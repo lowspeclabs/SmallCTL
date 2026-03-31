@@ -1,0 +1,256 @@
+#root {
+  layout: vertical;
+  height: 100%;
+}
+
+#console-wrap {
+  height: 1fr;
+  border: round #7f8ea3;
+  padding: 0;
+}
+
+#console {
+  height: 100%;
+}
+
+#bubble-stack {
+  layout: vertical;
+  width: 100%;
+  height: auto;
+  padding: 1;
+}
+
+.bubble {
+  width: 100%;
+  margin: 0 0 0 0;
+  padding: 0 1;
+  border: round #9aa6b2;
+  background: #0b1020;
+  color: #f3f4f6;
+}
+
+.bubble-user {
+  border: round #3b82f6;
+}
+
+.bubble-assistant {
+  border: round #22c55e;
+}
+
+.bubble-thinking {
+  border: round #f59e0b;
+}
+
+.bubble-tool_call {
+  border: round #e879f9;
+}
+
+.bubble-tool_result {
+  border: round #38bdf8;
+}
+
+.bubble-error {
+  border: round #ef4444;
+}
+
+.bubble-system {
+  border: round #a3a3a3;
+}
+
+.bubble-ansible {
+  border: round #fb923c;
+}
+
+.bubble-alert {
+  border: round #f97316;
+  color: #f97316;
+  text-style: bold italic;
+}
+
+#approve-prompt-shell {
+  width: 80;
+  max-width: 90%;
+  padding: 1 2;
+  border: round #f59e0b;
+  background: #111827;
+  color: #f9fafb;
+}
+
+#approve-prompt {
+  layout: vertical;
+  width: 100%;
+  height: auto;
+}
+
+#approve-prompt-title {
+  width: 100%;
+  text-style: bold;
+  color: #f59e0b;
+}
+
+#approve-prompt-body {
+  width: 100%;
+  color: #e5e7eb;
+}
+
+#approve-prompt-buttons {
+  width: 100%;
+  height: auto;
+  padding-top: 1;
+}
+
+#approve-yes,
+#approve-yes-session,
+#approve-no {
+  width: 12;
+  margin-right: 1;
+}
+
+#approve-yes-session {
+  width: 18;
+}
+
+#approve-yes:focus,
+#approve-yes-session:focus,
+#approve-no:focus {
+  text-style: bold;
+}
+
+.assistant-turn {
+  width: 100%;
+  height: auto;
+  padding: 0 1;
+}
+
+.assistant-turn-label {
+  width: 100%;
+  padding: 0;
+  text-style: bold;
+}
+
+.assistant-turn-body {
+  layout: vertical;
+  width: 100%;
+  height: auto;
+  border-left: solid #32415f;
+  margin-left: 1;
+  padding: 0 0 0 1;
+}
+
+.assistant-turn-text {
+  width: 100%;
+  margin: 0;
+  padding: 0 1;
+}
+
+.assistant-detail {
+  width: 100%;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  background: #0b1020;
+  border: round #9aa6b2;
+}
+
+.assistant-detail > CollapsibleTitle {
+  width: 100%;
+  padding: 0 1;
+}
+
+.assistant-detail.-collapsed {
+  padding-bottom: 0;
+}
+
+.assistant-detail > Contents {
+  width: 100%;
+  padding: 0 1 1 1;
+}
+
+.assistant-detail-thinking {
+  border: round #f59e0b;
+}
+
+.assistant-detail-tool_call {
+  border: round #e879f9;
+}
+
+.assistant-detail-tool_result {
+  border: round #38bdf8;
+}
+
+.assistant-detail-content {
+  width: 100%;
+}
+
+.assistant-detail-body {
+  layout: vertical;
+  width: 100%;
+  height: auto;
+}
+
+.bubble-nested {
+  width: 100%;
+  margin: 0 0 0 1;
+}
+
+.assistant-detail-nested {
+  width: 100%;
+  margin: 0 0 0 1;
+}
+
+#status-row {
+  height: 1;
+  background: #1f2937;
+  width: 100%;
+}
+
+#status {
+  width: 1fr;
+  color: #dbeafe;
+  padding: 0 1;
+}
+
+#stop-button {
+  width: 16;
+  height: 1;
+  min-width: 16;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: #ef4444;
+  color: white;
+  text-style: bold;
+}
+
+#stop-button:hover {
+  background: #dc2626;
+}
+
+#input {
+  height: 3;
+  border: round #7f8ea3;
+}
+
+.bubble-artifact {
+  background: black;
+  border: thick #475569;
+  color: #f1f5f9;
+  margin: 1 0 0 1;
+  padding: 0;
+}
+
+.bubble-artifact > CollapsibleTitle {
+  background: black;
+  color: cyan;
+  text-style: bold;
+}
+
+.bubble-artifact > Contents {
+  background: black;
+  color: #f1f5f9;
+  padding: 0 1 1 1;
+}
+
+.assistant-detail-nested {
+  margin-top: 1;
+}

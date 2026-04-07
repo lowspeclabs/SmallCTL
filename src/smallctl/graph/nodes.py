@@ -33,6 +33,7 @@ from ..memory.taxonomy import (
 from .display import format_tool_result_display
 from .interrupts import pause_for_plan_approval
 from .model_stream import process_model_stream
+from .recovery_context import build_goal_recap
 from .tool_call_parser import (
     parse_tool_calls,
     _detect_empty_file_write_payload,
@@ -280,17 +281,29 @@ def _looks_like_freeze_or_hang(harness: Any, assistant_text: str) -> bool:
     return False
 
 
-def _build_small_model_continue_message(harness: Any, assistant_text: str) -> str:
+def _build_small_model_continue_message(
+    harness: Any,
+    assistant_text: str,
+    *,
+    stream_halt_reason: str = "",
+) -> str:
     model_name = _harness_model_name(harness)
     clipped_text, clipped = clip_text_value(str(assistant_text or "").strip(), limit=180)
     lead = "You may be frozen or hanging."
+    if stream_halt_reason == "stream_ended_without_done":
+        lead = "The response stream ended before a clean completion signal."
     if clipped_text:
-        lead = f"You may be frozen or hanging after: {clipped_text}."
+        if stream_halt_reason == "stream_ended_without_done":
+            lead = f"The response stream ended after: {clipped_text}."
+        else:
+            lead = f"You may be frozen or hanging after: {clipped_text}."
     if clipped:
         lead = f"{lead} [truncated]"
     model_note = f" Model: {model_name}." if model_name else ""
+    goal_recap = build_goal_recap(harness)
+    goal_note = f" {goal_recap}" if goal_recap else ""
     return (
-        f"{lead}{model_note} Continue from the last concrete step. "
+        f"{lead}{model_note}{goal_note} Continue from the last concrete step within that objective. "
         "Do not restart the task; either call the next tool or emit the next JSON tool call immediately."
     )
 
@@ -1183,6 +1196,20 @@ async def model_call(
     if graph_state.final_result is not None:
         return
 
+    halt_detected = bool(getattr(result, "halted", False))
+    halt_reason = str(getattr(result, "halt_reason", "") or "").strip()
+    halt_details = json_safe_value(getattr(result, "halt_details", {}) or {})
+    if halt_detected:
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        if halt_reason:
+            harness.state.scratchpad["_last_stream_halt_reason"] = halt_reason
+        if isinstance(halt_details, dict):
+            harness.state.scratchpad["_last_stream_halt_details"] = halt_details
+    else:
+        harness.state.scratchpad.pop("_last_stream_halted_without_done", None)
+        harness.state.scratchpad.pop("_last_stream_halt_reason", None)
+        harness.state.scratchpad.pop("_last_stream_halt_details", None)
+
     usage_payload = json_safe_value(result.usage)
     if not isinstance(usage_payload, dict):
         usage_payload = {}
@@ -1749,28 +1776,44 @@ async def interpret_model_output(
         harness._runlog("no_tool_recovery", "injected recovery nudge", nudge_count=nudges+1)
         return LoopRoute.NEXT_STEP
 
-    if _is_small_model(harness) and _looks_like_freeze_or_hang(harness, assistant_text):
+    stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
+    if stream_halted or _looks_like_freeze_or_hang(harness, assistant_text):
         freeze_nudges = int(harness.state.scratchpad.get("_small_model_continue_nudges", 0))
         if freeze_nudges < 2:
             harness.state.scratchpad["_small_model_continue_nudges"] = freeze_nudges + 1
-            msg = _build_small_model_continue_message(harness, assistant_text)
+            halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "")
+            msg = _build_small_model_continue_message(
+                harness,
+                assistant_text,
+                stream_halt_reason=halt_reason,
+            )
+            if halt_reason == "stream_ended_without_done" and not assistant_text.strip():
+                msg = (
+                    "The response stream ended before a clean completion signal. "
+                    f"{build_goal_recap(harness)} Continue from the last concrete step within that objective. "
+                    "Do not restart the task; either call the next tool or emit the next JSON tool call immediately."
+                )
             harness.state.append_message(
                 ConversationMessage(
                     role="user",
                     content=msg,
                     metadata={
                         "is_recovery_nudge": True,
-                        "recovery_kind": "small_model_freeze",
+                        "recovery_kind": "model_halt" if stream_halted or not _is_small_model(harness) else "small_model_freeze",
                         "retry_count": freeze_nudges + 1,
                     },
                 )
             )
             harness._runlog(
                 "small_model_freeze_recovery",
-                "injected continuation nudge for a stalled small model",
+                "injected continuation nudge for a stalled model",
                 retry_count=freeze_nudges + 1,
                 model_name=_harness_model_name(harness),
+                stream_halted=stream_halted,
             )
+            harness.state.scratchpad.pop("_last_stream_halted_without_done", None)
+            harness.state.scratchpad.pop("_last_stream_halt_reason", None)
+            harness.state.scratchpad.pop("_last_stream_halt_details", None)
             return LoopRoute.NEXT_STEP
 
     # If we are stuck but already have tool evidence, finalize with the current answer.

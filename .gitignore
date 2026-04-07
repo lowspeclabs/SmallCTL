@@ -8,3 +8,15 @@ logs/
 tmp/
 temp/
 .smallctl/
+/.tmp_test/
+/checkpoints.json
+/old-logs-*.zip
+/step_*.txt
+/t*.log
+/test_checkpoints.json
+/test_setup.py
+/verify_fix.py
+/verify_tk.py
+/agent.md
+/double-read-fix.md
+/RELEASE_NOTES.md

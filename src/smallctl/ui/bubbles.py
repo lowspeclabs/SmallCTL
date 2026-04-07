@@ -1,6 +1,6 @@
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from rich.text import Text
 from rich.markup import escape as markup_escape
 from textual.reactive import reactive
@@ -15,6 +15,7 @@ KIND_LABEL = {
     "user": "USER",
     "thinking": "THINK",
     "assistant": "ASSIST",
+    "planner": "PLANNER",
     "tool_call": "TOOL",
     "tool_result": "RESULT",
     "error": "ERROR",
@@ -22,6 +23,19 @@ KIND_LABEL = {
     "system": "SYSTEM",
     "alert": "ALERT",
 }
+
+
+def _format_full_printout_text(text: str) -> str:
+    if not text:
+        return ""
+    return "\n".join(f"  {line}" if line else "  " for line in text.splitlines())
+
+
+def _build_full_printout_bubble(*, text: str, artifact_id: str | None) -> "ArtifactBubbleWidget":
+    title = "Full Artifact Contents"
+    if artifact_id:
+        title += f" ({artifact_id})"
+    return ArtifactBubbleWidget(title=title, text=_format_full_printout_text(text))
 
 
 class BubbleWidget(Static):
@@ -196,6 +210,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self.tool_name = tool_name
         self.tool_call_id = tool_call_id
         self._result_widgets: list[Widget] = []
+        self._pending_full_printouts: list[ArtifactBubbleWidget] = []
 
     @property
     def has_result(self) -> bool:
@@ -222,12 +237,14 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             bubble.add_class("assistant-detail-nested")
             await self.add_child_widget(bubble)
             self._result_widgets.append(bubble)
+            await self._flush_pending_full_printouts()
             return bubble
             
         detail = AssistantDetailWidget(kind="tool_result", text=text, id=None)
         detail.add_class("assistant-detail-nested")
         await self.add_child_widget(detail)
         self._result_widgets.append(detail)
+        await self._flush_pending_full_printouts()
         return detail
 
     async def get_or_create_artifact_bubble(self, title: str, *, path: str | None = None) -> ArtifactBubbleWidget:
@@ -247,14 +264,51 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self._result_widgets.append(bubble)
         return bubble
 
+    async def attach_or_queue_full_printout(self, text: str, *, artifact_id: str | None) -> None:
+        bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
+        bubble.add_class("assistant-detail-nested")
+        if self._result_widgets:
+            await self._attach_full_printout_widget(bubble)
+            return
+        self._pending_full_printouts.append(bubble)
+
+    async def _flush_pending_full_printouts(self) -> None:
+        while self._pending_full_printouts and self._result_widgets:
+            bubble = self._pending_full_printouts.pop(0)
+            await self._attach_full_printout_widget(bubble)
+
+    async def _attach_full_printout_widget(self, bubble: ArtifactBubbleWidget) -> None:
+        target = self._result_widgets[-1] if self._result_widgets else None
+        if isinstance(target, AssistantDetailWidget):
+            await target.add_child_widget(bubble)
+            return
+        await self.add_child_widget(bubble)
+
+class ToolCallsContainerWidget(Collapsible):
+    def __init__(self, *, id: str | None = None) -> None:
+        self._body_widget = VerticalScroll(classes="tool-calls-scroll-container")
+        super().__init__(
+            self._body_widget,
+            title="🛠️ Tool Calls",
+            collapsed=True,
+            id=id,
+            classes="assistant-detail assistant-detail-tool_call bubble bubble-tool_call"
+        )
+
+    async def add_tool_call(self, detail: Widget) -> None:
+        await self._body_widget.mount(detail)
+
 
 class AssistantTurnWidget(Vertical):
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, *, id: str | None = None, speaker: str = "assistant") -> None:
         super().__init__(id=id, classes="assistant-turn bubble bubble-assistant")
+        self._speaker = _coerce_speaker(speaker)
+        self._label_widget = Static(self._build_label_text(), classes="assistant-turn-label")
         self._last_assistant_block: TextBlockWidget | None = None
         self._last_thinking_detail: AssistantDetailWidget | None = None
         self._last_shell_stream: ArtifactBubbleWidget | None = None
         self._tool_call_details: list[ToolCallDetailWidget] = []
+        self._tool_calls_container: ToolCallsContainerWidget | None = None
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -271,8 +325,22 @@ class AssistantTurnWidget(Vertical):
         return "\n".join(parts)
 
     def compose(self) -> ComposeResult:
-        yield Static(KIND_LABEL["assistant"], classes="assistant-turn-label")
+        yield self._label_widget
         yield Vertical(classes="assistant-turn-body")
+
+    @property
+    def speaker(self) -> str:
+        return self._speaker
+
+    def set_speaker(self, speaker: str | None) -> None:
+        normalized = _coerce_speaker(speaker)
+        if normalized == self._speaker:
+            return
+        self._speaker = normalized
+        self._label_widget.update(self._build_label_text())
+
+    def _build_label_text(self) -> str:
+        return KIND_LABEL.get(self._speaker, self._speaker.upper())
 
     async def append_assistant_text(self, text: str) -> None:
         if not text:
@@ -290,12 +358,18 @@ class AssistantTurnWidget(Vertical):
             self._last_assistant_block.set_text(text)
 
     async def add_full_printout(self, text: str, *, artifact_id: str | None) -> None:
-        title = "Full Artifact Contents"
-        if artifact_id:
-            title += f" ({artifact_id})"
-        bubble = ArtifactBubbleWidget(title=title, text=text)
-        bubble.add_class("assistant-detail-nested")
-        await self._body().mount(bubble)
+        target_detail = None
+        for detail in reversed(self._tool_call_details):
+            if detail.tool_name in {"artifact_print", "show_artifact"}:
+                target_detail = detail
+                break
+
+        if target_detail is not None:
+            await target_detail.attach_or_queue_full_printout(text, artifact_id=artifact_id)
+        else:
+            bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
+            bubble.add_class("assistant-detail-nested")
+            await self._body().mount(bubble)
         self._last_assistant_block = None
         self._last_thinking_detail = None
         self._last_shell_stream = None
@@ -346,7 +420,12 @@ class AssistantTurnWidget(Vertical):
         tool_call_id: str | None = None,
     ) -> ToolCallDetailWidget:
         detail = ToolCallDetailWidget(text=text, tool_name=tool_name, tool_call_id=tool_call_id)
-        await self._body().mount(detail)
+        container = self._tool_calls_container
+        if container is None:
+            container = ToolCallsContainerWidget()
+            self._tool_calls_container = container
+            await self._body().mount(container)
+        await container.add_tool_call(detail)
         self._tool_call_details.append(detail)
         self._last_assistant_block = None
         self._last_thinking_detail = None
@@ -392,3 +471,8 @@ class AssistantTurnWidget(Vertical):
 
     def _body(self) -> Vertical:
         return self.query_one(".assistant-turn-body", Vertical)
+
+
+def _coerce_speaker(value: str | None) -> str:
+    speaker = str(value or "assistant").strip().lower()
+    return speaker or "assistant"

@@ -1,0 +1,2 @@
+[console_scripts]
+smallctl = smallctl.main:cli

@@ -26,10 +26,10 @@ class ContextPolicy:
     max_summary_items: int = 3
     max_artifact_snippets: int = 4
     artifact_snippet_token_limit: int = 400
-    artifact_summarization_threshold: int = 1200
+    artifact_summarization_threshold: int = 1560
     prior_outcome_token_limit: int = 220
     max_prior_outcomes: int = 4
-    tool_result_inline_token_limit: int = 250
+    tool_result_inline_token_limit: int = 325
     memory_staleness_step_limit: int = 8
     memory_low_confidence_threshold: float = 0.6
     

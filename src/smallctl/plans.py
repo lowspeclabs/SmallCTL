@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .state import ExecutionPlan, PlanStep
+from .state import ExecutionPlan, PlanStep, LoopState
 
 _ALLOWED_PLAN_EXPORT_SUFFIXES = {"", ".md", ".txt", ".text"}
 
@@ -12,6 +12,69 @@ def render_plan(plan: ExecutionPlan, *, format: str | None = None) -> str:
     if normalized_format == "markdown":
         return _render_markdown_plan(plan)
     return _render_text_plan(plan)
+
+
+def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None) -> str:
+    """Render a plan as a staged implementation playbook.
+
+    The playbook is intentionally more operational than the canonical plan export:
+    it tells the model how to proceed in small, bounded steps instead of trying to
+    complete the whole script in one shot.
+    """
+    stage_lines = [
+        "# Plan Playbook",
+        "",
+        f"Goal: {plan.goal}",
+        f"Status: {plan.status}",
+    ]
+    if plan.summary:
+        stage_lines.extend(["", "## Plan Summary", plan.summary.strip()])
+    if any([plan.inputs, plan.outputs, plan.constraints, plan.acceptance_criteria, plan.implementation_plan]):
+        stage_lines.append("")
+        stage_lines.append("## Spec Contract")
+        if plan.inputs:
+            stage_lines.append("Inputs:")
+            stage_lines.extend([f"- {item}" for item in plan.inputs])
+        if plan.outputs:
+            stage_lines.append("Outputs:")
+            stage_lines.extend([f"- {item}" for item in plan.outputs])
+        if plan.constraints:
+            stage_lines.append("Constraints:")
+            stage_lines.extend([f"- {item}" for item in plan.constraints])
+        if plan.acceptance_criteria:
+            stage_lines.append("Acceptance Criteria:")
+            stage_lines.extend([f"- {item}" for item in plan.acceptance_criteria])
+        if plan.implementation_plan:
+            stage_lines.append("Implementation Plan:")
+            stage_lines.extend([f"- {item}" for item in plan.implementation_plan])
+    if plan.requested_output_path:
+        stage_lines.extend(["", f"Export target: {plan.requested_output_path}"])
+    if state is not None and state.run_brief.original_task:
+        stage_lines.extend(["", "## Original Task", state.run_brief.original_task.strip()])
+    stage_lines.extend(
+        [
+            "",
+            "## Implementation Order",
+            "1. Write the file skeleton first.",
+            "2. Add the function and class signatures next.",
+            "3. Fill in the code in small increments.",
+            "4. Debug and verify with targeted tests or a minimal run.",
+            "",
+            "## Operating Rules",
+            "- Do not attempt a one-shot implementation of the whole script.",
+            "- Treat this playbook as the source of truth for the next action.",
+            "- Complete the current stage before moving to the next one.",
+            "- If a step grows too large, split it into smaller substeps.",
+            "- Verify against the acceptance criteria before calling the task complete.",
+        ]
+    )
+    if plan.steps:
+        stage_lines.extend(["", "## Plan Steps"])
+        for step in plan.steps:
+            stage_lines.extend(_render_playbook_step(step))
+    else:
+        stage_lines.extend(["", "## Plan Steps", "- (no steps yet)"])
+    return "\n".join(stage_lines).strip() + "\n"
 
 
 def write_plan_file(plan: ExecutionPlan, path: str | Path, *, format: str | None = None) -> str:
@@ -69,6 +132,9 @@ def _render_markdown_plan(plan: ExecutionPlan) -> str:
     ]
     if plan.summary:
         lines.extend(["", f"Summary: {plan.summary}"])
+    spec = plan.spec_summary()
+    if spec:
+        lines.extend(["", f"Spec: {spec}"])
     if plan.requested_output_path:
         lines.extend(["", f"Output: {plan.requested_output_path}"])
     lines.extend(["", "## Steps"])
@@ -104,6 +170,9 @@ def _render_text_plan(plan: ExecutionPlan) -> str:
     ]
     if plan.summary:
         lines.extend(["", f"Summary: {plan.summary}"])
+    spec = plan.spec_summary()
+    if spec:
+        lines.extend(["", f"Spec: {spec}"])
     if plan.requested_output_path:
         lines.extend(["", f"Output: {plan.requested_output_path}"])
     lines.extend(["", "Steps:"])
@@ -126,6 +195,21 @@ def _render_text_step(step: PlanStep, *, depth: int = 0) -> list[str]:
         lines.append(f"{indent}  evidence: {', '.join(step.evidence_refs)}")
     for substep in step.substeps:
         lines.extend(_render_text_step(substep, depth=depth + 1))
+    return lines
+
+
+def _render_playbook_step(step: PlanStep, *, depth: int = 0) -> list[str]:
+    indent = "  " * depth
+    lines = [f"{indent}- [{step.status}] {step.step_id} {step.title}".rstrip()]
+    if step.description:
+        lines.append(f"{indent}  - {step.description}")
+    if step.notes:
+        for note in step.notes:
+            lines.append(f"{indent}  - note: {note}")
+    if step.evidence_refs:
+        lines.append(f"{indent}  - evidence: {', '.join(step.evidence_refs)}")
+    for substep in step.substeps:
+        lines.extend(_render_playbook_step(substep, depth=depth + 1))
     return lines
 
 

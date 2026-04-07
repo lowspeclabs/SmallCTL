@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .client import OpenAICompatClient
-from .context import (
+from ..client import OpenAICompatClient
+from ..context import (
     ArtifactStore,
     ChildRunRequest,
     ChildRunResult,
@@ -28,27 +28,31 @@ from .context import (
     build_retrieval_query,
     format_reused_artifact_message,
 )
-from .guards import GuardConfig
-from .logging_utils import RunLogger, log_kv
-from .models.conversation import ConversationMessage
-from .models.tool_result import ToolEnvelope
-from .models.events import UIEvent, UIEventType
-from .phases import normalize_phase
-from .state import (
+from ..guards import GuardConfig, is_small_model_name
+from ..logging_utils import RunLogger, log_kv
+from ..models.conversation import ConversationMessage
+from ..models.tool_result import ToolEnvelope
+from ..models.events import UIEvent, UIEventType
+from ..phases import normalize_phase
+from ..state import (
     ExperienceMemory,
     LoopState,
+    PromptBudgetSnapshot,
+    RunBrief,
+    WorkingMemory,
     _coerce_experience_memory,
     align_memory_entries,
     clip_string_list,
     clip_text_value,
-    _dedupe_keep_tail,
     json_safe_value,
 )
-from .plans import write_plan_file
-from .tools import ToolDispatcher, build_registry
-from .tools.ansible import AnsibleRunnerAdapter, SessionInventory
-from .tools.profiles import classify_tool_profiles
-from .memory.taxonomy import (
+from ..task_targets import extract_task_target_paths
+from ..normalization import dedupe_keep_tail
+from ..plans import write_plan_file
+from ..tools import ToolDispatcher, build_registry
+from ..tools.ansible import AnsibleRunnerAdapter, SessionInventory
+from ..tools.profiles import classify_tool_profiles
+from ..memory.taxonomy import (
     PHASE_MISMATCH,
     PREMATURE_TASK_COMPLETE,
     SCHEMA_VALIDATION_ERROR,
@@ -58,6 +62,13 @@ from .memory.taxonomy import (
     WRONG_TOOL_CALLED,
     UNKNOWN_FAILURE,
 )
+from .run_mode import ModeDecisionService, should_enable_complex_write_chat_draft
+from .prompt_builder import PromptBuilderService
+from .tool_results import ToolResultService
+from .compaction import CompactionService
+from .memory import MemoryService
+from .approvals import ApprovalService
+from .factory import SubtaskService
 
 
 class Harness:
@@ -95,6 +106,7 @@ class Harness:
         fresh_run: bool = False,
         fresh_run_turns: int = 1,
         planning_mode: bool = False,
+        contract_flow_ui: bool = False,
         summarizer_endpoint: str | None = None,
         summarizer_model: str | None = None,
         summarizer_api_key: str | None = None,
@@ -111,11 +123,14 @@ class Harness:
         self.log = logging.getLogger("smallctl.harness")
         self.run_logger = run_logger
         normalized_phase = normalize_phase(phase)
+        self._initial_phase = normalized_phase
         self.state = LoopState(
             current_phase=normalized_phase,
             strategy=strategy,
             planning_mode_enabled=bool(planning_mode),
         )
+        if isinstance(strategy, dict):
+            self.state.scratchpad["strategy"] = json_safe_value(strategy)
         self.client = OpenAICompatClient(
             base_url=endpoint,
             model=model,
@@ -139,12 +154,13 @@ class Harness:
         self.thinking_visibility = thinking_visibility
         self.thinking_start_tag = thinking_start_tag
         self.thinking_end_tag = thinking_end_tag
+        self.state.scratchpad["_model_name"] = model
+        self.state.scratchpad["_model_is_small"] = is_small_model_name(model)
         self._active_processes: set[asyncio.subprocess.Process] = set()
         self.strategy_prompt = strategy_prompt
         self.event_handler = None
         self.allow_interactive_shell_approval = bool(allow_interactive_shell_approval)
         self.shell_approval_session_default = bool(shell_approval_session_default)
-        self._shell_approval_waiters: dict[str, asyncio.Future[bool]] = {}
         self._configured_tool_profiles = list(tool_profiles) if tool_profiles else None
         self._strategy_prompt = strategy_prompt
         self._indexer = indexer
@@ -172,6 +188,7 @@ class Harness:
             "fresh_run": fresh_run,
             "fresh_run_turns": fresh_run_turns,
             "planning_mode": planning_mode,
+            "contract_flow_ui": contract_flow_ui,
             "context_limit": context_limit,
             "max_prompt_tokens": max_prompt_tokens,
             "reserve_completion_tokens": reserve_completion_tokens,
@@ -188,6 +205,7 @@ class Harness:
             "allow_interactive_shell_approval": self.allow_interactive_shell_approval,
             "shell_approval_session_default": self.shell_approval_session_default,
         }
+        self._configured_planning_mode = bool(planning_mode)
         self.provider_profile = provider_profile
         self.checkpoint_on_exit = checkpoint_on_exit
         self.checkpoint_path = checkpoint_path
@@ -213,34 +231,61 @@ class Harness:
         )
         self.dispatcher = ToolDispatcher(
             registry=self.registry,
+            state=self.state,
             phase=normalized_phase,
             ansible_check_mode_in_plan=ansible_check_mode_in_plan,
             tier2_adapter=tier2_adapter,
             run_logger=run_logger,
         )
-        if not max_prompt_tokens and context_limit:
-            # Automatic budgeting: leave 25% headroom for completions (thinking + output), min 1024
-            headroom = max(1024, context_limit // 4)
-            max_prompt_tokens = context_limit - headroom
+        configured_prompt_budget = max_prompt_tokens
+        if configured_prompt_budget is None and policy is not None:
+            configured_prompt_budget = policy.max_prompt_tokens
+        self.configured_max_prompt_tokens: int | None = configured_prompt_budget
 
-        self.context_policy = policy or ContextPolicy(
-            max_prompt_tokens=max_prompt_tokens or context_limit,
-            reserve_completion_tokens=reserve_completion_tokens,
-            reserve_tool_tokens=reserve_tool_tokens,
-            summarize_at_ratio=summarize_at_ratio,
-            recent_message_limit=recent_message_limit,
-            max_summary_items=max_summary_items,
-            max_artifact_snippets=max_artifact_snippets,
-            artifact_snippet_token_limit=artifact_snippet_token_limit,
-            tool_result_inline_token_limit=tool_result_inline_token_limit,
+        known_server_context_limit = context_limit
+        if (
+            runtime_context_probe
+            and max_prompt_tokens is not None
+            and context_limit is not None
+            and int(context_limit) == int(max_prompt_tokens)
+        ):
+            # Legacy config paths can mirror the prompt budget into context_limit.
+            # Treat that as "unknown" so we still probe the real runtime window.
+            known_server_context_limit = None
+            self._harness_kwargs["context_limit"] = None
+
+        effective_max_prompt_tokens = self._resolve_effective_prompt_budget(
+            configured_max_prompt_tokens=self.configured_max_prompt_tokens,
+            server_context_limit=known_server_context_limit,
         )
+
+        if policy is None:
+            self.context_policy = ContextPolicy(
+                max_prompt_tokens=effective_max_prompt_tokens,
+                reserve_completion_tokens=reserve_completion_tokens,
+                reserve_tool_tokens=reserve_tool_tokens,
+                summarize_at_ratio=summarize_at_ratio,
+                recent_message_limit=recent_message_limit,
+                max_summary_items=max_summary_items,
+                max_artifact_snippets=max_artifact_snippets,
+                artifact_snippet_token_limit=artifact_snippet_token_limit,
+                tool_result_inline_token_limit=tool_result_inline_token_limit,
+            )
+        else:
+            self.context_policy = policy
+            if effective_max_prompt_tokens is not None:
+                self.context_policy.max_prompt_tokens = effective_max_prompt_tokens
         self.state.recent_message_limit = self.context_policy.recent_message_limit
         self.prompt_assembler = PromptAssembler(self.context_policy)
         self.retriever = LexicalRetriever(self.context_policy)
         self.summarizer = ContextSummarizer(self.context_policy)
         self.subtask_runner = SubtaskRunner(max_child_depth=1)
         self.guards = GuardConfig()
-        self.server_context_limit: int | None = max_prompt_tokens or context_limit
+        self.discovered_server_context_limit: int | None = known_server_context_limit
+        self.server_context_limit: int | None = known_server_context_limit
+        if self.server_context_limit is not None:
+            self.context_policy.recalculate_quotas(self.server_context_limit)
+            self.state.recent_message_limit = self.context_policy.recent_message_limit
         self.conversation_id = uuid.uuid4().hex[:8]
         if not self.state.thread_id:
             self.state.thread_id = self.conversation_id
@@ -251,7 +296,7 @@ class Harness:
             artifact_start_index=artifact_start_index
         )
         memory_base_dir = Path(self.state.cwd).resolve() / ".smallctl" / "memory"
-        from .memory_store import ExperienceStore
+        from ..memory_store import ExperienceStore
         self.warm_memory_store = ExperienceStore(memory_base_dir / "warm-experiences.jsonl")
         self.cold_memory_store = ExperienceStore(memory_base_dir / "cold-experiences.jsonl")
         # Fresh harness starts should begin empty. Prior experience is restored
@@ -259,6 +304,21 @@ class Harness:
 
         self._cancel_requested = False
         self._active_dispatch_task: asyncio.Task[Any] | None = None
+        self._active_task_scope: dict[str, Any] | None = None
+        self._task_sequence = 0
+        self._pending_task_shutdown_reason = ""
+        self._use_ansible = use_ansible
+        self._configured_tool_profiles = list(tool_profiles) if tool_profiles else None
+
+        # Initialize Services
+        self.mode_decision = ModeDecisionService(self)
+        self.prompt_builder = PromptBuilderService(self)
+        self.tool_results = ToolResultService(self)
+        self.compaction = CompactionService(self)
+        self.memory = MemoryService(self)
+        self.approvals = ApprovalService(self)
+        self.subtasks = SubtaskService(self)
+        
         self._runlog(
             "harness_started",
             "harness initialized",
@@ -266,8 +326,6 @@ class Harness:
             model=model,
             phase=normalized_phase,
         )
-        self._use_ansible = use_ansible
-        self._configured_tool_profiles = list(tool_profiles) if tool_profiles else None
 
     def set_interactive_shell_approval(self, enabled: bool) -> None:
         self.allow_interactive_shell_approval = bool(enabled)
@@ -277,8 +335,113 @@ class Harness:
         self.shell_approval_session_default = bool(enabled)
         self._harness_kwargs["shell_approval_session_default"] = self.shell_approval_session_default
 
+    @staticmethod
+    def _context_limit_headroom(context_limit: int) -> int:
+        return max(1024, int(context_limit) // 4)
+
+    @classmethod
+    def _derive_prompt_budget_from_context_limit(cls, context_limit: int | None) -> int | None:
+        if context_limit is None:
+            return None
+        limit = max(1, int(context_limit))
+        return max(64, limit - cls._context_limit_headroom(limit))
+
+    @classmethod
+    def _resolve_effective_prompt_budget(
+        cls,
+        *,
+        configured_max_prompt_tokens: int | None,
+        server_context_limit: int | None,
+        current_max_prompt_tokens: int | None = None,
+        observed_n_keep: int | None = None,
+    ) -> int | None:
+        candidates: list[int] = []
+        if configured_max_prompt_tokens is not None:
+            candidates.append(max(64, int(configured_max_prompt_tokens)))
+
+        derived_server_budget = cls._derive_prompt_budget_from_context_limit(server_context_limit)
+        if derived_server_budget is not None:
+            candidates.append(derived_server_budget)
+
+        if (
+            current_max_prompt_tokens is not None
+            and observed_n_keep is not None
+            and server_context_limit is not None
+            and observed_n_keep >= server_context_limit
+        ):
+            overflow = observed_n_keep - server_context_limit + 128
+            candidates.append(max(64, int(current_max_prompt_tokens) - overflow))
+
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def _apply_server_context_limit(
+        self,
+        context_limit: int | None,
+        *,
+        source: str,
+        observed_n_keep: int | None = None,
+    ) -> int | None:
+        if context_limit is None:
+            return self.context_policy.max_prompt_tokens
+
+        normalized_limit = max(1, int(context_limit))
+        if self.server_context_limit is None or normalized_limit < self.server_context_limit:
+            self.discovered_server_context_limit = normalized_limit
+            self.server_context_limit = normalized_limit
+
+        effective_max_prompt_tokens = self._resolve_effective_prompt_budget(
+            configured_max_prompt_tokens=self.configured_max_prompt_tokens,
+            server_context_limit=self.server_context_limit,
+            current_max_prompt_tokens=self.context_policy.max_prompt_tokens,
+            observed_n_keep=observed_n_keep,
+        )
+        if effective_max_prompt_tokens is not None:
+            self.context_policy.max_prompt_tokens = effective_max_prompt_tokens
+
+        if self.server_context_limit is not None:
+            self.context_policy.recalculate_quotas(self.server_context_limit)
+            self.state.recent_message_limit = self.context_policy.recent_message_limit
+            self._harness_kwargs["context_limit"] = self.server_context_limit
+
+        self._runlog(
+            "context_limit",
+            "server context limit applied",
+            source=source,
+            context_limit=self.server_context_limit,
+            configured_max_prompt_tokens=self.configured_max_prompt_tokens,
+            max_prompt_tokens=self.context_policy.max_prompt_tokens,
+            hot_message_limit=self.context_policy.hot_message_limit,
+        )
+        return self.context_policy.max_prompt_tokens
+
     async def run_task(self, task: str) -> dict[str, Any]:
         return await self.run_task_with_events(task)
+
+    async def run_subtask(
+        self,
+        brief: str,
+        phase: str = "plan",
+        depth: int = 1,
+        max_prompt_tokens: int | None = None,
+        recent_message_limit: int = 4,
+        metadata: dict[str, Any] | None = None,
+        harness_factory: Callable[..., "Harness"] | None = None,
+        artifact_start_index: int | None = None,
+        event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
+    ) -> ChildRunResult:
+        return await self.subtasks.run_subtask(
+            brief=brief,
+            phase=phase,
+            depth=depth,
+            max_prompt_tokens=max_prompt_tokens,
+            recent_message_limit=recent_message_limit,
+            metadata=metadata,
+            harness_factory=harness_factory,
+            artifact_start_index=artifact_start_index,
+            event_handler=event_handler,
+        )
 
     async def run_auto(
         self,
@@ -287,7 +450,7 @@ class Harness:
         event_handler: Callable[[UIEvent], Awaitable[None]] | None = None,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
-        from .graph.runtime import (
+        from ..graph.runtime import (
             ChatGraphRuntime,
             IndexerGraphRuntime,
             LoopGraphRuntime,
@@ -303,205 +466,29 @@ class Harness:
         return await self.resume_task_with_events(human_input)
 
     def restore_graph_state(self, thread_id: str | None = None) -> bool:
-        from .graph.runtime import LoopGraphRuntime
+        from ..graph.runtime import LoopGraphRuntime
 
         runtime = LoopGraphRuntime.from_harness(self)
         return runtime.restore(thread_id=thread_id)
 
-    async def run_subtask(
-        self,
-        brief: str,
-        *,
-        phase: str | None = None,
-        depth: int = 1,
-        max_prompt_tokens: int | None = None,
-        recent_message_limit: int | None = None,
-        metadata: dict[str, Any] | None = None,
-        harness_factory: Callable[..., "Harness"] | None = None,
-        event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
-    ) -> ChildRunResult:
-        request = ChildRunRequest(
-            brief=brief,
-            phase=normalize_phase(phase or self.state.current_phase),
-            depth=depth,
-            max_prompt_tokens=max_prompt_tokens,
-            recent_message_limit=recent_message_limit or self.context_policy.recent_message_limit,
-            metadata=metadata or {},
-        )
-        self._runlog(
-            "subtask_start",
-            "starting child run",
-            brief=brief,
-            phase=request.phase,
-            depth=request.depth,
-            max_prompt_tokens=request.max_prompt_tokens,
-            recent_message_limit=request.recent_message_limit,
-        )
-        await self._emit(
-            event_handler,
-            UIEvent(
-                event_type=UIEventType.SYSTEM,
-                content=f"Starting subtask: {brief}",
-                data={"phase": request.phase, "depth": request.depth},
-            ),
-        )
-        from .graph.subgraphs import ChildSubgraphRunner
-
-        result = await ChildSubgraphRunner().execute(
-            parent=self,
-            request=request,
-            harness_factory=harness_factory,
-        )
-        self.subtask_runner.merge_result(parent_state=self.state, request=request, result=result)
-        self._runlog(
-            "subtask_complete",
-            "child run finished",
-            status=result.status,
-            summary=result.summary,
-            artifact_ids=result.artifact_ids,
-            files_touched=result.files_touched,
-        )
-        await self._emit(
-            event_handler,
-            UIEvent(
-                event_type=UIEventType.SYSTEM,
-                content=f"Subtask {result.status}: {result.summary}",
-                data={
-                    "status": result.status,
-                    "artifact_ids": result.artifact_ids,
-                    "files_touched": result.files_touched,
-                },
-            ),
-        )
         return result
 
     async def decide_run_mode(self, task: str) -> str:
-        plan_request = self._extract_planning_request(task)
-        if plan_request is not None:
-            output_path, output_format = plan_request
-            self._set_planning_request(output_path=output_path, output_format=output_format)
-            self._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="planning",
-                raw="planning_intent",
-                output_path=output_path,
-                output_format=output_format,
-            )
-            return "planning"
-        if self.state.planning_mode_enabled and not (self.state.active_plan and self.state.active_plan.approved):
-            self._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="planning",
-                raw="planning_mode_enabled",
-            )
-            return "planning"
-        if self._is_smalltalk(task):
-            self._runlog("mode_decision", "selected run mode", mode="chat", raw="smalltalk_heuristic")
-            return "chat"
-        if self._needs_contextual_loop_escalation(task):
-            self._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="loop",
-                raw="contextual_execution_followup",
-            )
-            return "loop"
-        if (
-            self._needs_loop_for_content_lookup(task)
-            or self._looks_like_action_request(task)
-            or self._looks_like_shell_request(task)
-        ):
-            self._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="loop",
-                raw="action_lookup_heuristic",
-            )
-            return "loop"
-        prompt = (
-            "Decide whether the user request requires tool usage in a coding harness. "
-            "Reply with exactly one word: chat or loop."
-        )
-        messages = [
-            ConversationMessage(role="system", content=prompt).to_dict(),
-            ConversationMessage(role="user", content=task).to_dict(),
-        ]
-        chunks: list[dict[str, Any]] = []
-        try:
-            async for event in self.client.stream_chat(messages=messages, tools=[]):
-                chunks.append(event)
-        except Exception:
-            self._runlog("mode_decision_fallback", "mode decision failed, using loop")
-            return "loop"
-        decision_result = OpenAICompatClient.collect_stream(
-            chunks,
-            reasoning_mode="off",
-            thinking_start_tag=self.thinking_start_tag,
-            thinking_end_tag=self.thinking_end_tag,
-        )
-        decision = decision_result.assistant_text.strip().lower()
-        if not decision:
-            decision = decision_result.thinking_text.strip().lower()
-        mode = "loop" if decision.startswith("loop") else "chat"
-        self._runlog("mode_decision", "selected run mode", mode=mode, raw=decision)
-        return mode
+        resolved_task = self._resolve_followup_task(task)
+        return await self.mode_decision.decide(resolved_task or task)
 
     def _set_planning_request(self, *, output_path: str | None = None, output_format: str | None = None) -> None:
-        self.state.planning_mode_enabled = True
-        self.state.planner_requested_output_path = str(output_path or "").strip()
-        self.state.planner_requested_output_format = str(output_format or "").strip().lower()
-        self.state.planner_resume_target_mode = "loop"
-        self.state.touch()
-        self.state.sync_plan_mirror()
+        self.mode_decision._set_planning_request(output_path=output_path, output_format=output_format)
 
     def _extract_planning_request(self, task: str) -> tuple[str | None, str | None] | None:
-        lowered = (task or "").lower()
-        if "plan" not in lowered:
-            return None
-        output_path: str | None = None
-        output_format: str | None = None
-        import re
-
-        path_match = re.search(r"([^\s]+?\.(?:md|txt|text))\b", task, flags=re.IGNORECASE)
-        if path_match:
-            output_path = path_match.group(1)
-            suffix = Path(output_path).suffix.lower()
-            if suffix == ".md":
-                output_format = "markdown"
-            elif suffix in {".txt", ".text"}:
-                output_format = "text"
-        if "plan.md" in lowered and output_path is None:
-            output_format = "markdown"
-        if any(
-            phrase in lowered
-            for phrase in (
-                "make a plan",
-                "make a short plan",
-                "create a plan",
-                "create a short plan",
-                "create a brief plan",
-                "plan this",
-                "plan this out",
-                "make a plan first",
-                "plan out",
-                "before doing anything, create a short plan",
-                "before doing anything, create a plan",
-                "before doing anything, plan",
-            )
-        ):
-            return output_path, output_format
-        if output_path:
-            return output_path, output_format
-        return None
+        return self.mode_decision._extract_planning_request(task)
 
     async def run_chat_with_events(
         self,
         task: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
-        from .graph.runtime import ChatGraphRuntime
+        from ..graph.runtime import ChatGraphRuntime
 
         self.event_handler = event_handler
         runtime = ChatGraphRuntime.from_harness(
@@ -515,7 +502,7 @@ class Harness:
         task: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
-        from .graph.runtime import AutoGraphRuntime
+        from ..graph.runtime import AutoGraphRuntime
 
         self.event_handler = event_handler
         runtime = AutoGraphRuntime.from_harness(
@@ -527,16 +514,30 @@ class Harness:
 
     def cancel(self) -> None:
         self._cancel_requested = True
-        self._reject_pending_shell_approvals()
+        self.note_task_shutdown("cancel_requested")
+        self.approvals.reject_pending_shell_approvals()
+        self.approvals.reject_pending_sudo_password_prompts()
         if self._active_dispatch_task and not self._active_dispatch_task.done():
             self._active_dispatch_task.cancel()
         log_kv(self.log, logging.INFO, "harness_cancel_requested")
         # Direct cleanup on cancel helps avoid abandoned processes
         asyncio.create_task(self.teardown())
 
+    def note_task_shutdown(self, reason: str) -> None:
+        self._pending_task_shutdown_reason = str(reason or "").strip()
+
     async def teardown(self) -> None:
         """Kill and cleanup any remaining active processes efficiently."""
-        self._reject_pending_shell_approvals()
+        shutdown_reason = str(getattr(self, "_pending_task_shutdown_reason", "") or "").strip()
+        if shutdown_reason:
+            self._finalize_task_scope(
+                terminal_event="task_interrupted",
+                status="interrupted",
+                reason=shutdown_reason,
+            )
+            self._pending_task_shutdown_reason = ""
+        self.approvals.reject_pending_shell_approvals()
+        self.approvals.reject_pending_sudo_password_prompts()
         if not self._active_processes:
             return
             
@@ -580,75 +581,41 @@ class Harness:
         cwd: str,
         timeout_sec: int,
     ) -> bool:
-        if not self.allow_interactive_shell_approval or getattr(self, "event_handler", None) is None:
-            return True
-        if self.shell_approval_session_default:
-            return True
+        return await self.approvals.request_shell_approval(command=command, cwd=cwd, timeout_sec=timeout_sec)
 
-        approval_id = f"shell-{uuid.uuid4().hex[:10]}"
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[bool] = loop.create_future()
-        self._shell_approval_waiters[approval_id] = future
-        event = UIEvent(
-            event_type=UIEventType.ALERT,
-            content="Approve shell command?",
-            data={
-                "ui_kind": "approve_prompt",
-                "approval_id": approval_id,
-                "command": command,
-                "cwd": cwd,
-                "timeout_sec": timeout_sec,
-                "status_activity": "awaiting approval...",
-            },
-        )
-        try:
-            await self._emit(self.event_handler, event)
-            return await future
-        except Exception:
-            self._reject_shell_approval(approval_id)
-            raise
-        finally:
-            self._shell_approval_waiters.pop(approval_id, None)
+    async def request_sudo_password(
+        self,
+        *,
+        command: str,
+        prompt_text: str,
+    ) -> str | None:
+        return await self.approvals.request_sudo_password(command=command, prompt_text=prompt_text)
 
     def resolve_shell_approval(self, approval_id: str, approved: bool) -> None:
-        future = self._shell_approval_waiters.get(approval_id)
-        if future is None or future.done():
-            return
-        future.set_result(bool(approved))
+        self.approvals.resolve_shell_approval(approval_id, approved)
+
+    def resolve_sudo_password(self, prompt_id: str, password: str | None) -> None:
+        self.approvals.resolve_sudo_password(prompt_id, password)
 
     def _reject_pending_shell_approvals(self) -> None:
-        for approval_id in list(self._shell_approval_waiters.keys()):
-            self._reject_shell_approval(approval_id)
+        self.approvals.reject_pending_shell_approvals()
+
+    def _reject_pending_sudo_password_prompts(self) -> None:
+        self.approvals.reject_pending_sudo_password_prompts()
 
     def _reject_shell_approval(self, approval_id: str) -> None:
-        future = self._shell_approval_waiters.get(approval_id)
-        if future is None or future.done():
-            return
-        future.set_result(False)
+        # Service handles internal state; keeping as pass-through
+        pass
 
     async def run_task_with_events(
         self,
         task: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
-        from .graph.runtime import LoopGraphRuntime
+        from ..graph.runtime import LoopGraphRuntime
 
         self.event_handler = event_handler
-        # Reset task-boundary state
-        self.state.scratchpad.pop("_action_stalls", None)
-        self.state.scratchpad.pop("_no_tool_nudges", None)
-        self.state.scratchpad.pop("_chat_rounds", None)
-        # Deep-purge state to isolate context for the NEW task
-        self.state.recent_messages = []
-        self.state.experiences = []
-        self.state.working_memory.known_facts = []
-        self.state.artifacts = {}
-        self.state.episodic_summaries = []
-        self.state.retrieval_cache = []
-        self.state.scratchpad.pop("suppressed_truncated_artifact_ids", None)
-        self.state.retrieved_experience_ids = []
-        self.state.tool_execution_records = {}
-        self.state.recent_errors = []
+        self._reset_task_boundary_state(reason="run_task", new_task=task)
         
         runtime = LoopGraphRuntime.from_harness(
             self,
@@ -661,7 +628,7 @@ class Harness:
         human_input: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> dict[str, Any]:
-        from .graph.runtime import LoopGraphRuntime, PlanningGraphRuntime
+        from ..graph.runtime import LoopGraphRuntime, PlanningGraphRuntime
 
         self.event_handler = event_handler
         interrupt = self.get_pending_interrupt() or {}
@@ -697,7 +664,27 @@ class Harness:
             await maybe
 
     def _finalize(self, result: dict[str, Any]) -> dict[str, Any]:
-        self._runlog("task_finalize", "task finished", result=result)
+        status = str((result or {}).get("status") or "").strip().lower()
+        task_summary = None
+        if status not in {"needs_human", "plan_ready", "plan_approved"}:
+            terminal_event = "task_interrupted" if status == "cancelled" else ""
+            summary_status = "interrupted" if status == "cancelled" else status
+            task_summary = self._finalize_task_scope(
+                terminal_event=terminal_event,
+                status=summary_status or "stopped",
+                reason=str((result or {}).get("reason") or ""),
+                result=result,
+            )
+            self._pending_task_shutdown_reason = ""
+        summary_path = str((task_summary or {}).get("summary_path") or "").strip()
+        task_id = str((task_summary or {}).get("task_id") or "").strip()
+        self._runlog(
+            "task_finalize",
+            "task finished",
+            result=result,
+            task_id=task_id,
+            task_summary_path=summary_path,
+        )
         self._record_terminal_experience(result)
         self._rewrite_active_plan_export()
         if self.checkpoint_on_exit:
@@ -707,6 +694,20 @@ class Harness:
         result["step_count"] = self.state.step_count
         result["inactive_steps"] = self.state.inactive_steps
         result["token_usage"] = self.state.token_usage
+
+        if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
+            try:
+                import json
+                summary_payload = {
+                    "final_task_status": result.get("status", "unknown"),
+                    "total_tool_calls": self.state.step_count,
+                    "guard_trips": sum(1 for e in (getattr(self.state, "recent_errors", []) or []) if "Guard tripped" in str(e)),
+                    "postmortem_summary": result.get("reason") or "No reason provided",
+                }
+                summary_path = self.run_logger.run_dir / "task_summary.json"
+                summary_path.write_text(json.dumps(summary_payload, indent=2) + "\n", encoding="utf-8")
+            except Exception:
+                pass
         
         self._cancel_requested = False
         self._active_dispatch_task = None
@@ -728,65 +729,20 @@ class Harness:
         harness_factory: Callable[..., "Harness"] | None = None,
         artifact_start_index: int | None = None,
     ) -> "Harness":
-        child_kwargs = dict(self._harness_kwargs)
-        child_kwargs["phase"] = request.phase
-        child_kwargs["checkpoint_on_exit"] = False
-        child_kwargs["checkpoint_path"] = None
-        child_kwargs["artifact_start_index"] = artifact_start_index
-        if request.max_prompt_tokens is not None:
-            child_kwargs["max_prompt_tokens"] = request.max_prompt_tokens
-            child_kwargs["context_limit"] = request.max_prompt_tokens
-            child_kwargs["reserve_completion_tokens"] = min(
-                self.context_policy.reserve_completion_tokens,
-                max(64, request.max_prompt_tokens // 5),
-            )
-            child_kwargs["reserve_tool_tokens"] = min(
-                self.context_policy.reserve_tool_tokens,
-                max(64, request.max_prompt_tokens // 8),
-            )
-        child_recent_limit = request.recent_message_limit
-        if request.max_prompt_tokens is not None and request.max_prompt_tokens <= 1024:
-            child_recent_limit = min(child_recent_limit, 2)
-        child_kwargs["recent_message_limit"] = child_recent_limit
-        factory = harness_factory or self.__class__
-        child = factory(**child_kwargs)
-        child.state.cwd = self.state.cwd
-        child.state.inventory_state = dict(self.state.inventory_state)
-        return child
+        return self.subtasks.create_child_harness(
+            request=request,
+            harness_factory=harness_factory,
+            artifact_start_index=artifact_start_index,
+        )
 
-    @staticmethod
     def _build_subtask_result(
+        self,
         *,
         child: "Harness",
         request: ChildRunRequest,
         result: dict[str, Any],
     ) -> ChildRunResult:
-        del request
-        raw_status = str(result.get("status", "unknown"))
-        summary = _clean_subtask_summary(
-            _extract_subtask_summary_value(result) or raw_status
-        )
-        status = _normalize_subtask_status(result=result, summary=summary)
-        file_sources = [
-            artifact.source
-            for artifact in child.state.artifacts.values()
-            if artifact.source and artifact.kind in {"file_read", "shell_exec", "grep", "yaml_read"}
-        ]
-        return ChildRunResult(
-            status=status,
-            summary=str(summary),
-            artifact_ids=list(child.state.artifacts.keys())[-15:],
-            files_touched=file_sources[-8:],
-            decisions=child.state.working_memory.decisions[-6:],
-            remaining_plan=child.state.working_memory.next_actions[-6:],
-            artifacts={aid: child.state.artifacts[aid] for aid in list(child.state.artifacts.keys())[-15:]},
-            metadata={
-                "current_phase": child.state.current_phase,
-                "step_count": child.state.step_count,
-                "token_usage": child.state.token_usage,
-                "result": result,
-            },
-        )
+        return self.subtasks.build_subtask_result(child=child, request=request, result=result)
 
     def _persist_checkpoint(self, result: dict[str, Any]) -> None:
         path = (
@@ -839,29 +795,33 @@ class Harness:
             print(safe, end="", flush=True)
 
     async def _ensure_context_limit(self) -> None:
-        if self.server_context_limit is None and hasattr(self.client, "fetch_model_context_limit"):
-            try:
-                self.server_context_limit = await self.client.fetch_model_context_limit()
-            except Exception:
-                self.server_context_limit = None
-            if self.server_context_limit is not None:
-                limit: int = self.server_context_limit
-                if not self.context_policy.max_prompt_tokens:
-                    # Apply automatic 25% headroom to discovered server limit
-                    headroom = max(1024, limit // 4)
-                    self.context_policy.max_prompt_tokens = limit - headroom
-                
-                # Cascade update to all internal section quotas (Phase I)
-                self.context_policy.recalculate_quotas(limit)
-                self.state.recent_message_limit = self.context_policy.recent_message_limit
+        await self.prompt_builder.ensure_context_limit()
 
-                self._runlog(
-                    "context_limit",
-                    "server context limit detected",
-                    context_limit=limit,
-                    max_prompt_tokens=self.context_policy.max_prompt_tokens,
-                    hot_message_limit=self.context_policy.hot_message_limit,
-                )
+    async def _rebuild_messages_after_context_overflow(
+        self,
+        *,
+        n_ctx: int,
+        n_keep: int | None = None,
+        error_message: str = "",
+        event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        new_limit = self._apply_server_context_limit(
+            n_ctx,
+            source="stream_context_overflow",
+            observed_n_keep=n_keep,
+        )
+        system_prompt = str(self.state.scratchpad.get("_last_system_prompt") or "")
+        if not system_prompt:
+            return None
+        self._runlog(
+            "context_limit_rebuild",
+            "shrinking prompt budget after upstream context overflow",
+            n_ctx=n_ctx,
+            n_keep=n_keep,
+            error=error_message,
+            max_prompt_tokens=new_limit,
+        )
+        return await self._build_prompt_messages(system_prompt, event_handler=event_handler)
 
     def _apply_usage(self, usage: dict[str, Any]) -> None:
         normalized_usage = json_safe_value(usage or {})
@@ -885,293 +845,476 @@ class Harness:
         *,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> list[dict[str, Any]]:
-        self._update_working_memory()
-        query = self._select_retrieval_query()
-        self._runlog("retrieval_query", "selected retrieval query", query=query)
-        await self._maybe_compact_context(
-            query=query,
-            system_prompt=system_prompt,
-            event_handler=event_handler,
-        )
-        fresh_run_active = self.fresh_run and self._fresh_run_turns_remaining > 0
-        cold_store = None if fresh_run_active else self.cold_memory_store
-        retrieval_bundle = self.retriever.retrieve_bundle(
-            state=self.state,
-            query=query,
-            cold_store=cold_store,
-            include_experiences=not fresh_run_active,
-        )
-        summaries = retrieval_bundle.summaries
-        artifacts = retrieval_bundle.artifacts
-        experiences = [] if fresh_run_active else retrieval_bundle.experiences
-        self._runlog(
-            "retrieval_selected",
-            "retrieval candidates selected",
-            query=retrieval_bundle.query,
-            initial_query=retrieval_bundle.initial_query,
-            refined=retrieval_bundle.refined,
-            refinement_reason=retrieval_bundle.refinement_reason,
-            best_scores=retrieval_bundle.best_scores,
-            candidate_counts=retrieval_bundle.candidate_counts,
-            summaries=[
-                {
-                    "summary_id": summary.summary_id,
-                    "artifact_ids": summary.artifact_ids,
-                    "files_touched": summary.files_touched,
-                }
-                for summary in summaries
-            ],
-            artifacts=[
-                {
-                    "artifact_id": artifact.artifact_id,
-                    "score": artifact.score,
-                    "preview": artifact.text[:160],
-                }
-                for artifact in artifacts
-            ],
-            experiences=[
-                {
-                    "memory_id": exp.memory_id,
-                    "intent": exp.intent,
-                    "tool": exp.tool_name,
-                    "outcome": exp.outcome,
-                }
-                for exp in experiences
-            ],
-        )
-        recent_limit = self.context_policy.recent_message_limit
-        include_structured_sections = bool(summaries or artifacts or experiences or self.state.episodic_summaries)
-        soft_limit = self.context_policy.soft_prompt_token_limit
-        assembly = self.prompt_assembler.build_messages(
-            state=self.state,
-            system_prompt=system_prompt,
-            retrieved_summaries=summaries,
-            retrieved_artifacts=artifacts,
-            retrieved_experiences=experiences,
-            recent_message_limit=recent_limit,
-            include_structured_sections=include_structured_sections,
-            token_budget=soft_limit,
-        )
-        if fresh_run_active and self._fresh_run_turns_remaining > 0:
-            self._fresh_run_turns_remaining -= 1
-        
-        self.state.scratchpad["context_used_tokens"] = assembly.estimated_prompt_tokens
-
-        self._runlog(
-            "prompt_budget",
-            "prompt assembly estimate (bidding complete)",
-            estimated_prompt_tokens=assembly.estimated_prompt_tokens,
-            sections=assembly.section_tokens,
-            message_count=len(assembly.messages),
-            retrieval_cache=self.state.retrieval_cache,
-        )
-
-        # 7. Hard Budget Guard (Phase III)
-        limit = self.context_policy.max_prompt_tokens
-        if limit and assembly.estimated_prompt_tokens > limit:
-             raise RuntimeError(f"PROMPT BUDGET OVERFLOW: {assembly.estimated_prompt_tokens} tokens assembled, which exceeds the max prompt limit of {limit}.")
-
-        return assembly.messages
+        return await self.prompt_builder.build_messages(system_prompt, event_handler=event_handler)
 
     async def _record_tool_result(
         self,
-        *,
         tool_name: str,
         tool_call_id: str | None,
         result: ToolEnvelope,
         arguments: dict[str, Any] | None = None,
     ) -> ConversationMessage:
-        from .context.policy import estimate_text_tokens
-        
-        # Ensure arguments are preserved in metadata for loop detection
-        if arguments is not None and "arguments" not in result.metadata:
-             result.metadata["arguments"] = arguments
-        
-        if result.metadata.get("cache_hit"):
-            artifact_id = str(result.metadata.get("artifact_id", "")).strip()
-            artifact = self.state.artifacts.get(artifact_id)
-            if artifact is None:
-                compact_content = json.dumps(json_safe_value(result.to_dict()), ensure_ascii=True)
-            else:
-                self.state.retrieval_cache = [artifact.artifact_id]
-                compact_content = format_reused_artifact_message(artifact)
-                self._runlog(
-                    "artifact_reused",
-                    "tool result satisfied from cached artifact",
-                    artifact_id=artifact.artifact_id,
-                    tool_name=tool_name,
-                    source=artifact.source,
-                )
-            return ConversationMessage(
-                role="tool",
-                name=tool_name,
-                tool_call_id=tool_call_id,
-                content=compact_content,
-                metadata={"artifact_id": artifact_id, "cache_hit": True},
-            )
-        artifact = None
-        # Optimization: Do NOT create new artifacts for tool snapshots of existing artifacts (e.g. artifact_read).
-        # This prevents 'A0001 -> artifact_read -> A0002 -> artifact_read -> A0003' chains that confuse the model.
-        if tool_name == "artifact_read" and result.success and result.metadata.get("artifact_id"):
-             # Use the existing backing artifact from tool metadata
-             artifact_id = str(result.metadata["artifact_id"])
-             artifact = self.state.artifacts.get(artifact_id)
-             if artifact is not None and isinstance(result.output, str):
-                 artifact.preview_text = result.output[:self.artifact_store.policy.preview_char_limit]
-        
-        if artifact is None:
-             artifact = self.artifact_store.persist_tool_result(tool_name=tool_name, result=result)
-        
-        # Automatic summarization for large outputs (avoiding context flood)
-        if result.success and result.output and artifact:
-            out_str = str(result.output)
-            tokens = estimate_text_tokens(out_str)
-            if tokens > self.context_policy.artifact_summarization_threshold and self.summarizer_client:
-                self._runlog(
-                    "context_summarize_request",
-                    "requesting summarization for large tool result",
-                    tool_name=tool_name,
-                    tokens=tokens,
-                )
-                try:
-                    distilled = await self.summarizer.summarize_artifact_async(
-                        client=self.summarizer_client,
-                        artifact_id=artifact.artifact_id,
-                        content=out_str,
-                        label=artifact.source or tool_name
-                    )
-                    if distilled:
-                        artifact.summary = f"Distilled: {distilled}"
-                        # Also override preview text to be the summary for better retrieval/context
-                        artifact.preview_text = distilled[:self.artifact_store.policy.preview_char_limit]
-                        # Mark as summarized so messages.py suppresses the artifact_read followup hint.
-                        # Without this, the compact tool message tells the model to call artifact_read
-                        # while the system prompt says not to — a direct signal conflict.
-                        artifact.metadata["summarized"] = True
-                except Exception as exc:
-                    self.log.warning("Automatic context summarization failed: %s", exc)
-
-        if artifact:
-            self.state.artifacts[artifact.artifact_id] = artifact
-            self.state.retrieval_cache = [artifact.artifact_id]
-            if tool_name == "shell_exec":
-                _consolidate_shell_attempt_family(
-                    state=self.state,
-                    artifact_id=artifact.artifact_id,
-                    result=result,
-                )
-            if tool_name == "file_read" and result.success:
-                cache_key = _file_read_cache_key(self.state.cwd, result.metadata)
-                if cache_key:
-                    cache = self.state.scratchpad.setdefault("file_read_cache", {})
-                    if isinstance(cache, dict):
-                        cache[cache_key] = artifact.artifact_id
-
-            if tool_name == "memory_update" and result.success:
-                section = str(result.metadata.get("section", "")).strip().lower()
-                if section == "plan":
-                    self.state.plan_artifact_id = artifact.artifact_id
-                    self.state.plan_resolved = True
-            elif tool_name == "artifact_read" and result.success:
-                artifact_id = str(result.metadata.get("artifact_id", "")).strip()
-                if artifact_id:
-                    if artifact_id == self.state.plan_artifact_id:
-                        self.state.plan_resolved = True
-                    elif (
-                        not self.state.plan_artifact_id
-                        and artifact.tool_name == "memory_update"
-                        and str(artifact.metadata.get("section", "")).strip().lower() == "plan"
-                    ):
-                        self.state.plan_artifact_id = artifact_id
-                        self.state.plan_resolved = True
-                    if result.metadata.get("truncated"):
-                        suppressed = self.state.scratchpad.get("suppressed_truncated_artifact_ids", [])
-                        if isinstance(suppressed, list):
-                            self.state.scratchpad["suppressed_truncated_artifact_ids"] = _dedupe_keep_tail(
-                                suppressed + [artifact_id],
-                                limit=12,
-                            )
-                        else:
-                            self.state.scratchpad["suppressed_truncated_artifact_ids"] = [artifact_id]
-
-            if tool_name != "shell_exec":
-                fact_label = artifact.summary or tool_name
-                self.state.working_memory.known_facts = _dedupe_keep_tail(
-                    self.state.working_memory.known_facts + [f"{tool_name}: {fact_label}"],
-                    limit=12,
-                )
-            # Success clears consecutive error count
-            self.state.recent_errors = []
-            
-        if not result.success and result.error:
-            # Skip recording hallucinations as permanent failures to keep the retrieval context clean
-            if not result.metadata.get("hallucination") and not result.metadata.get("approval_denied"):
-                self.state.working_memory.failures = _dedupe_keep_tail(
-                    self.state.working_memory.failures + [f"{tool_name}: {result.error}"],
-                    limit=8,
-                )
-                # Track consecutive errors for guard tripping
-                self.state.recent_errors.append(f"{tool_name}: {result.error}")
-        
-        request_text = self.state.run_brief.original_task or self._current_user_task()
-        compact_content = (
-            self.artifact_store.compact_tool_message(
-                artifact,
-                result,
-                request_text=request_text,
-            )
-            if artifact
-            else str(result.output)
-        )
-
-        self._runlog(
-            "artifact_created",
-            "tool result processed",
-            artifact_id=artifact.artifact_id if artifact else None,
+        return await self.tool_results.record_result(
             tool_name=tool_name,
-            source=artifact.source if artifact else tool_name,
-            size_bytes=artifact.size_bytes if artifact else 0,
-            inline=bool(artifact and artifact.inline_content is not None),
-        )
-
-        msg = ConversationMessage(
-            role="tool",
-            name=tool_name,
             tool_call_id=tool_call_id,
-            content=compact_content,
-            metadata={"artifact_id": artifact.artifact_id} if artifact else {},
+            result=result,
+            arguments=arguments,
         )
-
-        # Record tool history fingerprint for loop/deadlock detection
-        args_str = json.dumps(result.metadata.get("arguments", {}), sort_keys=True)
-        outcome = "success" if result.success else f"error:{result.error}"
-        fingerprint = f"{tool_name}|{args_str}|{outcome}"
-        self.state.append_tool_history(fingerprint)
-
-        return msg
-
     def _record_assistant_message(
         self,
         *,
         assistant_text: str,
         tool_calls: list[dict[str, Any]],
+        speaker: str | None = None,
+        hidden_from_prompt: bool = False,
     ) -> None:
+        metadata: dict[str, Any] = {}
+        normalized_speaker = str(speaker or "").strip().lower()
+        if normalized_speaker:
+            metadata["speaker"] = normalized_speaker
+        if hidden_from_prompt:
+            metadata["hidden_from_prompt"] = True
         self.state.append_message(
             ConversationMessage(
                 role="assistant",
                 content=assistant_text or None,
                 tool_calls=tool_calls,
+                metadata=metadata,
             )
         )
 
-    def _initialize_run_brief(self, task: str) -> None:
-        self.state.run_brief.original_task = task
-        self.state.run_brief.current_phase_objective = f"{self.state.current_phase}: {task}"
-        self.state.working_memory.current_goal = task
-        self.state.working_memory.next_actions = _dedupe_keep_tail(
-            self.state.working_memory.next_actions + [f"{self.state.current_phase}: gather the next missing fact for {task}"],
-                limit=6,
+    def _active_task_scope_payload(self) -> dict[str, Any] | None:
+        payload = getattr(self, "_active_task_scope", None)
+        if isinstance(payload, dict) and payload:
+            return dict(payload)
+        state = getattr(self, "state", None)
+        scratchpad = getattr(state, "scratchpad", None)
+        if not isinstance(scratchpad, dict):
+            return None
+        stored = scratchpad.get("_active_task_scope")
+        if not isinstance(stored, dict) or not stored:
+            return None
+        restored = dict(stored)
+        self._active_task_scope = restored
+        sequence = stored.get("sequence")
+        try:
+            restored_sequence = int(sequence)
+        except (TypeError, ValueError):
+            restored_sequence = 0
+        current_sequence = int(getattr(self, "_task_sequence", 0) or 0)
+        if restored_sequence > current_sequence:
+            self._task_sequence = restored_sequence
+        return restored
+
+    def _clip_task_summary_text(self, value: Any, *, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        clipped, truncated = clip_text_value(text, limit=limit)
+        return f"{clipped} [truncated]" if truncated else clipped
+
+    def _extract_task_terminal_message(self, result: dict[str, Any] | None) -> str:
+        if not isinstance(result, dict) or not result:
+            return ""
+        message = result.get("message")
+        if isinstance(message, dict):
+            candidate = (
+                message.get("message")
+                or message.get("question")
+                or message.get("status")
             )
+            if candidate:
+                return self._clip_task_summary_text(candidate)
+        if isinstance(message, str) and message.strip():
+            return self._clip_task_summary_text(message)
+        reason = str(result.get("reason") or "").strip()
+        if reason:
+            return self._clip_task_summary_text(reason)
+        error = result.get("error")
+        if isinstance(error, dict):
+            candidate = error.get("message")
+            if candidate:
+                return self._clip_task_summary_text(candidate)
+        return ""
+
+    def _task_duration_seconds(self, started_at: str, finished_at: str) -> float:
+        try:
+            started = datetime.fromisoformat(str(started_at))
+            finished = datetime.fromisoformat(str(finished_at))
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, round((finished - started).total_seconds(), 3))
+
+    def _write_task_summary(self, payload: dict[str, Any]) -> str:
+        summary_path_text = str(payload.get("summary_path") or "").strip()
+        if not summary_path_text:
+            return ""
+        path = Path(summary_path_text)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(json_safe_value(payload), indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            return str(path)
+        except Exception:
+            logger = getattr(self, "log", logging.getLogger("smallctl.harness"))
+            logger.exception("failed to write task summary")
+            return ""
+
+    def _begin_task_scope(self, *, raw_task: str, effective_task: str) -> dict[str, Any]:
+        normalized_raw = str(raw_task or "").strip()
+        normalized_effective = str(effective_task or normalized_raw).strip()
+        current = self._active_task_scope_payload()
+        if current:
+            current_effective = str(
+                current.get("effective_task") or current.get("raw_task") or ""
+            ).strip()
+            current_raw = str(current.get("raw_task") or "").strip()
+            if (
+                (current_effective and current_effective == normalized_effective)
+                or (current_raw and current_raw == normalized_raw)
+            ):
+                return current
+            self._finalize_task_scope(
+                terminal_event="task_aborted",
+                status="aborted",
+                reason="replaced_by_new_task",
+                replacement_task=normalized_effective,
+            )
+
+        prior_sequence = getattr(self, "_task_sequence", 0)
+        if not prior_sequence:
+            state = getattr(self, "state", None)
+            scratchpad = getattr(state, "scratchpad", None)
+            if isinstance(scratchpad, dict):
+                prior_sequence = scratchpad.get("_task_sequence", 0)
+        try:
+            sequence = int(prior_sequence) + 1
+        except (TypeError, ValueError):
+            sequence = 1
+        self._task_sequence = sequence
+
+        task_id = f"task-{sequence:04d}"
+        summary_path = ""
+        if self.run_logger is not None:
+            summary_path = str(
+                (self.run_logger.run_dir / "tasks" / task_id / "task_summary.json").resolve()
+            )
+        scope = {
+            "task_id": task_id,
+            "sequence": sequence,
+            "raw_task": normalized_raw,
+            "effective_task": normalized_effective,
+            "target_paths": extract_task_target_paths(normalized_effective),
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "start_step_count": int(getattr(self.state, "step_count", 0) or 0),
+            "start_token_usage": int(getattr(self.state, "token_usage", 0) or 0),
+            "summary_path": summary_path,
+        }
+        self._active_task_scope = dict(scope)
+        self.state.scratchpad["_task_sequence"] = sequence
+        self.state.scratchpad["_active_task_scope"] = json_safe_value(scope)
+        self.state.scratchpad["_active_task_id"] = task_id
+        return dict(scope)
+
+    def _finalize_task_scope(
+        self,
+        *,
+        terminal_event: str,
+        status: str,
+        reason: str = "",
+        result: dict[str, Any] | None = None,
+        replacement_task: str = "",
+    ) -> dict[str, Any] | None:
+        scope = self._active_task_scope_payload()
+        if not scope:
+            return None
+
+        finished_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        result_status = str((result or {}).get("status") or "").strip().lower()
+        summary_terminal_event = terminal_event or "task_finalize"
+        summary_text = self._extract_task_terminal_message(result)
+        if not summary_text and reason:
+            summary_text = self._clip_task_summary_text(reason)
+
+        start_step_count = int(scope.get("start_step_count") or 0)
+        start_token_usage = int(scope.get("start_token_usage") or 0)
+        current_step_count = int(getattr(self.state, "step_count", 0) or 0)
+        current_token_usage = int(getattr(self.state, "token_usage", 0) or 0)
+
+        payload = {
+            "task_id": str(scope.get("task_id") or "").strip(),
+            "sequence": int(scope.get("sequence") or 0),
+            "raw_task": str(scope.get("raw_task") or "").strip(),
+            "effective_task": str(scope.get("effective_task") or "").strip(),
+            "terminal_event": summary_terminal_event,
+            "status": str(status or result_status or "stopped").strip(),
+            "result_status": result_status,
+            "reason": self._clip_task_summary_text(reason),
+            "message": summary_text,
+            "started_at": str(scope.get("started_at") or "").strip(),
+            "finished_at": finished_at,
+            "duration_seconds": self._task_duration_seconds(
+                str(scope.get("started_at") or "").strip(),
+                finished_at,
+            ),
+            "step_count": max(0, current_step_count - start_step_count),
+            "token_usage": max(0, current_token_usage - start_token_usage),
+            "current_phase": str(getattr(self.state, "current_phase", "") or "").strip(),
+            "active_tool_profiles": list(getattr(self.state, "active_tool_profiles", []) or []),
+            "target_paths": list(scope.get("target_paths") or []),
+            "artifact_count": len(getattr(self.state, "artifacts", {}) or {}),
+            "recent_error_count": len(getattr(self.state, "recent_errors", []) or []),
+            "last_recent_error": self._clip_task_summary_text(
+                (getattr(self.state, "recent_errors", []) or [""])[-1]
+                if getattr(self.state, "recent_errors", [])
+                else "",
+                limit=180,
+            ),
+            "summary_path": str(scope.get("summary_path") or "").strip(),
+        }
+        if replacement_task:
+            payload["replacement_task"] = replacement_task
+        error = (result or {}).get("error")
+        if isinstance(error, dict):
+            payload["error_type"] = str(error.get("type") or "").strip()
+
+        summary_path = self._write_task_summary(payload)
+        payload["summary_path"] = summary_path
+
+        if terminal_event:
+            self._runlog(
+                terminal_event,
+                "task ended without normal completion",
+                task_id=payload["task_id"],
+                status=payload["status"],
+                result_status=result_status,
+                reason=payload["reason"],
+                replacement_task=replacement_task,
+                summary_path=summary_path,
+                raw_task=payload["raw_task"],
+                effective_task=payload["effective_task"],
+            )
+
+        self._active_task_scope = None
+        self.state.scratchpad.pop("_active_task_scope", None)
+        self.state.scratchpad.pop("_active_task_id", None)
+        return payload
+
+    def _reset_task_boundary_state(
+        self,
+        *,
+        reason: str,
+        new_task: str = "",
+        previous_task: str = "",
+    ) -> None:
+        preserved_scratchpad: dict[str, Any] = {}
+        for key in (
+            "_model_name",
+            "_model_is_small",
+            "_max_steps",
+            "strategy",
+            "_last_task_text",
+            "_last_task_handoff",
+            "_task_sequence",
+        ):
+            if key in self.state.scratchpad:
+                preserved_scratchpad[key] = self.state.scratchpad[key]
+
+        background_processes = json_safe_value(self.state.background_processes)
+        inventory_state = json_safe_value(self.state.inventory_state)
+
+        # A true task boundary needs a clean task-local slate. Continue-like followups
+        # are resolved before we get here, so this path should not carry over prior-task
+        # messages, briefs, or working memory into the next objective.
+        self.state.current_phase = self._initial_phase
+        self.state.step_count = 0
+        self.state.inactive_steps = 0
+        self.state.latest_verdict = None
+
+        # Preserve only durable cross-task settings and handoff metadata; clear
+        # everything else that is scoped to the previous task.
+        self.state.scratchpad = preserved_scratchpad
+        self.state.recent_messages = []
+        self.state.recent_errors = []
+        self.state.run_brief = RunBrief()
+        self.state.working_memory = WorkingMemory()
+        self.state.acceptance_ledger = {}
+        self.state.acceptance_waivers = []
+        self.state.acceptance_waived = False
+        self.state.last_verifier_verdict = None
+        self.state.last_failure_class = ""
+
+        self.state.files_changed_this_cycle = []
+        self.state.repair_cycle_id = ""
+        self.state.stagnation_counters = {}
+        self.state.draft_plan = None
+        self.state.active_plan = None
+        self.state.plan_resolved = False
+        self.state.plan_artifact_id = ""
+        self.state.planning_mode_enabled = self._configured_planning_mode
+        self.state.planner_requested_output_path = ""
+        self.state.planner_requested_output_format = ""
+        self.state.planner_resume_target_mode = "loop"
+        self.state.planner_interrupt = None
+        self.state.artifacts = {}
+        if self.state.write_session and self.state.write_session.status != "complete":
+            from ..graph.tool_outcomes import _register_write_session_stage_artifact
+            _register_write_session_stage_artifact(self, self.state.write_session)
+        self.state.episodic_summaries = []
+        self.state.context_briefs = []
+        self.state.prompt_budget = PromptBudgetSnapshot()
+        self.state.retrieval_cache = []
+        self.state.active_intent = ""
+        self.state.secondary_intents = []
+        self.state.intent_tags = []
+        self.state.retrieved_experience_ids = []
+        self.state.tool_execution_records = {}
+        self.state.pending_interrupt = None
+        self.state.tool_history = []
+        self.state.background_processes = background_processes if isinstance(background_processes, dict) else {}
+        self.state.inventory_state = inventory_state if isinstance(inventory_state, dict) else {}
+        self.state.warm_experiences = []
+        self.state.touch()
+        self._runlog(
+            "task_boundary_reset",
+            "reset task-local state for new task",
+            reason=reason,
+            previous_task=previous_task,
+            new_task=new_task,
+        )
+
+    def _maybe_reset_for_new_task(self, task: str) -> None:
+        previous_task = str(self.state.run_brief.original_task or self.state.scratchpad.get("_last_task_text") or "").strip()
+        if not previous_task:
+            return
+        new_task = str(task or "").strip()
+        if not new_task or new_task == previous_task:
+            return
+        has_task_local_context = self._has_task_local_context()
+        if has_task_local_context:
+            self._finalize_task_scope(
+                terminal_event="task_aborted",
+                status="aborted",
+                reason="replaced_by_new_task",
+                replacement_task=new_task,
+            )
+            self._reset_task_boundary_state(
+                reason="task_switch",
+                new_task=new_task,
+                previous_task=previous_task,
+            )
+
+    def _has_task_local_context(self) -> bool:
+        return bool(
+            self.state.recent_messages
+            or self.state.recent_errors
+            or self.state.artifacts
+            or self.state.episodic_summaries
+            or self.state.context_briefs
+            or self.state.run_brief.task_contract
+            or self.state.run_brief.current_phase_objective
+            or self.state.working_memory.current_goal
+            or self.state.working_memory.plan
+            or self.state.working_memory.decisions
+            or self.state.working_memory.open_questions
+            or self.state.working_memory.known_facts
+            or self.state.working_memory.failures
+            or self.state.working_memory.next_actions
+            or self.state.acceptance_ledger
+            or self.state.acceptance_waivers
+            or self.state.scratchpad.get("_task_complete")
+            or self.state.scratchpad.get("_task_failed")
+        )
+
+    def _last_task_handoff(self) -> dict[str, Any]:
+        payload = self.state.scratchpad.get("_last_task_handoff")
+        if not isinstance(payload, dict):
+            return {}
+        return dict(payload)
+
+    def _is_continue_like_followup(self, task: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(task or "").strip().lower()).strip()
+        if not normalized:
+            return False
+        fillers = {"please", "pls", "now", "again", "just", "then", "more", "further"}
+        tokens = [token for token in normalized.split() if token not in fillers]
+        collapsed = " ".join(tokens)
+        return collapsed in {
+            "continue",
+            "conitnue",
+            "continune",
+            "keep going",
+            "resume",
+            "proceed",
+            "go on",
+            "carry on",
+        }
+
+    def _resolve_followup_task(self, task: str) -> str:
+        raw_task = str(task or "").strip()
+        if not raw_task or not self._is_continue_like_followup(raw_task):
+            return raw_task
+
+        handoff = self._last_task_handoff()
+        candidate = str(
+            handoff.get("effective_task")
+            or handoff.get("current_goal")
+            or self.state.run_brief.original_task
+            or self.state.scratchpad.get("_last_task_text")
+            or ""
+        ).strip()
+        if not candidate:
+            return raw_task
+
+        if not (self._has_task_local_context() or handoff):
+            return raw_task
+
+        return candidate
+
+    def _store_task_handoff(self, *, raw_task: str, effective_task: str) -> None:
+        effective = str(effective_task or "").strip()
+        if not effective:
+            return
+        target_paths = extract_task_target_paths(effective)
+        self.state.scratchpad["_last_task_handoff"] = {
+            "raw_task": str(raw_task or "").strip(),
+            "effective_task": effective,
+            "current_goal": str(self.state.working_memory.current_goal or effective),
+            "target_paths": list(target_paths),
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+    def _initialize_run_brief(self, task: str, *, raw_task: str | None = None) -> None:
+        effective_task = str(task or "").strip()
+        source_task = str(raw_task or effective_task).strip()
+        
+        existing_task = str(self.state.run_brief.original_task or "").strip()
+        if existing_task and effective_task and effective_task != existing_task:
+            # We are handing over the objective. Keep the original intent and append the new follow-up direction.
+            merged_task = f"{existing_task}\nFollow-up: {effective_task}"
+        else:
+            merged_task = effective_task or existing_task
+            
+        self.state.run_brief.original_task = merged_task
+        self.state.run_brief.task_contract = self._derive_task_contract(merged_task)
+        self.state.run_brief.current_phase_objective = f"{self.state.current_phase}: {effective_task}"
+        
+        existing_goal = str(self.state.working_memory.current_goal or "").strip()
+        if existing_goal and effective_task and effective_task not in existing_goal:
+            self.state.working_memory.current_goal = f"{existing_goal}\nFollow-up: {effective_task}"
+        else:
+            self.state.working_memory.current_goal = merged_task
+            
+        self.state.scratchpad["_task_target_paths"] = extract_task_target_paths(effective_task)
+        self._store_task_handoff(raw_task=source_task, effective_task=effective_task)
+        if hasattr(self.memory, "prime_write_policy"):
+            self.memory.prime_write_policy(effective_task)
+        self.state.working_memory.next_actions = dedupe_keep_tail(
+            self.state.working_memory.next_actions + [self.memory._next_action_for_task(effective_task)],
+            limit=6,
+        )
 
     async def _maybe_compact_context(
         self,
@@ -1179,186 +1322,17 @@ class Harness:
         system_prompt: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> None:
-        soft_limit = self.context_policy.soft_prompt_token_limit
-        tier_manager = MessageTierManager(self.context_policy)
-        
-        # 1. Check Triggers (Phase II + IV)
-        should_compact = (
-            tier_manager.should_compact(self.state) or 
-            tier_manager.should_compact_predictive(self.state, soft_limit)
-        )
-        
-        if not should_compact:
-            # Fallback for hard message limits (Phase II)
-            if len(self.state.recent_messages) <= tier_manager.hot_window:
-                return
-
-        # 2. Structured Tier Compaction
-        msg = "Context almost exhausted; initiating compression..."
-        self._runlog("compaction_trigger", msg)
-        if event_handler:
-             asyncio.create_task(event_handler(UIEvent(event_type=UIEventType.ALERT, content=msg)))
-
-        if self.summarizer_client:
-            try:
-                brief = await tier_manager.compact_to_warm(
-                    state=self.state,
-                    summarizer=self.summarizer,
-                    client=self.summarizer_client,
-                    artifact_store=self.artifact_store
-                )
-                if brief:
-                    self._runlog("compaction_complete", "Compressed messages into warm brief", brief_id=brief.brief_id)
-                    tier_manager.promote_to_cold(self.state, artifact_store=self.artifact_store)
-                    return # Successfully compacted
-            except Exception as e:
-                self._runlog("compaction_error", "Structured tier compaction failed", error=str(e))
-
-        # 3. Ratio-based Safety Fallback (Legacy/Emergency Truncation)
-        # If tiering failed or isn't enough, we might still need to truncate.
-        if len(self.state.recent_messages) > self.context_policy.recent_message_limit:
-            self._runlog("compaction_emergency", "Emergency truncation triggered (message limit exceeded)")
-            self.state.recent_messages = self.state.recent_messages[-self.context_policy.recent_message_limit:]
-        
-        # Re-evaluate after potential emergency truncation
-        probe = self.prompt_assembler.build_messages(
-            state=self.state,
+        await self.compaction.maybe_compact_context(
+            query=query,
             system_prompt=system_prompt,
-            retrieved_summaries=self.retriever.retrieve_summaries(state=self.state, query=query),
-            retrieved_artifacts=self.retriever.retrieve_artifacts(state=self.state, query=query),
-            recent_message_limit=self.context_policy.recent_message_limit,
-            include_structured_sections=True,
+            event_handler=event_handler,
         )
-        effective_soft_limit = soft_limit or self.context_policy.max_prompt_tokens or 4096
-        threshold = int(effective_soft_limit * self.context_policy.summarize_at_ratio)
-        
-        if probe.estimated_prompt_tokens <= threshold:
-            return # No further compaction needed
-        
-        self._runlog(
-            "compaction_trigger",
-            "context compaction triggered (budget pressure)",
-            estimated_prompt_tokens=probe.estimated_prompt_tokens,
-            summarize_threshold=threshold,
-            recent_messages=len(self.state.recent_messages),
-        )
-        keep_recent = max(4, min(10, self.context_policy.recent_message_limit))
-        if self.summarizer_client:
-            self._runlog("compaction_start", "AI-based summarization pass started")
-            await self._emit(
-                event_handler,
-                UIEvent(
-                    UIEventType.SYSTEM,
-                    "Long context detected; summarization pass activated",
-                    data={"status_activity": "summarizing..."},
-                ),
-            )
-            try:
-                summary = await self.summarizer.compact_recent_messages_async(
-                    state=self.state,
-                    client=self.summarizer_client,
-                    keep_recent=keep_recent,
-                    artifact_store=self.artifact_store,
-                )
-            except Exception as e:
-                self._runlog(
-                    "compaction_error",
-                    "AI summarization failed, falling back to heuristic compaction",
-                    error=str(e),
-                )
-                summary = self.summarizer.compact_recent_messages(
-                    state=self.state,
-                    keep_recent=keep_recent,
-                    artifact_store=self.artifact_store,
-                )
-        else:
-            summary = self.summarizer.compact_recent_messages(
-                state=self.state,
-                keep_recent=keep_recent,
-                artifact_store=self.artifact_store,
-            )
-
-        if summary:
-            self._runlog(
-                "summary_created",
-                "compacted recent context",
-                summary_id=summary.summary_id,
-                artifact_ids=summary.artifact_ids,
-                files_touched=summary.files_touched,
-            )
 
     def _update_working_memory(self) -> None:
-        self.state.run_brief.current_phase_objective = self.state.current_phase
-        if not self.state.working_memory.current_goal:
-            self.state.working_memory.current_goal = (
-                self.state.run_brief.current_phase_objective or self.state.run_brief.original_task
-            )
-        if self.state.active_plan is not None or self.state.draft_plan is not None:
-            self.state.sync_plan_mirror()
-        self._refresh_active_intent()
-        self.state.prune_stale_meta(limit=self.context_policy.memory_staleness_step_limit)
-        self.state.align_meta_to_content()
-        self.state.working_memory.open_questions = clip_string_list(
-            self.state.working_memory.open_questions,
-            limit=4,
-            item_char_limit=240,
-        )[0]
-        self.state.working_memory.plan = clip_string_list(
-            self.state.working_memory.plan,
-            limit=10,
-            item_char_limit=400,
-        )[0]
-        self.state.working_memory.decisions = clip_string_list(
-            self.state.working_memory.decisions,
-            limit=10,
-            item_char_limit=400,
-        )[0]
-        self.state.working_memory.known_facts = clip_string_list(
-            self.state.working_memory.known_facts,
-            limit=12,
-            item_char_limit=320,
-        )[0]
-        self.state.working_memory.failures = clip_string_list(
-            self.state.working_memory.failures,
-            limit=8,
-            item_char_limit=320,
-        )[0]
-        
-        has_recent_tool_evidence = any(message.role == "tool" for message in self.state.recent_messages[-4:])
-        has_known_facts = bool(self.state.working_memory.known_facts)
-        task_guidance = self._next_action_for_task(self.state.run_brief.original_task or "")
-
-        # Once we have evidence, nudge toward closure instead of repeating discovery boilerplate.
-        if self.state.current_phase == "verify" or has_recent_tool_evidence or has_known_facts:
-            next_action = self._completion_next_action()
-            if self.state.working_memory.next_actions and self.state.working_memory.next_actions[-1] == task_guidance:
-                self.state.working_memory.next_actions.pop()
-        else:
-            next_action = task_guidance
-        next_action, clipped = clip_text_value(next_action, limit=240)
-        self.state.working_memory.next_actions = clip_string_list(
-            _dedupe_keep_tail(self.state.working_memory.next_actions + [next_action], limit=6),
-            limit=6,
-            item_char_limit=240,
-        )[0]
-        self.state.working_memory.next_action_meta = align_memory_entries(
-            self.state.working_memory.next_actions,
-            self.state.working_memory.next_action_meta,
-            current_step=self.state.step_count,
-            current_phase=self.state.current_phase,
-            confidence=0.7,
-        )
-        self.state.recent_messages = _trim_recent_messages_window(
-            self.state.recent_messages,
-            limit=self.context_policy.recent_message_limit,
-        )
+        self.memory.update_working_memory(self.context_policy.recent_message_limit)
 
     def _refresh_active_intent(self) -> None:
-        task = self.state.run_brief.original_task or self._current_user_task()
-        primary, secondary, tags = self._extract_intent_state(task)
-        self.state.active_intent = primary
-        self.state.secondary_intents = secondary
-        self.state.intent_tags = tags
+        self.memory._refresh_active_intent()
 
     def _extract_intent_state(self, task: str) -> tuple[str, list[str], list[str]]:
         text = (task or "").lower()
@@ -1417,6 +1391,21 @@ class Harness:
 
     def _infer_requested_tool_name(self, task: str) -> str:
         text = (task or "").lower()
+        creation_markers = (
+            "build",
+            "create",
+            "make",
+            "write",
+            "generate",
+            "implement",
+            "save",
+            "produce",
+        )
+        if (
+            "script" in text
+            and any(marker in text for marker in creation_markers)
+        ) or re.search(r"\b(?:\.py|\.sh|\.bash|\.ps1)\b", text):
+            return "write_file"
         if "read_file" in text or "cat" in text:
             return "read_file"
         if "write_file" in text:
@@ -1429,7 +1418,7 @@ class Harness:
         return "Decide whether the current evidence is sufficient; call task_complete when it is."
 
     def _next_action_for_task(self, task: str) -> str:
-        return f"{self.state.current_phase}: gather the next missing fact for {clip_text_value(task, limit=40)[0]}"
+        return self.memory._next_action_for_task(task)
 
     def _record_experience(
         self,
@@ -1440,126 +1429,28 @@ class Harness:
         notes: str = "",
         source: str = "observed",
     ) -> ExperienceMemory:
-        failure_mode = self._normalize_failure_mode(result.error, tool_name=tool_name, success=result.success)
-        outcome = "success" if result.success else "failure"
-        confidence = 0.85 if result.success else 0.60
-        if tool_name == "task_complete" and result.success:
-            confidence = 0.95
-        
-        # Operational Notes Guidance based on memory-upgrade.md
-        op_notes = notes
-        if not op_notes:
-            if result.success:
-                if tool_name == "task_complete":
-                    op_notes = "Task finished successfully. Call task_complete when objectives met."
-                else:
-                    args_meta = result.metadata.get("arguments") or {}
-                    if not args_meta:
-                        op_notes = f"Successfully called {tool_name} with no arguments."
-                    else:
-                        op_notes = f"Successfully called {tool_name}. Key pattern: {list(args_meta.keys())}."
-            else:
-                if failure_mode == ZERO_ARG_TOOL_ARG_LEAK:
-                    op_notes = f"Do not send placeholder arguments to {tool_name}. Call it empty."
-                elif failure_mode == SCHEMA_VALIDATION_ERROR:
-                    op_notes = f"Argument mismatch for {tool_name}: {result.error}"
-                else:
-                    op_notes = str(result.error or result.output or "").strip()
-
-        correction_ids = [
-            memory.memory_id
-            for memory in self.state.warm_experiences
-            if memory.intent == self.state.active_intent and memory.tool_name == tool_name and memory.outcome == "failure"
-        ]
-        memory = ExperienceMemory(
-            memory_id=f"mem-{uuid.uuid4().hex[:10]}",
-            tier="warm",
-            source=source,
-            run_id=self.state.thread_id,
-            phase=self.state.current_phase,
-            intent=self.state.active_intent,
-            intent_tags=list(self.state.intent_tags),
-            environment_tags=self._infer_environment_tags(),
-            entity_tags=self._infer_entity_tags(self.state.run_brief.original_task),
-            action_type="tool_call",
+        return self.memory.record_experience(
             tool_name=tool_name,
-            arguments_fingerprint=self._argument_fingerprint(result.metadata.get("arguments")),
-            outcome=outcome,
-            failure_mode=failure_mode,
-            confidence=confidence,
-            notes=op_notes,
-            evidence_refs=evidence_refs or [],
-            supersedes=correction_ids if result.success else [],
+            result=result,
+            evidence_refs=evidence_refs,
+            notes=notes,
+            source=source,
         )
-        stored = self.state.upsert_experience(memory)
-        self.warm_memory_store.upsert(stored)
-        self._reinforce_retrieved_experiences(tool_name=tool_name, success=result.success)
-        if stored.confidence >= 0.9 or stored.reuse_count >= 3:
-            promoted = _coerce_experience_memory(json_safe_value(stored))
-            promoted.tier = "cold"
-            self.cold_memory_store.upsert(promoted)
-        return stored
 
     def _normalize_failure_mode(self, error: Any, *, tool_name: str, success: bool) -> str:
-        if success:
-            return ""
-        text = str(error or "").lower()
-        if "missing required field" in text or "expected type" in text or "schema" in text:
-            return SCHEMA_VALIDATION_ERROR
-        if "unknown tool" in text:
-            return WRONG_TOOL_CALLED
-        if "zero-argument" in text or ("scratch_list" in tool_name and "missing" in text):
-            return ZERO_ARG_TOOL_ARG_LEAK
-        if "loop" in text:
-            return REPEATED_TOOL_LOOP
-        if "premature" in text:
-            return PREMATURE_TASK_COMPLETE
-        if "phase" in text:
-            return PHASE_MISMATCH
-        if "not called" in text:
-            return TOOL_NOT_CALLED
-        return UNKNOWN_FAILURE
+        return self.memory._normalize_failure_mode(error, tool_name=tool_name, success=success)
 
     def _reinforce_retrieved_experiences(self, *, tool_name: str, success: bool) -> None:
-        if not self.state.retrieved_experience_ids:
-            return
-        for memory in self.state.warm_experiences:
-            if memory.memory_id in self.state.retrieved_experience_ids and memory.tool_name == tool_name:
-                self.state.reinforce_experience(memory.memory_id, success=success)
-                self.warm_memory_store.upsert(memory)
-                if memory.confidence >= 0.9 or memory.reuse_count >= 3:
-                     promoted = _coerce_experience_memory(json_safe_value(memory))
-                     promoted.tier = "cold"
-                     self.cold_memory_store.upsert(promoted)
+        self.memory._reinforce_retrieved_experiences(tool_name=tool_name, success=success)
 
     def _record_terminal_experience(self, result: dict[str, Any]) -> None:
-        status = str(result.get("status", "") or "")
-        if not status:
-            return
-        success = status in {"completed", "chat_completed"}
-        reason = str(result.get("reason", "") or result.get("message", "") or status)
-        from .models.tool_result import ToolEnvelope
-        payload = ToolEnvelope(
-            success=success,
-            output={"status": status, "message": reason},
-            error=None if success else reason,
-            metadata={"status": status},
-        )
-        self._record_experience(
-            tool_name="task_complete" if success else "task_fail",
-            result=payload,
-            notes=reason,
-        )
+        self.memory.record_terminal_experience(result)
 
     def _argument_fingerprint(self, arguments: Any) -> str:
-        payload = json.dumps(json_safe_value(arguments or {}), sort_keys=True, ensure_ascii=True)
-        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+        return self.memory._argument_fingerprint(arguments)
 
     def _derive_task_contract(self, task: str) -> str:
-        lowered = (task or "").lower()
-        if "contract" in lowered or "plan" in lowered:
-            return "high_fidelity"
-        return "general"
+        return self.memory.derive_task_contract(task)
 
     def _select_retrieval_query(self) -> str:
         return build_retrieval_query(self.state)
@@ -1845,7 +1736,7 @@ class Harness:
 
         Returns True if at least one message was compacted.
         """
-        from .context.policy import estimate_text_tokens
+        from ..context.policy import estimate_text_tokens
 
         compacted_any = False
         for message in reversed(self.state.recent_messages):
@@ -1867,7 +1758,7 @@ class Harness:
             if artifact is None:
                 continue
             # Re-derive the compact reference (tool_name is stored on the artifact)
-            from .models.tool_result import ToolEnvelope
+            from ..models.tool_result import ToolEnvelope
             # Build a minimal ToolEnvelope representative enough for the compact formatter
             dummy_result = ToolEnvelope(
                 success=True,
@@ -1895,7 +1786,9 @@ class Harness:
     def _current_user_task(self) -> str:
         for message in reversed(self.state.recent_messages):
             if message.role == "user" and message.content:
-                return message.content
+                content = str(message.content or "").strip()
+                resolved = self._resolve_followup_task(content)
+                return resolved or content
         last_task = self.state.scratchpad.get("_last_task_text")
         if isinstance(last_task, str) and last_task:
             return last_task
@@ -1904,6 +1797,15 @@ class Harness:
     def _chat_mode_requires_tools(self, task: str) -> bool:
         if self._is_smalltalk(task):
             return False
+        model_name = getattr(self.client, "model", None)
+        if should_enable_complex_write_chat_draft(
+            task,
+            model_name=model_name,
+            cwd=getattr(self.state, "cwd", None),
+        ):
+            return True
+        if self._needs_memory_persistence(task):
+            return True
         if self._needs_loop_for_content_lookup(task):
             return True
         return self._looks_like_readonly_chat_request(task) or self._looks_like_action_request(task)
@@ -1912,6 +1814,24 @@ class Harness:
         text = task.strip().lower()
         action_markers = ("run", "exec", "shell", "terminal", "ping", "curl", "wget", "git")
         return any(m in text for m in action_markers)
+
+    def _needs_memory_persistence(self, task: str) -> bool:
+        text = task.strip().lower()
+        if not text:
+            return False
+        memory_markers = (
+            "save this in memory",
+            "save memory",
+            "remember this",
+            "store this in memory",
+            "store this",
+            "note this",
+            "pin this",
+            "persist this",
+            "keep this in memory",
+            "write this down",
+        )
+        return any(marker in text for marker in memory_markers)
 
     def _looks_like_shell_request(self, task: str) -> bool:
         text = task.strip().lower()
@@ -2067,66 +1987,6 @@ class Harness:
 
 
 
-def _clean_subtask_summary(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if isinstance(value, dict):
-        nested = value.get("message") or value.get("output") or value.get("status")
-        if nested is not None and nested is not value:
-            return _clean_subtask_summary(nested)
-    if text.startswith("{") and text.endswith("}"):
-        try:
-            parsed = ast.literal_eval(text)
-        except (ValueError, SyntaxError):
-            parsed = None
-        if isinstance(parsed, dict):
-            nested = parsed.get("message") or parsed.get("output") or parsed.get("status")
-            if nested is not None:
-                return _clean_subtask_summary(nested)
-    if "</think>" in text:
-        tail = text.split("</think>")[-1].strip()
-        if tail:
-            text = tail
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if lines:
-        last_line = lines[-1]
-        if len(last_line) >= 24 or len(lines) == 1:
-            return _strip_summary_markup(last_line)
-    return _strip_summary_markup(text)
-
-
-def _normalize_subtask_status(*, result: dict[str, Any], summary: str) -> str:
-    status = str(result.get("status", "unknown"))
-    if status != "stopped":
-        return status
-    if str(result.get("reason", "")) != "no_tool_calls":
-        return status
-    if summary:
-        return "completed"
-    return status
-
-
-def _extract_subtask_summary_value(result: dict[str, Any]) -> Any:
-    return (
-        result.get("message")
-        or result.get("assistant")
-        or result.get("reason")
-        or result.get("status", "")
-    )
-
-
-def _strip_summary_markup(text: str) -> str:
-    cleaned = text.strip()
-    for marker in ("**", "__", "`"):
-        if cleaned.startswith(marker) and cleaned.endswith(marker) and len(cleaned) > len(marker) * 2:
-            cleaned = cleaned[len(marker) : -len(marker)].strip()
-    if cleaned.startswith("#"):
-        cleaned = cleaned.lstrip("#").strip()
-    cleaned = cleaned.replace("`", "")
-    cleaned = cleaned.replace("**", "")
-    cleaned = cleaned.replace("__", "")
-    return cleaned
 
 
 def _file_read_cache_key(cwd: str, payload: dict[str, Any] | None) -> str | None:

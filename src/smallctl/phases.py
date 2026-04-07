@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PHASES = ("explore", "plan", "execute", "verify")
+PHASES = ("explore", "plan", "author", "execute", "verify", "repair")
 
 
 def normalize_phase(value: str | None) -> str:

@@ -1,11 +1,40 @@
 from __future__ import annotations
 
+import ast
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
 from ..state import LoopState, json_safe_value
+
+
+def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if tool_name not in {"file_write", "file_append"}:
+        return args
+    if not isinstance(args, dict):
+        return {}
+
+    normalized = dict(args)
+
+    session_id = str(normalized.get("session_id") or "").strip()
+    write_session_id = str(normalized.get("write_session_id") or "").strip()
+    if session_id and not write_session_id:
+        normalized["write_session_id"] = session_id
+
+    # Providers sometimes emit Python literals such as `None` for optional
+    # write-session metadata. Treat those as omitted fields instead of letting
+    # schema validation fail after we've already recovered the real content.
+    for key, value in list(normalized.items()):
+        if value is None:
+            normalized.pop(key, None)
+    for key in ("path", "write_session_id", "section_name", "next_section_name", "replace_strategy"):
+        value = normalized.get(key)
+        if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+            normalized.pop(key, None)
+
+    return normalized
 
 
 @dataclass
@@ -21,10 +50,19 @@ class PendingToolCall:
             return None
         function = _coerce_dict_payload(payload.get("function"))
         raw_args = function.get("arguments", "")
+        tool_name, signature_args = cls._parse_tool_signature(function.get("name", ""))
         args = cls._parse_args(raw_args)
-        tool_name = str(function.get("name", "") or "").strip()
+        if signature_args:
+            if not args:
+                args = signature_args
+            else:
+                # Preserve explicit provider arguments but backfill any fields that were
+                # encoded into the tool name itself.
+                for key, value in signature_args.items():
+                    args.setdefault(key, value)
         if not tool_name:
             return None
+        args = _normalize_write_session_tool_args(tool_name, args)
         tool_call_id = payload.get("id")
         return cls(
             tool_name=tool_name,
@@ -37,8 +75,17 @@ class PendingToolCall:
     def _parse_args(raw: Any) -> dict[str, Any]:
         if not isinstance(raw, str) or not raw:
             return {}
-            
-        import re
+
+        def _parse_mapping(candidate: str) -> dict[str, Any]:
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except Exception:
+                    return {}
+            return parsed if isinstance(parsed, dict) else {}
+
         # Step 1: Basic cleanup
         cleaned = raw.strip()
         
@@ -52,33 +99,85 @@ class PendingToolCall:
             # Only try this if it's missing at most 5 closing braces (guard against crazy strings)
             for _ in range(5):
                 cleaned += '}'
-                try:
-                    # Clean AGAIN after adding brace to catch trailing commas that now have a bracket following them
-                    repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
-                    parsed = json.loads(repaired)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    continue
-        
-        try:
-            parsed = json.loads(cleaned)
-        except Exception:
+                # Clean AGAIN after adding brace to catch trailing commas that now have a bracket following them
+                repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
+                parsed = _parse_mapping(repaired)
+                if parsed:
+                    return parsed
+
+        parsed = _parse_mapping(cleaned)
+        if not parsed:
             # Step 4: Final fallback for very common 'code-block' wrap halluciations
             if "```json" in cleaned:
                 # Pre-clean the whole thing for trailing commas if we're desperate
                 desperate = re.sub(r',\s*([\]}])', r'\1', cleaned)
                 match = re.search(r"```json\s*(\{.*?\})\s*```", desperate, re.DOTALL)
                 if match:
-                    try:
-                        parsed = json.loads(match.group(1))
-                    except Exception:
-                        return {}
+                    parsed = _parse_mapping(match.group(1))
                 else:
                     return {}
-            else:
-                return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _parse_tool_signature(raw_name: Any) -> tuple[str, dict[str, Any]]:
+        if not isinstance(raw_name, str):
+            return "", {}
+
+        name = raw_name.strip()
+        if not name:
+            return "", {}
+
+        match = re.match(r"^\s*([A-Za-z0-9_.:-]+)\((.*)\)\s*$", name, re.DOTALL)
+        if not match:
+            return name, {}
+
+        tool_name = match.group(1).strip()
+        args_text = match.group(2).strip()
+        if not tool_name:
+            return name, {}
+        if not args_text:
+            return tool_name, {}
+
+        parsed_args = PendingToolCall._parse_function_arguments(args_text)
+        return tool_name, parsed_args
+
+    @staticmethod
+    def _parse_function_arguments(raw: str) -> dict[str, Any]:
+        if not isinstance(raw, str):
+            return {}
+
+        cleaned = raw.strip().rstrip(",")
+        if not cleaned:
+            return {}
+
+        # Reuse the JSON repair path first when the content is JSON-like.
+        if cleaned.startswith("{") and cleaned.endswith("}"):
+            try:
+                parsed = json.loads(cleaned)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+
+        try:
+            call = ast.parse(f"_tool__({cleaned})", mode="eval")
+        except Exception:
+            return {}
+
+        expr = call.body
+        if not isinstance(expr, ast.Call):
+            return {}
+
+        args: dict[str, Any] = {}
+        for keyword in expr.keywords:
+            if keyword.arg is None:
+                continue
+            try:
+                value = ast.literal_eval(keyword.value)
+            except Exception:
+                continue
+            args[keyword.arg] = value
+        return args
 
 
 @dataclass
@@ -118,7 +217,7 @@ class GraphRunState:
     final_result: dict[str, Any] | None = None
     interrupt_payload: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
-    latency_metrics: dict[str, float] = field(default_factory=dict)
+    latency_metrics: dict[str, float | int] = field(default_factory=dict)
 
 
 def build_operation_id(

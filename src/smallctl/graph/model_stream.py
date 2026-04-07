@@ -18,6 +18,7 @@ from ..models.events import UIEvent, UIEventType
 from ..state import clip_text_value, json_safe_value
 from ..task_targets import primary_task_target_path
 from .deps import GraphRuntimeDeps
+from .recovery_context import build_goal_recap
 from .state import GraphRunState, PendingToolCall
 from .tool_call_parser import (
     _detect_empty_file_write_payload,
@@ -49,6 +50,9 @@ class StreamProcessingResult:
     usage: dict[str, Any] = field(default_factory=dict)
     duration: float = 0.0
     ttft: float = 0.0
+    halted: bool = False
+    halt_reason: str = ""
+    halt_details: dict[str, Any] = field(default_factory=dict)
 
 
 def _classify_model_call_error(exc: Exception) -> tuple[str, dict[str, Any]]:
@@ -175,6 +179,9 @@ def _build_incomplete_tool_call_recovery_message(
         "The previous assistant response was interrupted before a tool call finished streaming.",
         "Please regenerate the full tool call from scratch with complete JSON arguments.",
     ]
+    goal_recap = build_goal_recap(harness)
+    if goal_recap:
+        lines.append(goal_recap)
     clipped_assistant_text, assistant_was_clipped = clip_text_value(assistant_text.strip(), limit=600)
     if clipped_assistant_text:
         prefix = "Assistant text before interruption"
@@ -877,6 +884,9 @@ async def _attempt_text_write_fallback(
             usage=usage_payload,
             duration=duration,
             ttft=ttft,
+            halted=stream_ended_without_done,
+            halt_reason="stream_ended_without_done" if stream_ended_without_done else "",
+            halt_details=stream_ended_without_done_details,
         )
 
     if fallback_intent is not None:
@@ -937,9 +947,11 @@ async def process_model_stream(
     buffer = ""
     start_tag = str(harness.thinking_start_tag or "<think>")
     end_tag = str(harness.thinking_end_tag or "</think>")
-    recovery_nudge_emitted = False
+    timeout_recovery_nudges = 0
     last_chunk_error_details: dict[str, Any] | None = None
     salvage_partial_stream: StreamResult | None = None
+    stream_ended_without_done = False
+    stream_ended_without_done_details: dict[str, Any] = {}
     harness.state.scratchpad.pop("_last_incomplete_tool_call", None)
     harness.state.scratchpad.pop("_last_text_write_fallback_assistant_text", None)
 
@@ -1037,7 +1049,7 @@ async def process_model_stream(
                             thinking_end_tag=harness.thinking_end_tag,
                         )
                         salvage_partial_stream = partial_stream
-                        if not recovery_nudge_emitted:
+                        if timeout_recovery_nudges < 2:
                             partial_tool_calls = _format_partial_tool_calls(partial_stream.tool_calls)
                             recovery_message = _build_incomplete_tool_call_recovery_message(
                                 harness=harness,
@@ -1070,7 +1082,7 @@ async def process_model_stream(
                             )
                             harness.state.append_message(recovery_message_obj)
                             messages.append(recovery_message_obj.to_dict())
-                            recovery_nudge_emitted = True
+                            timeout_recovery_nudges += 1
 
                         # ── Early-exit path for ≤4b models ──────────────────
                         # These models cannot stream large JSON tool-call
@@ -1119,6 +1131,12 @@ async def process_model_stream(
                             ),
                         )
                     break  # break inner loop → retry outer loop
+                if event.get("type") == "stream_ended_without_done":
+                    stream_ended_without_done = True
+                    details = event.get("details")
+                    if isinstance(details, dict):
+                        stream_ended_without_done_details = dict(details)
+                    continue
                 if event.get("type") == "chunk":
                     data = event.get("data", {})
                     choices = data.get("choices") or []
@@ -1396,6 +1414,9 @@ async def process_model_stream(
             usage=usage_payload,
             duration=duration,
             ttft=ttft,
+            halted=stream_ended_without_done,
+            halt_reason="stream_ended_without_done" if stream_ended_without_done else "",
+            halt_details=stream_ended_without_done_details,
         )
     if _stream_completed_cleanly:
         # ── Happy path: clean stream, no errors ──────────────────────────────
@@ -1454,6 +1475,9 @@ async def process_model_stream(
             usage=usage_payload,
             duration=duration,
             ttft=ttft,
+            halted=stream_ended_without_done,
+            halt_reason="stream_ended_without_done" if stream_ended_without_done else "",
+            halt_details=stream_ended_without_done_details,
         )
     else:
         # ── All retries exhausted without a salvageable partial stream ────────

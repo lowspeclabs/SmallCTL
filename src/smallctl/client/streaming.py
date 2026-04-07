@@ -197,6 +197,13 @@ class SSEStreamer:
                     "chat stream ended without [DONE]",
                     chunk_count=chunk_count,
                 )
+            yield {
+                "type": "stream_ended_without_done",
+                "details": {
+                    "chunk_count": chunk_count,
+                    "tool_call_stream_active": tool_call_stream_active,
+                },
+            }
 
     async def nonstream_chat(
         self,

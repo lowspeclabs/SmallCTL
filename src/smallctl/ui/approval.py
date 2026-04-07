@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 
 
 @dataclass(frozen=True)
@@ -197,5 +197,67 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalDecision]):
             "",
             "Use left/right to choose, then Enter.",
             "Y approves, N declines, R requests revision.",
+        ]
+        return "\n".join(parts)
+
+
+class SudoPasswordPromptScreen(ModalScreen[str | None]):
+    BINDINGS = [
+        ("enter", "submit", "Submit"),
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        prompt_id: str,
+        command: str,
+        prompt_text: str,
+    ) -> None:
+        super().__init__()
+        self.prompt_id = prompt_id
+        self.command = command
+        self.prompt_text = prompt_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="approve-prompt-shell"):
+            with Vertical(id="approve-prompt"):
+                yield Static("Sudo password required", id="approve-prompt-title")
+                yield Static(self._build_body(), id="approve-prompt-body")
+                yield Input(placeholder="Password", password=True, id="sudo-password-input")
+                with Horizontal(id="approve-prompt-buttons"):
+                    yield Button("Submit", id="sudo-password-submit", variant="success")
+                    yield Button("Cancel", id="sudo-password-cancel", variant="error")
+
+    async def on_mount(self) -> None:
+        self.query_one("#sudo-password-input", Input).focus()
+
+    def action_submit(self) -> None:
+        self.dismiss(self.query_one("#sudo-password-input", Input).value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "sudo-password-input":
+            self.dismiss(event.value)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "sudo-password-submit":
+            self.dismiss(self.query_one("#sudo-password-input", Input).value)
+            return
+        if event.button.id == "sudo-password-cancel":
+            self.dismiss(None)
+
+    def _build_body(self) -> str:
+        parts = [
+            f"Prompt ID: {self.prompt_id or 'pending'}",
+            "",
+            self.prompt_text or "Enter the sudo password to continue this command.",
+            "",
+            "Command:",
+            self.command or "(empty command)",
+            "",
+            "Press Enter to submit or Escape to cancel.",
         ]
         return "\n".join(parts)

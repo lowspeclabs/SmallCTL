@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
+from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
 from ..state import (
     ArtifactRecord,
     ArtifactSnippet,
@@ -115,6 +117,8 @@ class LexicalRetriever:
         ranked = self._rank_artifacts(state=state, query=query)
         snippets = self._select_artifact_snippets(
             ranked,
+            state=state,
+            query=query,
             token_budget=token_budget,
         )
         state.retrieval_cache = [snippet.artifact_id for snippet in snippets]
@@ -162,7 +166,12 @@ class LexicalRetriever:
             else []
         )
 
-        artifacts = self._select_artifact_snippets(ranked_artifacts, token_budget=artifact_token_budget)
+        artifacts = self._select_artifact_snippets(
+            ranked_artifacts,
+            state=state,
+            query=query,
+            token_budget=artifact_token_budget,
+        )
         summaries = self._select_summaries(ranked_summaries, token_budget=summary_token_budget)
         experiences = (
             self._select_distinct_experiences(
@@ -228,13 +237,22 @@ class LexicalRetriever:
             artifact = state.artifacts[artifact_id]
             if _is_superseded_artifact(artifact):
                 continue
-            if not _is_prompt_visible_artifact(artifact):
+            if not _is_retrieval_visible_artifact(artifact):
                 continue
             score = self._score_artifact(artifact=artifact, query_tokens=query_tokens, recency=index)
             if score > 0:
                 scored.append((score, artifact))
         scored.sort(key=lambda item: item[0], reverse=True)
-        return scored
+        deduped: list[tuple[float, ArtifactRecord]] = []
+        seen_keys: set[str] = set()
+        for score, artifact in scored:
+            dedupe_key = self._artifact_dedupe_key(artifact)
+            if dedupe_key and dedupe_key in seen_keys:
+                continue
+            if dedupe_key:
+                seen_keys.add(dedupe_key)
+            deduped.append((score, artifact))
+        return deduped
 
     def _rank_summaries(
         self,
@@ -280,18 +298,49 @@ class LexicalRetriever:
         self,
         ranked: list[tuple[float, ArtifactRecord]],
         *,
+        state: LoopState,
+        query: str,
         token_budget: int | None = None,
     ) -> list[ArtifactSnippet]:
         snippets: list[ArtifactSnippet] = []
         budget = token_budget or (self.policy.artifact_snippet_token_limit * self.policy.max_artifact_snippets)
         used_tokens = 0
-        for score, artifact in ranked[: self.policy.max_artifact_snippets * 3]:
+        detail_requested = self._query_requests_specific_detail(query)
+        verifier_passed = False
+        verdict = state.current_verifier_verdict()
+        if isinstance(verdict, dict):
+            verifier_passed = str(verdict.get("verdict") or "").strip().lower() == "pass"
+
+        primary_file_count = 0
+        verifier_count = 0
+        other_count = 0
+        semantic_limit = self.policy.max_artifact_snippets if detail_requested else min(2, self.policy.max_artifact_snippets)
+
+        for score, artifact in ranked[: self.policy.max_artifact_snippets * 4]:
+            category = self._artifact_category(artifact)
+            if verifier_passed and not detail_requested and category == "primary_file":
+                continue
+            if not detail_requested:
+                if category == "primary_file" and primary_file_count >= 1:
+                    continue
+                if category == "verifier" and verifier_count >= 1:
+                    continue
+                if category == "other" and other_count >= 1:
+                    continue
+                if len(snippets) >= semantic_limit:
+                    break
             text = self._artifact_text(artifact)
             text_tokens = estimate_text_tokens(text)
             if snippets and used_tokens + text_tokens > budget:
                 continue
             used_tokens += text_tokens
             snippets.append(ArtifactSnippet(artifact_id=artifact.artifact_id, text=text, score=score))
+            if category == "primary_file":
+                primary_file_count += 1
+            elif category == "verifier":
+                verifier_count += 1
+            else:
+                other_count += 1
             if len(snippets) >= self.policy.max_artifact_snippets and token_budget is None:
                 break
         return snippets
@@ -497,31 +546,90 @@ class LexicalRetriever:
                     return action.split("(")[0].strip()
         return None
 
-    def _select_distinct_experiences(
-        self,
-        memories: list[ExperienceMemory],
-        limit: int,
-    ) -> list[ExperienceMemory]:
-        seen_keys = set()
-        distinct = []
-        for m in memories:
-            key = (m.intent, m.tool_name, m.outcome)
-            if key in seen_keys:
-                continue
-            distinct.append(m)
-            seen_keys.add(key)
-            if len(distinct) >= limit:
-                break
-        return distinct
-
     @staticmethod
     def _artifact_text(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        verifier_verdict = str(metadata.get("verifier_verdict") or "").strip()
+        if verifier_verdict:
+            target = str(metadata.get("verifier_target") or artifact.source or artifact.tool_name or "").strip()
+            exit_code = metadata.get("verifier_exit_code")
+            stdout = str(metadata.get("verifier_stdout") or "").strip()
+            stderr = str(metadata.get("verifier_stderr") or "").strip()
+            transcript = stdout or stderr
+            if len(transcript) > 320:
+                transcript = f"{transcript[:320].rstrip()}..."
+            details = [f"Verifier {verifier_verdict}: {artifact.summary or target or artifact.tool_name}"]
+            if target:
+                details.append(f"Target: {target}")
+            if exit_code not in ("", None):
+                details.append(f"Exit code: {exit_code}")
+            if transcript:
+                details.append(f"Key output: {transcript}")
+            return "\n".join(details)[:900]
+
         base = f"{artifact.source or artifact.tool_name} | {artifact.summary}"
         preview = artifact.preview_text or artifact.inline_content or ""
-        if artifact.metadata.get("complete_file") and preview:
-            preview = f"Full file already captured; excerpt below is preview only.\n{preview}"
+        if metadata.get("complete_file") and preview:
+            preview = f"Full file already captured; excerpt below is preview only.\n{preview[:500].rstrip()}"
         combined = f"{base}\n{preview}".strip()
-        return combined[:1600]
+        return combined[:900]
+
+    @staticmethod
+    def _artifact_category(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        if str(metadata.get("verifier_verdict") or "").strip():
+            return "verifier"
+        if artifact.kind == "file_read" and bool(metadata.get("complete_file")):
+            return "primary_file"
+        return "other"
+
+    @staticmethod
+    def _artifact_dedupe_key(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        category = LexicalRetriever._artifact_category(artifact)
+        if category == "verifier":
+            family = str(metadata.get("attempt_family") or "").strip()
+            if family:
+                return f"verifier:{family}"
+            target = str(
+                metadata.get("verifier_target")
+                or metadata.get("command")
+                or artifact.source
+                or artifact.summary
+                or ""
+            ).strip()
+            return f"verifier:{target.lower()}"
+        path = str(metadata.get("path") or artifact.source or "").strip()
+        if path:
+            normalized = Path(path).as_posix().lower()
+            return f"{category}:{normalized}"
+        return f"{category}:{artifact.artifact_id}"
+
+    @staticmethod
+    def _query_requests_specific_detail(query: str) -> bool:
+        lowered = str(query or "").lower()
+        if not lowered:
+            return False
+        detail_markers = (
+            "specific line",
+            "specific lines",
+            "line-level",
+            "line level",
+            "line numbers",
+            "line number",
+            "start_line",
+            "end_line",
+            "artifact_read",
+            "quote the line",
+            "show the line",
+            "show lines",
+            "inspect lines",
+            "page forward",
+            "narrow excerpt",
+            "exact excerpt",
+            "specific excerpt",
+        )
+        return any(marker in lowered for marker in detail_markers)
 
     @staticmethod
     def _score_artifact(
@@ -530,6 +638,14 @@ class LexicalRetriever:
         query_tokens: set[str],
         recency: int,
     ) -> float:
+        expanded_query_tokens = set(query_tokens)
+        for token in list(query_tokens):
+            stripped = token.lstrip("./")
+            if len(stripped) > 1:
+                expanded_query_tokens.add(stripped)
+            for part in re.split(r"[\\/]+", stripped):
+                if len(part) > 1:
+                    expanded_query_tokens.add(part)
         source_name = Path(artifact.source).name.lower() if artifact.source else ""
         source_tokens = _tokens(artifact.source)
         summary_tokens = _tokens(artifact.summary)
@@ -540,18 +656,58 @@ class LexicalRetriever:
             str(metadata.get(key, ""))
             for key in ("intent", "path", "url", "command", "content_type", "source_type", "confidence")
         ))
-        overlap = len(query_tokens & (source_tokens | summary_tokens | keyword_tokens | path_tokens | metadata_tokens))
-        filename_bonus = 5.0 if source_name and source_name in query_tokens else 0.0
-        path_bonus = 3.0 if artifact.source and any(token in artifact.source.lower() for token in query_tokens) else 0.0
-        tool_bonus = 2.0 if artifact.tool_name.lower() in query_tokens else 0.0
+        overlap = len(expanded_query_tokens & (source_tokens | summary_tokens | keyword_tokens | path_tokens | metadata_tokens))
+        filename_bonus = 5.0 if source_name and source_name in expanded_query_tokens else 0.0
+        path_bonus = 3.0 if artifact.source and any(token in artifact.source.lower() for token in expanded_query_tokens) else 0.0
+        tool_bonus = 2.0 if artifact.tool_name.lower() in expanded_query_tokens else 0.0
+        verifier_bonus = 2.5 if str(metadata.get("verifier_verdict") or "").strip() else 0.0
         confidence_bonus = 0.0
         confidence = metadata.get("confidence")
         try:
             confidence_bonus = max(0.0, min(1.5, float(confidence) * 1.5)) if confidence is not None else 0.0
         except (TypeError, ValueError):
             confidence_bonus = 0.0
+        relevance = overlap + filename_bonus + path_bonus + tool_bonus + verifier_bonus + confidence_bonus
+        if relevance <= 0:
+            return 0.0
         recency_bonus = recency * 0.05
-        return overlap + filename_bonus + path_bonus + tool_bonus + confidence_bonus + recency_bonus
+        return relevance + recency_bonus
+
+
+def _dedupe_nonempty_texts(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _retrieval_failure_texts(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for text in values:
+        normalized.append(format_failure_tag(text))
+    return _dedupe_nonempty_texts(normalized)
+
+
+def _is_recovery_nudge_message(message: Any) -> bool:
+    metadata = getattr(message, "metadata", {})
+    return isinstance(metadata, dict) and bool(metadata.get("is_recovery_nudge"))
+
+
+def _retrieval_message_text(message: Any) -> str:
+    retrieval_safe_text = str(getattr(message, "retrieval_safe_text", "") or "").strip()
+    if retrieval_safe_text:
+        return retrieval_safe_text
+    return build_retrieval_safe_text(
+        role=str(getattr(message, "role", "") or ""),
+        content=getattr(message, "content", ""),
+        name=getattr(message, "name", ""),
+        metadata=getattr(message, "metadata", {}),
+    )
 
 
 def build_retrieval_query(state: LoopState) -> str:
@@ -584,12 +740,14 @@ def build_retrieval_query(state: LoopState) -> str:
     )
     parts.extend(state.working_memory.open_questions[-2:])
     parts.extend(
-        _visible_memory_texts(
-            state.working_memory.failures,
-            state.working_memory.failure_meta,
-            current_step=state.step_count,
-            current_phase=state.current_phase,
-        )[-4:]
+        _retrieval_failure_texts(
+            _visible_memory_texts(
+                state.working_memory.failures,
+                state.working_memory.failure_meta,
+                current_step=state.step_count,
+                current_phase=state.current_phase,
+            )[-4:]
+        )
     )
     parts.extend(
         _visible_memory_texts(
@@ -599,12 +757,11 @@ def build_retrieval_query(state: LoopState) -> str:
             current_phase=state.current_phase,
         )[-3:]
     )
-    for message in state.recent_messages[-3:]:
-        if message.content:
-            content = message.content
-            if len(content) > 1024:
-                content = content[:1024]
-            parts.append(content)
+    for content in _dedupe_nonempty_texts([
+        _retrieval_message_text(message)
+        for message in state.recent_messages[-3:]
+    ]):
+        parts.append(content)
     return "\n".join(part for part in parts if part)
 
 
@@ -645,11 +802,18 @@ def build_refined_retrieval_query(
             parts.append("Memory tags: " + " ".join(memory.intent_tags[:4]))
     if state.working_memory.open_questions:
         parts.append("Open questions: " + " ".join(state.working_memory.open_questions[-2:]))
-    if state.working_memory.failures:
-        parts.append("Recent failures: " + " ".join(state.working_memory.failures[-2:]))
+    retrieval_failures = _retrieval_failure_texts(state.working_memory.failures[-2:])
+    if retrieval_failures:
+        parts.append("Recent failures: " + " ".join(retrieval_failures))
     if state.recent_messages:
         last_user = next(
-            (message.content for message in reversed(state.recent_messages) if message.role == "user" and message.content),
+            (
+                message.content
+                for message in reversed(state.recent_messages)
+                if message.role == "user"
+                and message.content
+                and not _is_recovery_nudge_message(message)
+            ),
             "",
         )
         if last_user:
@@ -668,18 +832,13 @@ def _is_prompt_visible_artifact(artifact: ArtifactRecord) -> bool:
     return metadata.get("model_visible", True) is not False
 
 
-def _coerce_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+def _is_retrieval_visible_artifact(artifact: ArtifactRecord) -> bool:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    if metadata.get("model_visible", True) is not False:
+        return True
+    return bool(str(metadata.get("verifier_verdict") or "").strip())
+
+
 
 
 def _visible_memory_texts(
@@ -703,9 +862,3 @@ def _visible_memory_texts(
                 continue
         visible.append(text)
     return visible
-
-
-def _tokens(text: str | None) -> set[str]:
-    if not text:
-        return set()
-    return {token for token in re.findall(r"[a-z0-9_.:/\\-]+", text.lower()) if len(token) > 1}

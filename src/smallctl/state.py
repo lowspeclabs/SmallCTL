@@ -1,19 +1,61 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any
 
 from .models.conversation import ConversationMessage
+from .normalization import (
+    coerce_datetime as _coerce_datetime,
+    coerce_dict_payload as _coerce_dict_payload,
+    coerce_float as _coerce_float,
+    coerce_int,
+    coerce_json_dict_payload,
+    coerce_list_payload as _coerce_list_payload,
+    coerce_string_list,
+    coerce_timestamp_string as _coerce_timestamp_string,
+)
+
+
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    return coerce_int(value, default=default)
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    return coerce_string_list(value)
+
+
+def _coerce_json_dict_payload(value: Any) -> dict[str, Any]:
+    return coerce_json_dict_payload(value, json_safe_func=json_safe_value)
+
+
+def _coerce_write_section_ranges(value: Any) -> dict[str, dict[str, int]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, int]] = {}
+    for key, item in value.items():
+        if not isinstance(item, dict):
+            continue
+        start = _coerce_int(item.get("start"), default=-1)
+        end = _coerce_int(item.get("end"), default=-1)
+        if start < 0 or end < start:
+            continue
+        normalized[str(key)] = {"start": start, "end": end}
+    return normalized
 
 
 @dataclass
 class RunBrief:
     original_task: str = ""
     task_contract: str = ""
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
+    implementation_plan: list[str] = field(default_factory=list)
     current_phase_objective: str = ""
 
 
@@ -66,6 +108,11 @@ class ExecutionPlan:
     plan_id: str
     goal: str
     summary: str = ""
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    implementation_plan: list[str] = field(default_factory=list)
     steps: list[PlanStep] = field(default_factory=list)
     status: str = "draft"
     requested_output_path: str | None = None
@@ -107,11 +154,28 @@ class ExecutionPlan:
         lines = [f"{self.plan_id}: {self.goal}".strip()]
         if self.summary:
             lines.append(f"summary: {self.summary}")
+        spec = self.spec_summary()
+        if spec:
+            lines.append(f"spec: {spec}")
         for step in self.steps:
             lines.extend(_compact_plan_step_lines(step))
         if self.requested_output_path:
             lines.append(f"export: {self.requested_output_path}")
         return lines
+
+    def spec_summary(self) -> str:
+        parts: list[str] = []
+        if self.inputs:
+            parts.append("inputs=" + ", ".join(self.inputs))
+        if self.outputs:
+            parts.append("outputs=" + ", ".join(self.outputs))
+        if self.constraints:
+            parts.append("constraints=" + ", ".join(self.constraints))
+        if self.acceptance_criteria:
+            parts.append("acceptance=" + "; ".join(self.acceptance_criteria))
+        if self.implementation_plan:
+            parts.append("implementation=" + " | ".join(self.implementation_plan))
+        return " ; ".join(parts)
 
 
 @dataclass
@@ -183,6 +247,8 @@ class ArtifactRecord:
     inline_content: str | None = None
     preview_text: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    session_id: str = ""       # thread_id of the run that created this artifact
+    tool_call_id: str = ""     # tool_call_id from the model turn that triggered this artifact
 
 
 @dataclass
@@ -217,6 +283,39 @@ class ContextBrief:
 
 
 @dataclass
+class WriteSession:
+    write_session_id: str = ""
+    write_target_path: str = ""
+    write_session_intent: str = "replace_file"  # "replace_file" | "patch_existing"
+    write_session_mode: str = "chunked_author"  # "single_write" | "chunked_author" | "local_repair" | "stub_and_fill"
+    write_session_started_at: float = 0.0
+    write_first_chunk_at: float = 0.0
+    write_staging_path: str = ""
+    write_original_snapshot_path: str = ""
+    write_target_existed_at_start: bool = False
+    write_section_ranges: dict[str, dict[str, int]] = field(default_factory=dict)
+    write_last_attempt_snapshot_path: str = ""
+    write_last_attempt_sections: list[str] = field(default_factory=list)
+    write_last_attempt_ranges: dict[str, dict[str, int]] = field(default_factory=dict)
+    write_last_staged_hash: str = ""
+    write_sections_completed: list[str] = field(default_factory=list)
+    write_current_section: str = ""
+    write_next_section: str = ""
+    write_failed_local_patches: int = 0
+    write_empty_payload_retries: int = 0
+    write_salvage_count: int = 0
+    write_last_verifier: dict[str, Any] | None = None
+    write_session_fallback_mode: str = "stub_and_fill"
+    write_pending_finalize: bool = False
+    suggested_sections: list[str] = field(default_factory=list)
+    status: str = "open"  # "open" | "local_repair" | "fallback" | "complete"
+
+    def to_dict(self) -> dict[str, Any]:
+        from dataclasses import asdict
+        return asdict(self)
+
+
+@dataclass
 class PromptBudgetSnapshot:
     estimated_prompt_tokens: int = 0
     sections: dict[str, int] = field(default_factory=dict)
@@ -247,6 +346,14 @@ class LoopState:
     recent_messages: list[ConversationMessage] = field(default_factory=list)
     run_brief: RunBrief = field(default_factory=RunBrief)
     working_memory: WorkingMemory = field(default_factory=WorkingMemory)
+    acceptance_ledger: dict[str, str] = field(default_factory=dict)
+    acceptance_waivers: list[str] = field(default_factory=list)
+    acceptance_waived: bool = False
+    last_verifier_verdict: dict[str, Any] | None = None
+    last_failure_class: str = ""
+    files_changed_this_cycle: list[str] = field(default_factory=list)
+    repair_cycle_id: str = ""
+    stagnation_counters: dict[str, int] = field(default_factory=dict)
     draft_plan: ExecutionPlan | None = None
     active_plan: ExecutionPlan | None = None
     plan_resolved: bool = False
@@ -281,6 +388,12 @@ class LoopState:
     recent_message_limit: int = 6
     last_completion_tokens: int = 0
     tool_history: list[str] = field(default_factory=list)
+    write_session: WriteSession | None = None
+    log: logging.Logger = field(default_factory=lambda: logging.getLogger("smallctl.state"))
+    
+    @property
+    def state(self) -> "LoopState":
+        return self
 
     def touch(self) -> None:
         self.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -311,7 +424,134 @@ class LoopState:
             limit=12,
             item_char_limit=220,
         )[0]
+        self.working_memory.current_goal = plan.goal
+        self.run_brief.current_phase_objective = plan.goal
         self.plan_resolved = True
+        self.run_brief.task_contract = plan.spec_summary()
+        self.run_brief.inputs = list(plan.inputs)
+        self.run_brief.outputs = list(plan.outputs)
+        self.run_brief.constraints = list(plan.constraints)
+        self.run_brief.acceptance_criteria = list(plan.acceptance_criteria)
+        self.run_brief.implementation_plan = list(plan.implementation_plan)
+
+    def active_acceptance_criteria(self) -> list[str]:
+        plan = self.active_plan or self.draft_plan
+        if plan is not None and plan.acceptance_criteria:
+            return list(plan.acceptance_criteria)
+        if self.run_brief.acceptance_criteria:
+            return list(self.run_brief.acceptance_criteria)
+        return []
+
+    def acceptance_checklist(self) -> list[dict[str, Any]]:
+        criteria = self.active_acceptance_criteria()
+        if not criteria:
+            return []
+        ledger = self.acceptance_ledger.copy()
+        scratch_ledger = self.scratchpad.get("_acceptance_ledger")
+        if isinstance(scratch_ledger, dict):
+            for key, value in scratch_ledger.items():
+                ledger[str(key)] = str(value)
+        waived_items = {item for item in self.acceptance_waivers if item}
+        if self.acceptance_waived:
+            waived_items.update(criteria)
+        checklist: list[dict[str, Any]] = []
+        for criterion in criteria:
+            status = str(ledger.get(criterion, "pending") or "pending")
+            if criterion in waived_items:
+                status = "waived"
+            checklist.append(
+                {
+                    "criterion": criterion,
+                    "status": status,
+                    "satisfied": status in {"done", "passed", "complete", "completed", "waived"},
+                }
+            )
+        return checklist
+
+    def acceptance_ready(self) -> bool:
+        checklist = self.acceptance_checklist()
+        return not checklist or all(item["satisfied"] for item in checklist)
+
+    def current_verifier_verdict(self) -> dict[str, Any] | None:
+        verdict = self.last_verifier_verdict
+        if isinstance(verdict, dict):
+            return verdict
+        scratch_verdict = self.scratchpad.get("_last_verifier_verdict")
+        return scratch_verdict if isinstance(scratch_verdict, dict) else None
+
+    def contract_flow_active(self) -> bool:
+        if self.repair_cycle_id or self.current_verifier_verdict() is not None:
+            return True
+        if self.active_plan is not None or self.draft_plan is not None:
+            return True
+        if self.run_brief.acceptance_criteria or self.run_brief.implementation_plan:
+            return True
+        if self.active_intent in {"write_file", "use_file_write", "use_file_append", "use_file_delete"}:
+            return True
+
+        intent_tags = {
+            str(tag).strip().lower()
+            for tag in (self.intent_tags or [])
+            if str(tag).strip()
+        }
+        if intent_tags & {"write_file", "file_write", "mutate_repo"}:
+            return True
+
+        target_paths = self.scratchpad.get("_task_target_paths")
+        has_targets = isinstance(target_paths, list) and any(str(path).strip() for path in target_paths)
+        task_bits = [
+            str(self.run_brief.original_task or "").strip(),
+            str(self.working_memory.current_goal or "").strip(),
+        ]
+        task_text = " ".join(bit for bit in task_bits if bit).lower()
+        if not task_text:
+            return False
+
+        write_markers = (
+            "write ",
+            "edit ",
+            "patch ",
+            "create ",
+            "build ",
+            "implement ",
+            "update ",
+            "append ",
+            "replace ",
+            "refactor ",
+            "fix ",
+        )
+        artifact_markers = (
+            "script",
+            "file",
+            ".py",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".json",
+            ".md",
+            "unittest",
+            "test suite",
+            "tests",
+        )
+        return any(marker in task_text for marker in write_markers) and (
+            has_targets or any(marker in task_text for marker in artifact_markers)
+        )
+
+    def contract_phase(self) -> str:
+        scratch_phase = str(self.scratchpad.get("_contract_phase") or "").strip()
+        if scratch_phase:
+            return scratch_phase
+        plan = self.active_plan or self.draft_plan
+        if self.planning_mode_enabled and not (plan and plan.approved):
+            return self.current_phase
+        if self.repair_cycle_id:
+            return "repair"
+        if not self.contract_flow_active():
+            return self.current_phase
+        if self.current_verifier_verdict() is None:
+            return "author"
+        return "verify" if not self.acceptance_ready() else "execute"
+        return self.current_phase
 
     def upsert_experience(self, memory: ExperienceMemory) -> ExperienceMemory:
         for i, existing in enumerate(self.warm_experiences):
@@ -453,7 +693,10 @@ class LoopState:
         return list(self.recent_messages)
 
     def to_dict(self) -> dict[str, Any]:
-        serialized_messages = [json_safe_value(m.to_dict()) for m in self.recent_messages]
+        serialized_messages = [
+            json_safe_value(m.to_dict(include_retrieval_safe_text=True))
+            for m in self.recent_messages
+        ]
         payload = {
             "current_phase": self.current_phase,
             "thread_id": self.thread_id,
@@ -462,10 +705,19 @@ class LoopState:
             "elapsed_seconds": self.elapsed_seconds,
             "inactive_steps": self.inactive_steps,
             "recent_errors": json_safe_value(self.recent_errors),
+            "strategy": json_safe_value(self.strategy),
             "scratchpad": json_safe_value(self.scratchpad),
             "recent_messages": serialized_messages,
             "run_brief": json_safe_value(self.run_brief),
             "working_memory": json_safe_value(self.working_memory),
+            "acceptance_ledger": json_safe_value(self.acceptance_ledger),
+            "acceptance_waivers": json_safe_value(self.acceptance_waivers),
+            "acceptance_waived": self.acceptance_waived,
+            "last_verifier_verdict": json_safe_value(self.last_verifier_verdict),
+            "last_failure_class": self.last_failure_class,
+            "files_changed_this_cycle": json_safe_value(self.files_changed_this_cycle),
+            "repair_cycle_id": self.repair_cycle_id,
+            "stagnation_counters": json_safe_value(self.stagnation_counters),
             "draft_plan": json_safe_value(self.draft_plan),
             "active_plan": json_safe_value(self.active_plan),
             "planning_mode_enabled": self.planning_mode_enabled,
@@ -496,6 +748,7 @@ class LoopState:
             "inventory_state": json_safe_value(self.inventory_state),
             "active_tool_profiles": json_safe_value(self.active_tool_profiles),
             "tool_history": json_safe_value(self.tool_history),
+            "write_session": self.write_session.to_dict() if self.write_session else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "recent_message_limit": self.recent_message_limit,
@@ -527,6 +780,7 @@ class LoopState:
         raw["elapsed_seconds"] = _coerce_float(data.get("elapsed_seconds"), default=0.0)
         raw["inactive_steps"] = _coerce_int(data.get("inactive_steps"), default=0)
         raw["recent_errors"] = _coerce_string_list(data.get("recent_errors"))
+        raw["strategy"] = _coerce_json_dict_payload(data.get("strategy"))
         raw["recent_messages"] = recent_messages
         raw["recent_message_limit"] = recent_limit
         raw["run_brief"] = _coerce_run_brief(data.get("run_brief"))
@@ -535,6 +789,14 @@ class LoopState:
             current_step=raw["step_count"],
             current_phase=raw["current_phase"],
         )
+        raw["acceptance_ledger"] = _coerce_string_map(data.get("acceptance_ledger"))
+        raw["acceptance_waivers"] = _coerce_string_list(data.get("acceptance_waivers"))
+        raw["acceptance_waived"] = bool(data.get("acceptance_waived", False))
+        raw["last_verifier_verdict"] = _coerce_json_dict_payload(data.get("last_verifier_verdict"))
+        raw["last_failure_class"] = str(data.get("last_failure_class", "") or "")
+        raw["files_changed_this_cycle"] = _coerce_string_list(data.get("files_changed_this_cycle"))
+        raw["repair_cycle_id"] = str(data.get("repair_cycle_id", "") or "")
+        raw["stagnation_counters"] = _coerce_int_map(data.get("stagnation_counters"))
         raw["draft_plan"] = _coerce_execution_plan(data.get("draft_plan"))
         raw["active_plan"] = _coerce_execution_plan(data.get("active_plan"))
         raw["planning_mode_enabled"] = bool(data.get("planning_mode_enabled", False))
@@ -578,6 +840,7 @@ class LoopState:
         raw["inventory_state"] = _coerce_json_dict_payload(data.get("inventory_state"))
         raw["active_tool_profiles"] = _coerce_string_list(data.get("active_tool_profiles")) or ["core"]
         raw["tool_history"] = _coerce_string_list(data.get("tool_history"))
+        raw["write_session"] = _coerce_write_session(data.get("write_session"))
         raw["created_at"] = _coerce_timestamp_string(data.get("created_at"))
         raw["updated_at"] = _coerce_timestamp_string(data.get("updated_at"))
         raw["last_completion_tokens"] = _coerce_int(data.get("last_completion_tokens"), default=0)
@@ -619,8 +882,11 @@ def _coerce_run_brief(value: Any) -> RunBrief:
     if isinstance(value, dict):
         payload = _filter_dataclass_payload(RunBrief, value)
         payload["task_contract"] = str(payload.get("task_contract") or "")
+        payload["inputs"] = _coerce_string_list(payload.get("inputs"))
+        payload["outputs"] = _coerce_string_list(payload.get("outputs"))
         payload["constraints"] = _coerce_string_list(payload.get("constraints"))
         payload["acceptance_criteria"] = _coerce_string_list(payload.get("acceptance_criteria"))
+        payload["implementation_plan"] = _coerce_string_list(payload.get("implementation_plan"))
         if "original_task" in payload:
             payload["original_task"] = str(payload.get("original_task") or "")
         if "current_phase_objective" in payload:
@@ -639,7 +905,7 @@ def _coerce_conversation_message(value: Any) -> ConversationMessage | None:
     role = payload.get("role")
     if not isinstance(role, str) or not role.strip():
         return None
-    for key in ("content", "name", "tool_call_id"):
+    for key in ("content", "name", "tool_call_id", "retrieval_safe_text"):
         if key in payload and payload[key] is not None:
             payload[key] = str(payload[key])
     if "tool_calls" in payload:
@@ -687,6 +953,24 @@ def _coerce_working_memory(value: Any, *, current_step: int = 0, current_phase: 
         )
         return WorkingMemory(**payload)
     return WorkingMemory()
+
+
+def _coerce_string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items() if str(key).strip()}
+
+
+def _coerce_int_map(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key, item in value.items():
+        try:
+            normalized[str(key)] = int(item)
+        except (TypeError, ValueError):
+            continue
+    return normalized
 
 
 def _compact_plan_step_lines(step: PlanStep, *, depth: int = 0) -> list[str]:
@@ -742,6 +1026,11 @@ def _coerce_execution_plan(value: Any) -> ExecutionPlan | None:
     payload["plan_id"] = plan_id or f"plan-{datetime.now(timezone.utc).strftime('%H%M%S')}"
     payload["goal"] = goal or plan_id
     payload["summary"] = str(payload.get("summary", "") or "")
+    payload["inputs"] = _coerce_string_list(payload.get("inputs"))
+    payload["outputs"] = _coerce_string_list(payload.get("outputs"))
+    payload["constraints"] = _coerce_string_list(payload.get("constraints"))
+    payload["acceptance_criteria"] = _coerce_string_list(payload.get("acceptance_criteria"))
+    payload["implementation_plan"] = _coerce_string_list(payload.get("implementation_plan"))
     payload["status"] = str(payload.get("status", "draft") or "draft")
     payload["requested_output_path"] = (
         None if payload.get("requested_output_path") in (None, "") else str(payload.get("requested_output_path"))
@@ -904,18 +1193,63 @@ def _coerce_prompt_budget(value: Any) -> PromptBudgetSnapshot:
     return PromptBudgetSnapshot()
 
 
-def _coerce_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if not isinstance(value, str) or not value.strip():
+def _coerce_write_session(value: Any) -> WriteSession | None:
+    if isinstance(value, WriteSession):
+        return value
+    if not isinstance(value, dict):
         return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    payload = _filter_dataclass_payload(WriteSession, value)
+    
+    # Handle legacy field names if they exist in the payload
+    if "session_id" in value and "write_session_id" not in payload:
+        payload["write_session_id"] = str(value["session_id"])
+    if "target_path" in value and "write_target_path" not in payload:
+        payload["write_target_path"] = str(value["target_path"])
+    if "completed_sections" in value and "write_sections_completed" not in payload:
+        payload["write_sections_completed"] = _coerce_string_list(value["completed_sections"])
+    if "current_section" in value and "write_current_section" not in payload:
+        payload["write_current_section"] = str(value["current_section"])
+    if "next_section" in value and "write_next_section" not in payload:
+        payload["write_next_section"] = str(value["next_section"])
+    if "verdict" in value and "write_last_verifier" not in payload:
+        payload["write_last_verifier"] = _coerce_json_dict_payload(value["verdict"])
+    
+    payload["write_session_id"] = str(payload.get("write_session_id", "") or "")
+    payload["write_target_path"] = str(payload.get("write_target_path", "") or "")
+    intent = str(payload.get("write_session_intent", "replace_file") or "replace_file").strip().lower()
+    payload["write_session_intent"] = intent if intent in {"replace_file", "patch_existing"} else "replace_file"
+    payload["write_session_mode"] = str(payload.get("write_session_mode", "chunked_author") or "chunked_author")
+    payload["write_session_started_at"] = _coerce_float(payload.get("write_session_started_at"), default=0.0)
+    payload["write_first_chunk_at"] = _coerce_float(payload.get("write_first_chunk_at"), default=0.0)
+    payload["write_staging_path"] = str(payload.get("write_staging_path", "") or "")
+    payload["write_original_snapshot_path"] = str(payload.get("write_original_snapshot_path", "") or "")
+    existed_at_start = payload.get("write_target_existed_at_start")
+    payload["write_target_existed_at_start"] = (
+        bool(existed_at_start)
+        if isinstance(existed_at_start, bool)
+        else str(existed_at_start or "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    payload["write_section_ranges"] = _coerce_write_section_ranges(payload.get("write_section_ranges"))
+    payload["write_last_attempt_snapshot_path"] = str(payload.get("write_last_attempt_snapshot_path", "") or "")
+    payload["write_last_attempt_sections"] = _coerce_string_list(payload.get("write_last_attempt_sections"))
+    payload["write_last_attempt_ranges"] = _coerce_write_section_ranges(payload.get("write_last_attempt_ranges"))
+    payload["write_last_staged_hash"] = str(payload.get("write_last_staged_hash", "") or "")
+    payload["write_sections_completed"] = _coerce_string_list(payload.get("write_sections_completed"))
+    payload["write_current_section"] = str(payload.get("write_current_section", "") or "")
+    payload["write_next_section"] = str(payload.get("write_next_section", "") or "")
+    payload["write_failed_local_patches"] = _coerce_int(payload.get("write_failed_local_patches"), default=0)
+    payload["write_empty_payload_retries"] = _coerce_int(payload.get("write_empty_payload_retries"), default=0)
+    payload["write_salvage_count"] = _coerce_int(payload.get("write_salvage_count"), default=0)
+    payload["write_last_verifier"] = _coerce_json_dict_payload(payload.get("write_last_verifier"))
+    payload["write_session_fallback_mode"] = str(payload.get("write_session_fallback_mode", "stub_and_fill") or "stub_and_fill")
+    pending_finalize = payload.get("write_pending_finalize")
+    payload["write_pending_finalize"] = bool(pending_finalize) if isinstance(pending_finalize, bool) else str(pending_finalize or "").strip().lower() in {"1", "true", "yes", "on"}
+    payload["suggested_sections"] = _coerce_string_list(payload.get("suggested_sections"))
+    payload["status"] = str(payload.get("status", "open") or "open")
+    
+    return WriteSession(**payload)
+
+
 
 
 def _coerce_background_process_record(value: Any, *, job_id: str) -> dict[str, Any]:
@@ -1026,20 +1360,6 @@ def _coerce_pending_interrupt_payload(value: Any) -> dict[str, Any] | None:
     return normalized
 
 
-def _coerce_string_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        stripped = value.strip()
-        return [stripped] if stripped else []
-    if isinstance(value, (list, tuple, set, frozenset)):
-        result: list[str] = []
-        for item in value:
-            text = str(item).strip()
-            if text:
-                result.append(text)
-        return result
-    return []
 
 
 def _coerce_list_payload(value: Any) -> list[Any]:
@@ -1054,29 +1374,8 @@ def _coerce_dict_payload(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _coerce_json_dict_payload(value: Any) -> dict[str, Any]:
-    normalized = json_safe_value(value or {})
-    return normalized if isinstance(normalized, dict) else {}
 
 
-def _coerce_int(value: Any, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_float(value: Any, *, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_timestamp_string(value: Any) -> str:
-    if isinstance(value, str) and value.strip():
-        return value
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _coerce_conversation_message_payload(value: Any) -> dict[str, Any] | None:
@@ -1087,12 +1386,9 @@ def _coerce_conversation_message_payload(value: Any) -> dict[str, Any] | None:
         return None
     filtered = _filter_dataclass_payload(ConversationMessage, normalized)
     filtered["role"] = str(filtered.get("role", "tool"))
-    if "content" in filtered and filtered["content"] is not None:
-        filtered["content"] = str(filtered["content"])
-    if "name" in filtered and filtered["name"] is not None:
-        filtered["name"] = str(filtered["name"])
-    if "tool_call_id" in filtered and filtered["tool_call_id"] is not None:
-        filtered["tool_call_id"] = str(filtered["tool_call_id"])
+    for key in ("content", "name", "tool_call_id", "retrieval_safe_text"):
+        if key in filtered and filtered[key] is not None:
+            filtered[key] = str(filtered[key])
     if "tool_calls" in filtered:
         tool_calls = filtered.get("tool_calls")
         filtered["tool_calls"] = tool_calls if isinstance(tool_calls, list) else []
@@ -1265,8 +1561,22 @@ def _trim_recent_messages(
     if any(m is anchor for m in suffix):
         return list(suffix)
         
-    # Build the trimmed list: [Anchor] + [Suffix]
-    return [anchor] + list(suffix)
+    # [Anchor] + [Suffix]
+    result = [anchor] + list(suffix)
+    if len(result) > limit:
+        # If still over limit due to tool alignment, drop the start of the suffix
+        # but ensure we dont break tool-call integrity again.
+        to_drop = len(result) - limit
+        trimmed_suffix = list(suffix)
+        while to_drop > 0 and trimmed_suffix:
+            trimmed_suffix.pop(0)
+            to_drop -= 1
+        # Re-check integrity of the new start
+        while trimmed_suffix and trimmed_suffix[0].role == "tool":
+            trimmed_suffix.pop(0)
+        return [anchor] + trimmed_suffix
+
+    return result
 
 
 def clip_text_value(
@@ -1331,33 +1641,3 @@ def align_memory_entries(
                 confidence=confidence,
             ))
     return meta
-def _dedupe_keep_tail(items: list[str], *, limit: int) -> list[str]:
-    deduped: list[str] = []
-    for item in items:
-        normalized = item.strip()
-        if normalized and normalized not in deduped:
-            deduped.append(normalized)
-    return deduped[-limit:]
-
-
-def _coerce_int(value: Any, *, default: int = 0) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item) for item in value if item is not None]
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return [str(item) for item in parsed if item is not None]
-        except (json.JSONDecodeError, TypeError):
-            pass
-        return [value]
-    return []

@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..plans import resolve_plan_export_target, write_plan_file
+from ..plans import render_plan_playbook, resolve_plan_export_target, write_plan_file
 from ..state import ExecutionPlan, PlanInterrupt, PlanStep, LoopState
 from .common import needs_human, ok
 
@@ -68,6 +68,35 @@ def _sync_plan_state(state: LoopState, plan: ExecutionPlan) -> None:
         state.active_plan = plan
     state.sync_plan_mirror()
     state.touch()
+
+
+def _refresh_plan_playbook_artifact(*, state: LoopState, harness: Any, plan: ExecutionPlan) -> dict[str, Any]:
+    if harness is None or not hasattr(harness, "artifact_store"):
+        return {"artifact_id": "", "artifact_summary": ""}
+
+    playbook_text = render_plan_playbook(plan, state=state)
+    artifact = harness.artifact_store.persist_generated_text(
+        kind="plan_playbook",
+        source=plan.goal or "plan",
+        content=playbook_text,
+        summary=f"Plan playbook for {plan.goal or 'current task'}",
+        metadata={
+            "section": "plan",
+            "plan_id": plan.plan_id,
+            "goal": plan.goal,
+            "plan_status": plan.status,
+            "artifact_role": "plan_playbook",
+        },
+        tool_name="plan_playbook",
+    )
+    harness.state.artifacts[artifact.artifact_id] = artifact
+    harness.state.plan_artifact_id = artifact.artifact_id
+    harness.state.plan_resolved = True
+    harness.state.retrieval_cache = [artifact.artifact_id]
+    return {
+        "artifact_id": artifact.artifact_id,
+        "artifact_summary": artifact.summary,
+    }
 
 
 def _format_plan_metadata(plan: ExecutionPlan) -> dict[str, Any]:
@@ -170,12 +199,18 @@ async def plan_set(
     *,
     goal: str,
     summary: str = "",
+    inputs: list[Any] | None = None,
+    outputs: list[Any] | None = None,
+    constraints: list[Any] | None = None,
+    acceptance_criteria: list[Any] | None = None,
+    implementation_plan: list[Any] | None = None,
     steps: list[Any] | None = None,
     output_path: str | None = None,
     plan_output_path: str | None = None,
     output_format: str | None = None,
     plan_output_format: str | None = None,
     state: LoopState,
+    harness: Any,
 ) -> dict:
     requested_output_path = plan_output_path if plan_output_path is not None else output_path
     requested_output_format = plan_output_format if plan_output_format is not None else output_format
@@ -188,6 +223,11 @@ async def plan_set(
         plan_id=f"plan-{uuid.uuid4().hex[:8]}",
         goal=str(goal or "").strip(),
         summary=str(summary or "").strip(),
+        inputs=_coerce_string_list(inputs),
+        outputs=_coerce_string_list(outputs),
+        constraints=_coerce_string_list(constraints),
+        acceptance_criteria=_coerce_string_list(acceptance_criteria),
+        implementation_plan=_coerce_string_list(implementation_plan),
         steps=[
             step
             for index, item in enumerate((steps or []), start=1)
@@ -204,12 +244,27 @@ async def plan_set(
     state.planning_mode_enabled = True
     state.planner_requested_output_path = plan.requested_output_path or ""
     state.planner_requested_output_format = plan.requested_output_format or ""
+    state.acceptance_waived = False
+    state.last_verifier_verdict = None
+    state.last_failure_class = ""
+    state.files_changed_this_cycle = []
+    state.repair_cycle_id = ""
+    state.stagnation_counters = {}
+    if plan.acceptance_criteria:
+        state.acceptance_ledger = {
+            criterion: state.acceptance_ledger.get(criterion, "pending")
+            for criterion in plan.acceptance_criteria
+        }
+    else:
+        state.acceptance_ledger = {}
     state.sync_plan_mirror()
+    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
     state.touch()
     payload = {
         "status": "plan_set",
         "plan": plan,
         **_format_plan_metadata(plan),
+        **artifact_info,
         **warning_metadata,
     }
     return ok(payload, metadata=warning_metadata)
@@ -221,6 +276,7 @@ async def plan_step_update(
     status: str,
     note: str = "",
     state: LoopState,
+    harness: Any,
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
@@ -233,6 +289,7 @@ async def plan_step_update(
         step.notes.append(note.strip())
     plan.touch()
     _sync_plan_state(state, plan)
+    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
     export_warning = _try_write_plan_export(plan)
     return ok(
         {
@@ -240,6 +297,7 @@ async def plan_step_update(
             "step_id": step.step_id,
             "step_status": step.status,
             "note": note,
+            **artifact_info,
             **({"export_warning": export_warning} if export_warning else {}),
             **_format_plan_metadata(plan),
         }
@@ -250,12 +308,14 @@ async def plan_request_execution(
     *,
     question: str,
     state: LoopState,
+    harness: Any,
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
         return {"success": False, "output": None, "error": "No active or draft plan available.", "metadata": {}}
     plan.status = "awaiting_approval"
     plan.touch()
+    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
     export_warning = _try_write_plan_export(plan)
     interrupt = PlanInterrupt(
         question=str(question or "Plan ready. Execute it now?").strip() or "Plan ready. Execute it now?",
@@ -275,6 +335,7 @@ async def plan_request_execution(
         metadata={
             "kind": interrupt.kind,
             "plan_id": interrupt.plan_id,
+            **artifact_info,
             **({"export_warning": export_warning} if export_warning else {}),
             **_format_plan_metadata(plan),
         },
@@ -286,6 +347,7 @@ async def plan_export(
     path: str,
     format: str | None = None,
     state: LoopState,
+    harness: Any,
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
@@ -304,12 +366,14 @@ async def plan_export(
     state.planner_requested_output_format = normalized_format
     state.touch()
     content = write_plan_file(plan, Path(export_path), format=normalized_format)
+    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
     return ok(
         {
             "status": "exported",
             "path": export_path,
             "format": plan.requested_output_format,
             "bytes_written": len(content.encode("utf-8")),
+            **artifact_info,
             **_format_plan_metadata(plan),
         }
     )

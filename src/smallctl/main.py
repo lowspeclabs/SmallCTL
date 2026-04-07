@@ -10,7 +10,7 @@ from .cleanup import run_cleanup
 from .config import resolve_config
 from .harness import Harness
 from .logging_utils import create_run_logger, log_kv, setup_logging
-from .memory_cli import build_memory_parser, handle_memory_command
+from .memory_cli import build_memory_parser, handle_memory_command, memory_cli
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,6 +120,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start in planning mode",
     )
     parser.add_argument(
+        "--contract-flow-ui",
+        dest="contract_flow_ui",
+        action="store_true",
+        default=None,
+        help="Show refined contract-phase and verifier details in the UI",
+    )
+    parser.add_argument(
+        "--no-contract-flow-ui",
+        dest="contract_flow_ui",
+        action="store_false",
+        default=None,
+        help="Hide refined contract-phase and verifier details in the UI",
+    )
+    parser.add_argument(
         "--graph-thread-id",
         help=argparse.SUPPRESS,
     )
@@ -170,6 +184,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_session_id(harness: object | None) -> str:
+    if harness is None:
+        return ""
+    state = getattr(harness, "state", None)
+    thread_id = str(getattr(state, "thread_id", "") or "").strip()
+    if thread_id:
+        return thread_id
+    conversation_id = str(getattr(harness, "conversation_id", "") or "").strip()
+    if conversation_id:
+        return conversation_id
+    return ""
+
+
+def _print_shutdown_alert(session_id: str) -> None:
+    print(
+        json.dumps(
+            {
+                "status": "alert",
+                "message": "smallctl closed via Ctrl+C",
+                "session_id": session_id or "unknown",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -180,7 +221,7 @@ def cli(argv: list[str] | None = None) -> int:
 
     config = resolve_config(vars(args))
 
-    setup_logging(config.debug, log_file=config.log_file)
+    setup_logging(config.debug, log_file=config.log_file, stream_to_terminal=not args.tui)
     run_logger = create_run_logger("logs")
     log = logging.getLogger("smallctl")
     log_kv(
@@ -194,10 +235,11 @@ def cli(argv: list[str] | None = None) -> int:
         tui=bool(args.tui),
         run_log_dir=str(run_logger.run_dir),
     )
-    print(json.dumps({"status": "logging_ready", "run_log_dir": str(run_logger.run_dir)}))
+    if not args.tui:
+        print(json.dumps({"status": "logging_ready", "run_log_dir": str(run_logger.run_dir)}))
 
-    if config.debug:
-        print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
+        if config.debug:
+            print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
 
     for warning in config.compatibility_warnings:
         log_kv(log, logging.WARNING, "config_compatibility_warning", warning=warning)
@@ -240,6 +282,7 @@ def cli(argv: list[str] | None = None) -> int:
             "fresh_run": config.fresh_run,
             "fresh_run_turns": config.fresh_run_turns,
             "planning_mode": config.planning_mode,
+            "contract_flow_ui": config.contract_flow_ui,
             "restore_graph_state_on_startup": config.restore_graph_state,
             "restore_thread_id": config.graph_thread_id,
             "context_limit": config.context_limit,
@@ -255,8 +298,22 @@ def cli(argv: list[str] | None = None) -> int:
             "run_logger": run_logger,
             "task": config.task,
         }
+        app = SmallctlApp(harness_kwargs=harness_kwargs)
         try:
-            SmallctlApp(harness_kwargs=harness_kwargs).run()
+            app.run()
+        except KeyboardInterrupt:
+            harness = getattr(app, "harness", None)
+            if harness is not None:
+                try:
+                    harness.note_task_shutdown("keyboard_interrupt")
+                except Exception:
+                    pass
+                try:
+                    asyncio.run(harness.teardown())
+                except Exception as exc:
+                    log.warning("Harness teardown failed after Ctrl+C: %s", exc)
+            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
+            return 130
         except Exception as exc:
             log.exception("tui_fatal_error")
             print(f"\n[FATAL ERROR] TUI crashed: {exc}")
@@ -268,6 +325,8 @@ def cli(argv: list[str] | None = None) -> int:
             # Force secondary terminal reset code just in case textual cleanup was partial
             sys.stdout.write("\033[?1000l\033[?1006l\033[?25h")
             sys.stdout.flush()
+        if getattr(app, "closed_by_ctrl_c", False):
+            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
     elif config.task or config.restore_graph_state:
         harness = Harness(
             endpoint=config.endpoint,
@@ -290,6 +349,7 @@ def cli(argv: list[str] | None = None) -> int:
             graph_checkpoint_path=config.graph_checkpoint_path,
             fresh_run=config.fresh_run,
             fresh_run_turns=config.fresh_run_turns,
+            contract_flow_ui=config.contract_flow_ui,
             context_limit=config.context_limit,
             max_prompt_tokens=config.max_prompt_tokens,
             reserve_completion_tokens=config.reserve_completion_tokens,
@@ -333,8 +393,13 @@ def cli(argv: list[str] | None = None) -> int:
                     )
                 )
                 return 0
+        interrupted = False
         try:
             result = asyncio.run(harness.run_auto(config.task))
+        except KeyboardInterrupt:
+            interrupted = True
+            harness.note_task_shutdown("keyboard_interrupt")
+            result = None
         except Exception as exc:
             log.exception("Harness run failed")
             result = {
@@ -342,6 +407,14 @@ def cli(argv: list[str] | None = None) -> int:
                 "reason": str(exc),
                 "error": {"type": "runtime", "message": str(exc), "details": {}},
             }
+        finally:
+            try:
+                asyncio.run(harness.teardown())
+            except Exception as exc:
+                log.warning("Harness teardown failed: %s", exc)
+        if interrupted:
+            _print_shutdown_alert(_resolve_session_id(harness))
+            return 130
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print("No task provided. Use --task to run a task.")

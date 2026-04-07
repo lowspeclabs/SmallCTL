@@ -14,6 +14,13 @@ class ContextSummarizer:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
 
+    @staticmethod
+    def _format_message_for_compaction(message: ConversationMessage) -> str:
+        role = message.role
+        if message.metadata.get("hidden_from_prompt") is True and role == "assistant":
+            role = "commentary"
+        return f"{role}: {message.content or ''}"
+
     def compact_recent_messages(self, *, state: LoopState, keep_recent: int, artifact_store: Any | None = None) -> EpisodicSummary | None:
         if len(state.recent_messages) <= keep_recent:
             return None
@@ -76,7 +83,7 @@ class ContextSummarizer:
             return None
 
         # Build summarization prompt
-        conv_text = "\n".join([f"{m.role}: {m.content or ''}" for m in old_messages])
+        conv_text = "\n".join([self._format_message_for_compaction(m) for m in old_messages])
         prompt = (
             "Summarize the following conversation history into a concise episodic memory. "
             "Focus on: 1) Key decisions made. 2) Facts learned. 3) Any failed approaches to avoid. "
@@ -142,7 +149,7 @@ class ContextSummarizer:
             return None
 
         # Build summarization prompt for structured output
-        conv_text = "\n".join([f"{m.role}: {m.content or ''}" for m in messages])
+        conv_text = "\n".join([self._format_message_for_compaction(m) for m in messages])
         
         system_prompt = (
             "You are a context compression engine. Your goal is to summarize a segment of conversation "

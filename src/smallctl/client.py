@@ -34,9 +34,9 @@ class OpenAICompatClient:
     STREAM_RETRY_ATTEMPTS = 3
     STREAM_CONNECT_TIMEOUT_SEC = 10.0
     STREAM_WRITE_TIMEOUT_SEC = 30.0
-    STREAM_READ_TIMEOUT_SEC = 60.0
+    STREAM_READ_TIMEOUT_SEC = 120.0
     STREAM_POOL_TIMEOUT_SEC = 30.0
-    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 8.0
+    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 30.0
     _shared_clients: ClassVar[dict[tuple[str, str], Any]] = {}
 
     def __init__(
@@ -290,6 +290,9 @@ class OpenAICompatClient:
             if isinstance(tool_calls, list) and tool_calls:
                 sanitized["tool_calls"] = tool_calls
         elif role == "tool":
+            name = message.get("name")
+            if name:
+                sanitized["name"] = name
             tool_call_id = message.get("tool_call_id")
             if tool_call_id:
                 sanitized["tool_call_id"] = tool_call_id
@@ -842,9 +845,9 @@ class OpenAICompatClient:
             if isinstance(next_usage, dict):
                 usage = next_usage
             choices = data.get("choices") or []
-            if not choices:
+            if not isinstance(choices, list) or not choices:
                 continue
-            first_choice = choices[0]
+            first_choice = next((choice for choice in choices if isinstance(choice, dict)), None)
             if not isinstance(first_choice, dict):
                 continue
             delta = first_choice.get("delta", {})
@@ -1019,9 +1022,9 @@ class _TimelineCollector:
         if not isinstance(data, dict):
             return
         choices = data.get("choices") or []
-        if not choices:
+        if not isinstance(choices, list) or not choices:
             return
-        first_choice = choices[0]
+        first_choice = next((choice for choice in choices if isinstance(choice, dict)), None)
         if not isinstance(first_choice, dict):
             return
         delta = first_choice.get("delta", {})

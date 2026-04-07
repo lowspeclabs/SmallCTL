@@ -1,0 +1,109 @@
+Metadata-Version: 2.4
+Name: smallctl
+Version: 0.1.0
+Summary: Terminal UI agentic harness with OpenAI-compatible API support
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: aiofiles
+Requires-Dist: ansible-core
+Requires-Dist: ansible-runner
+Requires-Dist: click
+Requires-Dist: httpx
+Requires-Dist: jmespath
+Requires-Dist: langgraph<1.0,>=0.2
+Requires-Dist: openai
+Requires-Dist: pydantic
+Requires-Dist: pyyaml
+Requires-Dist: rich
+Requires-Dist: textual
+Provides-Extra: dev
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+
+# smallctl
+
+`smallctl` is a Python terminal harness for OpenAI-compatible models with phased tool execution and streaming responses.
+
+## Current State
+
+Implementation is tracked in `plan-tracker.md` and follows `imp-plan.md`.
+
+Implemented highlights:
+- Headless harness loop with streaming client and tool dispatch
+- Tier 1 tools (`fs`, `shell`, `http`, `memory`, `search`, `data`, `control`)
+- Tier 2 Ansible adapter (`ansible_inventory`, `ansible_task`, `ansible_playbook`)
+- Phase gating and plan-phase Ansible check-mode forcing
+- Profile-based tool exposure with a compact core and task-driven `data`/`network`/`ops` activation
+- Textual TUI shell with live event rendering and task cancellation
+- Compatibility profiles (`generic`, `openai`, `ollama`, `vllm`, `lmstudio`)
+- Checkpoint persistence and optional log-file output
+
+## Tool Profiles
+
+Default tool exposure starts from the `core` profile:
+- `file_read`
+- `find_files`
+- `grep`
+- `file_write`
+- `file_append`
+- `shell_exec`
+- `task_complete`
+- `task_fail`
+- `ask_human`
+- `loop_status`
+
+Additional profiles are activated dynamically from task wording:
+- `data`: `yaml_read`, `json_query`, `diff`
+- `network`: `http_get`, `http_post`, `file_download`
+- `ops`: `ansible_inventory`, `ansible_task`, `ansible_playbook`
+- `mutate`: `file_delete`
+
+Overlapping legacy helpers such as directory listing/tree views, scratchpad helpers, and router-style indirection are kept off the normal default surface.
+
+You can also force static profile selection:
+
+```bash
+smallctl --task "inspect config" --tool-profiles core,data
+```
+
+## CLI Examples
+
+Headless task run:
+
+```bash
+smallctl --task "Read README.md and summarize it"
+```
+
+TUI mode:
+
+```bash
+smallctl --tui --endpoint http://localhost:11434/v1 --model qwen2.5-coder:7b
+```
+
+Provider profile + checkpoint:
+
+```bash
+smallctl \
+  --task "Inspect project layout" \
+  --provider-profile vllm \
+  --checkpoint-on-exit \
+  --checkpoint-path .smallctl-checkpoint.json \
+  --log-file logs/smallctl.log
+```
+
+## Quick Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+smallctl --help
+```
+
+## Tests
+
+```bash
+PYTHONPATH=src pytest -q tests
+```

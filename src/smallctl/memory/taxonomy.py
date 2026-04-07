@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 # Recommended Failure Modes from memory-upgrade.md
 TOOL_NOT_CALLED = "tool_not_called"
 WRONG_TOOL_CALLED = "wrong_tool_called"
@@ -26,3 +28,27 @@ ALL_FAILURE_MODES = {
     ENVIRONMENT_MISMATCH,
     UNKNOWN_FAILURE,
 }
+
+
+def normalize_failure_mode(error: Any, *, tool_name: str = "", success: bool = False) -> str:
+    if success:
+        return ""
+
+    text = str(error or "").lower()
+    normalized_tool = str(tool_name or "").lower()
+
+    if "missing required field" in text or "expected type" in text or "schema" in text:
+        return SCHEMA_VALIDATION_ERROR
+    if "unknown tool" in text:
+        return WRONG_TOOL_CALLED
+    if "zero-argument" in text or ("scratch_list" in normalized_tool and "missing" in text):
+        return ZERO_ARG_TOOL_ARG_LEAK
+    if "loop" in text:
+        return REPEATED_TOOL_LOOP
+    if "premature" in text:
+        return PREMATURE_TASK_COMPLETE
+    if "phase" in text:
+        return PHASE_MISMATCH
+    if "not called" in text:
+        return TOOL_NOT_CALLED
+    return UNKNOWN_FAILURE

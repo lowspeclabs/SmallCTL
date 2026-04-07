@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from .state import LoopState
 from typing import TYPE_CHECKING
@@ -18,6 +19,45 @@ class GuardConfig:
     max_repeated_actions: int = 3
 
 
+_SMALL_MODEL_SIZE_RE = re.compile(r"(?<![xX])\b(?P<size>\d+(?:\.\d+)?)b\b", re.IGNORECASE)
+_SMALL_MODEL_HINTS = ("tiny", "mini", "small", "compact")
+
+
+def is_small_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+
+    if any(hint in normalized for hint in _SMALL_MODEL_HINTS):
+        return True
+
+    for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
+        try:
+            size = float(match.group("size"))
+        except ValueError:
+            continue
+        if size <= 14.0:
+            return True
+
+    return False
+
+
+def is_four_b_or_under_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+
+    for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
+        try:
+            size = float(match.group("size"))
+        except ValueError:
+            continue
+        if size <= 4.0:
+            return True
+
+    return False
+
+
 def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
     if state.step_count >= cfg.max_steps:
         return f"Guard tripped: max_steps ({cfg.max_steps})"
@@ -25,6 +65,10 @@ def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
         return f"Guard tripped: max_tokens ({cfg.max_tokens})"
     if len(state.recent_errors) >= cfg.max_consecutive_errors:
         return f"Guard tripped: max_consecutive_errors ({cfg.max_consecutive_errors}) - Errors: {state.recent_errors}"
+    
+    no_progress = int(state.stagnation_counters.get("no_progress", 0))
+    if no_progress >= 2:
+        return f"Guard tripped: stagnation limit - no progress made in {no_progress} steps."
     
     # Repeat detection (Detects loops even if some steps succeed)
     if state.tool_history:

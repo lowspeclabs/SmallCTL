@@ -77,6 +77,7 @@ class SmallctlConfig:
     fresh_run: bool = False
     fresh_run_turns: int = 1
     planning_mode: bool = False
+    contract_flow_ui: bool = False
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -100,6 +101,18 @@ class SmallctlConfig:
     summarizer_api_key: str | None = None
     min_exploration_steps: int = 1
     artifact_summarization_threshold: int = 1200
+    chunk_mode_min_bytes: int = 4096
+    chunk_mode_new_file_only: bool = True
+    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3"])
+    small_model_soft_write_chars: int = 2000
+    small_model_hard_write_chars: int = 4000
+    new_file_chunk_mode_line_estimate: int = 100
+    allow_multi_section_turns_for_small_edits: bool = True
+    failed_local_patch_limit: int = 2
+    enable_write_intent_recovery: bool = True
+    enable_assistant_code_write_recovery: bool = True
+    write_recovery_min_confidence: str = "high"
+    write_recovery_allow_raw_text_targets: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,6 +212,7 @@ def _env_config() -> dict[str, Any]:
         "fresh_run": env_or_dotenv(f"{ENV_PREFIX}FRESH_RUN"),
         "fresh_run_turns": env_or_dotenv(f"{ENV_PREFIX}FRESH_RUN_TURNS"),
         "planning_mode": env_or_dotenv(f"{ENV_PREFIX}PLANNING_MODE"),
+        "contract_flow_ui": env_or_dotenv(f"{ENV_PREFIX}CONTRACT_FLOW_UI"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -218,6 +232,18 @@ def _env_config() -> dict[str, Any]:
         "summarizer_api_key": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_API_KEY"),
         "min_exploration_steps": env_or_dotenv(f"{ENV_PREFIX}MIN_EXPLORATION_STEPS"),
         "artifact_summarization_threshold": env_or_dotenv(f"{ENV_PREFIX}ARTIFACT_SUMMARIZATION_THRESHOLD"),
+        "chunk_mode_min_bytes": env_or_dotenv(f"{ENV_PREFIX}CHUNK_MODE_MIN_BYTES"),
+        "chunk_mode_new_file_only": env_or_dotenv(f"{ENV_PREFIX}CHUNK_MODE_NEW_FILE_ONLY"),
+        "chunk_mode_supported_models": env_or_dotenv(f"{ENV_PREFIX}CHUNK_MODE_SUPPORTED_MODELS"),
+        "small_model_soft_write_chars": env_or_dotenv(f"{ENV_PREFIX}SMALL_MODEL_SOFT_WRITE_CHARS"),
+        "small_model_hard_write_chars": env_or_dotenv(f"{ENV_PREFIX}SMALL_MODEL_HARD_WRITE_CHARS"),
+        "new_file_chunk_mode_line_estimate": env_or_dotenv(f"{ENV_PREFIX}NEW_FILE_CHUNK_MODE_LINE_ESTIMATE"),
+        "allow_multi_section_turns_for_small_edits": env_or_dotenv(f"{ENV_PREFIX}ALLOW_MULTI_SECTION_TURNS_FOR_SMALL_EDITS"),
+        "failed_local_patch_limit": env_or_dotenv(f"{ENV_PREFIX}FAILED_LOCAL_PATCH_LIMIT"),
+        "enable_write_intent_recovery": env_or_dotenv(f"{ENV_PREFIX}ENABLE_WRITE_INTENT_RECOVERY"),
+        "enable_assistant_code_write_recovery": env_or_dotenv(f"{ENV_PREFIX}ENABLE_ASSISTANT_CODE_WRITE_RECOVERY"),
+        "write_recovery_min_confidence": env_or_dotenv(f"{ENV_PREFIX}WRITE_RECOVERY_MIN_CONFIDENCE"),
+        "write_recovery_allow_raw_text_targets": env_or_dotenv(f"{ENV_PREFIX}WRITE_RECOVERY_ALLOW_RAW_TEXT_TARGETS"),
     }
     cfg = {k: v for k, v in raw.items() if v not in (None, "")}
     if "use_ansible" in cfg:
@@ -240,8 +266,22 @@ def _env_config() -> dict[str, Any]:
         cfg["fresh_run_turns"] = _to_int_allow_zero(cfg["fresh_run_turns"])
     if "planning_mode" in cfg:
         cfg["planning_mode"] = _to_bool(cfg["planning_mode"])
+    if "contract_flow_ui" in cfg:
+        cfg["contract_flow_ui"] = _to_bool(cfg["contract_flow_ui"])
     if "indexer" in cfg:
         cfg["indexer"] = _to_bool(cfg["indexer"])
+    if "chunk_mode_new_file_only" in cfg:
+        cfg["chunk_mode_new_file_only"] = _to_bool(cfg["chunk_mode_new_file_only"])
+    if "allow_multi_section_turns_for_small_edits" in cfg:
+        cfg["allow_multi_section_turns_for_small_edits"] = _to_bool(cfg["allow_multi_section_turns_for_small_edits"])
+    if "enable_write_intent_recovery" in cfg:
+        cfg["enable_write_intent_recovery"] = _to_bool(cfg["enable_write_intent_recovery"])
+    if "enable_assistant_code_write_recovery" in cfg:
+        cfg["enable_assistant_code_write_recovery"] = _to_bool(cfg["enable_assistant_code_write_recovery"])
+    if "write_recovery_allow_raw_text_targets" in cfg:
+        cfg["write_recovery_allow_raw_text_targets"] = _to_bool(cfg["write_recovery_allow_raw_text_targets"])
+    if "chunk_mode_supported_models" in cfg:
+        cfg["chunk_mode_supported_models"] = [s.strip() for s in str(cfg["chunk_mode_supported_models"]).split(",") if s.strip()]
     if "graph_checkpointer" in cfg:
         cfg["graph_checkpointer"] = _normalize_graph_checkpointer(cfg["graph_checkpointer"])
     if "graph_checkpoint_path" in cfg and "graph_checkpointer" not in cfg:
@@ -261,6 +301,11 @@ def _env_config() -> dict[str, Any]:
         "max_artifact_snippets",
         "artifact_snippet_token_limit",
         "artifact_summarization_threshold",
+        "chunk_mode_min_bytes",
+        "small_model_soft_write_chars",
+        "small_model_hard_write_chars",
+        "new_file_chunk_mode_line_estimate",
+        "failed_local_patch_limit",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])
@@ -315,8 +360,16 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["fresh_run_turns"] = _to_int_allow_zero(cli_clean["fresh_run_turns"])
     if "planning_mode" in cli_clean:
         cli_clean["planning_mode"] = _to_bool(cli_clean["planning_mode"])
+    if "contract_flow_ui" in cli_clean:
+        cli_clean["contract_flow_ui"] = _to_bool(cli_clean["contract_flow_ui"])
     if "indexer" in cli_clean:
         cli_clean["indexer"] = _to_bool(cli_clean["indexer"])
+    if "enable_write_intent_recovery" in cli_clean:
+        cli_clean["enable_write_intent_recovery"] = _to_bool(cli_clean["enable_write_intent_recovery"])
+    if "enable_assistant_code_write_recovery" in cli_clean:
+        cli_clean["enable_assistant_code_write_recovery"] = _to_bool(cli_clean["enable_assistant_code_write_recovery"])
+    if "write_recovery_allow_raw_text_targets" in cli_clean:
+        cli_clean["write_recovery_allow_raw_text_targets"] = _to_bool(cli_clean["write_recovery_allow_raw_text_targets"])
     if "graph_checkpointer" in cli_clean:
         cli_clean["graph_checkpointer"] = _normalize_graph_checkpointer(cli_clean["graph_checkpointer"])
     if "graph_checkpoint_path" in cli_clean and "graph_checkpointer" not in cli_clean:

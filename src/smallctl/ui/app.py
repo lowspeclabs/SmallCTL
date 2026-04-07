@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import Any, Iterable
 
+from textual import events
 from textual.app import App, ComposeResult, ScreenStackError, SystemCommand
 from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, Horizontal
@@ -21,7 +22,17 @@ from .approval import ApprovePromptScreen
 from .approval import PlanApprovalScreen
 from .approval import ShellApprovalDecision
 from .approval import PlanApprovalDecision
+from .approval import SudoPasswordPromptScreen
 from .console import ConsolePane
+from .display import (
+    format_restore_status,
+    should_render_run_log_row,
+    should_render_event,
+    compute_activity_for_event,
+    should_promote_tool_args_to_assistant,
+    check_duplicate_promotion,
+    StatusState,
+)
 from .input import InputPane
 from .statusbar import StatusBar
 
@@ -70,6 +81,7 @@ class SmallctlApp(App[None]):
         self._api_error_count = 0
         self._pending_user_echo: str | None = None
         self._active_approval_prompt: Screen | None = None
+        self.closed_by_ctrl_c = False
         self._shell_approval_session_default = bool(
             self.harness_kwargs.pop("shell_approval_session_default", False)
         )
@@ -162,6 +174,12 @@ class SmallctlApp(App[None]):
         self._refresh_status(step_override="running")
         self.active_task = asyncio.create_task(self._run_harness_task(task))
         log_kv(self._app_logger, logging.INFO, "ui_task_started", task=task)
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        selected_text = self._get_selected_screen_text()
+        if not selected_text:
+            return
+        self._copy_selection_to_clipboard(selected_text)
 
     async def _handle_slash_command(self, task: str) -> bool:
         harness = self.harness
@@ -288,26 +306,37 @@ class SmallctlApp(App[None]):
         if event.data.get("ui_kind") == "approve_prompt":
             await self._handle_approval_prompt(event)
             return
+        if event.data.get("ui_kind") == "sudo_password_prompt":
+            await self._handle_sudo_password_prompt(event)
+            return
 
         if event.event_type == UIEventType.ERROR:
             if event.data.get("is_api_error"):
                 self._api_error_count += 1
                 self._refresh_status()
 
-        if not self._should_render_event(event):
+        tool_name = str(event.data.get("tool_name") or event.content or "").strip()
+
+        # Keep terminal control-tool noise out of the transcript by default.
+        # The final answer is already promoted into the assistant bubble, so
+        # the explicit task_complete call is only useful when system messages
+        # are enabled.
+        suppress_task_complete = tool_name == "task_complete" and not self._show_system_messages
+
+        if suppress_task_complete and event.event_type == UIEventType.TOOL_RESULT:
             if self.harness is not None:
                 self._refresh_status()
             return
 
         # Special handling: Promote tool arguments to assistant text if appropriate
+        # before deciding whether to render the originating tool call.
+        #
+        # This lets task_complete surface the final answer even when the
+        # underlying control tool call is hidden from the default transcript.
         if event.event_type == UIEventType.TOOL_CALL:
             name = event.content
             args = event.data.get("args") or {}
-            promote_text = ""
-            if name == "task_complete":
-                promote_text = str(args.get("message") or "").strip()
-            elif name == "ask_human":
-                promote_text = str(args.get("question") or "").strip()
+            promote_text = should_promote_tool_args_to_assistant(name, args)
 
             if promote_text:
                 # Check if we already have a bubble group for this turn with substantial text.
@@ -317,8 +346,7 @@ class SmallctlApp(App[None]):
                 skip_promotion = False
                 if name == "task_complete" and console:
                     active_text = console.get_active_assistant_text().lower()
-                    if promote_text.lower() in active_text or active_text in promote_text.lower():
-                        skip_promotion = True
+                    skip_promotion = check_duplicate_promotion(promote_text.lower(), active_text)
 
                 if not skip_promotion:
                     # Create a synthetic assistant event to show the text in a bubble
@@ -329,6 +357,16 @@ class SmallctlApp(App[None]):
                             data={"promoted_from": name},
                         )
                     )
+
+            if suppress_task_complete:
+                if self.harness is not None:
+                    self._refresh_status()
+                return
+
+        if not self._should_render_event(event):
+            if self.harness is not None:
+                self._refresh_status()
+            return
 
         console = self._get_console()
         if console is None:
@@ -471,6 +509,73 @@ class SmallctlApp(App[None]):
             self._active_approval_prompt = None
         return None
 
+    async def _handle_sudo_password_prompt(self, event: UIEvent) -> None:
+        harness = self.harness
+        if harness is None:
+            return
+        prompt_id = str(event.data.get("prompt_id") or "").strip()
+        command = str(event.data.get("command") or "").strip()
+        prompt_text = str(event.data.get("prompt_text") or "").strip()
+
+        prompt = SudoPasswordPromptScreen(
+            prompt_id=prompt_id or "pending",
+            command=command or "(empty command)",
+            prompt_text=prompt_text or "Enter the sudo password to continue this command.",
+        )
+        self._active_approval_prompt = prompt
+        self._refresh_status()
+
+        password: str | None = None
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "sudo_password_prompt",
+                "awaiting sudo password",
+                prompt_id=prompt_id or "pending",
+                command=command or "(empty command)",
+            )
+        try:
+            loop = asyncio.get_running_loop()
+            decision_future: asyncio.Future[str | None] = loop.create_future()
+
+            def _resolve_decision(decision: str | None) -> None:
+                if decision_future.done():
+                    return
+                decision_future.set_result(decision)
+
+            await self.push_screen(prompt, callback=_resolve_decision)
+            password = await decision_future
+        except Exception as exc:
+            self._app_logger.warning("Sudo password prompt failed: %s", exc)
+            if callable(runlog):
+                runlog(
+                    "sudo_password_error",
+                    "sudo password prompt failed",
+                    prompt_id=prompt_id or "pending",
+                    error=str(exc),
+                )
+        finally:
+            self._active_approval_prompt = None
+            if prompt_id:
+                try:
+                    harness.resolve_sudo_password(prompt_id, password)
+                except Exception as exc:
+                    self._app_logger.warning(
+                        "Failed to resolve sudo password prompt %s: %s",
+                        prompt_id,
+                        exc,
+                    )
+            if callable(runlog):
+                runlog(
+                    "sudo_password_resolved",
+                    "sudo password prompt resolved",
+                    prompt_id=prompt_id or "pending",
+                    provided=bool(password),
+                    command=command or "(empty command)",
+                )
+            self._set_activity("running shell..." if password is not None else "thinking...")
+            self._refresh_status()
+
     async def action_clear_console(self) -> None:
         console = self.query_one(ConsolePane)
         await console.clear_bubbles()
@@ -509,6 +614,7 @@ class SmallctlApp(App[None]):
         if self.active_task and not self.active_task.done():
             await self.action_cancel_task()
             return
+        self.closed_by_ctrl_c = True
         self.exit()
 
     async def action_copy_last_system_message(self) -> None:
@@ -524,6 +630,38 @@ class SmallctlApp(App[None]):
             await self._append_system_line("Copied latest system message to clipboard.")
         except Exception as exc:
             await self._append_system_line(f"Copy failed: {exc}")
+
+    def _get_selected_screen_text(self) -> str:
+        try:
+            selected_text = self.screen.get_selected_text()
+        except Exception:
+            return ""
+        return str(selected_text or "").strip()
+
+    def _copy_selection_to_clipboard(self, text: str) -> bool:
+        selected_text = str(text or "")
+        if not selected_text.strip():
+            return False
+        try:
+            self.copy_to_clipboard(selected_text)
+        except Exception as exc:
+            self.notify(
+                f"Copy failed: {exc}",
+                title="Clipboard",
+                severity="error",
+                timeout=2.5,
+                markup=False,
+            )
+            return False
+        count = len(selected_text)
+        noun = "character" if count == 1 else "characters"
+        self.notify(
+            f"Copied {count} {noun} to clipboard.",
+            title="Selection Copied",
+            timeout=1.5,
+            markup=False,
+        )
+        return True
 
     async def action_new_conversation(self) -> None:
         if self.active_task and not self.active_task.done():
@@ -597,12 +735,10 @@ class SmallctlApp(App[None]):
                 return
             if row.get("event") in {"harness_tool_dispatch", "harness_tool_result"}:
                 return
-        msg = row.get("message") or ""
-        if len(msg) > 1024:
-            msg = msg[:1024] + "... [truncated]"
-        text = f"[{row.get('channel')}] {row.get('event')}: {msg}"
+        from .display import format_run_log_row
+        text = format_run_log_row(row)
         emit = lambda: asyncio.create_task(
-            self.on_harness_event(UIEvent(event_type=UIEventType.SYSTEM, content=text))
+            self.on_harness_event(UIEvent(event_type= UIEventType.SYSTEM, content=text))
         )
         app_thread_id = getattr(self, "_loop_thread_id", None) or getattr(self, "_thread_id", None)
         if app_thread_id == threading.get_ident():
@@ -616,76 +752,35 @@ class SmallctlApp(App[None]):
 
     @staticmethod
     def _should_render_run_log_row(row: dict[str, Any]) -> bool:
-        channel = str(row.get("channel") or "")
-        event = str(row.get("event") or "")
-        # Keep model/tool/chat protocol logs out of the main transcript.
-        if channel in {"tools", "chat", "model_output"}:
-            return False
-        if channel != "harness":
-            return False
-        if event in {
-            "chunk",
-            "model_token",
-            "model_output",
-            "model_thinking",
-            "harness_tool_dispatch",
-            "harness_tool_result",
-            "tool_replay_hit",
-        }:
-            return False
-        return True
+        return should_render_run_log_row(row)
 
     def _refresh_status(self, step_override: int | str | None = None) -> None:
-        harness = self.harness
-        model = str(self.harness_kwargs.get("model", "n/a"))
-        phase = str(self.harness_kwargs.get("phase", "explore"))
-        step: int | str = 0
-        mode = "execution"
-        plan_label = ""
-        active_step_label = ""
-        activity = self._status_activity
-        token_usage = 0
-        token_limit = 0
-        if harness is not None:
-            phase = harness.state.current_phase
-            step = harness.state.step_count
-            mode = "planning" if harness.state.planning_mode_enabled else "execution"
-            plan = harness.state.active_plan or harness.state.draft_plan
-            if plan is not None:
-                total_steps = max(1, len(plan.iter_steps()))
-                completed_steps = sum(1 for item in plan.iter_steps() if item.status == "completed")
-                plan_label = f"{completed_steps}/{total_steps}"
-                active_step = plan.active_step()
-                if active_step is not None:
-                    active_step_label = active_step.step_id
-            token_usage = int(
-                harness.state.scratchpad.get("context_used_tokens", getattr(harness.state, "token_usage", 0))
-            )
-            context_policy = getattr(harness, "context_policy", None)
-            server_context_limit = getattr(harness, "server_context_limit", None)
-            guards = getattr(harness, "guards", None)
-            token_limit = (
-                getattr(context_policy, "max_prompt_tokens", None)
-                or server_context_limit
-                or getattr(guards, "max_tokens", 0)
-            )
-        if not activity and self.active_task is not None and not self.active_task.done():
-            activity = "thinking..."
+        state = StatusState.from_harness(
+            self.harness,
+            self.harness_kwargs,
+            activity=self._status_activity,
+            api_errors=self._api_error_count,
+            active_task=self.active_task,
+        )
         if step_override is not None:
-            step = step_override
+            state.step = step_override
         try:
             self.query_one(StatusBar).set_state(
-                model=model,
-                phase=phase,
-                step=step,
-                mode=mode,
-                plan=plan_label,
-                active_step=active_step_label,
-                activity=activity,
-                token_usage=token_usage, # Current prompt pressure
-                token_total=harness.state.token_usage if harness else 0,
-                token_limit=token_limit or 0, # Window limit
-                api_errors=self._api_error_count,
+                model=state.model,
+                phase=state.phase,
+                step=state.step,
+                mode=state.mode,
+                plan=state.plan,
+                active_step=state.active_step,
+                activity=state.activity,
+                contract_flow_ui=state.contract_flow_ui,
+                contract_phase=state.contract_phase,
+                acceptance_progress=state.acceptance_progress,
+                latest_verdict=state.latest_verdict,
+                token_usage=state.token_usage,
+                token_total=state.token_total,
+                token_limit=state.token_limit,
+                api_errors=state.api_errors,
             )
         except (NoMatches, ScreenStackError):
             return
@@ -726,21 +821,7 @@ class SmallctlApp(App[None]):
 
     @staticmethod
     def _format_restore_status(status: dict[str, Any]) -> str:
-        if status.get("status") == "not_found":
-            thread_id = str(status.get("thread_id") or "").strip()
-            if thread_id:
-                return f"No persisted graph state found for thread {thread_id}."
-            return "No persisted graph state found."
-        thread_id = str(status.get("thread_id") or "").strip() or "unknown"
-        interrupt = status.get("interrupt")
-        if isinstance(interrupt, dict):
-            question = str(interrupt.get("question") or "").strip()
-            if question:
-                return (
-                    f"Restored graph state for thread {thread_id}. "
-                    f"Submit a reply to continue: {question}"
-                )
-        return f"Restored graph state for thread {thread_id}."
+        return format_restore_status(status)
 
     async def _append_system_line(self, text: str, *, force: bool = False) -> None:
         if not force and not self._show_system_messages:
@@ -761,27 +842,19 @@ class SmallctlApp(App[None]):
                 setter(self._shell_approval_session_default)
 
     def _update_activity_for_event(self, event: UIEvent) -> None:
-        if "status_activity" in event.data:
+        activity = compute_activity_for_event(
+            event,
+            active_task_done=None if self.active_task is None else self.active_task.done(),
+        )
+        if activity is not None:
+            self._set_activity(activity)
+        # Handle the case where status_activity is in data but activity is None
+        if "status_activity" in event.data and activity is None:
             self._set_activity(str(event.data.get("status_activity") or "").strip())
-        if event.event_type == UIEventType.TOOL_CALL:
-            tool_name = str(event.content or event.data.get("tool_name") or "").strip()
-            self._set_activity(f"running {tool_name}..." if tool_name else "running tool...")
-            return
-        if event.event_type == UIEventType.TOOL_RESULT:
-            if self.active_task is not None and not self.active_task.done():
-                self._set_activity("thinking...")
-            else:
-                self._set_activity("")
-            return
-        if event.event_type in {UIEventType.ASSISTANT, UIEventType.THINKING}:
-            self._set_activity("responding...")
-            return
-        if event.event_type == UIEventType.ERROR:
-            self._set_activity("")
 
     def _should_render_event(self, event: UIEvent) -> bool:
-        if event.event_type == UIEventType.SYSTEM and not self._show_system_messages:
-            return False
-        if event.event_type in {UIEventType.TOOL_CALL, UIEventType.TOOL_RESULT} and not self._show_tool_calls:
-            return False
-        return True
+        return should_render_event(
+            event,
+            show_system_messages=self._show_system_messages,
+            show_tool_calls=self._show_tool_calls,
+        )

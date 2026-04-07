@@ -69,6 +69,20 @@ def classify_tool_profiles(
     ):
         profiles.add(NETWORK_PROFILE)
 
+    if _matches_any(
+        text,
+        (
+            "ssh",
+            "scp",
+            "sftp",
+            "sshd",
+            "remote host",
+            "remote server",
+            "remote command",
+        ),
+    ):
+        profiles.add(NETWORK_PROFILE)
+
     if use_ansible and _matches_any(
         text,
         (

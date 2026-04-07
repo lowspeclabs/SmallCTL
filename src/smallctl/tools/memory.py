@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..state import LoopState, _dedupe_keep_tail, clip_string_list, clip_text_value
+from ..normalization import dedupe_keep_tail as _dedupe_keep_tail
+from ..state import LoopState, clip_string_list, clip_text_value
 from .common import fail, ok
 
 
@@ -100,8 +101,15 @@ async def memory_update(
                 metadata={"section": section, "action": action},
             )
         return ok(
-            f"Content already exists in {section}",
-            metadata={"section": section, "action": action},
+            f"No-op: content already exists in {section}. Continue with the next step or call task_complete if finished.",
+            metadata={
+                "section": section,
+                "action": action,
+                "duplicate": True,
+                "noop": True,
+                "skip_auto_fact_record": True,
+                "follow_up": "task_complete",
+            },
         )
     
     if action == "remove":

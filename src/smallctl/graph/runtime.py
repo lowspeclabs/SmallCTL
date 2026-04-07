@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
@@ -49,13 +50,116 @@ class LoopGraphPayload(TypedDict, total=False):
     final_result: dict[str, Any] | None
     interrupt_payload: dict[str, Any] | None
     error: dict[str, Any] | None
+    latency_metrics: dict[str, Any]
     input_task: str
 
 
 LANGGRAPH_RECURSION_LIMIT = 512
 
 
+@dataclass(frozen=True)
+class RuntimeGraphSpec:
+    """Configuration for building a runtime StateGraph.
+
+    Attributes:
+        node_map: Maps graph node names to method names on the runtime instance.
+        edge_map: Maps source node names to (router method name, target mapping).
+        static_edges: List of (source, target) tuples for unconditional edges.
+        entry_point: Tuple of (START, first_node_name) for graph entry.
+    """
+
+    node_map: dict[str, str]
+    edge_map: dict[str, tuple[str, dict[str, str]]]
+    static_edges: list[tuple[str, str]]
+    entry_point: tuple[str, str] = (START, "initialize_run")
+
+
+class RuntimeGraphBuilder:
+    """Builds a compiled StateGraph from a runtime instance and spec."""
+
+    def __init__(self, runtime: LoopGraphRuntime, spec: RuntimeGraphSpec) -> None:
+        self.runtime = runtime
+        self.spec = spec
+
+    def build(self) -> Any:
+        builder = StateGraph(LoopGraphPayload)
+
+        for node_name, method_name in self.spec.node_map.items():
+            fn = getattr(self.runtime, method_name)
+            builder.add_node(node_name, fn)
+
+        entry_source, entry_target = self.spec.entry_point
+        builder.add_edge(entry_source, entry_target)
+
+        for source, (router_name, targets) in self.spec.edge_map.items():
+            router = getattr(self.runtime, router_name)
+            builder.add_conditional_edges(source, router, targets)
+
+        for source, target in self.spec.static_edges:
+            builder.add_edge(source, target)
+
+        return builder.compile(checkpointer=self.runtime._get_checkpointer())
+
+
 class LoopGraphRuntime:
+    _run_mode = "loop"
+
+    GRAPH_SPEC = RuntimeGraphSpec(
+        node_map={
+            "initialize_run": "_initialize_run_node",
+            "prepare_step": "_prepare_step_node",
+            "prepare_prompt": "_prepare_prompt_node",
+            "model_call": "_model_call_node",
+            "interpret_model_output": "_interpret_model_output_node",
+            "dispatch_tools": "_dispatch_tools_node",
+            "persist_tool_results": "_persist_tool_results_node",
+            "apply_tool_outcomes": "_apply_tool_outcomes_node",
+            "interrupt_for_human": "_interrupt_for_human_node",
+        },
+        edge_map={
+            "initialize_run": (
+                "_route_after_initialize",
+                {"prepare_step": "prepare_step", END: END},
+            ),
+            "prepare_step": (
+                "_route_after_prepare_step",
+                {
+                    "prepare_prompt": "prepare_prompt",
+                    "dispatch_tools": "dispatch_tools",
+                    END: END,
+                },
+            ),
+            "prepare_prompt": (
+                "_route_after_prepare_prompt",
+                {"model_call": "model_call", END: END},
+            ),
+            "model_call": (
+                "_route_after_model_call",
+                {"interpret_model_output": "interpret_model_output", END: END},
+            ),
+            "interpret_model_output": (
+                "_route_after_interpret",
+                {"dispatch_tools": "dispatch_tools", "prepare_step": "prepare_step", END: END},
+            ),
+            "dispatch_tools": (
+                "_route_after_dispatch",
+                {"persist_tool_results": "persist_tool_results", END: END},
+            ),
+            "apply_tool_outcomes": (
+                "_route_after_apply",
+                {
+                    "prepare_step": "prepare_step",
+                    "interrupt_for_human": "interrupt_for_human",
+                    END: END,
+                },
+            ),
+        },
+        static_edges=[
+            ("persist_tool_results", "apply_tool_outcomes"),
+            ("interrupt_for_human", "prepare_step"),
+        ],
+    )
+
     def __init__(self, deps: GraphRuntimeDeps) -> None:
         self.deps = deps
 
@@ -93,7 +197,7 @@ class LoopGraphRuntime:
             GraphRunState(
                 loop_state=harness.state,
                 thread_id=harness.state.thread_id,
-                run_mode="loop",
+                run_mode=self._run_mode,
             ),
             input_task=task,
         )
@@ -112,8 +216,21 @@ class LoopGraphRuntime:
         return await self._execute_langgraph(command)
 
     async def _execute_langgraph(self, payload: LoopGraphPayload | Command) -> dict[str, object]:
+        return await self._execute_streaming_graph(
+            payload,
+            build_graph=self._build_compiled_loop_graph,
+            empty_result_message="Graph loop ended without a terminal result.",
+        )
+
+    async def _execute_streaming_graph(
+        self,
+        payload: LoopGraphPayload | Command,
+        *,
+        build_graph: Callable[[], Any],
+        empty_result_message: str,
+    ) -> dict[str, Any]:
         harness = self.deps.harness
-        compiled = self._build_compiled_loop_graph()
+        compiled = build_graph()
         config = self._checkpoint_config()
         interrupt_payload: dict[str, Any] | None = None
         async for chunk in compiled.astream(payload, config):
@@ -132,7 +249,7 @@ class LoopGraphRuntime:
             graph_state = GraphRunState(
                 loop_state=harness.state,
                 thread_id=harness.state.thread_id or harness.conversation_id,
-                run_mode="loop",
+                run_mode=self._run_mode,
             )
         if interrupt_payload is not None:
             result = {
@@ -143,67 +260,22 @@ class LoopGraphRuntime:
                 },
                 "interrupt": interrupt_payload,
             }
+            metrics = json_safe_value(graph_state.latency_metrics)
+            if isinstance(metrics, dict) and metrics:
+                result["latency_metrics"] = metrics
             return harness._finalize(result)
         result = graph_state.final_result or harness._failure(
-            "Graph loop ended without a terminal result.",
+            empty_result_message,
             error_type="runtime",
         )
+        metrics = json_safe_value(graph_state.latency_metrics)
+        if isinstance(metrics, dict) and metrics:
+            result = dict(result)
+            result["latency_metrics"] = metrics
         return harness._finalize(result)
 
     def _build_compiled_loop_graph(self):
-        builder = StateGraph(LoopGraphPayload)
-        builder.add_node("initialize_run", self._initialize_run_node)
-        builder.add_node("prepare_step", self._prepare_step_node)
-        builder.add_node("prepare_prompt", self._prepare_prompt_node)
-        builder.add_node("model_call", self._model_call_node)
-        builder.add_node("interpret_model_output", self._interpret_model_output_node)
-        builder.add_node("dispatch_tools", self._dispatch_tools_node)
-        builder.add_node("persist_tool_results", self._persist_tool_results_node)
-        builder.add_node("apply_tool_outcomes", self._apply_tool_outcomes_node)
-        builder.add_node("interrupt_for_human", self._interrupt_for_human_node)
-        builder.add_edge(START, "initialize_run")
-        builder.add_conditional_edges(
-            "initialize_run",
-            self._route_after_initialize,
-            {"prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "prepare_step",
-            self._route_after_prepare_step,
-            {
-                "prepare_prompt": "prepare_prompt",
-                "dispatch_tools": "dispatch_tools",
-                END: END,
-            },
-        )
-        builder.add_conditional_edges(
-            "prepare_prompt",
-            self._route_after_prepare_prompt,
-            {"model_call": "model_call", END: END},
-        )
-        builder.add_conditional_edges(
-            "model_call",
-            self._route_after_model_call,
-            {"interpret_model_output": "interpret_model_output", END: END},
-        )
-        builder.add_conditional_edges(
-            "interpret_model_output",
-            self._route_after_interpret,
-            {"dispatch_tools": "dispatch_tools", "prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "dispatch_tools",
-            self._route_after_dispatch,
-            {"persist_tool_results": "persist_tool_results", END: END},
-        )
-        builder.add_edge("persist_tool_results", "apply_tool_outcomes")
-        builder.add_conditional_edges(
-            "apply_tool_outcomes",
-            self._route_after_apply,
-            {"prepare_step": "prepare_step", "interrupt_for_human": "interrupt_for_human", END: END},
-        )
-        builder.add_edge("interrupt_for_human", "prepare_step")
-        return builder.compile(checkpointer=self._get_checkpointer())
+        return RuntimeGraphBuilder(self, self.GRAPH_SPEC).build()
 
     def _get_checkpointer(self):
         harness = self.deps.harness
@@ -374,6 +446,62 @@ class LoopGraphRuntime:
 
 
 class ChatGraphRuntime(LoopGraphRuntime):
+    _run_mode = "chat"
+
+    GRAPH_SPEC = RuntimeGraphSpec(
+        node_map={
+            "initialize_run": "_initialize_run_node",
+            "prepare_step": "_prepare_step_node",
+            "prepare_chat_prompt": "_prepare_chat_prompt_node",
+            "model_call": "_chat_model_call_node",
+            "interpret_chat_output": "_interpret_chat_output_node",
+            "dispatch_tools": "_dispatch_tools_node",
+            "persist_tool_results": "_persist_tool_results_node",
+            "apply_chat_tool_outcomes": "_apply_chat_tool_outcomes_node",
+            "interrupt_for_human": "_interrupt_for_human_node",
+        },
+        edge_map={
+            "initialize_run": (
+                "_route_after_initialize",
+                {"prepare_step": "prepare_step", END: END},
+            ),
+            "prepare_step": (
+                "_route_after_prepare_step",
+                {
+                    "prepare_prompt": "prepare_chat_prompt",
+                    "dispatch_tools": "dispatch_tools",
+                    END: END,
+                },
+            ),
+            "prepare_chat_prompt": (
+                "_route_after_prepare_prompt",
+                {"model_call": "model_call", END: END},
+            ),
+            "model_call": (
+                "_route_after_model_call",
+                {"interpret_model_output": "interpret_chat_output", END: END},
+            ),
+            "interpret_chat_output": (
+                "_route_after_interpret",
+                {"dispatch_tools": "dispatch_tools", END: END},
+            ),
+            "dispatch_tools": (
+                "_route_after_dispatch",
+                {"persist_tool_results": "persist_tool_results", END: END},
+            ),
+            "apply_chat_tool_outcomes": (
+                "_route_after_chat_apply",
+                {
+                    "prepare_step": "prepare_step",
+                    "interrupt_for_human": "interrupt_for_human",
+                    END: END,
+                },
+            ),
+        },
+        static_edges=[
+            ("persist_tool_results", "apply_chat_tool_outcomes"),
+        ],
+    )
 
     async def run(self, task: str) -> dict[str, object]:
         harness = self.deps.harness
@@ -384,116 +512,26 @@ class ChatGraphRuntime(LoopGraphRuntime):
         )
         if not harness.state.thread_id:
             harness.state.thread_id = harness.conversation_id
-            
+
         payload = self._serialize_state(
             GraphRunState(
                 loop_state=harness.state,
                 thread_id=harness.state.thread_id,
-                run_mode="chat",
+                run_mode=self._run_mode,
             ),
             input_task=task,
         )
         return await self._execute_langgraph(payload)
 
     async def _execute_langgraph(self, payload: LoopGraphPayload | Command) -> dict[str, Any]:
-        harness = self.deps.harness
-        compiled = self._build_compiled_chat_graph()
-        config = self._checkpoint_config()
-        interrupt_payload: dict[str, Any] | None = None
-        async for chunk in compiled.astream(payload, config):
-            if not isinstance(chunk, dict):
-                continue
-            interrupt_chunk = chunk.get("__interrupt__")
-            interrupt_payload = _coerce_interrupt_payload(interrupt_chunk)
-            if interrupt_payload is not None:
-                break
-        
-        snapshot = compiled.get_state(config)
-        values = _coerce_graph_values_payload(getattr(snapshot, "values", None))
-        if values:
-            graph_state = self._load_state(values)
-            harness.state = graph_state.loop_state
-        else:
-            graph_state = GraphRunState(
-                loop_state=harness.state,
-                thread_id=harness.state.thread_id or harness.conversation_id,
-                run_mode="chat",
-            )
-        
-        if interrupt_payload is not None:
-            result = {
-                "status": "needs_human",
-                "message": {
-                    "status": "human_input_required",
-                    "question": interrupt_payload.get("question", ""),
-                },
-                "interrupt": interrupt_payload,
-            }
-            return harness._finalize(result)
-            
-        result = graph_state.final_result or harness._failure(
-            "Chat graph ended without a terminal result.",
-            error_type="runtime",
+        return await self._execute_streaming_graph(
+            payload,
+            build_graph=self._build_compiled_chat_graph,
+            empty_result_message="Chat graph ended without a terminal result.",
         )
-        return harness._finalize(result)
 
     def _build_compiled_chat_graph(self):
-        builder = StateGraph(LoopGraphPayload)
-        builder.add_node("initialize_run", self._initialize_run_node)
-        builder.add_node("prepare_step", self._prepare_step_node)
-        builder.add_node("prepare_chat_prompt", self._prepare_chat_prompt_node)
-        builder.add_node("model_call", self._chat_model_call_node)
-        builder.add_node("interpret_chat_output", self._interpret_chat_output_node)
-        builder.add_node("dispatch_tools", self._dispatch_tools_node)
-        builder.add_node("persist_tool_results", self._persist_tool_results_node)
-        builder.add_node("apply_chat_tool_outcomes", self._apply_chat_tool_outcomes_node)
-        builder.add_node("interrupt_for_human", self._interrupt_for_human_node)
-        builder.add_edge(START, "initialize_run")
-        builder.add_conditional_edges(
-            "initialize_run",
-            self._route_after_initialize,
-            {"prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "prepare_step",
-            self._route_after_prepare_step,
-            {
-                "prepare_prompt": "prepare_chat_prompt",
-                "dispatch_tools": "dispatch_tools",
-                END: END,
-            },
-        )
-        builder.add_conditional_edges(
-            "prepare_chat_prompt",
-            self._route_after_prepare_prompt,
-            {"model_call": "model_call", END: END},
-        )
-        builder.add_conditional_edges(
-            "model_call",
-            self._route_after_model_call,
-            {"interpret_model_output": "interpret_chat_output", END: END},
-        )
-        builder.add_conditional_edges(
-            "interpret_chat_output",
-            self._route_after_interpret,
-            {"dispatch_tools": "dispatch_tools", END: END},
-        )
-        builder.add_conditional_edges(
-            "dispatch_tools",
-            self._route_after_dispatch,
-            {"persist_tool_results": "persist_tool_results", END: END},
-        )
-        builder.add_edge("persist_tool_results", "apply_chat_tool_outcomes")
-        builder.add_conditional_edges(
-            "apply_chat_tool_outcomes",
-            self._route_after_chat_apply,
-            {
-                "prepare_step": "prepare_step",
-                "interrupt_for_human": "interrupt_for_human",
-                END: END
-            },
-        )
-        return builder.compile(checkpointer=self._get_checkpointer())
+        return RuntimeGraphBuilder(self, self.GRAPH_SPEC).build()
 
     async def _prepare_chat_prompt_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = self._load_state(payload)
@@ -529,6 +567,63 @@ class ChatGraphRuntime(LoopGraphRuntime):
 
 
 class PlanningGraphRuntime(LoopGraphRuntime):
+    _run_mode = "planning"
+
+    GRAPH_SPEC = RuntimeGraphSpec(
+        node_map={
+            "initialize_run": "_initialize_run_node",
+            "prepare_step": "_prepare_step_node",
+            "prepare_prompt": "_prepare_planning_prompt_node",
+            "model_call": "_planning_model_call_node",
+            "interpret_planning_output": "_interpret_planning_output_node",
+            "dispatch_tools": "_dispatch_tools_node",
+            "persist_tool_results": "_persist_tool_results_node",
+            "apply_tool_outcomes": "_apply_planning_tool_outcomes_node",
+            "interrupt_for_human": "_interrupt_for_human_node",
+        },
+        edge_map={
+            "initialize_run": (
+                "_route_after_initialize",
+                {"prepare_step": "prepare_step", END: END},
+            ),
+            "prepare_step": (
+                "_route_after_prepare_step",
+                {
+                    "prepare_prompt": "prepare_prompt",
+                    "dispatch_tools": "dispatch_tools",
+                    END: END,
+                },
+            ),
+            "prepare_prompt": (
+                "_route_after_prepare_prompt",
+                {"model_call": "model_call", END: END},
+            ),
+            "model_call": (
+                "_route_after_model_call",
+                {"interpret_model_output": "interpret_planning_output", END: END},
+            ),
+            "interpret_planning_output": (
+                "_route_after_planning_interpret",
+                {"dispatch_tools": "dispatch_tools", "prepare_step": "prepare_step", END: END},
+            ),
+            "dispatch_tools": (
+                "_route_after_dispatch",
+                {"persist_tool_results": "persist_tool_results", END: END},
+            ),
+            "apply_tool_outcomes": (
+                "_route_after_planning_apply",
+                {
+                    "prepare_step": "prepare_step",
+                    "interrupt_for_human": "interrupt_for_human",
+                    END: END,
+                },
+            ),
+        },
+        static_edges=[
+            ("persist_tool_results", "apply_tool_outcomes"),
+            ("interrupt_for_human", "prepare_step"),
+        ],
+    )
 
     async def run(self, task: str) -> dict[str, object]:
         harness = self.deps.harness
@@ -544,7 +639,7 @@ class PlanningGraphRuntime(LoopGraphRuntime):
             GraphRunState(
                 loop_state=harness.state,
                 thread_id=harness.state.thread_id,
-                run_mode="planning",
+                run_mode=self._run_mode,
             ),
             input_task=task,
         )
@@ -559,7 +654,7 @@ class PlanningGraphRuntime(LoopGraphRuntime):
                 graph_state = GraphRunState(
                     loop_state=harness.state,
                     thread_id=harness.state.thread_id or harness.conversation_id,
-                    run_mode="planning",
+                    run_mode=self._run_mode,
                 )
                 await resume_planning_run(graph_state, self.deps, human_input=human_input)
                 plan = harness.state.active_plan or harness.state.draft_plan
@@ -572,98 +667,14 @@ class PlanningGraphRuntime(LoopGraphRuntime):
         return await self._resume_langgraph(human_input)
 
     async def _execute_planning_langgraph(self, payload: LoopGraphPayload | Command) -> dict[str, object]:
-        harness = self.deps.harness
-        compiled = self._build_compiled_planning_graph()
-        config = self._checkpoint_config()
-        interrupt_payload: dict[str, Any] | None = None
-        async for chunk in compiled.astream(payload, config):
-            if not isinstance(chunk, dict):
-                continue
-            interrupt_chunk = chunk.get("__interrupt__")
-            interrupt_payload = _coerce_interrupt_payload(interrupt_chunk)
-            if interrupt_payload is not None:
-                break
-        snapshot = compiled.get_state(config)
-        values = _coerce_graph_values_payload(getattr(snapshot, "values", None))
-        if values:
-            graph_state = self._load_state(values)
-            harness.state = graph_state.loop_state
-        else:
-            graph_state = GraphRunState(
-                loop_state=harness.state,
-                thread_id=harness.state.thread_id or harness.conversation_id,
-                run_mode="planning",
-            )
-        if interrupt_payload is not None:
-            result = {
-                "status": "needs_human",
-                "message": {
-                    "status": "human_input_required",
-                    "question": interrupt_payload.get("question", ""),
-                },
-                "interrupt": interrupt_payload,
-            }
-            return harness._finalize(result)
-        result = graph_state.final_result or harness._failure(
-            "Planning graph ended without a terminal result.",
-            error_type="runtime",
+        return await self._execute_streaming_graph(
+            payload,
+            build_graph=self._build_compiled_planning_graph,
+            empty_result_message="Planning graph ended without a terminal result.",
         )
-        return harness._finalize(result)
 
     def _build_compiled_planning_graph(self):
-        builder = StateGraph(LoopGraphPayload)
-        builder.add_node("initialize_run", self._initialize_run_node)
-        builder.add_node("prepare_step", self._prepare_step_node)
-        builder.add_node("prepare_prompt", self._prepare_planning_prompt_node)
-        builder.add_node("model_call", self._planning_model_call_node)
-        builder.add_node("interpret_model_output", self._interpret_planning_output_node)
-        builder.add_node("dispatch_tools", self._dispatch_tools_node)
-        builder.add_node("persist_tool_results", self._persist_tool_results_node)
-        builder.add_node("apply_tool_outcomes", self._apply_planning_tool_outcomes_node)
-        builder.add_node("interrupt_for_human", self._interrupt_for_human_node)
-        builder.add_edge(START, "initialize_run")
-        builder.add_conditional_edges(
-            "initialize_run",
-            self._route_after_initialize,
-            {"prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "prepare_step",
-            self._route_after_prepare_step,
-            {
-                "prepare_prompt": "prepare_prompt",
-                "dispatch_tools": "dispatch_tools",
-                END: END,
-            },
-        )
-        builder.add_conditional_edges(
-            "prepare_prompt",
-            self._route_after_prepare_prompt,
-            {"model_call": "model_call", END: END},
-        )
-        builder.add_conditional_edges(
-            "model_call",
-            self._route_after_model_call,
-            {"interpret_model_output": "interpret_model_output", END: END},
-        )
-        builder.add_conditional_edges(
-            "interpret_model_output",
-            self._route_after_planning_interpret,
-            {"dispatch_tools": "dispatch_tools", "prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "dispatch_tools",
-            self._route_after_dispatch,
-            {"persist_tool_results": "persist_tool_results", END: END},
-        )
-        builder.add_edge("persist_tool_results", "apply_tool_outcomes")
-        builder.add_conditional_edges(
-            "apply_tool_outcomes",
-            self._route_after_planning_apply,
-            {"prepare_step": "prepare_step", "interrupt_for_human": "interrupt_for_human", END: END},
-        )
-        builder.add_edge("interrupt_for_human", "prepare_step")
-        return builder.compile(checkpointer=self._get_checkpointer())
+        return RuntimeGraphBuilder(self, self.GRAPH_SPEC).build()
 
     async def _prepare_planning_prompt_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = self._load_state(payload)
@@ -713,6 +724,58 @@ class PlanningGraphRuntime(LoopGraphRuntime):
 class IndexerGraphRuntime(LoopGraphRuntime):
     """A rigid code indexing runtime optimized for SLM traversal and extraction."""
 
+    _run_mode = "indexer"
+
+    GRAPH_SPEC = RuntimeGraphSpec(
+        node_map={
+            "initialize_run": "_initialize_run_node",
+            "prepare_step": "_prepare_step_node",
+            "prepare_indexer_prompt": "_prepare_indexer_prompt_node",
+            "model_call": "_indexer_model_call_node",
+            "interpret_indexer_output": "_interpret_indexer_output_node",
+            "dispatch_tools": "_dispatch_tools_node",
+            "persist_tool_results": "_persist_tool_results_node",
+            "apply_indexer_tool_outcomes": "_apply_indexer_tool_outcomes_node",
+        },
+        edge_map={
+            "initialize_run": (
+                "_route_after_initialize",
+                {"prepare_step": "prepare_step", END: END},
+            ),
+            "prepare_step": (
+                "_route_after_prepare_step",
+                {
+                    "prepare_prompt": "prepare_indexer_prompt",
+                    "dispatch_tools": "dispatch_tools",
+                    END: END,
+                },
+            ),
+            "prepare_indexer_prompt": (
+                "_route_after_prepare_prompt",
+                {"model_call": "model_call", END: END},
+            ),
+            "model_call": (
+                "_route_after_model_call",
+                {"interpret_model_output": "interpret_indexer_output", END: END},
+            ),
+            "interpret_indexer_output": (
+                "_route_after_interpret",
+                {"dispatch_tools": "dispatch_tools", END: END},
+            ),
+            "dispatch_tools": (
+                "_route_after_dispatch",
+                {"persist_tool_results": "persist_tool_results", END: END},
+            ),
+            "apply_indexer_tool_outcomes": (
+                "_route_after_indexer_apply",
+                {"prepare_step": "prepare_step", END: END},
+            ),
+        },
+        static_edges=[
+            ("persist_tool_results", "apply_indexer_tool_outcomes"),
+        ],
+    )
+
     async def run(self, task: str) -> dict[str, object]:
         harness = self.deps.harness
         harness._runlog(
@@ -730,7 +793,7 @@ class IndexerGraphRuntime(LoopGraphRuntime):
             GraphRunState(
                 loop_state=harness.state,
                 thread_id=harness.state.thread_id,
-                run_mode="indexer",
+                run_mode=self._run_mode,
             ),
             input_task=task,
         )
@@ -750,58 +813,7 @@ class IndexerGraphRuntime(LoopGraphRuntime):
         return harness._finalize(result)
 
     def _build_compiled_indexer_graph(self):
-        builder = StateGraph(LoopGraphPayload)
-        builder.add_node("initialize_run", self._initialize_run_node)
-        builder.add_node("prepare_step", self._prepare_step_node)
-        builder.add_node("prepare_indexer_prompt", self._prepare_indexer_prompt_node)
-        builder.add_node("model_call", self._indexer_model_call_node)
-        builder.add_node("interpret_indexer_output", self._interpret_indexer_output_node)
-        builder.add_node("dispatch_tools", self._dispatch_tools_node)
-        builder.add_node("persist_tool_results", self._persist_tool_results_node)
-        builder.add_node("apply_indexer_tool_outcomes", self._apply_indexer_tool_outcomes_node)
-        
-        builder.add_edge(START, "initialize_run")
-        builder.add_conditional_edges(
-            "initialize_run",
-            self._route_after_initialize,
-            {"prepare_step": "prepare_step", END: END},
-        )
-        builder.add_conditional_edges(
-            "prepare_step",
-            self._route_after_prepare_step,
-            {
-                "prepare_prompt": "prepare_indexer_prompt",
-                "dispatch_tools": "dispatch_tools",
-                END: END,
-            },
-        )
-        builder.add_conditional_edges(
-            "prepare_indexer_prompt",
-            self._route_after_prepare_prompt,
-            {"model_call": "model_call", END: END},
-        )
-        builder.add_conditional_edges(
-            "model_call",
-            self._route_after_model_call,
-            {"interpret_model_output": "interpret_indexer_output", END: END},
-        )
-        builder.add_conditional_edges(
-            "interpret_indexer_output",
-            self._route_after_interpret,
-            {"dispatch_tools": "dispatch_tools", END: END},
-        )
-        builder.add_conditional_edges(
-            "dispatch_tools",
-            self._route_after_dispatch,
-            {"persist_tool_results": "persist_tool_results", END: END},
-        )
-        builder.add_edge("persist_tool_results", "apply_indexer_tool_outcomes")
-        builder.add_conditional_edges(
-            "apply_indexer_tool_outcomes",
-            self._route_after_indexer_apply,
-            {"prepare_step": "prepare_step", END: END},
-        )
-        return builder.compile(checkpointer=self._get_checkpointer())
+        return RuntimeGraphBuilder(self, self.GRAPH_SPEC).build()
 
     async def _prepare_indexer_prompt_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = self._load_state(payload)
@@ -824,8 +836,8 @@ class IndexerGraphRuntime(LoopGraphRuntime):
         # Indexer-specific interpretation: strictly follow tool calls
         if graph_state.pending_tool_calls:
              return self._serialize_state(graph_state)
-        
-        # If no tools, it might be a completion. Since indexers don't chat, 
+
+        # If no tools, it might be a completion. Since indexers don't chat,
         # we assume it's stuck or done if it didn't call finalize.
         graph_state.final_result = {
             "status": "stopped",
@@ -844,7 +856,7 @@ class IndexerGraphRuntime(LoopGraphRuntime):
                     "index_manifest": record.result.output,
                 }
                 break
-        
+
         await apply_chat_tool_outcomes(graph_state, self.deps)
         return self._serialize_state(graph_state)
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from ..state import LoopState
 from . import artifact, control, data, fs, http, indexer, indexer_query, memory, network, planning, search, shell
-from .base import ToolMode, ToolRisk, ToolSpec, build_tool_schema
+from .base import ToolMode, ToolRisk, ToolSpec, ToolTier, build_tool_schema
 from .profiles import (
     CORE_PROFILE,
     DATA_PROFILE,
+    INDEXER_PROFILE,
     MUTATE_PROFILE,
     NETWORK_PROFILE,
     OPS_PROFILE,
@@ -15,9 +16,21 @@ from .profiles import (
 )
 from .registry import ToolRegistry
 
-INDEXER_PROFILE = "indexer"
-
 Handler = Callable[..., Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class ToolRegistration:
+    name: str
+    description: str
+    schema: dict[str, Any]
+    handler: Handler
+    category: str
+    risk: ToolRisk
+    allowed_phases: set[str] | None = None
+    allowed_modes: set[ToolMode] | None = None
+    profiles: set[str] | None = None
+    tier: ToolTier = "tier1"
 
 
 def build_registry(
@@ -29,352 +42,740 @@ def build_registry(
     registry = ToolRegistry()
     state_provider.log.info("build_registry: starting registration")
 
-    def reg(
-        name: str,
-        description: str,
-        schema: dict[str, Any],
-        handler: Handler,
-        category: str,
-        risk: ToolRisk,
-        allowed_phases: set[str] | None = None,
-        allowed_modes: set[ToolMode] | None = None,
-        profiles: set[str] | None = None,
-    ) -> None:
-        spec = ToolSpec(
-            name=name,
-            description=description,
-            schema=schema,
-            handler=handler,
-            tier="tier1",
-            category=category,
-            risk=risk,
-            allowed_phases=allowed_phases,
-            allowed_modes=allowed_modes,
-            profiles=profiles,
-        )
-        if registry_profiles and profiles and not (profiles & registry_profiles):
-            return
-        registry.register(spec)
+    def _inject_cwd(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
+        return lambda **kwargs: func(cwd=state_provider.state.cwd, **kwargs)
 
-    reg(
-        "file_read",
-        "Read a text file with optional line slicing. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path.",
-        build_tool_schema(
-            required=["path"],
-            properties={
-                "path": {"type": "string"},
-                "start_line": {"type": "integer"},
-                "end_line": {"type": "integer"},
-                "max_bytes": {"type": "integer"},
-            },
+    def _inject_state_and_cwd(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
+        return lambda **kwargs: func(cwd=state_provider.state.cwd, state=state_provider.state, **kwargs)
+
+    def _inject_state(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
+        return lambda **kwargs: func(state=state_provider.state, **kwargs)
+
+    def _inject_state_and_harness(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
+        return lambda **kwargs: func(state=state_provider.state, harness=state_provider, **kwargs)
+
+    def _inject_harness(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
+        return lambda **kwargs: func(harness=state_provider, **kwargs)
+
+    def _register(tools: list[ToolRegistration]) -> None:
+        for tool in tools:
+            spec = ToolSpec(
+                name=tool.name,
+                description=tool.description,
+                schema=tool.schema,
+                handler=tool.handler,
+                tier=tool.tier,
+                category=tool.category,
+                risk=tool.risk,
+                allowed_phases=tool.allowed_phases,
+                allowed_modes=tool.allowed_modes,
+                profiles=tool.profiles,
+            )
+            if registry_profiles and tool.profiles and not (tool.profiles & registry_profiles):
+                continue
+            registry.register(spec)
+
+    _register([
+        # Filesystem
+        ToolRegistration(
+            name="file_read",
+            description=(
+                "Read a text file with optional line slicing. Paths resolve relative to the current cwd. "
+                "For large files, read in chunks to avoid context overflow. If a file was recently written in 'chunked_build' mode, "
+                "verify the final output after the last section is written."
+            ),
+            schema=build_tool_schema(
+                required=["path"],
+                properties={
+                    "path": {"type": "string", "description": "Path to file."},
+                    "start_line": {"type": "integer", "description": "Start line (1-indexed)."},
+                    "end_line": {"type": "integer", "description": "End line (inclusive)."},
+                    "max_bytes": {"type": "integer", "description": "Max bytes to read."},
+                },
+            ),
+            handler=_inject_state_and_cwd(fs.file_read),
+            category="filesystem",
+            risk="low",
+            allowed_modes={"chat", "loop", "indexer", "planning"},
+            profiles={CORE_PROFILE},
         ),
-        lambda **kwargs: fs.file_read(cwd=state_provider.state.cwd, **kwargs),
-        category="filesystem",
-        risk="low",
-        allowed_modes={"chat", "loop", "indexer", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "dir_list",
-        "List directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path.",
-        build_tool_schema(properties={"path": {"type": "string"}}),
-        lambda **kwargs: fs.dir_list(cwd=state_provider.state.cwd, **kwargs),
-        category="filesystem",
-        risk="low",
-        allowed_modes={"chat", "loop", "indexer", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "task_complete",
-        "Mark task complete and end loop.",
-        build_tool_schema(required=["message"], properties={"message": {"type": "string"}}),
-        lambda **kwargs: control.task_complete(state=state_provider.state, **kwargs),
-        category="control",
-        risk="medium",
-        allowed_phases={"explore", "plan", "execute", "verify"},
-        allowed_modes={"loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "task_fail",
-        "Mark task failed and end loop.",
-        build_tool_schema(required=["message"], properties={"message": {"type": "string"}}),
-        lambda **kwargs: control.task_fail(state=state_provider.state, **kwargs),
-        category="control",
-        risk="medium",
-        allowed_phases={"explore", "plan", "execute", "verify"},
-        allowed_modes={"loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "ask_human",
-        "Request human input and pause loop.",
-        build_tool_schema(required=["question"], properties={"question": {"type": "string"}}),
-        lambda **kwargs: control.ask_human(state=state_provider.state, **kwargs),
-        category="control",
-        risk="medium",
-        allowed_phases={"explore", "plan", "execute", "verify"},
-        allowed_modes={"loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "loop_status",
-        "Return current loop state summary.",
-        build_tool_schema(),
-        lambda **kwargs: control.loop_status(state=state_provider.state, **kwargs),
-        category="control",
-        risk="low",
-        allowed_modes={"chat", "loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-
-    reg(
-        "plan_set",
-        "Create or replace the current draft execution plan. Export fields are only for plan documents, never implementation files.",
-        build_tool_schema(
-            required=["goal", "steps"],
-            properties={
-                "goal": {
-                    "type": "string",
-                    "description": "High-level objective the plan is trying to achieve.",
+        ToolRegistration(
+            name="dir_list",
+            description="List directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path.",
+            schema=build_tool_schema(properties={"path": {"type": "string"}}),
+            handler=_inject_cwd(fs.dir_list),
+            category="filesystem",
+            risk="low",
+            allowed_modes={"chat", "loop", "indexer", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="file_write",
+            description=(
+                "Write content to a file. For large files or complex implementations, use chunked mode by providing "
+                "`write_session_id`, section metadata, and an optional `replace_strategy`. Overwrites existing files unless in an active session."
+            ),
+            schema=build_tool_schema(
+                required=["path", "content"],
+                properties={
+                    "path": {"type": "string", "description": "Path to file."},
+                    "content": {"type": "string", "description": "Content to write."},
+                    "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
+                    "section_name": {"type": "string", "description": "Brief name for this logical block (e.g. 'imports', 'class_def')."},
+                    "section_id": {"type": "string", "description": "Optional stable section identifier for chunk-mode writes."},
+                    "section_role": {"type": "string", "description": "Optional section role such as 'imports', 'helpers', or 'core_logic'."},
+                    "next_section_name": {"type": "string", "description": "Name of the logical block you will write next. Omit for the last chunk."},
+                    "replace_strategy": {"type": "string", "description": "Optional write mode override: 'append' or 'overwrite'. Use 'overwrite' for local repair."},
+                    "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
                 },
-                "summary": {
-                    "type": "string",
-                    "description": "Optional short context summary for the plan.",
+            ),
+            handler=_inject_state_and_cwd(fs.file_write),
+            category="filesystem",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="file_append",
+            description="Append content to a file. In chunk mode, this also accepts write-session metadata and defaults to append semantics.",
+            schema=build_tool_schema(
+                required=["path", "content"],
+                properties={
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "write_session_id": {"type": "string"},
+                    "section_name": {"type": "string"},
+                    "section_id": {"type": "string"},
+                    "section_role": {"type": "string"},
+                    "next_section_name": {"type": "string"},
+                    "replace_strategy": {"type": "string"},
+                    "expected_followup_verifier": {"type": "string"},
                 },
-                "steps": {
-                    "type": "array",
-                    "description": "Ordered plan steps. Prefer concise step objects with titles over prose paragraphs.",
-                    "items": {
-                        "anyOf": [
-                            {"type": "string"},
-                            {"type": "object"},
-                        ]
+            ),
+            handler=_inject_state_and_cwd(fs.file_append),
+            category="filesystem",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="file_delete",
+            description="Delete a file.",
+            schema=build_tool_schema(required=["path"], properties={"path": {"type": "string"}}),
+            handler=_inject_state_and_cwd(fs.file_delete),
+            category="filesystem",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={MUTATE_PROFILE},
+        ),
+        ToolRegistration(
+            name="dir_tree",
+            description="Show a recursive directory tree.",
+            schema=build_tool_schema(
+                properties={
+                    "path": {"type": "string"},
+                    "max_depth": {"type": "integer"},
+                    "max_entries": {"type": "integer"},
+                }
+            ),
+            handler=_inject_cwd(fs.dir_tree),
+            category="filesystem",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        # Control
+        ToolRegistration(
+            name="task_complete",
+            description="Mark task complete and end loop.",
+            schema=build_tool_schema(
+                required=["message"], properties={"message": {"type": "string"}}
+            ),
+            handler=_inject_state(control.task_complete),
+            category="control",
+            risk="medium",
+            allowed_phases={"explore", "plan", "execute", "verify"},
+            allowed_modes={"loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="task_fail",
+            description="Mark task failed and end loop.",
+            schema=build_tool_schema(
+                required=["message"], properties={"message": {"type": "string"}}
+            ),
+            handler=_inject_state(control.task_fail),
+            category="control",
+            risk="medium",
+            allowed_phases={"explore", "plan", "execute", "verify"},
+            allowed_modes={"loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="ask_human",
+            description="Request human input and pause loop.",
+            schema=build_tool_schema(
+                required=["question"], properties={"question": {"type": "string"}}
+            ),
+            handler=_inject_state(control.ask_human),
+            category="control",
+            risk="medium",
+            allowed_phases={"explore", "plan", "execute", "verify"},
+            allowed_modes={"loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="loop_status",
+            description="Return current loop state summary.",
+            schema=build_tool_schema(),
+            handler=_inject_state(control.loop_status),
+            category="control",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        # Planning
+        ToolRegistration(
+            name="plan_set",
+            description="Create or replace the current draft execution plan. Provide the full spec contract: goal, inputs, outputs, constraints, acceptance criteria, implementation plan, and steps. Export fields are only for plan documents, never implementation files.",
+            schema=build_tool_schema(
+                required=["goal", "inputs", "outputs", "constraints", "acceptance_criteria", "implementation_plan", "steps"],
+                properties={
+                    "goal": {
+                        "type": "string",
+                        "description": "High-level objective the plan is trying to achieve.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Optional short context summary for the plan.",
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "description": "Facts, files, or inputs the implementation will rely on.",
+                    },
+                    "outputs": {
+                        "type": "array",
+                        "description": "Artifacts, files, or outcomes the plan should produce.",
+                    },
+                    "constraints": {
+                        "type": "array",
+                        "description": "Rules or limits the implementation must respect.",
+                    },
+                    "acceptance_criteria": {
+                        "type": "array",
+                        "description": "Checklist items that must be satisfied before task completion.",
+                    },
+                    "implementation_plan": {
+                        "type": "array",
+                        "description": "Short implementation stages or ordered authoring plan items.",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered plan steps. Prefer concise step objects with titles over prose paragraphs.",
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "object"},
+                            ]
+                        },
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py.",
+                    },
+                    "plan_output_path": {
+                        "type": "string",
+                        "description": "Alias for output_path. Reserved for plan document exports only.",
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "enum": ["markdown", "md", "text", "txt"],
+                        "description": "Optional plan document format. Use markdown/md or text/txt only.",
+                    },
+                    "plan_output_format": {
+                        "type": "string",
+                        "enum": ["markdown", "md", "text", "txt"],
+                        "description": "Alias for output_format.",
                     },
                 },
-                "output_path": {
-                    "type": "string",
-                    "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py.",
+            ),
+            handler=_inject_state_and_harness(planning.plan_set),
+            category="planning",
+            risk="low",
+            allowed_modes={"planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="plan_step_update",
+            description="Update a plan step status during planning or execution.",
+            schema=build_tool_schema(
+                required=["step_id", "status"],
+                properties={
+                    "step_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "note": {"type": "string"},
                 },
-                "plan_output_path": {
-                    "type": "string",
-                    "description": "Alias for output_path. Reserved for plan document exports only.",
+            ),
+            handler=_inject_state_and_harness(planning.plan_step_update),
+            category="planning",
+            risk="low",
+            allowed_modes={"planning", "loop"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="plan_request_execution",
+            description="Pause planning and ask the user to approve execution.",
+            schema=build_tool_schema(
+                required=["question"],
+                properties={"question": {"type": "string"}},
+            ),
+            handler=_inject_state_and_harness(planning.plan_request_execution),
+            category="planning",
+            risk="low",
+            allowed_modes={"planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="plan_export",
+            description="Write the current plan to disk using the canonical exporter.",
+            schema=build_tool_schema(
+                required=["path"],
+                properties={
+                    "path": {"type": "string"},
+                    "format": {"type": "string"},
                 },
-                "output_format": {
-                    "type": "string",
-                    "enum": ["markdown", "md", "text", "txt"],
-                    "description": "Optional plan document format. Use markdown/md or text/txt only.",
+            ),
+            handler=_inject_state_and_harness(planning.plan_export),
+            category="planning",
+            risk="low",
+            allowed_modes={"planning", "loop"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="plan_subtask",
+            description="Run a bounded planning child run.",
+            schema=build_tool_schema(
+                required=["brief"],
+                properties={
+                    "brief": {"type": "string"},
+                    "phase": {"type": "string"},
+                    "constraints": {"type": "array"},
+                    "acceptance_criteria": {"type": "array"},
                 },
-                "plan_output_format": {
-                    "type": "string",
-                    "enum": ["markdown", "md", "text", "txt"],
-                    "description": "Alias for output_format.",
+            ),
+            handler=_inject_state_and_harness(planning.plan_subtask),
+            category="planning",
+            risk="medium",
+            allowed_modes={"planning"},
+            profiles={CORE_PROFILE},
+        ),
+        # Network
+        ToolRegistration(
+            name="ssh_exec",
+            description="Execute a command on a remote host via SSH with live streaming support.",
+            schema=build_tool_schema(
+                required=["host", "command"],
+                properties={
+                    "host": {"type": "string", "description": "Target hostname or IP."},
+                    "command": {"type": "string", "description": "Command to run remotely."},
+                    "user": {"type": "string", "description": "SSH username."},
+                    "port": {"type": "integer", "default": 22},
+                    "identity_file": {"type": "string", "description": "Path to SSH private key."},
+                    "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
+                    "timeout_sec": {"type": "integer", "default": 60},
                 },
-            },
+            ),
+            handler=_inject_state_and_harness(network.ssh_exec),
+            category="network",
+            risk="high",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={NETWORK_PROFILE},
         ),
-        lambda **kwargs: planning.plan_set(state=state_provider.state, **kwargs),
-        category="planning",
-        risk="low",
-        allowed_modes={"planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "plan_step_update",
-        "Update a plan step status during planning or execution.",
-        build_tool_schema(
-            required=["step_id", "status"],
-            properties={
-                "step_id": {"type": "string"},
-                "status": {"type": "string"},
-                "note": {"type": "string"},
-            },
+        # Shell
+        ToolRegistration(
+            name="shell_exec",
+            description="Execute a shell command after user approval.",
+            schema=build_tool_schema(
+                required=["command"],
+                properties={"command": {"type": "string"}, "timeout_sec": {"type": "integer"}},
+            ),
+            handler=_inject_state_and_harness(shell.shell_exec),
+            category="shell",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={CORE_PROFILE},
         ),
-        lambda **kwargs: planning.plan_step_update(state=state_provider.state, **kwargs),
-        category="planning",
-        risk="low",
-        allowed_modes={"planning", "loop"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "plan_request_execution",
-        "Pause planning and ask the user to approve execution.",
-        build_tool_schema(
-            required=["question"],
-            properties={"question": {"type": "string"}},
+        ToolRegistration(
+            name="shell_background",
+            description="Run shell command in background.",
+            schema=build_tool_schema(
+                required=["command"], properties={"command": {"type": "string"}}
+            ),
+            handler=_inject_state_and_harness(shell.shell_background),
+            category="shell",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={SUPPORT_PROFILE},
         ),
-        lambda **kwargs: planning.plan_request_execution(state=state_provider.state, **kwargs),
-        category="planning",
-        risk="low",
-        allowed_modes={"planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "plan_export",
-        "Write the current plan to disk using the canonical exporter.",
-        build_tool_schema(
-            required=["path"],
-            properties={
-                "path": {"type": "string"},
-                "format": {"type": "string"},
-            },
+        ToolRegistration(
+            name="process_kill",
+            description="Kill a tracked background process.",
+            schema=build_tool_schema(
+                required=["job_id"], properties={"job_id": {"type": "string"}}
+            ),
+            handler=_inject_state(shell.process_kill),
+            category="shell",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={SUPPORT_PROFILE},
         ),
-        lambda **kwargs: planning.plan_export(state=state_provider.state, **kwargs),
-        category="planning",
-        risk="low",
-        allowed_modes={"planning", "loop"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "plan_subtask",
-        "Run a bounded planning child run.",
-        build_tool_schema(
-            required=["brief"],
-            properties={
-                "brief": {"type": "string"},
-                "phase": {"type": "string"},
-                "constraints": {"type": "array"},
-                "acceptance_criteria": {"type": "array"},
-            },
+        ToolRegistration(
+            name="env_get",
+            description="Read an environment variable.",
+            schema=build_tool_schema(
+                required=["name"], properties={"name": {"type": "string"}}
+            ),
+            handler=shell.env_get,
+            category="environment",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={SUPPORT_PROFILE},
         ),
-        lambda **kwargs: planning.plan_subtask(harness=state_provider, state=state_provider.state, **kwargs),
-        category="planning",
-        risk="medium",
-        allowed_modes={"planning"},
-        profiles={CORE_PROFILE},
-    )
-
-    # Remaining Tier 1 tools from Phase 3
-    reg("file_write", "Write content to a file.", build_tool_schema(required=["path", "content"], properties={"path": {"type": "string"}, "content": {"type": "string"}}), lambda **kwargs: fs.file_write(cwd=state_provider.state.cwd, **kwargs), category="filesystem", risk="high", allowed_modes={"loop"}, profiles={CORE_PROFILE})
-    reg("file_append", "Append content to a file.", build_tool_schema(required=["path", "content"], properties={"path": {"type": "string"}, "content": {"type": "string"}}), lambda **kwargs: fs.file_append(cwd=state_provider.state.cwd, **kwargs), category="filesystem", risk="high", allowed_modes={"loop"}, profiles={CORE_PROFILE})
-    reg("file_delete", "Delete a file.", build_tool_schema(required=["path"], properties={"path": {"type": "string"}}), lambda **kwargs: fs.file_delete(cwd=state_provider.state.cwd, **kwargs), category="filesystem", risk="high", allowed_modes={"loop"}, profiles={MUTATE_PROFILE})
-    reg("dir_tree", "Show a recursive directory tree.", build_tool_schema(properties={"path": {"type": "string"}, "max_depth": {"type": "integer"}, "max_entries": {"type": "integer"}}), lambda **kwargs: fs.dir_tree(cwd=state_provider.state.cwd, **kwargs), category="filesystem", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg(
-        "ssh_exec",
-        "Execute a command on a remote host via SSH with live streaming support.",
-        build_tool_schema(
-            required=["host", "command"],
-            properties={
-                "host": {"type": "string", "description": "Target hostname or IP."},
-                "command": {"type": "string", "description": "Command to run remotely."},
-                "user": {"type": "string", "description": "SSH username."},
-                "port": {"type": "integer", "default": 22},
-                "identity_file": {"type": "string", "description": "Path to SSH private key."},
-                "timeout_sec": {"type": "integer", "default": 60},
-            },
+        ToolRegistration(
+            name="env_set",
+            description="Set an environment variable.",
+            schema=build_tool_schema(
+                required=["name", "value"],
+                properties={"name": {"type": "string"}, "value": {"type": "string"}},
+            ),
+            handler=shell.env_set,
+            category="environment",
+            risk="medium",
+            allowed_modes={"loop"},
+            profiles={SUPPORT_PROFILE},
         ),
-        lambda **kwargs: network.ssh_exec(
-            state=state_provider.state, 
-            harness=state_provider, 
-            **kwargs
+        ToolRegistration(
+            name="cwd_get",
+            description="Get current working directory.",
+            schema=build_tool_schema(),
+            handler=_inject_state(shell.cwd_get),
+            category="environment",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={SUPPORT_PROFILE},
         ),
-        category="network",
-        risk="high",
-        allowed_modes={"chat", "loop", "planning"},
-        profiles={NETWORK_PROFILE},
-    )
-    reg("shell_exec", "Execute a shell command after user approval.", build_tool_schema(required=["command"], properties={"command": {"type": "string"}, "timeout_sec": {"type": "integer"}}), lambda **kwargs: shell.shell_exec(state=state_provider.state, harness=state_provider, **kwargs), category="shell", risk="high", allowed_modes={"loop"}, profiles={CORE_PROFILE})
-    reg("shell_background", "Run shell command in background.", build_tool_schema(required=["command"], properties={"command": {"type": "string"}}), lambda **kwargs: shell.shell_background(state=state_provider.state, harness=state_provider, **kwargs), category="shell", risk="high", allowed_modes={"loop"}, profiles={SUPPORT_PROFILE})
-    reg("process_kill", "Kill a tracked background process.", build_tool_schema(required=["job_id"], properties={"job_id": {"type": "string"}}), lambda **kwargs: shell.process_kill(state=state_provider.state, **kwargs), category="shell", risk="high", allowed_modes={"loop"}, profiles={SUPPORT_PROFILE})
-    reg("env_get", "Read an environment variable.", build_tool_schema(required=["name"], properties={"name": {"type": "string"}}), shell.env_get, category="environment", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg("env_set", "Set an environment variable.", build_tool_schema(required=["name", "value"], properties={"name": {"type": "string"}, "value": {"type": "string"}}), shell.env_set, category="environment", risk="medium", allowed_modes={"loop"}, profiles={SUPPORT_PROFILE})
-    reg("cwd_get", "Get current working directory.", build_tool_schema(), lambda **kwargs: shell.cwd_get(state=state_provider.state, **kwargs), category="environment", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg("cwd_set", "Set current working directory.", build_tool_schema(required=["path"], properties={"path": {"type": "string"}}), lambda **kwargs: shell.cwd_set(state=state_provider.state, **kwargs), category="environment", risk="medium", allowed_modes={"loop"}, profiles={SUPPORT_PROFILE})
-    reg("http_get", "Run an HTTP GET request.", build_tool_schema(required=["url"], properties={"url": {"type": "string"}, "headers": {"type": "object"}, "timeout_sec": {"type": "integer"}}), http.http_get, category="http", risk="medium", allowed_modes={"loop"}, profiles={NETWORK_PROFILE})
-    reg("http_post", "Run an HTTP POST request.", build_tool_schema(required=["url"], properties={"url": {"type": "string"}, "json_body": {"type": "object"}, "headers": {"type": "object"}, "timeout_sec": {"type": "integer"}}), http.http_post, category="http", risk="high", allowed_modes={"loop"}, profiles={NETWORK_PROFILE})
-    reg("file_download", "Download a file from URL.", build_tool_schema(required=["url", "output_path"], properties={"url": {"type": "string"}, "output_path": {"type": "string"}, "headers": {"type": "object"}, "timeout_sec": {"type": "integer"}}), http.file_download, category="http", risk="high", allowed_modes={"loop"}, profiles={NETWORK_PROFILE})
-    reg("scratch_set", "Set a scratchpad value.", build_tool_schema(required=["key", "value"], properties={"key": {"type": "string"}, "value": {}, "persist": {"type": "boolean"}}), lambda **kwargs: memory.scratch_set(state=state_provider.state, **kwargs), category="memory", risk="low", allowed_modes={"loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg("scratch_get", "Get scratchpad value.", build_tool_schema(required=["key"], properties={"key": {"type": "string"}}), lambda **kwargs: memory.scratch_get(state=state_provider.state, **kwargs), category="memory", risk="low", allowed_modes={"loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg("scratch_list", "List scratchpad keys.", build_tool_schema(), lambda **kwargs: memory.scratch_list(state=state_provider.state, **kwargs), category="memory", risk="low", allowed_modes={"loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg("scratch_delete", "Delete scratchpad key.", build_tool_schema(required=["key"], properties={"key": {"type": "string"}}), lambda **kwargs: memory.scratch_delete(state=state_provider.state, **kwargs), category="memory", risk="low", allowed_modes={"loop", "planning"}, profiles={SUPPORT_PROFILE})
-    reg(
-        "memory_update",
-        "Update the pinned Working Memory (plan, decisions, known_facts, next_actions). Use this to persist critical facts (like numerical values or key findings) found in large artifacts so they aren't lost when history is truncated.",
-        build_tool_schema(
-            required=["section", "content"],
-            properties={
-                "section": {
-                    "type": "string",
-                    "enum": ["plan", "decisions", "open_questions", "known_facts", "failures", "next_actions"],
+        ToolRegistration(
+            name="cwd_set",
+            description="Set current working directory.",
+            schema=build_tool_schema(
+                required=["path"], properties={"path": {"type": "string"}}
+            ),
+            handler=_inject_state(shell.cwd_set),
+            category="environment",
+            risk="medium",
+            allowed_modes={"loop"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        # HTTP
+        ToolRegistration(
+            name="http_get",
+            description="Run an HTTP GET request.",
+            schema=build_tool_schema(
+                required=["url"],
+                properties={
+                    "url": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "timeout_sec": {"type": "integer"},
                 },
-                "content": {"type": "string"},
-                "action": {"type": "string", "enum": ["add", "remove"]},
-            },
+            ),
+            handler=http.http_get,
+            category="http",
+            risk="medium",
+            allowed_modes={"loop"},
+            profiles={NETWORK_PROFILE},
         ),
-        lambda **kwargs: memory.memory_update(state=state_provider.state, **kwargs),
-        category="memory",
-        risk="low",
-        allowed_modes={"loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg("checkpoint", "Persist current loop state.", build_tool_schema(properties={"label": {"type": "string"}, "output_path": {"type": "string"}}), lambda **kwargs: memory.checkpoint(state=state_provider.state, **kwargs), category="memory", risk="medium", allowed_modes={"loop"}, profiles={SUPPORT_PROFILE})
-    reg("grep", "Search file contents recursively.", build_tool_schema(required=["pattern"], properties={"pattern": {"type": "string"}, "path": {"type": "string"}, "regex": {"type": "boolean"}, "case_sensitive": {"type": "boolean"}, "max_results": {"type": "integer"}}), search.grep, category="search", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={CORE_PROFILE})
-    reg("find_files", "Find files recursively.", build_tool_schema(required=["pattern"], properties={"pattern": {"type": "string"}, "path": {"type": "string"}, "regex": {"type": "boolean"}, "max_results": {"type": "integer"}}), search.find_files, category="search", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={CORE_PROFILE})
-    reg("json_query", "Run JMESPath query on JSON data.", build_tool_schema(required=["data", "expression"], properties={"data": {}, "expression": {"type": "string"}}), data.json_query, category="data", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={DATA_PROFILE})
-    reg("yaml_read", "Read YAML file into structured data.", build_tool_schema(required=["path"], properties={"path": {"type": "string"}}), data.yaml_read, category="data", risk="low", allowed_modes={"chat", "loop", "planning"}, profiles={DATA_PROFILE})
-    reg("diff", "Generate unified diff for two strings.", build_tool_schema(required=["before", "after"], properties={"before": {"type": "string"}, "after": {"type": "string"}, "context": {"type": "integer"}}), data.diff, category="data", risk="low", allowed_modes={"loop"}, profiles={DATA_PROFILE})
-    reg(
-        "artifact_read",
-        "Read stored artifact content by ID. Large artifacts are returned in bounded line chunks; use start_line/end_line for follow-up paging.",
-        build_tool_schema(
-            required=["artifact_id"],
-            properties={
-                "artifact_id": {"type": "string"},
-                "start_line": {"type": "integer"},
-                "end_line": {"type": "integer"},
-                "max_chars": {"type": "integer"},
-            },
+        ToolRegistration(
+            name="http_post",
+            description="Run an HTTP POST request.",
+            schema=build_tool_schema(
+                required=["url"],
+                properties={
+                    "url": {"type": "string"},
+                    "json_body": {"type": "object"},
+                    "headers": {"type": "object"},
+                    "timeout_sec": {"type": "integer"},
+                },
+            ),
+            handler=http.http_post,
+            category="http",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={NETWORK_PROFILE},
         ),
-        lambda **kwargs: artifact.artifact_read(state=state_provider.state, **kwargs),
-        category="data",
-        risk="low",
-        allowed_modes={"chat", "loop", "indexer", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "artifact_grep",
-        "Search for a pattern within an artifact and return matching lines with line numbers. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
-        build_tool_schema(
-            required=["artifact_id", "query"],
-            properties={
-                "artifact_id": {"type": "string"},
-                "query": {"type": "string"},
-                "case_insensitive": {"type": "boolean"},
-                "max_results": {"type": "integer"},
-            },
+        ToolRegistration(
+            name="file_download",
+            description="Download a file from URL.",
+            schema=build_tool_schema(
+                required=["url", "output_path"],
+                properties={
+                    "url": {"type": "string"},
+                    "output_path": {"type": "string"},
+                    "headers": {"type": "object"},
+                    "timeout_sec": {"type": "integer"},
+                },
+            ),
+            handler=http.file_download,
+            category="http",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={NETWORK_PROFILE},
         ),
-        lambda **kwargs: artifact.artifact_grep(state=state_provider.state, **kwargs),
-        category="data",
-        risk="low",
-        allowed_modes={"chat", "loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "artifact_recall",
-        "Retrieve the full text content of an artifact and bring it into your context window for analysis. Use for small to medium artifacts that need close inspection.",
-        build_tool_schema(required=["artifact_id"], properties={"artifact_id": {"type": "string"}}),
-        lambda **kwargs: artifact.artifact_recall(state=state_provider.state, **kwargs),
-        category="data",
-        risk="low",
-        allowed_modes={"chat", "loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
-    reg(
-        "artifact_print",
-        "Print out the full contents of an artifact directly to the user's console/UI without including it in your context window. Use this for extremely large outputs (like full logs) that the user should see, but you only need confirmation of.",
-        build_tool_schema(required=["artifact_id"], properties={"artifact_id": {"type": "string"}}),
-        lambda **kwargs: artifact.artifact_print(harness=state_provider, **kwargs),
-        category="data",
-        risk="low",
-        allowed_modes={"chat", "loop", "planning"},
-        profiles={CORE_PROFILE},
-    )
+        # Memory
+        ToolRegistration(
+            name="scratch_set",
+            description="Set a scratchpad value.",
+            schema=build_tool_schema(
+                required=["key", "value"],
+                properties={
+                    "key": {"type": "string"},
+                    "value": {},
+                    "persist": {"type": "boolean"},
+                },
+            ),
+            handler=_inject_state(memory.scratch_set),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        ToolRegistration(
+            name="scratch_get",
+            description="Get scratchpad value.",
+            schema=build_tool_schema(
+                required=["key"], properties={"key": {"type": "string"}}
+            ),
+            handler=_inject_state(memory.scratch_get),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        ToolRegistration(
+            name="scratch_list",
+            description="List scratchpad keys.",
+            schema=build_tool_schema(),
+            handler=_inject_state(memory.scratch_list),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        ToolRegistration(
+            name="scratch_delete",
+            description="Delete scratchpad key.",
+            schema=build_tool_schema(
+                required=["key"], properties={"key": {"type": "string"}}
+            ),
+            handler=_inject_state(memory.scratch_delete),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        ToolRegistration(
+            name="memory_update",
+            description="Update the pinned Working Memory (plan, decisions, known_facts, next_actions). Use this to persist critical facts (like numerical values or key findings) found in large artifacts so they aren't lost when history is truncated.",
+            schema=build_tool_schema(
+                required=["section", "content"],
+                properties={
+                    "section": {
+                        "type": "string",
+                        "enum": ["plan", "decisions", "open_questions", "known_facts", "failures", "next_actions"],
+                    },
+                    "content": {"type": "string"},
+                    "action": {"type": "string", "enum": ["add", "remove"]},
+                },
+            ),
+            handler=_inject_state(memory.memory_update),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="checkpoint",
+            description="Persist current loop state.",
+            schema=build_tool_schema(
+                properties={"label": {"type": "string"}, "output_path": {"type": "string"}}
+            ),
+            handler=_inject_state(memory.checkpoint),
+            category="memory",
+            risk="medium",
+            allowed_modes={"loop"},
+            profiles={SUPPORT_PROFILE},
+        ),
+        # Search
+        ToolRegistration(
+            name="grep",
+            description="Search file contents recursively.",
+            schema=build_tool_schema(
+                required=["pattern"],
+                properties={
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "regex": {"type": "boolean"},
+                    "case_sensitive": {"type": "boolean"},
+                    "max_results": {"type": "integer"},
+                },
+            ),
+            handler=search.grep,
+            category="search",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="find_files",
+            description="Find files recursively.",
+            schema=build_tool_schema(
+                required=["pattern"],
+                properties={
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                    "regex": {"type": "boolean"},
+                    "max_results": {"type": "integer"},
+                },
+            ),
+            handler=search.find_files,
+            category="search",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        # Data
+        ToolRegistration(
+            name="json_query",
+            description="Run JMESPath query on JSON data.",
+            schema=build_tool_schema(
+                required=["data", "expression"],
+                properties={"data": {}, "expression": {"type": "string"}},
+            ),
+            handler=data.json_query,
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={DATA_PROFILE},
+        ),
+        ToolRegistration(
+            name="yaml_read",
+            description="Read YAML file into structured data.",
+            schema=build_tool_schema(
+                required=["path"], properties={"path": {"type": "string"}}
+            ),
+            handler=data.yaml_read,
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={DATA_PROFILE},
+        ),
+        ToolRegistration(
+            name="diff",
+            description="Generate unified diff for two strings.",
+            schema=build_tool_schema(
+                required=["before", "after"],
+                properties={
+                    "before": {"type": "string"},
+                    "after": {"type": "string"},
+                    "context": {"type": "integer"},
+                },
+            ),
+            handler=data.diff,
+            category="data",
+            risk="low",
+            allowed_modes={"loop"},
+            profiles={DATA_PROFILE},
+        ),
+        # Artifact
+        ToolRegistration(
+            name="artifact_read",
+            description="Read stored artifact content by ID. Large artifacts are returned in bounded line chunks; use start_line/end_line for follow-up paging.",
+            schema=build_tool_schema(
+                required=["artifact_id"],
+                properties={
+                    "artifact_id": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "max_chars": {"type": "integer"},
+                },
+            ),
+            handler=_inject_state(artifact.artifact_read),
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "indexer", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="artifact_grep",
+            description="Search for a pattern within an artifact and return matching lines with line numbers. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
+            schema=build_tool_schema(
+                required=["artifact_id", "query"],
+                properties={
+                    "artifact_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "case_insensitive": {"type": "boolean"},
+                    "max_results": {"type": "integer"},
+                },
+            ),
+            handler=_inject_state(artifact.artifact_grep),
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="artifact_recall",
+            description="Retrieve the full text content of an artifact and bring it into your context window for analysis. Use for small to medium artifacts that need close inspection.",
+            schema=build_tool_schema(
+                required=["artifact_id"], properties={"artifact_id": {"type": "string"}}
+            ),
+            handler=_inject_state(artifact.artifact_recall),
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="artifact_print",
+            description="Print out the full contents of an artifact directly to the user's console/UI without including it in your context window. Use this for extremely large outputs (like full logs) that the user should see, but you only need confirmation of.",
+            schema=build_tool_schema(
+                required=["artifact_id"], properties={"artifact_id": {"type": "string"}}
+            ),
+            handler=_inject_harness(artifact.artifact_print),
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="show_artifact",
+            description="Alias for artifact_print. Print out the full contents of an artifact directly to the user's console/UI without including it in your context window.",
+            schema=build_tool_schema(
+                required=["artifact_id"], properties={"artifact_id": {"type": "string"}}
+            ),
+            handler=_inject_harness(artifact.artifact_print),
+            category="data",
+            risk="low",
+            allowed_modes={"chat", "loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+    ])
 
     if include_ansible:
         async def _tier2_placeholder(**_: Any) -> dict[str, Any]:
             return {"success": False, "error": "tier2 adapter not configured", "output": None, "metadata": {}}
 
-        registry.register(
-            ToolSpec(
+        _register([
+            ToolRegistration(
                 name="ansible_inventory",
                 description="Manage runtime inventory: list, add_host, add_group, remove_host.",
                 schema=build_tool_schema(
@@ -386,17 +787,15 @@ def build_registry(
                     },
                     required=["action"],
                 ),
-                handler=_tier2_placeholder,
-                tier="tier2",
+                handler=_tier2_placeholder,  # type: ignore[arg-type]
                 category="ansible",
                 risk="high",
                 allowed_phases={"explore", "plan", "execute", "verify"},
                 allowed_modes={"loop"},
                 profiles={OPS_PROFILE},
-            )
-        )
-        registry.register(
-            ToolSpec(
+                tier="tier2",
+            ),
+            ToolRegistration(
                 name="ansible_task",
                 description="Run one Ansible module task across hosts.",
                 schema=build_tool_schema(
@@ -410,17 +809,15 @@ def build_registry(
                     },
                     required=["module"],
                 ),
-                handler=_tier2_placeholder,
-                tier="tier2",
+                handler=_tier2_placeholder,  # type: ignore[arg-type]
                 category="ansible",
                 risk="high",
                 allowed_phases={"plan", "execute", "verify"},
                 allowed_modes={"loop"},
                 profiles={OPS_PROFILE},
-            )
-        )
-        registry.register(
-            ToolSpec(
+                tier="tier2",
+            ),
+            ToolRegistration(
                 name="ansible_playbook",
                 description="Run an Ansible playbook file or inline tasks.",
                 schema=build_tool_schema(
@@ -436,19 +833,19 @@ def build_registry(
                         "timeout": {"type": "integer"},
                     },
                 ),
-                handler=_tier2_placeholder,
-                tier="tier2",
+                handler=_tier2_placeholder,  # type: ignore[arg-type]
                 category="ansible",
                 risk="high",
                 allowed_phases={"plan", "execute", "verify"},
                 allowed_modes={"loop"},
                 profiles={OPS_PROFILE},
-            )
-        )
-    
-    # Indexing tools
-    registry.register(
-        ToolSpec(
+                tier="tier2",
+            ),
+        ])
+
+    _register([
+        # Indexer
+        ToolRegistration(
             name="index_write_symbol",
             description="Record a source code symbol (class, function) in the project index.",
             schema=build_tool_schema(
@@ -469,10 +866,8 @@ def build_registry(
             risk="low",
             allowed_modes={"indexer"},
             profiles={INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_write_reference",
             description="Record a cross-reference between symbols in the project index.",
             schema=build_tool_schema(
@@ -489,10 +884,8 @@ def build_registry(
             risk="low",
             allowed_modes={"indexer"},
             profiles={INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_write_import",
             description="Record a module import dependency in the project index.",
             schema=build_tool_schema(
@@ -509,10 +902,8 @@ def build_registry(
             risk="low",
             allowed_modes={"indexer"},
             profiles={INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_finalize",
             description="Finalize the indexing process and generate a project manifest.",
             schema=build_tool_schema(),
@@ -521,10 +912,8 @@ def build_registry(
             risk="low",
             allowed_modes={"indexer"},
             profiles={INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_batch_write",
             description="Write multiple indexing records (symbols, references, imports) in a single batch.",
             schema=build_tool_schema(
@@ -541,10 +930,10 @@ def build_registry(
                                 "end_line": {"type": "integer"},
                                 "signature": {"type": "string"},
                                 "docstring_short": {"type": "string"},
-                                "parent": {"type": "string"}
+                                "parent": {"type": "string"},
                             },
-                            "required": ["name", "kind", "file"]
-                        }
+                            "required": ["name", "kind", "file"],
+                        },
                     },
                     "references": {
                         "type": "array",
@@ -554,10 +943,10 @@ def build_registry(
                                 "to_symbol": {"type": "string"},
                                 "call_site_file": {"type": "string"},
                                 "from_symbol": {"type": "string"},
-                                "call_site_line": {"type": "integer"}
+                                "call_site_line": {"type": "integer"},
                             },
-                            "required": ["to_symbol", "call_site_file"]
-                        }
+                            "required": ["to_symbol", "call_site_file"],
+                        },
                     },
                     "imports": {
                         "type": "array",
@@ -567,11 +956,11 @@ def build_registry(
                                 "file": {"type": "string"},
                                 "imported_from": {"type": "string"},
                                 "symbols": {"type": "array", "items": {"type": "string"}},
-                                "is_external": {"type": "boolean"}
+                                "is_external": {"type": "boolean"},
                             },
-                            "required": ["file", "imported_from"]
-                        }
-                    }
+                            "required": ["file", "imported_from"],
+                        },
+                    },
                 }
             ),
             handler=indexer.index_batch_write,
@@ -579,55 +968,48 @@ def build_registry(
             risk="low",
             allowed_modes={"indexer"},
             profiles={INDEXER_PROFILE},
-        )
-    )
-
-    # Index query tools
-    registry.register(
-        ToolSpec(
+        ),
+        # Index query
+        ToolRegistration(
             name="index_query_symbol",
             description="Search for symbols in the code index by name or fuzzy pattern.",
             schema=build_tool_schema(
                 required=["query"],
-                properties={"query": {"type": "string"}}
+                properties={"query": {"type": "string"}},
             ),
             handler=indexer_query.index_query_symbol,
             category="indexer",
             risk="low",
-        allowed_modes={"chat", "loop", "planning"},
+            allowed_modes={"chat", "loop", "planning"},
             profiles={CORE_PROFILE, INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_get_references",
             description="Retrieve all locations where a specific symbol is referenced.",
             schema=build_tool_schema(
                 required=["symbol_name"],
-                properties={"symbol_name": {"type": "string"}}
+                properties={"symbol_name": {"type": "string"}},
             ),
             handler=indexer_query.index_get_references,
             category="indexer",
             risk="low",
-        allowed_modes={"chat", "loop", "planning"},
+            allowed_modes={"chat", "loop", "planning"},
             profiles={CORE_PROFILE, INDEXER_PROFILE},
-        )
-    )
-    registry.register(
-        ToolSpec(
+        ),
+        ToolRegistration(
             name="index_get_definition",
             description="Retrieve the file path and line numbers where a symbol is defined.",
             schema=build_tool_schema(
                 required=["symbol_name"],
-                properties={"symbol_name": {"type": "string"}}
+                properties={"symbol_name": {"type": "string"}},
             ),
             handler=indexer_query.index_get_definition,
             category="indexer",
             risk="low",
-        allowed_modes={"chat", "loop", "planning"},
+            allowed_modes={"chat", "loop", "planning"},
             profiles={CORE_PROFILE, INDEXER_PROFILE},
-        )
-    )
+        ),
+    ])
 
     return registry
 
@@ -642,7 +1024,7 @@ def register_mock_tool(
     **kwargs: Any,
 ) -> None:
     """Helper for registering mock tools with common patterns.
-    
+
     This function consolidates the schema building patterns used in AHO,
     reducing code duplication and ensuring consistency with core tool registration.
     """

@@ -16,6 +16,7 @@ def next_step_hint(
     artifact: ArtifactRecord,
     *,
     result: ToolEnvelope | None = None,
+    request_text: str | None = None,
 ) -> str:
     metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
     result_metadata = result.metadata if result and isinstance(result.metadata, dict) else {}
@@ -28,9 +29,24 @@ def next_step_hint(
     ).lower()
 
     if result_metadata.get("source_artifact_id"):
+        summary_hint = _artifact_summary_exit_hint(
+            artifact,
+            result=result,
+            request_text=request_text,
+        )
+        if summary_hint:
+            return summary_hint
         if result_metadata.get("truncated"):
             return _artifact_read_continuation_hint(artifact, result_metadata=result_metadata)
         return ""
+
+    summary_hint = _artifact_summary_exit_hint(
+        artifact,
+        result=result,
+        request_text=request_text,
+    )
+    if summary_hint:
+        return summary_hint
 
     if "listing" in intent or tool_name == "dir_list":
         return _dir_list_followup_hint(artifact, result=result)
@@ -77,14 +93,54 @@ def _artifact_read_continuation_hint(
     )
 
 
+def _request_prefers_summary_exit(request_text: str | None) -> bool:
+    text = re.sub(r"\s+", " ", str(request_text or "").strip().lower())
+    if not text:
+        return False
+    asks_for_summary = any(keyword in text for keyword in ("table", "summary", "summarize", "report", "overview", "present"))
+    asks_about_listing = any(keyword in text for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env"))
+    return asks_for_summary and asks_about_listing
+
+
+def _artifact_summary_exit_hint(
+    artifact: ArtifactRecord,
+    *,
+    result: ToolEnvelope | None = None,
+    request_text: str | None = None,
+) -> str:
+    if not _request_prefers_summary_exit(request_text):
+        return ""
+
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    result_metadata = result.metadata if result and isinstance(result.metadata, dict) else {}
+    if result_metadata.get("truncated"):
+        return ""
+
+    tool_name = (
+        metadata.get("_original_tool_name", "")
+        or artifact.kind
+        or artifact.tool_name
+        or ""
+    ).lower()
+    if tool_name not in {"dir_list", "dir_tree", "artifact_read", "artifact_print", "grep", "find_files"}:
+        return ""
+
+    return (
+        "You already have enough evidence to produce the requested table or summary. "
+        "Synthesize the answer now instead of rereading or printing the same artifact again."
+    )
+
+
 def format_compact_tool_message(
     artifact: ArtifactRecord,
     result: ToolEnvelope,
     *,
     request_text: str | None = None,
+    inline_full_file: bool = True,
+    full_file_preview_chars: int | None = None,
 ) -> str:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    if artifact.kind == "shell_exec" and not metadata.get("source_artifact_id"):
+    if artifact.kind in {"shell_exec", "ssh_exec"} and not metadata.get("source_artifact_id"):
         return _format_shell_exec_message(artifact, result, request_text=request_text)
 
     msg = f"Tool output captured as Artifact {artifact.artifact_id} ({artifact.size_bytes} bytes)."
@@ -93,10 +149,17 @@ def format_compact_tool_message(
     if artifact.kind == "file_read" and complete_file and isinstance(result.output, str):
         line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "the full file"
         file_text = result.output.rstrip()
-        msg = (
-            f"{msg}\n\nFull file captured ({line_label}).\n\nfull_file_content:\n"
-            f"{file_text}"
-        )
+        if inline_full_file:
+            msg = (
+                f"{msg}\n\nFull file captured ({line_label}).\n\nfull_file_content:\n"
+                f"{file_text}"
+            )
+        else:
+            preview_limit = full_file_preview_chars or 600
+            preview = file_text
+            if len(preview) > preview_limit:
+                preview = f"{preview[:preview_limit].rstrip()}..."
+            msg = f"{msg}\n\nFull file captured ({line_label}).\n\nPreview:\n{preview}"
     elif metadata.get("source_artifact_id") and isinstance(result.output, str):
         preview = _preview_result_text(result.output)
         if preview:
@@ -107,7 +170,7 @@ def format_compact_tool_message(
         preview = _preview_text(artifact)
         if preview:
             msg = f"{msg}\n\nPreview:\n{preview}"
-    hint = next_step_hint(artifact, result=result)
+    hint = next_step_hint(artifact, result=result, request_text=request_text)
     if hint:
         msg = f"{msg}\n\n{hint}"
     return msg
@@ -136,8 +199,9 @@ def _format_shell_exec_message(
             preview_limit=_SHELL_EXEC_INLINE_CHAR_LIMIT,
             strip_whitespace=False,
         )
-        msg = "Shell output:\n"
-        msg = f"{msg}{transcript}" if transcript else "Shell output."
+        command = metadata.get("command") or artifact.source or artifact.metadata.get("command")
+        msg = f"Shell output for `{command}`:\n" if command else "Shell output:\n"
+        msg = f"{msg}```\n{transcript}\n```" if transcript else f"{msg}ok"
 
     truncated = bool(metadata.get("truncated")) or transcript.endswith("... output truncated")
     if truncated:
@@ -152,14 +216,17 @@ def _format_shell_exec_message(
 
 
 def format_reused_artifact_message(artifact: ArtifactRecord) -> str:
-    message = f"REUSED Artifact {artifact.artifact_id}: {artifact.summary}"
-    preview = _preview_text(artifact)
-    if preview:
-        message = f"{message}\n\nPreview:\n{preview}"
-    hint = next_step_hint(artifact)
-    if hint:
-        message = f"{message}\n\n{hint}"
-    return message
+    summary = artifact.summary or artifact.source or artifact.kind or "cached artifact"
+    if artifact.kind == "file_read":
+        path = str(artifact.source or artifact.metadata.get("path") or artifact.content_path or "").strip()
+        path_note = f" for `{path}`" if path else ""
+        return (
+            f"Reused Artifact {artifact.artifact_id}: {summary}{path_note}. "
+            "You already have the full file evidence in context. "
+            "Do not call `file_read` again on the same path. "
+            "Work from this artifact, patch the file, or use `artifact_read` if you need paging."
+        )
+    return f"Reused Artifact {artifact.artifact_id}: {summary}"
 
 
 def _artifact_read_hint(
@@ -281,6 +348,23 @@ def _dir_list_followup_hint(
     )
 
 
+def render_dir_list_tree(
+    items: list[object],
+    *,
+    max_depth: int = 2,
+    max_children: int = 8,
+) -> str:
+    lines: list[str] = []
+    _append_dir_tree_lines(
+        lines,
+        items,
+        depth=0,
+        max_depth=max_depth,
+        max_children=max_children,
+    )
+    return "\n".join(lines).strip()
+
+
 def _dir_tree_followup_hint(
     artifact: ArtifactRecord,
     *,
@@ -305,7 +389,7 @@ def _search_followup_hint(
     return _artifact_read_hint(
         artifact,
         lead="To continue through more results in the next chunk,",
-        tail="or rerun the search with a narrower query/path.",
+        tail="instead of rerun the search with a narrower query/path or a larger `max_results`.",
     )
 
 
@@ -318,7 +402,14 @@ def _file_read_followup_hint(
     complete_file = bool(metadata.get("complete_file"))
     total_lines = metadata.get("total_lines")
     if complete_file:
-        return ""
+        line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "the full file"
+        path = str(metadata.get("path") or artifact.source or artifact.content_path or "").strip()
+        path_note = f" from `{path}`" if path else ""
+        return (
+            f"You now have {line_label}{path_note}. Do not call `file_read` on the same path again. "
+            f"Next, patch the file, run focused verification, or call `task_complete`. "
+            f"If you need line-level detail later, use `artifact_read(artifact_id='{artifact.artifact_id}')`."
+        )
     if total_lines is None and result and isinstance(result.output, str):
         total_lines = len(result.output.splitlines())
     line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "this excerpt"
@@ -362,9 +453,23 @@ def _dir_list_preview_is_incomplete(
     if total_items is None and result and result.output:
         if isinstance(result.output, list):
             total_items = len(result.output)
-    
+
     if total_items is not None and total_items > _LISTING_PREVIEW_ENTRY_LIMIT:
         return True
+    if result and isinstance(result.output, list) and _dir_list_tree_has_truncation(result.output):
+        return True
+    return False
+
+
+def _dir_list_tree_has_truncation(items: list[object]) -> bool:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("children_truncated"):
+            return True
+        children = item.get("children")
+        if isinstance(children, list) and _dir_list_tree_has_truncation(children):
+            return True
     return False
 
 
@@ -377,3 +482,77 @@ def _listing_preview_is_incomplete(
     if metadata.get("truncated"):
         return True
     return _dir_list_preview_is_incomplete(artifact, result=result)
+
+
+def _append_dir_tree_lines(
+    lines: list[str],
+    items: list[object],
+    *,
+    depth: int,
+    max_depth: int,
+    max_children: int,
+) -> None:
+    indent = "  " * depth
+    preview_items = items[:max_children]
+    for item in preview_items:
+        _append_dir_tree_line(
+            lines,
+            item,
+            depth=depth,
+            max_depth=max_depth,
+            max_children=max_children,
+        )
+    if len(items) > len(preview_items):
+        lines.append(f"{indent}... {len(items) - len(preview_items)} more items")
+
+
+def _append_dir_tree_line(
+    lines: list[str],
+    item: object,
+    *,
+    depth: int,
+    max_depth: int,
+    max_children: int,
+) -> None:
+    indent = "  " * depth
+    if not isinstance(item, dict):
+        text = str(item or "").strip()
+        if text:
+            lines.append(f"{indent}{text}")
+        return
+
+    name = str(item.get("name") or item.get("path") or "").strip()
+    if not name:
+        return
+
+    parts = [name]
+    item_type = str(item.get("type") or "").strip()
+    if item_type:
+        parts.append(f"[{item_type}]")
+
+    size = item.get("size")
+    if isinstance(size, int) and size >= 0:
+        parts.append(f"({size} bytes)")
+
+    children = item.get("children")
+    children_count = item.get("children_count")
+    if item_type == "dir" and isinstance(children_count, int) and children_count >= 0:
+        parts.append(f"({children_count} children)")
+
+    lines.append(f"{indent}{' '.join(parts).strip()}")
+
+    if depth >= max_depth:
+        if isinstance(children_count, int) and children_count > 0 and isinstance(children, list):
+            lines.append(f"{indent}  ... more nested items")
+        return
+
+    if isinstance(children, list) and children:
+        _append_dir_tree_lines(
+            lines,
+            children,
+            depth=depth + 1,
+            max_depth=max_depth,
+            max_children=max_children,
+        )
+        if item.get("children_truncated"):
+            lines.append(f"{indent}  ... more nested items")

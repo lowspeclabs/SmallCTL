@@ -130,7 +130,7 @@
 
 .assistant-turn-body {
   layout: vertical;
-  width: 100%;
+  width: 1fr;
   height: auto;
   border-left: solid #32415f;
   margin-left: 1;
@@ -138,18 +138,21 @@
 }
 
 .assistant-turn-text {
-  width: 100%;
+  width: 1fr;
   margin: 0;
   padding: 0 1;
 }
 
 .assistant-detail {
-  width: 100%;
+  width: 1fr;
   height: auto;
   margin: 0;
   padding: 0;
   background: #0b1020;
-  border: round #9aa6b2;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  border-left: thick #9aa6b2;
 }
 
 .assistant-detail > CollapsibleTitle {
@@ -167,15 +170,24 @@
 }
 
 .assistant-detail-thinking {
-  border: round #f59e0b;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  border-left: thick #f59e0b;
 }
 
 .assistant-detail-tool_call {
-  border: round #e879f9;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  border-left: thick #e879f9;
 }
 
 .assistant-detail-tool_result {
-  border: round #38bdf8;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  border-left: thick #38bdf8;
 }
 
 .assistant-detail-content {
@@ -189,12 +201,12 @@
 }
 
 .bubble-nested {
-  width: 100%;
+  width: 1fr;
   margin: 0 0 0 1;
 }
 
 .assistant-detail-nested {
-  width: 100%;
+  width: 1fr;
   margin: 0 0 0 1;
 }
 
@@ -235,7 +247,7 @@
   background: black;
   border: thick #475569;
   color: #f1f5f9;
-  margin: 1 0 0 1;
+  margin: 0 0 0 1;
   padding: 0;
 }
 
@@ -252,5 +264,12 @@
 }
 
 .assistant-detail-nested {
-  margin-top: 1;
+  margin-top: 0;
+}
+
+.tool-calls-scroll-container {
+  height: auto;
+  max-height: 24;
+  overflow-y: auto;
+  overflow-x: hidden;
 }

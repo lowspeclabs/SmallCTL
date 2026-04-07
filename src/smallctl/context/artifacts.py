@@ -10,13 +10,13 @@ from typing import Any
 from ..models.tool_result import ToolEnvelope
 from ..state import ArtifactRecord, json_safe_value
 from .rendering import render_shell_failure, render_shell_output
-from .messages import _LISTING_PREVIEW_ENTRY_LIMIT, format_compact_tool_message
+from .messages import _LISTING_PREVIEW_ENTRY_LIMIT, format_compact_tool_message, render_dir_list_tree
 from .policy import estimate_text_tokens
 
 
 @dataclass
 class ArtifactPolicy:
-    inline_token_limit: int = 1000
+    inline_token_limit: int = 1300
     preview_char_limit: int = 4000
     force_artifact_tools: tuple[str, ...] = (
         "file_read",
@@ -52,8 +52,15 @@ class ArtifactStore:
         discovered = self._discover_next_index()
         self._next_index = max(discovered, artifact_start_index or 1)
 
-    def persist_tool_result(self, *, tool_name: str, result: ToolEnvelope) -> ArtifactRecord:
-        if tool_name == "shell_exec" and isinstance(result.metadata, dict):
+    def persist_tool_result(
+        self,
+        *,
+        tool_name: str,
+        result: ToolEnvelope,
+        session_id: str = "",
+        tool_call_id: str = "",
+    ) -> ArtifactRecord:
+        if tool_name in {"shell_exec", "ssh_exec"} and isinstance(result.metadata, dict):
             result.metadata.setdefault("model_visible", False)
             result.metadata.setdefault("hidden", True)
         payload = result.to_dict()
@@ -61,7 +68,7 @@ class ArtifactStore:
         artifact_id = f"A{self._next_index:04d}"
         self._next_index += 1
         metadata = _coerce_metadata_payload(result.metadata)
-        if tool_name == "shell_exec":
+        if tool_name in {"shell_exec", "ssh_exec"}:
             metadata["model_visible"] = False
             metadata["hidden"] = True
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -126,6 +133,76 @@ class ArtifactStore:
             inline_content=inline_content,
             preview_text=preview_text,
             metadata=metadata,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+        )
+
+    def persist_generated_text(
+        self,
+        *,
+        kind: str,
+        source: str,
+        content: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+        tool_name: str | None = None,
+        session_id: str = "",
+        tool_call_id: str = "",
+    ) -> ArtifactRecord:
+        artifact_id = f"A{self._next_index:04d}"
+        self._next_index += 1
+        created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        txt_path = self.run_dir / f"{artifact_id}.txt"
+        json_path = self.run_dir / f"{artifact_id}.json"
+
+        metadata_payload = _coerce_metadata_payload(metadata or {})
+        metadata_payload.setdefault("content_type", kind)
+        metadata_payload.setdefault("generated", True)
+        metadata_payload.setdefault("source_type", "generated")
+        metadata_payload.setdefault("source", source)
+        metadata_payload.setdefault("kind", kind)
+
+        txt_path.write_text(content, encoding="utf-8")
+        record_payload = {
+            "artifact_id": artifact_id,
+            "kind": kind,
+            "source": source,
+            "created_at": created_at,
+            "size_bytes": len(content.encode("utf-8")),
+            "summary": summary,
+            "keywords": [],
+            "path_tags": [],
+            "tool_name": tool_name or kind,
+            "content_path": str(txt_path),
+            "inline_content": None,
+            "preview_text": content[: self.policy.preview_char_limit],
+            "metadata": metadata_payload,
+        }
+        json_path.write_text(
+            json.dumps(record_payload, ensure_ascii=True, default=str, indent=2),
+            encoding="utf-8",
+        )
+        preview_text = content[: self.policy.preview_char_limit]
+        if not self.policy.should_externalize(tool_name=tool_name or kind, serialized_output=content):
+            inline_content = content
+        else:
+            inline_content = None
+        return ArtifactRecord(
+            artifact_id=artifact_id,
+            kind=kind,
+            source=source,
+            created_at=created_at,
+            size_bytes=len(content.encode("utf-8")),
+            summary=summary,
+            keywords=self._keywords(source=source, summary=summary, metadata=metadata_payload),
+            path_tags=self._path_tags(metadata_payload),
+            tool_name=tool_name or kind,
+            content_path=str(txt_path),
+            inline_content=inline_content,
+            preview_text=preview_text,
+            metadata=metadata_payload,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
         )
 
     def persist_thinking(self, *, raw_thinking: str, summary: str, source: str = "assistant") -> ArtifactRecord:
@@ -155,8 +232,16 @@ class ArtifactStore:
         result: ToolEnvelope,
         *,
         request_text: str | None = None,
+        inline_full_file: bool = True,
+        full_file_preview_chars: int | None = None,
     ) -> str:
-        return format_compact_tool_message(artifact, result, request_text=request_text)
+        return format_compact_tool_message(
+            artifact,
+            result,
+            request_text=request_text,
+            inline_full_file=inline_full_file,
+            full_file_preview_chars=full_file_preview_chars,
+        )
 
     @staticmethod
     def _is_shell_output(output: dict[str, Any]) -> bool:
@@ -261,7 +346,7 @@ class ArtifactStore:
             if ArtifactStore._is_shell_output(output):
                 preview = render_shell_output(output, preview_limit=limit, strip_whitespace=False)
                 return preview or None
-        structured_preview = ArtifactStore._structured_preview(output=output, limit=min(limit, 400))
+        structured_preview = ArtifactStore._structured_preview(output=output, limit=min(limit, 1600))
         if structured_preview:
             return structured_preview
         if tool_name == "yaml_read" and output is not None:
@@ -282,10 +367,13 @@ class ArtifactStore:
             return rendered[:limit] if rendered else None
         if isinstance(output, list):
             lines: list[str] = []
-            for item in output[:_LISTING_PREVIEW_ENTRY_LIMIT]:
-                line = ArtifactStore._preview_line(item)
-                if line:
-                    lines.append(line)
+            tree_preview = render_dir_list_tree(
+                output[:_LISTING_PREVIEW_ENTRY_LIMIT],
+                max_depth=2,
+                max_children=8,
+            )
+            if tree_preview:
+                lines.extend(tree_preview.splitlines())
             if len(output) > _LISTING_PREVIEW_ENTRY_LIMIT:
                 lines.append(f"... {len(output) - _LISTING_PREVIEW_ENTRY_LIMIT} more items")
             preview = "\n".join(lines).strip()
@@ -336,6 +424,9 @@ class ArtifactStore:
                 size = item.get("size")
                 if isinstance(size, int) and size >= 0:
                     line = f"{line} ({size} bytes)"
+                children_count = item.get("children_count")
+                if isinstance(children_count, int) and children_count >= 0:
+                    line = f"{line} ({children_count} children)"
                 return line
             rendered = json.dumps(item, ensure_ascii=True, default=str)
             return rendered

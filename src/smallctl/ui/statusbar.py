@@ -17,6 +17,10 @@ class StatusBar(Static):
         plan: str = "",
         active_step: str = "",
         activity: str = "",
+        contract_flow_ui: bool = False,
+        contract_phase: str = "",
+        acceptance_progress: str = "",
+        latest_verdict: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -27,6 +31,10 @@ class StatusBar(Static):
         self._plan = plan
         self._active_step = active_step
         self._activity = activity
+        self._contract_flow_ui = contract_flow_ui
+        self._contract_phase = contract_phase
+        self._acceptance_progress = acceptance_progress
+        self._latest_verdict = latest_verdict
         self._token_usage = 0  # Current prompt estimate
         self._token_limit = 0  # Context window limit
         self._token_total = 0  # Cumulative session tokens
@@ -47,6 +55,10 @@ class StatusBar(Static):
         plan: str,
         active_step: str,
         activity: str,
+        contract_flow_ui: bool,
+        contract_phase: str,
+        acceptance_progress: str,
+        latest_verdict: str,
         token_usage: int, # prompt estimate
         token_total: int, # cumulative
         token_limit: int, # window
@@ -59,6 +71,10 @@ class StatusBar(Static):
         self._plan = plan
         self._active_step = active_step
         self._activity = activity
+        self._contract_flow_ui = contract_flow_ui
+        self._contract_phase = contract_phase
+        self._acceptance_progress = acceptance_progress
+        self._latest_verdict = latest_verdict
         self._token_usage = max(0, token_usage)
         self._token_total = max(0, token_total)
         self._token_limit = max(0, token_limit)
@@ -78,6 +94,13 @@ class StatusBar(Static):
             parts.append(f"active-step: {self._active_step}")
         if self._activity:
             parts.append(f"activity: {self._activity}")
+        if self._contract_flow_ui:
+            if self._contract_phase:
+                parts.append(f"contract: {self._contract_phase}")
+            if self._acceptance_progress:
+                parts.append(f"acceptance: {self._acceptance_progress}")
+            if self._latest_verdict:
+                parts.append(f"verdict: {self._latest_verdict}")
         
         if self._api_errors > 0:
             parts.append(f"[bold red]API ERRORS: {self._api_errors}[/]")

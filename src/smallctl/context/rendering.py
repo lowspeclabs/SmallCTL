@@ -20,7 +20,7 @@ def render_shell_output(
         parts.append(stdout)
     if stderr:
         parts.append(f"--- [STDERR] ---\n{stderr}")
-    if exit_code is not None and exit_code != 0:
+    if exit_code is not None:
         parts.append(f"--- [EXIT CODE: {exit_code}] ---")
 
     text = "\n\n".join(parts) or "ok"

@@ -47,7 +47,9 @@ class ConsolePane(VerticalScroll):
         self._schedule_autoscroll()
 
     async def append_event(self, event: UIEvent) -> None:
+        speaker = _coerce_speaker(event.data.get("speaker"))
         if event.event_type == UIEventType.ASSISTANT:
+            await self._ensure_assistant_turn(speaker=speaker)
             if event.data.get("kind") == "print":
                 await self._append_full_printout(
                     event.content, 
@@ -59,12 +61,15 @@ class ConsolePane(VerticalScroll):
                 await self._append_assistant(event.content)
             return
         if event.event_type == UIEventType.THINKING:
+            await self._ensure_assistant_turn(speaker=speaker)
             await self._append_thinking(event.content)
             return
         if event.event_type == UIEventType.SHELL_STREAM:
+            await self._ensure_assistant_turn(speaker=speaker)
             await self._append_shell_stream(event.content)
             return
         if event.event_type == UIEventType.TOOL_CALL:
+            await self._ensure_assistant_turn(speaker=speaker)
             await self._append_tool_call(
                 str(event.data.get("display_text") or event.content),
                 tool_name=event.content,
@@ -72,6 +77,7 @@ class ConsolePane(VerticalScroll):
             )
             return
         if event.event_type == UIEventType.TOOL_RESULT:
+            await self._ensure_assistant_turn(speaker=speaker)
             nested = await self._append_tool_result(
                 str(event.data.get("display_text") or event.content),
                 tool_name=_coerce_str(event.data.get("tool_name")),
@@ -163,12 +169,14 @@ class ConsolePane(VerticalScroll):
         await stack.mount(bubble)
         return bubble
 
-    async def _ensure_assistant_turn(self) -> AssistantTurnWidget:
+    async def _ensure_assistant_turn(self, *, speaker: str | None = None) -> AssistantTurnWidget:
         if self._active_assistant_turn is None:
-            turn = AssistantTurnWidget()
+            turn = AssistantTurnWidget(speaker=speaker or "assistant")
             stack = self.query_one("#bubble-stack", Vertical)
             await stack.mount(turn)
             self._active_assistant_turn = turn
+        elif speaker:
+            self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
 
     def _schedule_autoscroll(self) -> None:
@@ -191,3 +199,8 @@ def _coerce_str(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _coerce_speaker(value: object) -> str:
+    speaker = str(value or "assistant").strip().lower()
+    return speaker or "assistant"

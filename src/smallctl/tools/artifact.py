@@ -180,7 +180,21 @@ def artifact_read(
                 pass
 
     if not artifact:
-        return fail(f"Artifact {artifact_id} not found in state.")
+        # Provide a session-mismatch hint if the ID format is valid but belongs to another run
+        hint = ""
+        if artifact_id.startswith("A"):
+            current_session = str(getattr(state, "thread_id", "") or "")
+            if current_session:
+                # Check if any artifact has a mismatched session_id to give a useful diagnostic
+                for aid, rec in state.artifacts.items():
+                    if getattr(rec, "session_id", "") and rec.session_id != current_session:
+                        hint = " This artifact ID was created in a previous session. Re-execute the original tool call to regenerate the data in the current session."
+                        break
+                else:
+                    if not state.artifacts:
+                        hint = " No artifacts exist in the current session state. Re-execute the original tool call."
+        return fail(f"Artifact {artifact_id} not found in state.{hint}")
+
 
     requested_max_chars = _coerce_positive_int(max_chars)
     if max_chars is not None and requested_max_chars is None:

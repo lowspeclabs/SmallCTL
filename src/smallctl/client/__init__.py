@@ -22,6 +22,9 @@ from .chunk_parser import (
     maybe_parse_tool_args,
 )
 from .provider_adapters import (
+    adapter_for_profile,
+    get_provider_adapter,
+    registered_provider_adapters,
     sanitize_message_for_transport,
     sanitize_messages_with_pending_tool_cleanup,
     sanitize_messages_for_openrouter,
@@ -30,6 +33,7 @@ from .provider_adapters import (
 )
 from .streaming import SSEStreamer
 from .usage import extract_context_limit, extract_runtime_context_limit
+from .usage import detect_provider_profile
 
 __all__ = [
     # Data classes
@@ -44,6 +48,9 @@ __all__ = [
     "format_tool_call_text",
     "maybe_parse_tool_args",
     # Provider adapters
+    "adapter_for_profile",
+    "get_provider_adapter",
+    "registered_provider_adapters",
     "sanitize_message_for_transport",
     "sanitize_messages_with_pending_tool_cleanup",
     "sanitize_messages_for_openrouter",
@@ -54,4 +61,5 @@ __all__ = [
     # Usage
     "extract_context_limit",
     "extract_runtime_context_limit",
+    "detect_provider_profile",
 ]

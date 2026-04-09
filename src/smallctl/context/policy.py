@@ -30,6 +30,7 @@ class ContextPolicy:
     prior_outcome_token_limit: int = 220
     max_prior_outcomes: int = 4
     tool_result_inline_token_limit: int = 325
+    artifact_read_inline_token_limit: int = 1024
     memory_staleness_step_limit: int = 8
     memory_low_confidence_threshold: float = 0.6
     
@@ -51,6 +52,7 @@ class ContextPolicy:
     min_hot_messages: int = 8
     max_hot_messages: int = 256
     compaction_strategy: str = "lazy"   # "lazy" | "aggressive"
+    backend_profile: str = "generic"
 
     @property
     def section_token_limits(self) -> dict[str, int]:
@@ -78,9 +80,35 @@ class ContextPolicy:
             int(limit - reserve_comp - reserve_tool),
         )
 
-    def recalculate_quotas(self, total_context: int) -> None:
+    def apply_backend_profile(self, backend_profile: str | None) -> None:
+        profile = str(backend_profile or "generic").strip().lower()
+        self.backend_profile = profile
+
+        if profile in {"lmstudio", "ollama", "llamacpp"}:
+            self.messages_per_k_tokens = 0.8
+            self.hot_history_ratio = 0.40
+            self.retrieval_ratio = 0.18
+            self.warm_tier_ratio = 0.08
+            self.min_hot_messages = 6
+        elif profile in {"openai", "openrouter", "vllm"}:
+            self.messages_per_k_tokens = 1.2
+            self.hot_history_ratio = 0.48
+            self.retrieval_ratio = 0.22
+            self.warm_tier_ratio = 0.12
+            self.min_hot_messages = 8
+        else:
+            self.messages_per_k_tokens = 1.0
+            self.hot_history_ratio = 0.45
+            self.retrieval_ratio = 0.20
+            self.warm_tier_ratio = 0.10
+            self.min_hot_messages = 8
+
+    def recalculate_quotas(self, total_context: int, *, backend_profile: str | None = None) -> None:
         """Called once after server context discovery. Recalculates all section
         token budgets from ratios so the policy is internally consistent."""
+        if backend_profile is not None:
+            self.apply_backend_profile(backend_profile)
+
         soft = self.soft_prompt_token_limit or total_context
         if soft is None:
             return

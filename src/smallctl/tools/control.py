@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..state import LoopState, clip_text_value
+from ..write_session_fsm import recent_write_session_events, record_write_session_event
 from .common import fail, ok
 
 
@@ -98,6 +99,36 @@ def _write_session_resume_action(
 
 async def task_complete(message: str, state: LoopState) -> dict:
     verifier_verdict = _normalized_verifier_verdict(state)
+    session = state.write_session
+    if session is not None and str(session.status or "").strip().lower() != "complete":
+        record_write_session_event(
+            state,
+            event="task_complete_blocked",
+            session=session,
+            details={"reason": "session_incomplete"},
+        )
+        session_status = str(session.status or "open").strip() or "open"
+        error = (
+            "Cannot complete the task while Write Session "
+            f"`{session.write_session_id}` for `{session.write_target_path}` is still {session_status}."
+        )
+        next_section = str(session.write_next_section or "").strip()
+        if next_section:
+            error += f" Next required section: `{next_section}`."
+        elif session.write_pending_finalize:
+            error += " The staged file still needs verification and finalization."
+        else:
+            error += " The staged file has not been finalized to the target path yet."
+        failure = _write_session_schema_failure(state)
+        return fail(
+            error,
+            metadata={
+                "write_session": session.to_dict(),
+                "next_required_tool": _write_session_resume_action(state, failure),
+                "last_verifier_verdict": verifier_verdict,
+                "acceptance_checklist": state.acceptance_checklist(),
+            },
+        )
     if verifier_verdict and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"} and not state.acceptance_waived:
         error = "Cannot complete the task while the latest verifier verdict is still failing."
         verifier_summary = _verifier_failure_summary(verifier_verdict)
@@ -128,6 +159,14 @@ async def task_complete(message: str, state: LoopState) -> dict:
 
 
 async def task_fail(message: str, state: LoopState) -> dict:
+    session = state.write_session
+    if session is not None and str(session.status or "").strip().lower() != "complete":
+        record_write_session_event(
+            state,
+            event="session_abandoned",
+            session=session,
+            details={"reason": "task_fail"},
+        )
     state.scratchpad["_task_failed"] = True
     state.scratchpad["_task_failed_message"] = message
     state.recent_errors.append(message)
@@ -159,6 +198,7 @@ async def loop_status(state: LoopState) -> dict:
     contract_phase = state.contract_phase()
     write_session_failure = _write_session_schema_failure(state)
     write_session_payload = state.write_session.to_dict() if state.write_session else None
+    write_session_events = recent_write_session_events(state, limit=10)
     next_required_tool = _write_session_resume_action(state, write_session_failure)
     if write_session_payload is not None and write_session_failure is not None:
         write_session_payload = dict(write_session_payload)
@@ -186,9 +226,10 @@ async def loop_status(state: LoopState) -> dict:
             "last_verifier_verdict": verifier_verdict,
             "last_failure_class": state.last_failure_class,
             "files_changed_this_cycle": state.files_changed_this_cycle,
-            "repair_cycle_id": state.repair_cycle_id,
+            "system_repair_cycle_id": state.repair_cycle_id,
             "stagnation_counters": state.stagnation_counters,
             "next_required_tool": next_required_tool,
             "write_session": write_session_payload,
+            "write_session_events": write_session_events,
         }
     )

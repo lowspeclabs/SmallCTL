@@ -21,6 +21,7 @@ class RecoveredWriteIntent:
     write_session_id: str = ""
     section_name: str = ""
     next_section_name: str = ""
+    next_section_name_supplied: bool = False
     replace_strategy: str = ""
     confidence: str = "low"
     evidence: list[str] = field(default_factory=list)
@@ -114,8 +115,9 @@ def recover_content_from_assistant_text(
     allow_raw_text_targets: bool,
     path_confidence: str = "low",
 ) -> tuple[str, str, list[str]]:
-    inline_content, inline_evidence = _extract_inline_tool_content(text, target_path=target_path)
-    if inline_content:
+    inline_payload, inline_evidence = _extract_inline_tool_payload(text, target_path=target_path)
+    inline_content = str(inline_payload.get("content") or "")
+    if inline_content.strip():
         evidence = ["assistant_inline_tool_block"]
         evidence.extend(inline_evidence)
         return inline_content, "high", evidence
@@ -155,7 +157,8 @@ def recover_write_intent(
     if pending is None and not _contains_write_tool_calls(partial_tool_calls):
         return None
 
-    args = normalize_write_argument_aliases(dict(getattr(pending, "args", {}) or {})) if pending is not None else {}
+    raw_args = dict(getattr(pending, "args", {}) or {}) if pending is not None else {}
+    args = normalize_write_argument_aliases(raw_args) if pending is not None else {}
     intent = RecoveredWriteIntent()
     if pending is not None:
         intent.tool_name = "file_write" if pending.tool_name in _WRITE_TOOLS else pending.tool_name
@@ -206,7 +209,53 @@ def recover_write_intent(
     intent.write_session_id = str(args.get("write_session_id") or "").strip()
     intent.section_name = str(args.get("section_name") or args.get("section_id") or "").strip()
     intent.next_section_name = str(args.get("next_section_name") or "").strip()
+    intent.next_section_name_supplied = any(
+        key in raw_args for key in ("next_section_name", "next_section")
+    )
     intent.replace_strategy = str(args.get("replace_strategy") or "").strip()
+
+    assistant_payload, assistant_payload_evidence = _extract_inline_tool_payload(
+        assistant_text,
+        target_path=path,
+    )
+    if assistant_payload:
+        intent.evidence.extend(["assistant_inline_tool_block", *assistant_payload_evidence])
+        if not intent.write_session_id:
+            intent.write_session_id = str(assistant_payload.get("write_session_id") or "").strip()
+        if not intent.section_name:
+            intent.section_name = str(
+                assistant_payload.get("section_name")
+                or assistant_payload.get("section_id")
+                or ""
+            ).strip()
+        if not intent.next_section_name:
+            intent.next_section_name = str(assistant_payload.get("next_section_name") or "").strip()
+            if intent.next_section_name:
+                intent.next_section_name_supplied = True
+        if not intent.replace_strategy:
+            intent.replace_strategy = str(assistant_payload.get("replace_strategy") or "").strip()
+
+    partial_payload, partial_payload_evidence = _extract_partial_write_payload(
+        partial_tool_calls,
+        target_path=path,
+        cwd=getattr(getattr(harness, "state", None), "cwd", None),
+    )
+    if partial_payload:
+        intent.evidence.extend(partial_payload_evidence)
+        if not intent.write_session_id:
+            intent.write_session_id = str(partial_payload.get("write_session_id") or "").strip()
+        if not intent.section_name:
+            intent.section_name = str(
+                partial_payload.get("section_name")
+                or partial_payload.get("section_id")
+                or ""
+            ).strip()
+        if not intent.next_section_name and not intent.next_section_name_supplied:
+            intent.next_section_name = str(partial_payload.get("next_section_name") or "").strip()
+            if intent.next_section_name:
+                intent.next_section_name_supplied = True
+        if not intent.replace_strategy:
+            intent.replace_strategy = str(partial_payload.get("replace_strategy") or "").strip()
 
     _attach_session_metadata(intent, harness=harness)
     if intent.path:
@@ -363,7 +412,7 @@ def _attach_session_metadata(intent: RecoveredWriteIntent, *, harness: Any) -> N
         ).strip() or "imports"
         intent.section_name = section_name
         intent.evidence.append("active_section_name")
-    if not intent.next_section_name:
+    if not intent.next_section_name and not intent.next_section_name_supplied:
         sections = [
             str(item).strip()
             for item in (getattr(session, "suggested_sections", []) or [])
@@ -451,22 +500,61 @@ def _extract_inline_tool_paths(text: str) -> list[str]:
     return paths
 
 
-def _extract_inline_tool_content(text: str, *, target_path: str) -> tuple[str, list[str]]:
+def _extract_inline_tool_payload(text: str, *, target_path: str) -> tuple[dict[str, Any], list[str]]:
     for pending in _extract_inline_write_calls(text):
         payload = normalize_write_argument_aliases(dict(getattr(pending, "args", {}) or {}))
         candidate_path = str(payload.get("path") or "").strip()
         if target_path and candidate_path and candidate_path != target_path:
             continue
-        content = str(payload.get("content") or "")
-        if content.strip():
-            evidence: list[str] = []
-            block_source = str(getattr(pending, "_recovery_block_source", "") or "").strip()
-            if block_source:
-                evidence.append(block_source)
-            block_format = str(getattr(pending, "_recovery_block_format", "") or "").strip()
-            if block_format:
-                evidence.append(block_format)
-            return content, evidence
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("content", "section_name", "section_id", "next_section_name", "write_session_id", "replace_strategy")
+        ):
+            continue
+        evidence: list[str] = []
+        block_source = str(getattr(pending, "_recovery_block_source", "") or "").strip()
+        if block_source:
+            evidence.append(block_source)
+        block_format = str(getattr(pending, "_recovery_block_format", "") or "").strip()
+        if block_format:
+            evidence.append(block_format)
+        return payload, evidence
+    return {}, []
+
+
+def _extract_partial_write_payload(
+    partial_tool_calls: list[dict[str, Any]] | None,
+    *,
+    target_path: str = "",
+    cwd: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    if not isinstance(partial_tool_calls, list):
+        return {}, []
+
+    for raw in reversed(partial_tool_calls):
+        candidate = PendingToolCall.from_payload(raw)
+        if candidate is None or candidate.tool_name not in _WRITE_TOOLS:
+            continue
+        payload = normalize_write_argument_aliases(dict(getattr(candidate, "args", {}) or {}))
+        candidate_path = str(payload.get("path") or "").strip()
+        if target_path and candidate_path and not _same_path(candidate_path, target_path, cwd):
+            continue
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("content", "section_name", "section_id", "next_section_name", "write_session_id", "replace_strategy")
+        ):
+            continue
+        return payload, ["partial_tool_arguments"]
+    return {}, []
+
+
+def _extract_inline_tool_content(text: str, *, target_path: str) -> tuple[str, list[str]]:
+    payload, inline_evidence = _extract_inline_tool_payload(text, target_path=target_path)
+    content = str(payload.get("content") or "")
+    if content.strip():
+        evidence = ["assistant_inline_tool_block"]
+        evidence.extend(inline_evidence)
+        return content, evidence
     return "", []
 
 

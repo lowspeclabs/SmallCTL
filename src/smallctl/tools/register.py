@@ -394,28 +394,20 @@ def build_registry(
         # Shell
         ToolRegistration(
             name="shell_exec",
-            description="Execute a shell command after user approval.",
+            description="Execute a shell command after user approval, launch it in background, or poll a background job with job_id.",
             schema=build_tool_schema(
-                required=["command"],
-                properties={"command": {"type": "string"}, "timeout_sec": {"type": "integer"}},
+                properties={
+                    "command": {"type": "string"},
+                    "job_id": {"type": "string"},
+                    "background": {"type": "boolean"},
+                    "timeout_sec": {"type": "integer"},
+                },
             ),
             handler=_inject_state_and_harness(shell.shell_exec),
             category="shell",
             risk="high",
             allowed_modes={"loop"},
             profiles={CORE_PROFILE},
-        ),
-        ToolRegistration(
-            name="shell_background",
-            description="Run shell command in background.",
-            schema=build_tool_schema(
-                required=["command"], properties={"command": {"type": "string"}}
-            ),
-            handler=_inject_state_and_harness(shell.shell_background),
-            category="shell",
-            risk="high",
-            allowed_modes={"loop"},
-            profiles={SUPPORT_PROFILE},
         ),
         ToolRegistration(
             name="process_kill",

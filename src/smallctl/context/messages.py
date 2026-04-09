@@ -189,23 +189,36 @@ def _format_shell_exec_message(
         transcript = render_shell_failure(
             error=result.error,
             output=failure_output if isinstance(failure_output, dict) else None,
-            preview_limit=_SHELL_EXEC_INLINE_CHAR_LIMIT,
+            preview_limit=None,
             strip_whitespace=False,
         )
-        msg = f"Shell error:\n{transcript}" if transcript else "Shell error."
+        msg = transcript or "Shell command failed."
     else:
         transcript = render_shell_output(
             output,
+            preview_limit=None,
+            strip_whitespace=False,
+        )
+        msg = transcript or "ok"
+
+    truncated = (
+        bool(metadata.get("truncated"))
+        or len(transcript) > _SHELL_EXEC_INLINE_CHAR_LIMIT
+        or transcript.endswith("... output truncated")
+    )
+    if truncated:
+        preview = render_shell_output(
+            output,
+            preview_limit=_SHELL_EXEC_INLINE_CHAR_LIMIT,
+            strip_whitespace=False,
+        ) if result.success else render_shell_failure(
+            error=result.error,
+            output=failure_output if isinstance(failure_output, dict) else None,
             preview_limit=_SHELL_EXEC_INLINE_CHAR_LIMIT,
             strip_whitespace=False,
         )
-        command = metadata.get("command") or artifact.source or artifact.metadata.get("command")
-        msg = f"Shell output for `{command}`:\n" if command else "Shell output:\n"
-        msg = f"{msg}```\n{transcript}\n```" if transcript else f"{msg}ok"
-
-    truncated = bool(metadata.get("truncated")) or transcript.endswith("... output truncated")
-    if truncated:
         footer = f"Output truncated; full transcript stored in hidden Artifact {artifact.artifact_id}."
+        msg = preview or msg
         if _request_has_full_artifact_intent(request_text):
             footer = (
                 f"{footer} Call `artifact_read(artifact_id='{artifact.artifact_id}')` "

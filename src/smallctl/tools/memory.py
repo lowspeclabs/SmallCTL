@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..normalization import dedupe_keep_tail as _dedupe_keep_tail
-from ..state import LoopState, clip_string_list, clip_text_value
+from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, clip_string_list, clip_text_value
 from .common import fail, ok
 
 
@@ -43,6 +43,8 @@ async def checkpoint(
 ) -> dict[str, Any]:
     path = Path(output_path).resolve() if output_path else Path(state.cwd).resolve() / ".smallctl-checkpoint.json"
     payload = {
+        "checkpoint_schema_version": 1,
+        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
         "label": label,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "state": state.to_dict(),

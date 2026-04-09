@@ -60,6 +60,30 @@ class RunLogger:
             (self.run_dir / f"{channel}.jsonl").touch(exist_ok=True)
             (self.run_dir / f"{channel}.log").touch(exist_ok=True)
 
+    def set_session_id(self, session_id: str) -> Path:
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return self.run_dir
+
+        with self._lock:
+            self.extra_fields["session_id"] = normalized
+            current_name = self.run_dir.name
+            parts = current_name.split("-", 1)
+            suffix = parts[1] if len(parts) == 2 else current_name
+            if parts and parts[0] == normalized:
+                return self.run_dir
+
+            parent = self.run_dir.parent
+            candidate = parent / f"{normalized}-{suffix}"
+            if candidate != self.run_dir:
+                counter = 2
+                while candidate.exists():
+                    candidate = parent / f"{normalized}-{suffix}-{counter}"
+                    counter += 1
+                self.run_dir.rename(candidate)
+                self.run_dir = candidate
+            return self.run_dir
+
     @staticmethod
     def _token_stream_fragment(
         event: str,

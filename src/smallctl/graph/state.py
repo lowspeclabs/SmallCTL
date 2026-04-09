@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
-from ..state import LoopState, json_safe_value
+from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, json_safe_value
 
 
 def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -233,6 +233,8 @@ def build_operation_id(
 
 def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
     return {
+        "graph_state_schema_version": 1,
+        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
         "loop_state": graph_state.loop_state.to_dict(),
         "thread_id": graph_state.thread_id,
         "run_mode": graph_state.run_mode,

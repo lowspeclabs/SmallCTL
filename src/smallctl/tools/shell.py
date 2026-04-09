@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,28 @@ def _detect_unsupported_shell_syntax(command: str) -> str | None:
     return None
 
 
+def _shell_workspace_relative_hint(command: str, cwd: str | None = None) -> str | None:
+    raw_command = str(command or "")
+    match = re.search(r"(?<![\w/])(/temp(?:/[^\s\"'`]+)*)", raw_command)
+    if match is None:
+        return None
+
+    suspicious_path = match.group(1)
+    trimmed = suspicious_path.lstrip("/")
+    if not trimmed:
+        return None
+
+    base = Path(cwd) if cwd else Path.cwd()
+    workspace_candidate = (base / Path(trimmed)).resolve()
+    if not (workspace_candidate.exists() or workspace_candidate.parent.exists()):
+        return None
+
+    return (
+        f"That command used the root-level `{suspicious_path}` path. "
+        f"If you meant the workspace copy, retry with `{('./' + trimmed)}` instead."
+    )
+
+
 def _shell_execution_authoring_guard(state: LoopState, command: str) -> dict[str, Any] | None:
     """
     Keep small-model runs in the authoring contract until they have produced an
@@ -168,6 +191,121 @@ def _command_uses_leading_sudo(command: str) -> bool:
 
 def _matches_any_pattern(text: str, patterns: list[re.Pattern[str]]) -> bool:
     return any(pattern.search(text) for pattern in patterns)
+
+
+def _shell_status_update_interval(timeout_sec: int) -> float:
+    return max(1.0, min(max(1, timeout_sec) / 3.0, 10.0))
+
+
+def _build_shell_status_update(command: str, *, elapsed_sec: float, timeout_sec: int) -> str:
+    elapsed_text = f"{elapsed_sec:.0f}s"
+    timeout_text = f"{max(1, timeout_sec)}s"
+    return f"[still running after {elapsed_text} of {timeout_text}] {command}"
+
+
+def _find_active_process_by_pid(harness: Any, pid: int) -> Any | None:
+    active_processes = getattr(harness, "_active_processes", None)
+    if not isinstance(active_processes, set):
+        return None
+    for proc in active_processes:
+        if getattr(proc, "pid", None) == pid:
+            return proc
+    return None
+
+
+def _background_job_record(state: LoopState, job_id: str) -> dict[str, Any] | None:
+    record = state.background_processes.get(job_id)
+    if not isinstance(record, dict):
+        return None
+    return dict(record)
+
+
+async def _shell_job_status(job_id: str, state: LoopState, harness: Any = None) -> dict[str, Any]:
+    record = _background_job_record(state, job_id)
+    if record is None:
+        return fail(f"Unknown job id: {job_id}")
+
+    pid = int(record.get("pid") or 0)
+    proc = _find_active_process_by_pid(harness, pid) if harness is not None else None
+    status = str(record.get("status") or "unknown").strip().lower()
+    command = str(record.get("command") or "").strip()
+    cwd = str(record.get("cwd") or "").strip()
+
+    if proc is not None:
+        returncode = getattr(proc, "returncode", None)
+        if returncode is None:
+            record["status"] = "running"
+            state.background_processes[job_id] = record
+            state.touch()
+            return ok(
+                {
+                    "job_id": job_id,
+                    "pid": pid,
+                    "command": command,
+                    "cwd": cwd,
+                    "status": "running",
+                    "started_at": record.get("started_at"),
+                }
+            )
+        status = "completed" if returncode == 0 else "failed"
+        record["status"] = status
+        record["exit_code"] = returncode
+        state.background_processes[job_id] = record
+        state.touch()
+        if harness is not None and hasattr(harness, "_active_processes"):
+            try:
+                harness._active_processes.discard(proc)
+            except Exception:
+                pass
+        return ok(
+            {
+                "job_id": job_id,
+                "pid": pid,
+                "command": command,
+                "cwd": cwd,
+                "status": status,
+                "exit_code": returncode,
+                "started_at": record.get("started_at"),
+            }
+        )
+
+    if os.name != "nt" and pid > 0:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            status = "unknown"
+        except PermissionError:
+            status = "running"
+        else:
+            status = "running"
+    if status == "running":
+        record["status"] = "running"
+        state.background_processes[job_id] = record
+        state.touch()
+        return ok(
+            {
+                "job_id": job_id,
+                "pid": pid,
+                "command": command,
+                "cwd": cwd,
+                "status": "running",
+                "started_at": record.get("started_at"),
+            }
+        )
+
+    record["status"] = "unknown"
+    state.background_processes[job_id] = record
+    state.touch()
+    return ok(
+        {
+            "job_id": job_id,
+            "pid": pid,
+            "command": command,
+            "cwd": cwd,
+            "status": "unknown",
+            "started_at": record.get("started_at"),
+        }
+    )
 
 
 async def _run_sudo_validation(
@@ -319,14 +457,16 @@ async def _ensure_sudo_credentials(
     return None
 
 
-async def shell_exec(
+async def _shell_exec_foreground(
     command: str,
+    *,
     state: LoopState,
-    timeout_sec: int = 30,
+    timeout_sec: int,
     harness: Any = None,
 ) -> dict[str, Any]:
     proc = None
     password_prompt_detected = False
+    progress_updates: list[str] = []
     try:
         sudo_human_message = (
             "Sudo execution requires a password. If interactive prompts are unavailable, "
@@ -376,6 +516,8 @@ async def shell_exec(
         stdout_data = []
         stderr_data = []
         detection_buffer = ""  # Buffer for pattern detection
+        heartbeat_interval = _shell_status_update_interval(timeout_sec)
+        start_time = time.monotonic()
 
         async def read_stream(stream, out_list, is_stderr: bool = False):
             nonlocal password_prompt_detected, detection_buffer
@@ -423,15 +565,68 @@ async def shell_exec(
                     except RuntimeError:
                         pass
 
-        if hasattr(proc, "stdout") and hasattr(proc, "stderr") and hasattr(proc.stdout, "read"):
-            await asyncio.wait_for(
-                asyncio.gather(
-                    read_stream(proc.stdout, stdout_data, is_stderr=False),
-                    read_stream(proc.stderr, stderr_data, is_stderr=True),
-                    proc.wait()
-                ),
-                timeout=timeout_sec
+        async def emit_status_update() -> None:
+            elapsed_sec = time.monotonic() - start_time
+            status_text = _build_shell_status_update(
+                command,
+                elapsed_sec=elapsed_sec,
+                timeout_sec=timeout_sec,
             )
+            progress_updates.append(status_text)
+            if harness and hasattr(harness, "_emit") and getattr(harness, "event_handler", None):
+                from ..models.events import UIEvent, UIEventType
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        await harness._emit(
+                            harness.event_handler,
+                            UIEvent(event_type=UIEventType.SHELL_STREAM, content=status_text),
+                        )
+                except RuntimeError:
+                    pass
+
+        if hasattr(proc, "stdout") and hasattr(proc, "stderr") and hasattr(proc.stdout, "read"):
+            stdout_task = asyncio.create_task(read_stream(proc.stdout, stdout_data, is_stderr=False))
+            stderr_task = asyncio.create_task(read_stream(proc.stderr, stderr_data, is_stderr=True))
+            wait_task = asyncio.create_task(proc.wait())
+            deadline = start_time + max(1, timeout_sec)
+            timed_out = False
+
+            try:
+                while True:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    wait_window = min(heartbeat_interval, remaining)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(wait_task), timeout=wait_window)
+                        break
+                    except asyncio.TimeoutError:
+                        await emit_status_update()
+                        continue
+            finally:
+                if timed_out and proc and proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task), timeout=1.0)
+                except Exception:
+                    for task in (stdout_task, stderr_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                if not wait_task.done():
+                    try:
+                        await asyncio.wait_for(wait_task, timeout=1.0)
+                    except Exception:
+                        wait_task.cancel()
+                        await asyncio.gather(wait_task, return_exceptions=True)
+            if timed_out:
+                raise asyncio.TimeoutError
             final_stdout = "".join(stdout_data)
             final_stderr = "".join(stderr_data)
             
@@ -447,6 +642,8 @@ async def shell_exec(
                 "stderr": final_stderr,
                 "exit_code": proc.returncode,
             }
+            if progress_updates:
+                output["progress_updates"] = progress_updates
         else:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
             output = {
@@ -466,6 +663,8 @@ async def shell_exec(
                             await harness._emit(harness.event_handler, UIEvent(event_type=UIEventType.SHELL_STREAM, content=msg))
                     except RuntimeError:
                         pass
+            if progress_updates:
+                output["progress_updates"] = progress_updates
 
         if password_prompt_detected:
             # Process was waiting for password input - kill it and ask user
@@ -522,6 +721,18 @@ async def shell_exec(
                     },
                 )
 
+            path_hint = _shell_workspace_relative_hint(command, cwd=state.cwd)
+            if path_hint and any(
+                token in error.lower()
+                for token in (
+                    "no such file",
+                    "can't open file",
+                    "cannot open file",
+                    "file not found",
+                )
+            ):
+                error = f"{error}\n\n{path_hint}"
+
             return fail(error, metadata={"output": output})
         return ok(output)
     except asyncio.TimeoutError:
@@ -537,7 +748,10 @@ async def shell_exec(
                 f"Command timed out waiting for sudo/password input: '{command}'. {sudo_human_message}",
                 metadata={"command": command, "reason": "password_prompt_timeout"}
             )
-        return fail(f"Command timed out after {timeout_sec}s")
+        metadata: dict[str, Any] = {"command": command}
+        if progress_updates:
+            metadata["progress_updates"] = progress_updates
+        return fail(f"Command timed out after {timeout_sec}s", metadata=metadata)
     except asyncio.CancelledError:
         if proc and proc.returncode is None:
             try:
@@ -554,11 +768,32 @@ async def shell_exec(
                 harness._active_processes.discard(proc)
             except Exception:
                 pass
-    
+
     return fail("Unknown shell execution error")
 
 
-async def shell_background(command: str, state: LoopState, harness: Any = None) -> dict[str, Any]:
+async def shell_exec(
+    command: str = "",
+    state: LoopState | None = None,
+    timeout_sec: int = 30,
+    job_id: str = "",
+    background: bool = False,
+    harness: Any = None,
+) -> dict[str, Any]:
+    poll_job_id = str(job_id or "").strip()
+    command = str(command or "").strip()
+    if state is None:
+        return fail("Shell execution requires state context.", metadata={"reason": "missing_state"})
+    if poll_job_id:
+        return await _shell_job_status(job_id=poll_job_id, state=state, harness=harness)
+    if not command:
+        return fail("Shell execution requires a command or a job_id to poll.", metadata={"reason": "missing_command"})
+    if background:
+        return await _shell_job_launch(command=command, state=state, harness=harness)
+    return await _shell_exec_foreground(command, state=state, timeout_sec=timeout_sec, harness=harness)
+
+
+async def _shell_job_launch(command: str, state: LoopState, harness: Any = None) -> dict[str, Any]:
     try:
         proc = await _create_process(
             command=command,
@@ -688,7 +923,7 @@ async def create_process(
         harness._active_processes.add(proc)
         # We don't want to leak memory, but we need to remove it when done.
         # However, create_process is a low-level helper.
-        # The caller (shell_exec/shell_background) should handle the removal or teardown.
+        # The caller (shell_exec in foreground/background mode) should handle the removal or teardown.
 
     return proc
 

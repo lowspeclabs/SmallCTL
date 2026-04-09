@@ -6,6 +6,48 @@ from typing import Any
 from .guards import is_small_model_name
 from .state import LoopState, clip_text_value
 
+_GEMMA_MODEL_MARKERS = (
+    "google_gemma-4",
+    "google_gemma",
+    "gemma-4",
+    "gemma-3",
+    "gemma/",
+)
+_EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
+    "gemma-4-e2b-it",
+    "gemma-4-e4b-it",
+)
+_EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES = (
+    "google_gemma-4-26b-a4b-it",
+)
+
+
+def is_gemma_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
+
+
+def is_exact_small_gemma_4_it_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(
+        normalized
+        and any(
+            normalized == suffix or normalized.endswith(f"/{suffix}")
+            for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
+        )
+    )
+
+
+def is_exact_large_gemma_4_26b_a4b_it_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(
+        normalized
+        and any(
+            normalized == suffix or normalized.endswith(f"/{suffix}")
+            for suffix in _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES
+        )
+    )
+
 
 def build_system_prompt(
     state: LoopState,
@@ -18,51 +60,100 @@ def build_system_prompt(
 ) -> str:
     _TOOL_MSG_COMPACT_THRESHOLD: int = 400
     active_profiles = ", ".join(state.active_tool_profiles or ["core"])
-    parts = [
-        "You are smallctl, an autonomous execution agent. ",
-        "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. ",
-        "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
-        "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
-        "CONCISENESS: NEVER re-type detailed tool outputs (like full directory listings or file contents) in your conversational chat. ",
-        "CONCISENESS: Summarize findings in 1-2 sentences in chat, then call `task_complete(message='...')` with the definitive answer. ",
-        "STRICT: No hallucinations. Do not add descriptions or metadata (like 'Python project config') to file lists unless the tool returned them. ",
-        "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. These are FORBIDDEN. ",
-        f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
-        f"Contract phase: {state.contract_phase()}. ",
-        "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
-        "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
-        "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
-        "MEMORY: Use `memory_update` to persist key facts. ",
-        "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
-        "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
-        "REDUNDANCY: Prefer the compressed summary or preview first. Use `artifact_read` or `artifact_grep` only when you need the full evidence or line-level detail. ",
-        "REDUNDANCY: reuse information you already retrieved. avoid rereading the same path unless the summary is insufficient. ",
-        "REDUNDANCY: Do not call `artifact_read` again on an artifact that is already summarized in the tool preview, Working Memory, or Retrieved Artifact Snippets; treat those summaries as the content unless you truly need more detail. ",
-        "REDUNDANCY: If `artifact_read` or `artifact_recall` returns 'not found', treat the evidence as unavailable and re-execute the original tool call (e.g. re-run the shell command) instead of synthesizing or guessing from memory. ",
-        "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. ",
-        "PLAN HANDOFF: If a plan exists, treat its playbook artifact as the implementation contract. The required order is: 1) write the file skeleton, 2) add function signatures, 3) fill in the code, 4) debug and verify. Do not jump straight to a one-shot full script. ",
-        "AUTHORING: In the author phase, prefer one concrete write or read action at a time. If you already have a target file, write or replace it directly instead of bouncing through multiple exploratory calls. Create the target artifact before shell execution; the harness will block shell and SSH commands until there is something concrete to verify. ",
-        "AUTHORING: In the repair phase, read the failing file or evidence first, then patch one narrow target and re-run the smallest useful check. ",
-        "CHUNKED AUTHORING: When writing large files or complex logic, the harness may initialize a Write Session. "
-        "Break the file into logical sections (e.g., imports, constants, classes, main logic). "
-        "Use `file_write` or `file_append` with these parameters: "
-        "`write_session_id`: Use the ID provided by the harness. "
-        "`section_name` or `section_id`: A descriptive name for the current chunk (e.g., 'imports'). "
-        "`section_role`: Optional role label for the chunk. "
-        "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
-        "When resuming an active session, prefer `file_write`; the harness will track append/replace behavior from the session metadata. "
-        "During local repair, keep the same session and prefer `replace_strategy='overwrite'` so you repair the active section cleanly instead of appending duplicate code. "
-        "Complete the entire session before moving to other tasks or verification. ",
-        "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. ",
-        "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
-        f"Once your objective is met, stop exploring and call task_complete(message='...').",
-    ]
+    model_name = ""
+    scratchpad = getattr(state, "scratchpad", {})
+    if isinstance(scratchpad, dict):
+        model_name = str(scratchpad.get("_model_name") or "").strip()
+    gemma_mode = is_gemma_model_name(model_name)
+    exact_small_gemma_mode = is_exact_small_gemma_4_it_model_name(model_name)
+    exact_large_gemma_26b_mode = is_exact_large_gemma_4_26b_a4b_it_model_name(model_name)
+    if gemma_mode:
+        response_structure = (
+            "RESPONSE STRUCTURE: This Gemma model may use its native reasoning format. "
+            "Do not force a <think> block or add conflicting wrapper tags. "
+            "Use the model's normal reasoning flow, then continue with tool calls or the final answer as needed. "
+        )
+        if exact_small_gemma_mode:
+            response_structure += (
+                "SMALL GEMMA-4 FORMAT: If you include short reasoning before a tool call, end the reasoning cleanly, "
+                "then emit exactly one JSON tool object on its own line with no wrapper tags. "
+            )
+    else:
+        response_structure = (
+            "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. "
+        )
+    if exact_large_gemma_26b_mode:
+        parts = [
+            "You are smallctl, an autonomous execution agent. ",
+            response_structure,
+            "PRIMARY RULE: Solve the current user task only. Keep the task goal in view and avoid side quests. ",
+            "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
+            "STRICT: No hallucinations. Only report what tools actually returned. ",
+            "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. ",
+            "CONCISENESS: Do not paste long tool output into chat. Summarize briefly, then call `task_complete(message='...')` when done. ",
+            "REDUNDANCY: Reuse what you already know. Do not repeat identical or near-identical tool calls. ",
+            f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
+            f"Contract phase: {state.contract_phase()}. ",
+            "WORKSPACE: Prefer workspace-relative paths like `src/app.py`, not absolute paths. ",
+            "If the task is complete, stop and call `task_complete(message='...')`. ",
+        ]
+    else:
+        parts = [
+            "You are smallctl, an autonomous execution agent. ",
+            response_structure,
+            "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
+            "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
+            "CONCISENESS: NEVER re-type detailed tool outputs (like full directory listings or file contents) in your conversational chat. ",
+            "CONCISENESS: Summarize findings in 1-2 sentences in chat, then call `task_complete(message='...')` with the definitive answer. ",
+            "STRICT: No hallucinations. Do not add descriptions or metadata (like 'Python project config') to file lists unless the tool returned them. ",
+            "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. These are FORBIDDEN. ",
+            f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
+            f"Contract phase: {state.contract_phase()}. ",
+            "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
+            "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
+            "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
+            "MEMORY: Use `memory_update` to persist key facts. ",
+            "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
+            "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
+            "REDUNDANCY: Prefer the compressed summary or preview first. Use `artifact_read` or `artifact_grep` only when you need the full evidence or line-level detail. ",
+            "REDUNDANCY: reuse information you already retrieved. avoid rereading the same path unless the summary is insufficient. ",
+            "REDUNDANCY: Do not call `artifact_read` again on an artifact that is already summarized in the tool preview, Working Memory, or Retrieved Artifact Snippets; treat those summaries as the content unless you truly need more detail. ",
+            "REDUNDANCY: If `artifact_read` or `artifact_recall` returns 'not found', treat the evidence as unavailable and re-execute the original tool call (e.g. re-run the shell command) instead of synthesizing or guessing from memory. ",
+            "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. ",
+            "PLAN HANDOFF: If a plan exists, treat its playbook artifact as the implementation contract. The required order is: 1) write the file skeleton, 2) add function signatures, 3) fill in the code, 4) debug and verify. Do not jump straight to a one-shot full script. ",
+            "AUTHORING: In the author phase, prefer one concrete write or read action at a time. If you already have a target file, write or replace it directly instead of bouncing through multiple exploratory calls. Create the target artifact before shell execution; the harness will block shell and SSH commands until there is something concrete to verify. ",
+            "AUTHORING: In the repair phase, read the failing file or evidence first, then patch one narrow target and re-run the smallest useful check. ",
+            "SYSTEM IDS: `repair-*` values are system repair cycle IDs for diagnostics only. Never copy a system repair cycle ID into `write_session_id`. ",
+            "CHUNKED AUTHORING: When writing large files or complex logic, the harness may initialize a Write Session. "
+            "Break the file into logical sections (e.g., imports, constants, classes, main logic). "
+            "Use `file_write` or `file_append` with these parameters: "
+            "`write_session_id`: Use the ID provided by the harness. "
+            "`section_name` or `section_id`: A descriptive name for the current chunk (e.g., 'imports'). "
+            "`section_role`: Optional role label for the chunk. "
+            "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
+            "When resuming an active session, prefer `file_write`; the harness will track append/replace behavior from the session metadata. "
+            "During local repair, keep the same session and prefer `replace_strategy='overwrite'` so you repair the active section cleanly instead of appending duplicate code. "
+            "Complete the entire session before moving to other tasks or verification. ",
+            "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. ",
+            "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
+            f"Once your objective is met, stop exploring and call task_complete(message='...').",
+        ]
+    if exact_small_gemma_mode:
+        parts.append(
+            "SMALL GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
+            "`<channel|>`, `<thought>`, angle-bracket function wrappers like `<task_complete(...)>`, "
+            "or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
+            "If tools are needed, emit only the JSON object. The backticked task_complete examples in this prompt "
+            "describe intent only; do not copy that literal syntax into the response. "
+        )
     if state.contract_phase() == "repair":
         repair_bits = []
         if state.last_failure_class:
             repair_bits.append(f"failure class: {state.last_failure_class}")
         if state.repair_cycle_id:
-            repair_bits.append(f"repair cycle: {state.repair_cycle_id}")
+            repair_bits.append(
+                f"system repair cycle: {state.repair_cycle_id} (diagnostic only; not a write_session_id)"
+            )
         if state.files_changed_this_cycle:
             repair_bits.append(
                 "files changed this cycle: " + ", ".join(state.files_changed_this_cycle[-5:])
@@ -135,7 +226,8 @@ def build_system_prompt(
     if is_small_model_name(state.scratchpad.get("_model_name")):
         parts.append(
             "SMALL MODEL GUARD: If you seem frozen, hung, or stuck, continue from the last concrete step instead of restarting. "
-            "The harness may nudge you to continue, so emit the next tool call or a short progress update immediately."
+            "The harness may nudge you to continue, so emit the next tool call or a short progress update immediately. "
+            "When writing code, keep each chunk under 50 lines and finish one logical section before starting the next."
         )
     if state.scratchpad.get("subtask_depth"):
         parts.append(
@@ -151,6 +243,11 @@ def build_system_prompt(
                 parts.append(
                     "NETWORK: Use `ssh_exec` for remote SSH commands and `shell_exec` for local shell work only. "
                     "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available."
+                )
+            if "shell_exec" in available_tool_names:
+                parts.append(
+                    "SHELL: For long-running commands, start them with `shell_exec(background=True, command='...')`, then poll with `shell_exec(job_id='...')` every few seconds until the job completes or the timeout window is reached. "
+                    "Use the status updates to stay anchored to the original task."
                 )
             if "artifact_read" in tool_names:
                 parts.append(

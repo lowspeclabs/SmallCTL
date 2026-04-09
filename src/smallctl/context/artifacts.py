@@ -14,9 +14,15 @@ from .messages import _LISTING_PREVIEW_ENTRY_LIMIT, format_compact_tool_message,
 from .policy import estimate_text_tokens
 
 
+_ARTIFACT_INLINE_TOKEN_LIMIT_BASE = 1300
+_ARTIFACT_INLINE_TOKEN_LIMIT_SCALE = 1.4
+
+
 @dataclass
 class ArtifactPolicy:
-    inline_token_limit: int = 1300
+    # Raise the bar for artifact externalization so moderately sized tool outputs
+    # stay inline longer and do not immediately flip the model into repeat-read loops.
+    inline_token_limit: int = int(round(_ARTIFACT_INLINE_TOKEN_LIMIT_BASE * _ARTIFACT_INLINE_TOKEN_LIMIT_SCALE))
     preview_char_limit: int = 4000
     force_artifact_tools: tuple[str, ...] = (
         "file_read",

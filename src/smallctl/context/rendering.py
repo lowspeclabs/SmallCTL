@@ -14,8 +14,13 @@ def render_shell_output(
     stdout = str(output.get("stdout") or "")
     stderr = str(output.get("stderr") or "")
     exit_code = output.get("exit_code")
+    progress_updates = output.get("progress_updates")
 
     parts: list[str] = []
+    if isinstance(progress_updates, list) and progress_updates:
+        progress_text = "\n".join(str(item).strip() for item in progress_updates if str(item).strip())
+        if progress_text:
+            parts.append(f"--- [PROGRESS] ---\n{progress_text}")
     if stdout:
         parts.append(stdout)
     if stderr:

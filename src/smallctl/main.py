@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase", help="Initial phase (explore|plan|execute|verify)")
     parser.add_argument(
         "--provider-profile",
-        choices=["generic", "openai", "ollama", "vllm", "lmstudio", "openrouter", "llamacpp"],
+        choices=["auto", "generic", "openai", "ollama", "vllm", "lmstudio", "openrouter", "llamacpp"],
         help="Compatibility profile for OpenAI-compatible provider behavior",
     )
     parser.add_argument("--inventory", help="Inventory file path")
@@ -162,6 +162,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-prompt-tokens", type=int, help="Per-request prompt token budget")
     parser.add_argument("--reserve-completion-tokens", type=int, help="Reserved completion tokens")
     parser.add_argument("--reserve-tool-tokens", type=int, help="Reserved tool-call tokens")
+    parser.add_argument(
+        "--backend-unload-command",
+        help="Shell command to unload a wedged backend model before retrying generation",
+    )
     parser.add_argument("--summarize-at-ratio", type=float, help="Prompt usage ratio that triggers compaction")
     parser.add_argument("--recent-message-limit", type=int, help="Recent raw message retention limit")
     parser.add_argument("--max-summary-items", type=int, help="Maximum retrieved summary items")
@@ -289,6 +293,16 @@ def cli(argv: list[str] | None = None) -> int:
             "max_prompt_tokens": config.max_prompt_tokens,
             "reserve_completion_tokens": config.reserve_completion_tokens,
             "reserve_tool_tokens": config.reserve_tool_tokens,
+            "first_token_timeout_sec": config.first_token_timeout_sec,
+            "healthcheck_url": config.healthcheck_url,
+            "restart_command": config.restart_command,
+            "startup_grace_period_sec": config.startup_grace_period_sec,
+            "max_restarts_per_hour": config.max_restarts_per_hour,
+            "backend_healthcheck_url": config.backend_healthcheck_url,
+            "backend_restart_command": config.backend_restart_command,
+            "backend_unload_command": config.backend_unload_command,
+            "backend_healthcheck_timeout_sec": config.backend_healthcheck_timeout_sec,
+            "backend_restart_grace_sec": config.backend_restart_grace_sec,
             "summarize_at_ratio": config.summarize_at_ratio,
             "recent_message_limit": config.recent_message_limit,
             "max_summary_items": config.max_summary_items,
@@ -354,6 +368,16 @@ def cli(argv: list[str] | None = None) -> int:
             max_prompt_tokens=config.max_prompt_tokens,
             reserve_completion_tokens=config.reserve_completion_tokens,
             reserve_tool_tokens=config.reserve_tool_tokens,
+            first_token_timeout_sec=config.first_token_timeout_sec,
+            healthcheck_url=config.healthcheck_url,
+            restart_command=config.restart_command,
+            startup_grace_period_sec=config.startup_grace_period_sec,
+            max_restarts_per_hour=config.max_restarts_per_hour,
+            backend_healthcheck_url=config.backend_healthcheck_url,
+            backend_restart_command=config.backend_restart_command,
+            backend_unload_command=config.backend_unload_command,
+            backend_healthcheck_timeout_sec=config.backend_healthcheck_timeout_sec,
+            backend_restart_grace_sec=config.backend_restart_grace_sec,
             summarize_at_ratio=config.summarize_at_ratio,
             recent_message_limit=config.recent_message_limit,
             max_summary_items=config.max_summary_items,

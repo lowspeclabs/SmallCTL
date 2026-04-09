@@ -10,11 +10,14 @@ import uuid
 import sys
 import ast
 import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from ..client import OpenAICompatClient
+from ..client.usage import detect_provider_profile
 from ..context import (
     ArtifactStore,
     ChildRunRequest,
@@ -94,6 +97,16 @@ class Harness:
         max_prompt_tokens: int | None = None,
         reserve_completion_tokens: int = 1024,
         reserve_tool_tokens: int = 512,
+        first_token_timeout_sec: int | None = None,
+        healthcheck_url: str | None = None,
+        restart_command: str | None = None,
+        startup_grace_period_sec: int = 20,
+        max_restarts_per_hour: int = 2,
+        backend_healthcheck_url: str | None = None,
+        backend_restart_command: str | None = None,
+        backend_unload_command: str | None = None,
+        backend_healthcheck_timeout_sec: int = 5,
+        backend_restart_grace_sec: int = 20,
         summarize_at_ratio: float = 0.8,
         recent_message_limit: int = 24,
         max_summary_items: int = 3,
@@ -113,6 +126,7 @@ class Harness:
         run_logger: RunLogger | None = None,
         artifact_start_index: int | None = None,
         tool_result_inline_token_limit: int = 250,
+        artifact_read_inline_token_limit: int = 1024,
         strategy_prompt: str | None = None,
         strategy: dict[str, Any] | None = None,
         indexer: bool = False,
@@ -131,22 +145,43 @@ class Harness:
         )
         if isinstance(strategy, dict):
             self.state.scratchpad["strategy"] = json_safe_value(strategy)
+        self.backend_healthcheck_url = str(
+            healthcheck_url or backend_healthcheck_url or ""
+        ).strip() or None
+        self.backend_restart_command = str(
+            restart_command or backend_restart_command or ""
+        ).strip() or None
+        self.backend_unload_command = str(backend_unload_command or "").strip() or None
+        self.backend_healthcheck_timeout_sec = max(1, int(backend_healthcheck_timeout_sec))
+        self.backend_restart_grace_sec = max(
+            1,
+            int(startup_grace_period_sec if startup_grace_period_sec is not None else backend_restart_grace_sec),
+        )
+        self.backend_max_restarts_per_hour = max(0, int(max_restarts_per_hour))
         self.client = OpenAICompatClient(
             base_url=endpoint,
             model=model,
             api_key=api_key,
             chat_endpoint=chat_endpoint,
-            provider_profile=provider_profile,
+            provider_profile=self._resolve_provider_profile(provider_profile, endpoint=endpoint, model=model),
+            first_token_timeout_sec=first_token_timeout_sec,
             runtime_context_probe=runtime_context_probe,
             run_logger=run_logger,
+            backend_recovery_handler=self.recover_backend_wedge,
         )
         self.summarizer_client = None
         if summarizer_endpoint:
+            summarizer_provider = detect_provider_profile(
+                summarizer_endpoint,
+                summarizer_model or model,
+            )
             self.summarizer_client = OpenAICompatClient(
                 base_url=summarizer_endpoint,
                 model=summarizer_model or model,
                 api_key=summarizer_api_key or api_key,
                 chat_endpoint=chat_endpoint,
+                provider_profile=summarizer_provider,
+                first_token_timeout_sec=first_token_timeout_sec,
                 runtime_context_probe=False,
                 run_logger=run_logger,
             )
@@ -165,11 +200,12 @@ class Harness:
         self._strategy_prompt = strategy_prompt
         self._indexer = indexer
         self._use_ansible = use_ansible
+        self.provider_profile = self.client.provider_profile
         self._harness_kwargs = {
             "endpoint": endpoint,
             "model": model,
             "phase": normalized_phase,
-            "provider_profile": provider_profile,
+            "provider_profile": self.provider_profile,
             "api_key": api_key,
             "tool_profiles": tool_profiles,
             "use_ansible": use_ansible,
@@ -193,6 +229,16 @@ class Harness:
             "max_prompt_tokens": max_prompt_tokens,
             "reserve_completion_tokens": reserve_completion_tokens,
             "reserve_tool_tokens": reserve_tool_tokens,
+            "first_token_timeout_sec": first_token_timeout_sec,
+            "healthcheck_url": self.backend_healthcheck_url,
+            "restart_command": self.backend_restart_command,
+            "startup_grace_period_sec": self.backend_restart_grace_sec,
+            "max_restarts_per_hour": self.backend_max_restarts_per_hour,
+            "backend_healthcheck_url": self.backend_healthcheck_url,
+            "backend_restart_command": self.backend_restart_command,
+            "backend_unload_command": self.backend_unload_command,
+            "backend_healthcheck_timeout_sec": self.backend_healthcheck_timeout_sec,
+            "backend_restart_grace_sec": self.backend_restart_grace_sec,
             "summarize_at_ratio": summarize_at_ratio,
             "recent_message_limit": recent_message_limit,
             "max_summary_items": max_summary_items,
@@ -205,8 +251,8 @@ class Harness:
             "allow_interactive_shell_approval": self.allow_interactive_shell_approval,
             "shell_approval_session_default": self.shell_approval_session_default,
         }
+        self.config = SimpleNamespace(**self._harness_kwargs)
         self._configured_planning_mode = bool(planning_mode)
-        self.provider_profile = provider_profile
         self.checkpoint_on_exit = checkpoint_on_exit
         self.checkpoint_path = checkpoint_path
         self.graph_checkpointer = str(graph_checkpointer or "memory").strip().lower()
@@ -270,11 +316,13 @@ class Harness:
                 max_artifact_snippets=max_artifact_snippets,
                 artifact_snippet_token_limit=artifact_snippet_token_limit,
                 tool_result_inline_token_limit=tool_result_inline_token_limit,
+                artifact_read_inline_token_limit=artifact_read_inline_token_limit,
             )
         else:
             self.context_policy = policy
             if effective_max_prompt_tokens is not None:
                 self.context_policy.max_prompt_tokens = effective_max_prompt_tokens
+        self.context_policy.apply_backend_profile(self.provider_profile)
         self.state.recent_message_limit = self.context_policy.recent_message_limit
         self.prompt_assembler = PromptAssembler(self.context_policy)
         self.retriever = LexicalRetriever(self.context_policy)
@@ -283,12 +331,17 @@ class Harness:
         self.guards = GuardConfig()
         self.discovered_server_context_limit: int | None = known_server_context_limit
         self.server_context_limit: int | None = known_server_context_limit
-        if self.server_context_limit is not None:
-            self.context_policy.recalculate_quotas(self.server_context_limit)
+        scaling_context = self.server_context_limit or self.context_policy.max_prompt_tokens
+        if scaling_context is not None:
+            self.context_policy.recalculate_quotas(
+                scaling_context,
+                backend_profile=self.provider_profile,
+            )
             self.state.recent_message_limit = self.context_policy.recent_message_limit
         self.conversation_id = uuid.uuid4().hex[:8]
         if not self.state.thread_id:
             self.state.thread_id = self.conversation_id
+        self._sync_run_logger_session_id()
         artifact_base_dir = Path(self.state.cwd).resolve() / ".smallctl" / "artifacts"
         self.artifact_store = ArtifactStore(
             artifact_base_dir, 
@@ -325,6 +378,7 @@ class Harness:
             endpoint=endpoint,
             model=model,
             phase=normalized_phase,
+            provider_profile=self.provider_profile,
         )
 
     def set_interactive_shell_approval(self, enabled: bool) -> None:
@@ -338,6 +392,13 @@ class Harness:
     @staticmethod
     def _context_limit_headroom(context_limit: int) -> int:
         return max(1024, int(context_limit) // 4)
+
+    @staticmethod
+    def _resolve_provider_profile(provider_profile: str, *, endpoint: str, model: str) -> str:
+        profile = str(provider_profile or "auto").strip().lower()
+        if profile != "auto":
+            return profile
+        return detect_provider_profile(endpoint, model)
 
     @classmethod
     def _derive_prompt_budget_from_context_limit(cls, context_limit: int | None) -> int | None:
@@ -401,7 +462,10 @@ class Harness:
             self.context_policy.max_prompt_tokens = effective_max_prompt_tokens
 
         if self.server_context_limit is not None:
-            self.context_policy.recalculate_quotas(self.server_context_limit)
+            self.context_policy.recalculate_quotas(
+                self.server_context_limit,
+                backend_profile=self.provider_profile,
+            )
             self.state.recent_message_limit = self.context_policy.recent_message_limit
             self._harness_kwargs["context_limit"] = self.server_context_limit
 
@@ -469,9 +533,24 @@ class Harness:
         from ..graph.runtime import LoopGraphRuntime
 
         runtime = LoopGraphRuntime.from_harness(self)
-        return runtime.restore(thread_id=thread_id)
+        restored = runtime.restore(thread_id=thread_id)
+        if restored:
+            self._sync_run_logger_session_id()
+        return restored
 
         return result
+
+    def _sync_run_logger_session_id(self) -> None:
+        run_logger = getattr(self, "run_logger", None)
+        if run_logger is None or not hasattr(run_logger, "set_session_id"):
+            return
+        session_id = str(getattr(self.state, "thread_id", "") or self.conversation_id or "").strip()
+        if not session_id:
+            return
+        try:
+            run_logger.set_session_id(session_id)
+        except Exception:
+            self.log.debug("Unable to sync run logger session id", exc_info=True)
 
     async def decide_run_mode(self, task: str) -> str:
         resolved_task = self._resolve_followup_task(task)
@@ -784,6 +863,259 @@ class Harness:
             self.run_logger.log("harness", event, message, **data)
             if event.startswith("model_"):
                 self.run_logger.log("model_output", event, message, **data)
+
+    async def recover_backend_wedge(self, payload: dict[str, Any]) -> dict[str, Any]:
+        details = dict(payload.get("details") or {})
+        health_url = self.backend_healthcheck_url or f"{self.client.base_url}/models"
+        timeout_sec = max(1, int(self.backend_healthcheck_timeout_sec))
+        health_before = await self._probe_backend_health(health_url, timeout_sec=timeout_sec)
+        action = "none"
+        status = "unrecovered"
+        message = "Backend did not emit a first token before timeout."
+        health_after = dict(health_before)
+        unload_available = self.backend_unload_command or self.provider_profile == "ollama"
+        if health_before.get("ok") and unload_available:
+            action = "unload_command" if self.backend_unload_command else "ollama_keep_alive_zero"
+            command_result = await self._run_backend_unload_command(self.backend_unload_command)
+            if command_result.get("ok"):
+                health_after = await self._wait_for_backend_health(
+                    health_url,
+                    timeout_sec=max(timeout_sec, int(self.backend_restart_grace_sec)),
+                )
+                if health_after.get("ok"):
+                    status = "recovered"
+                    if self.backend_unload_command:
+                        message = "Backend unload command succeeded and health probe recovered."
+                    else:
+                        message = "Ollama unload request succeeded and health probe recovered."
+                else:
+                    if self.backend_unload_command:
+                        message = "Backend unload command ran, but the health probe did not recover."
+                    else:
+                        message = "Ollama unload request ran, but the health probe did not recover."
+            else:
+                health_after = {"ok": False}
+                message = str(command_result.get("message") or "Backend unload command failed.")
+        elif self.backend_restart_command:
+            rate_limit = self._check_backend_restart_rate_limit()
+            if not rate_limit.get("allowed", False):
+                message = (
+                    f"Backend restart suppressed by supervisor rate limit "
+                    f"({rate_limit.get('count', 0)}/{self.backend_max_restarts_per_hour} in the last hour)."
+                )
+                result = {
+                    "status": status,
+                    "action": "rate_limited",
+                    "message": message,
+                    "health_url": health_url,
+                    "health_before": health_before,
+                    "health_after": health_after,
+                    "reason": str(details.get("reason") or ""),
+                    "restart_window": rate_limit,
+                }
+                self.state.scratchpad["_last_backend_recovery"] = result
+                self._runlog(
+                    "backend_recovery",
+                    message,
+                    provider_profile=self.provider_profile,
+                    status=status,
+                    action="rate_limited",
+                    health_url=health_url,
+                    health_before=health_before,
+                    health_after=health_after,
+                    details=details,
+                    restart_window=rate_limit,
+                )
+                return result
+            action = "restart_command"
+            self._record_backend_restart_attempt()
+            command_result = await self._run_backend_restart_command(self.backend_restart_command)
+            if command_result.get("ok"):
+                health_after = await self._wait_for_backend_health(
+                    health_url,
+                    timeout_sec=max(timeout_sec, int(self.backend_restart_grace_sec)),
+                )
+                if health_after.get("ok"):
+                    status = "recovered"
+                    message = "Backend restart command succeeded and health probe recovered."
+                else:
+                    message = "Backend restart command ran, but the health probe did not recover."
+            else:
+                health_after = {"ok": False}
+                message = str(command_result.get("message") or "Backend restart command failed.")
+        else:
+            if health_before.get("ok"):
+                message = "Backend accepted health probes but appears wedged on generation; no unload or restart command configured."
+            else:
+                message = "Backend health probe failed and no restart command is configured."
+        result = {
+            "status": status,
+            "action": action,
+            "message": message,
+            "health_url": health_url,
+            "health_before": health_before,
+            "health_after": health_after,
+            "reason": str(details.get("reason") or ""),
+        }
+        self.state.scratchpad["_last_backend_recovery"] = result
+        self._runlog(
+            "backend_recovery",
+            message,
+            provider_profile=self.provider_profile,
+            status=status,
+            action=action,
+            health_url=health_url,
+            health_before=health_before,
+            health_after=health_after,
+            details=details,
+        )
+        return result
+
+    def _backend_restart_history(self) -> list[float]:
+        history = self.state.scratchpad.setdefault("_backend_restart_history", [])
+        if not isinstance(history, list):
+            history = []
+            self.state.scratchpad["_backend_restart_history"] = history
+        return history
+
+    def _check_backend_restart_rate_limit(self) -> dict[str, Any]:
+        history = self._backend_restart_history()
+        if self.backend_max_restarts_per_hour <= 0:
+            return {"allowed": False, "count": len(history), "window_sec": 3600}
+        cutoff = time.time() - 3600.0
+        recent = [float(ts) for ts in history if float(ts) >= cutoff]
+        self.state.scratchpad["_backend_restart_history"] = recent
+        return {
+            "allowed": len(recent) < self.backend_max_restarts_per_hour,
+            "count": len(recent),
+            "window_sec": 3600,
+        }
+
+    def _record_backend_restart_attempt(self) -> None:
+        history = self._backend_restart_history()
+        cutoff = time.time() - 3600.0
+        recent = [float(ts) for ts in history if float(ts) >= cutoff]
+        recent.append(time.time())
+        self.state.scratchpad["_backend_restart_history"] = recent
+
+    async def _probe_backend_health(self, health_url: str, *, timeout_sec: int) -> dict[str, Any]:
+        try:
+            import httpx
+        except Exception as exc:
+            return {"ok": False, "error": f"httpx unavailable: {exc}"}
+        headers = {"Authorization": f"Bearer {self.client.api_key}"}
+        try:
+            async with httpx.AsyncClient(timeout=float(timeout_sec)) as probe_client:
+                response = await probe_client.get(health_url, headers=headers)
+            return {"ok": response.status_code < 500, "status_code": response.status_code}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    async def _wait_for_backend_health(self, health_url: str, *, timeout_sec: int) -> dict[str, Any]:
+        deadline = time.monotonic() + max(1, int(timeout_sec))
+        last_result: dict[str, Any] = {"ok": False, "error": "health probe not started"}
+        while time.monotonic() < deadline:
+            last_result = await self._probe_backend_health(
+                health_url,
+                timeout_sec=min(self.backend_healthcheck_timeout_sec, max(1, int(timeout_sec))),
+            )
+            if last_result.get("ok"):
+                return last_result
+            await asyncio.sleep(1.0)
+        return last_result
+
+    async def _run_backend_restart_command(self, command: str) -> dict[str, Any]:
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            return {"ok": False, "message": f"Unable to launch restart command: {exc}"}
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {"ok": False, "message": "Restart command timed out after 60s."}
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode == 0:
+            return {"ok": True, "stdout": stdout_text, "stderr": stderr_text}
+        return {
+            "ok": False,
+            "message": f"Restart command exited with status {proc.returncode}.",
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        }
+
+    async def _run_backend_unload_command(self, command: str | None) -> dict[str, Any]:
+        if command:
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception as exc:
+                return {"ok": False, "message": f"Unable to launch unload command: {exc}"}
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return {"ok": False, "message": "Unload command timed out after 60s."}
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            if proc.returncode == 0:
+                return {"ok": True, "stdout": stdout_text, "stderr": stderr_text}
+            return {
+                "ok": False,
+                "message": f"Unload command exited with status {proc.returncode}.",
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+            }
+        if self.provider_profile != "ollama":
+            return {"ok": False, "message": "No backend unload command is configured."}
+        return await self._run_ollama_backend_unload()
+
+    async def _run_ollama_backend_unload(self) -> dict[str, Any]:
+        try:
+            import httpx
+        except Exception as exc:
+            return {"ok": False, "message": f"httpx unavailable: {exc}"}
+
+        base_url = str(self.client.base_url or "").rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        unload_url = f"{base_url}/api/generate"
+        payload = {
+            "model": self.client.model,
+            "prompt": "",
+            "stream": False,
+            "keep_alive": 0,
+        }
+        headers = {
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=float(self.backend_healthcheck_timeout_sec)) as unload_client:
+                response = await unload_client.post(unload_url, headers=headers, json=payload)
+        except Exception as exc:
+            return {"ok": False, "message": f"Ollama unload request failed: {exc}"}
+        if response.status_code >= 400:
+            return {
+                "ok": False,
+                "message": f"Ollama unload request failed with status {response.status_code}.",
+            }
+        body_text = response.text.strip()
+        return {
+            "ok": True,
+            "status_code": response.status_code,
+            "body": body_text,
+            "message": "Ollama unload request completed.",
+        }
 
     @staticmethod
     def _stream_print(text: str) -> None:
@@ -1109,6 +1441,12 @@ class Harness:
         new_task: str = "",
         previous_task: str = "",
     ) -> None:
+        preserved_previous_task = str(
+            previous_task
+            or self.state.run_brief.original_task
+            or self.state.scratchpad.get("_last_task_text")
+            or ""
+        ).strip()
         preserved_scratchpad: dict[str, Any] = {}
         for key in (
             "_model_name",
@@ -1117,10 +1455,13 @@ class Harness:
             "strategy",
             "_last_task_text",
             "_last_task_handoff",
+            "_task_boundary_previous_task",
             "_task_sequence",
         ):
             if key in self.state.scratchpad:
                 preserved_scratchpad[key] = self.state.scratchpad[key]
+        if preserved_previous_task:
+            preserved_scratchpad["_task_boundary_previous_task"] = preserved_previous_task
 
         background_processes = json_safe_value(self.state.background_processes)
         inventory_state = json_safe_value(self.state.inventory_state)
@@ -1289,24 +1630,25 @@ class Harness:
     def _initialize_run_brief(self, task: str, *, raw_task: str | None = None) -> None:
         effective_task = str(task or "").strip()
         source_task = str(raw_task or effective_task).strip()
-        
         existing_task = str(self.state.run_brief.original_task or "").strip()
+        if not existing_task:
+            existing_task = str(self.state.scratchpad.pop("_task_boundary_previous_task", "") or "").strip()
         if existing_task and effective_task and effective_task != existing_task:
             # We are handing over the objective. Keep the original intent and append the new follow-up direction.
             merged_task = f"{existing_task}\nFollow-up: {effective_task}"
         else:
             merged_task = effective_task or existing_task
-            
+
         self.state.run_brief.original_task = merged_task
         self.state.run_brief.task_contract = self._derive_task_contract(merged_task)
         self.state.run_brief.current_phase_objective = f"{self.state.current_phase}: {effective_task}"
-        
+
         existing_goal = str(self.state.working_memory.current_goal or "").strip()
         if existing_goal and effective_task and effective_task not in existing_goal:
             self.state.working_memory.current_goal = f"{existing_goal}\nFollow-up: {effective_task}"
         else:
             self.state.working_memory.current_goal = merged_task
-            
+
         self.state.scratchpad["_task_target_paths"] = extract_task_target_paths(effective_task)
         self._store_task_handoff(raw_task=source_task, effective_task=effective_task)
         if hasattr(self.memory, "prime_write_policy"):
@@ -1473,6 +1815,8 @@ class Harness:
     def _chat_mode_tools(self) -> list[dict[str, Any]]:
         task = self._current_user_task()
         if not self._chat_mode_requires_tools(task):
+            self.state.scratchpad["_chat_tools_exposed"] = False
+            self.state.scratchpad["_chat_tools_suppressed_reason"] = "non_lookup_chat"
             self._runlog(
                 "chat_tool_selection",
                 "chat tool exposure suppressed",
@@ -1480,6 +1824,8 @@ class Harness:
                 reason="non_lookup_chat",
             )
             return []
+        self.state.scratchpad["_chat_tools_exposed"] = True
+        self.state.scratchpad.pop("_chat_tools_suppressed_reason", None)
         tools = self.registry.export_openai_tools(
             phase=self.state.current_phase,
             mode="chat",

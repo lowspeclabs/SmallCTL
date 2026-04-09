@@ -230,14 +230,17 @@ def _is_sub4b_write_timeout(
     partial_tool_calls: list[dict[str, Any]],
 ) -> bool:
     """Return True when all of these hold:
-    - The error reason is tool_call_continuation_timeout
+    - The error reason is tool_call_continuation_timeout or read_timeout
     - The partial tool call is file_write or file_append
     - The active model is ≤4 B parameters
 
     Used to trigger an immediate chat-mode fallback on the first chunk
     error rather than burning through all retries.
     """
-    if details.get("reason") != "tool_call_continuation_timeout":
+    reason = str(details.get("reason") or "").strip().lower()
+    if reason not in {"tool_call_continuation_timeout", "read_timeout"}:
+        return False
+    if reason == "read_timeout" and not bool(details.get("tool_call_stream_active", True)):
         return False
 
     write_tools = {"file_write", "file_append"}
@@ -320,6 +323,7 @@ def _build_text_write_fallback_prompt(
         [
             "Do not emit tool calls, XML wrappers, or `memory_update`; output code only.",
             "If you start a tool-style tag, JSON object, or explanation, stop and emit the code fence instead.",
+            "Keep the chunk small, ideally under 50 lines, and write only one logical section at a time.",
             f"Target path: `{target_path}`.",
             f"Write intent: `{session_intent}`.",
             f"Current section: `{current_section}`.",
@@ -700,6 +704,23 @@ async def _attempt_text_write_fallback(
             },
         ),
     )
+    await harness._emit(
+        deps.event_handler,
+        UIEvent(
+            event_type=UIEventType.ASSISTANT,
+            content="Fallback progress: switching to a code-only rescue pass for the stalled write.",
+            data={"status_activity": "fallback rescue in progress"},
+        ),
+    )
+    harness._runlog(
+        "stream_text_write_fallback_progress",
+        "fallback rescue in progress",
+        status_activity="fallback rescue in progress",
+        write_session_id=str(getattr(session_context, "write_session_id", "") or ""),
+        target_path=str(getattr(session_context, "write_target_path", "") or ""),
+        current_section=current_section,
+        reason=reason,
+    )
     fallback_messages = list(messages) + [
         {
             "role": "system",
@@ -829,6 +850,23 @@ async def _attempt_text_write_fallback(
         )
     if fallback_intent is not None and can_safely_synthesize(fallback_intent, harness=harness):
         synthetic_call = build_synthetic_file_write_call(fallback_intent)
+        await harness._emit(
+            deps.event_handler,
+            UIEvent(
+                event_type=UIEventType.ASSISTANT,
+                content="Fallback progress: recovered a usable code block and is finalizing the write.",
+                data={"status_activity": "fallback rescue finalizing"},
+            ),
+        )
+        harness._runlog(
+            "stream_text_write_fallback_progress",
+            "fallback rescue finalizing",
+            status_activity="fallback rescue finalizing",
+            write_session_id=str(getattr(session_context, "write_session_id", "") or ""),
+            target_path=str(getattr(session_context, "write_target_path", "") or ""),
+            current_section=fallback_intent.section_name or current_section,
+            reason=reason,
+        )
         harness._runlog(
             "stream_text_write_fallback_succeeded",
             "converted no-tools write response into synthetic file_write",
@@ -884,9 +922,9 @@ async def _attempt_text_write_fallback(
             usage=usage_payload,
             duration=duration,
             ttft=ttft,
-            halted=stream_ended_without_done,
-            halt_reason="stream_ended_without_done" if stream_ended_without_done else "",
-            halt_details=stream_ended_without_done_details,
+            halted=False,
+            halt_reason="",
+            halt_details={},
         )
 
     if fallback_intent is not None:
@@ -1131,6 +1169,33 @@ async def process_model_stream(
                             ),
                         )
                     break  # break inner loop → retry outer loop
+                if event.get("type") == "backend_wedged":
+                    details = event.get("details")
+                    if not isinstance(details, dict):
+                        details = {}
+                    graph_state.latency_metrics["backend_wedged_count"] = (
+                        int(graph_state.latency_metrics.get("backend_wedged_count", 0) or 0) + 1
+                    )
+                    harness._runlog(
+                        "backend_wedged",
+                        "backend did not emit a first token before timeout",
+                        details=details,
+                    )
+                    await harness._emit(
+                        deps.event_handler,
+                        UIEvent(
+                            event_type=UIEventType.ERROR,
+                            content="Backend did not emit a first token before timeout. Automatic recovery did not succeed.",
+                            data={"is_api_error": True, "details": details},
+                        ),
+                    )
+                    graph_state.final_result = harness._failure(
+                        "Backend did not emit a first token before timeout",
+                        error_type="provider",
+                        details=details,
+                    )
+                    graph_state.error = graph_state.final_result["error"]
+                    return StreamProcessingResult(chunks=chunks)
                 if event.get("type") == "stream_ended_without_done":
                     stream_ended_without_done = True
                     details = event.get("details")

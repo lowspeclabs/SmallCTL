@@ -19,7 +19,8 @@ from ..phases import normalize_phase
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..plans import write_plan_file
 from ..normalization import coerce_int as _coerce_int_value, coerce_datetime as _coerce_datetime
-from ..state import clip_text_value, json_safe_value, ExecutionPlan, PlanStep, WriteSession
+from ..state import clip_text_value, json_safe_value, ExecutionPlan, PlanStep
+from ..write_session_fsm import new_write_session, record_write_session_event
 from ..task_targets import primary_task_target_path
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.planning import _refresh_plan_playbook_artifact
@@ -38,6 +39,7 @@ from .tool_call_parser import (
     parse_tool_calls,
     _detect_empty_file_write_payload,
     _detect_missing_required_tool_arguments,
+    _detect_placeholder_tool_call,
     _build_schema_repair_message,
     _ensure_chunk_write_session,
     _suggested_chunk_sections,
@@ -66,6 +68,7 @@ from .tool_outcomes import (
     _get_tool_execution_record,
     _shell_human_retry_hint,
     _shell_ssh_retry_hint,
+    _shell_workspace_relative_retry_hint,
     _store_tool_execution_record,
     _has_matching_tool_message,
     _conversation_message_from_dict,
@@ -272,13 +275,31 @@ def _recent_assistant_texts(harness: Any, *, limit: int = 2) -> list[str]:
 def _looks_like_freeze_or_hang(harness: Any, assistant_text: str) -> bool:
     text = str(assistant_text or "").strip()
     if not text:
+        return False
+    recent = _recent_assistant_texts(harness, limit=3)
+    if not recent:
+        return False
+    if text in recent:
         return True
-    recent = _recent_assistant_texts(harness, limit=2)
-    if recent and text == recent[0]:
+    if len(recent) >= 2 and recent[0] == recent[1]:
         return True
-    if len(recent) >= 2 and recent[0] == recent[1] == text:
+    if len(recent) >= 3 and recent[0] == recent[1] == recent[2]:
         return True
     return False
+
+
+def _build_blank_message_nudge(harness: Any, *, repeated: bool) -> str:
+    goal_recap = build_goal_recap(harness)
+    goal_note = f" {goal_recap}" if goal_recap else ""
+    if repeated:
+        return (
+            "Blank Message Nudge: the last assistant turn had no text and no tool calls."
+            f"{goal_note} Provide a concrete next step, emit the JSON tool call, or call `task_complete(message='...')` if finished."
+        )
+    return (
+        "The assistant turn was empty."
+        f"{goal_note} Please respond with a concrete thought or tool call; if you are finished, call `task_complete(message='...')`."
+    )
 
 
 def _build_small_model_continue_message(
@@ -326,6 +347,30 @@ def _task_prefers_summary_synthesis(harness: Any) -> bool:
     asks_for_summary = any(keyword in merged for keyword in ("table", "summary", "summarize", "report", "overview", "present"))
     asks_about_listing = any(keyword in merged for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env"))
     return asks_for_summary and asks_about_listing
+
+
+def _chat_turn_signature(graph_state: GraphRunState) -> str:
+    thinking_text = re.sub(r"\s+", " ", str(graph_state.last_thinking_text or "").strip())
+    if thinking_text:
+        return thinking_text
+    assistant_text = re.sub(r"\s+", " ", str(graph_state.last_assistant_text or "").strip())
+    if not assistant_text:
+        return ""
+    return assistant_text
+
+
+def _build_repeated_chat_thinking_message(harness: Any, graph_state: GraphRunState) -> str:
+    thinking_text = str(graph_state.last_thinking_text or "").strip()
+    clipped_thinking, was_clipped = clip_text_value(thinking_text, limit=240)
+    goal_recap = build_goal_recap(harness)
+    goal_note = f" {goal_recap}" if goal_recap else ""
+    repeat_note = f" Previous thinking: {clipped_thinking}{' [truncated]' if was_clipped else ''}." if clipped_thinking else ""
+    return (
+        "You repeated the same reasoning without making forward progress."
+        f"{repeat_note}{goal_note} "
+        "Do not restate the same thoughts. Continue from the last concrete step and either call the next tool "
+        "or call `task_complete(message='...')` if you are actually finished."
+    )
 
 
 def _build_artifact_summary_exit_message(harness: Any, *, artifact_id: str = "") -> str:
@@ -597,17 +642,27 @@ async def resume_loop_run(
     if continue_like:
         harness._runlog("step_count_reset", "resetting step count for continuation", old_count=harness.state.step_count)
         harness.state.step_count = 0
+        harness.state.inactive_steps = 0
 
     _clear_tool_attempt_history(harness)
+    if hasattr(harness.state, "tool_history") and isinstance(harness.state.tool_history, list):
+        harness.state.tool_history.clear()
 
     harness.state.pending_interrupt = None
+    graph_state.pending_interrupt = None
+    graph_state.interrupt_payload = None
+    graph_state.pending_tool_calls = []
+
     for key in (
         "_ask_human",
         "_ask_human_question",
         "_file_read_recovery_nudged",
         "_shell_human_retry_nudged",
+        "_artifact_read_recovery_nudged",
         "_artifact_read_synthesis_nudged",
         "_artifact_summary_exit_nudged",
+        "_schema_validation_nudges",
+        "_consecutive_idle",
     ):
         harness.state.scratchpad.pop(key, None)
     harness.state.append_message(
@@ -801,8 +856,9 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
                 )
 
     guard_error = check_guards(harness.state, harness.guards)
+    recovery_hint: tuple[str, str] | None = None
     if guard_error:
-        if "stagnation limit" in guard_error or "loop detected" in guard_error:
+        if "stagnation limit" in guard_error or "loop detected" in guard_error or "repeated tool call loop" in guard_error:
             harness.state.append_message(
                 ConversationMessage(
                     role="system",
@@ -833,45 +889,45 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
         if guard_error:
             recovery_hint = _artifact_read_recovery_hint(harness, guard_error)
-        if (
-            recovery_hint is not None
-            and graph_state.run_mode != "chat"
-        ):
-            artifact_id, query = recovery_hint
-            _clear_artifact_read_guard_state(harness, artifact_id)
-            graph_state.pending_tool_calls = [
-                PendingToolCall(
-                    tool_name="artifact_grep",
-                    args={
-                        "artifact_id": artifact_id,
-                        "query": query,
-                    },
+            if (
+                recovery_hint is not None
+                and graph_state.run_mode != "chat"
+            ):
+                artifact_id, query = recovery_hint
+                _clear_artifact_read_guard_state(harness, artifact_id)
+                graph_state.pending_tool_calls = [
+                    PendingToolCall(
+                        tool_name="artifact_grep",
+                        args={
+                            "artifact_id": artifact_id,
+                            "query": query,
+                        },
+                    )
+                ]
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=(
+                            f"Auto-advancing repeated `artifact_read` on artifact {artifact_id} "
+                            f"to `artifact_grep` with query `{query}`."
+                        ),
+                        metadata={
+                            "recovery_kind": "artifact_read",
+                            "artifact_id": artifact_id,
+                            "query": query,
+                            "recovery_mode": "direct_dispatch",
+                        },
+                    )
                 )
-            ]
-            harness.state.append_message(
-                ConversationMessage(
-                    role="system",
-                    content=(
-                        f"Auto-advancing repeated `artifact_read` on artifact {artifact_id} "
-                        f"to `artifact_grep` with query `{query}`."
-                    ),
-                    metadata={
-                        "recovery_kind": "artifact_read",
-                        "artifact_id": artifact_id,
-                        "query": query,
-                        "recovery_mode": "direct_dispatch",
-                    },
+                harness._runlog(
+                    "artifact_read_recovery",
+                    "scheduled recovery dispatch",
+                    step=harness.state.step_count,
+                    artifact_id=artifact_id,
+                    query=query,
+                    guard_error=guard_error,
                 )
-            )
-            harness._runlog(
-                "artifact_read_recovery",
-                "scheduled recovery dispatch",
-                step=harness.state.step_count,
-                artifact_id=artifact_id,
-                query=query,
-                guard_error=guard_error,
-            )
-            guard_error = None
+                guard_error = None
         elif (
             recovery_hint is not None
             and graph_state.run_mode == "chat"
@@ -919,20 +975,25 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
                 session_id = new_write_session_id()
 
-                harness.state.write_session = WriteSession(
-                    write_session_id=session_id,
-                    write_target_path=target_path,
-                    write_session_intent=infer_write_session_intent(
+                harness.state.write_session = new_write_session(
+                    session_id=session_id,
+                    target_path=target_path,
+                    intent=infer_write_session_intent(
                         target_path,
                         getattr(harness.state, "cwd", None),
                     ),
-                    write_session_mode="chunked_author",
+                    mode="chunked_author",
                     suggested_sections=suggestions,
-                    write_next_section=suggestions[0] if suggestions else "",
-                    status="open",
+                    next_section=suggestions[0] if suggestions else "",
                 )
                 from .tool_outcomes import _register_write_session_stage_artifact
                 _register_write_session_stage_artifact(harness, harness.state.write_session)
+                record_write_session_event(
+                    harness.state,
+                    event="session_opened",
+                    session=harness.state.write_session,
+                    details={"source": "chunk_mode_trigger", "size": len(content)},
+                )
                 
                 msg = (
                     f"Writing `{target_path}` requires chunked authoring for this model/task ({len(content)} chars in the attempted write). "
@@ -1498,8 +1559,10 @@ async def interpret_model_output(
                             evidence=intent.evidence,
                             recovery_kind=write_recovery_kind(intent),
                         )
-            missing_args = _detect_empty_file_write_payload(harness, pending)
-            if missing_args is not None:
+            missing_args = _detect_placeholder_tool_call(harness, pending)
+            if missing_args is None:
+                missing_args = _detect_empty_file_write_payload(harness, pending)
+            if missing_args is not None and pending.tool_name in {"file_write", "file_append"}:
                 retry_count = _record_empty_write_retry_metric(graph_state, harness, pending)
                 salvaged = _salvage_active_write_session_append(harness, pending)
                 if salvaged is not None:
@@ -1743,20 +1806,47 @@ async def interpret_model_output(
     # Guard against premature success for "hello" when real work was requested
     if not graph_state.pending_tool_calls and "hello" in low_text and ("task" in low_text or "complete" in low_text):
         if any(v in harness.state.run_brief.original_task.lower() for v in ["ping", "list", "read", "run"]):
-             harness.state.append_message(ConversationMessage(
-                 role="user",
-                 content="### MISSION CHECK: You mention 'hello' or completing the greeting, but a real task is still pending. DO NOT finish yet. Proceed with the primary mission."
-             ))
-             harness._record_experience(
-                 tool_name="task_complete",
-                 result=ToolEnvelope(success=False, error="Blocked hello completion attempt"),
-                 source="guarded_completion",
-                 notes=f"Model attempted 'hello' completion while mission pending. Failure mode: {PREMATURE_TASK_COMPLETE}",
-             )
-             harness._runlog("premature_completion_blocked", "blocked hello completion", task=harness.state.run_brief.original_task)
-             return LoopRoute.NEXT_STEP
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content="### MISSION CHECK: You mention 'hello' or completing the greeting, but a real task is still pending. DO NOT finish yet. Proceed with the primary mission.",
+                )
+            )
+            harness._record_experience(
+                tool_name="task_complete",
+                result=ToolEnvelope(success=False, error="Blocked hello completion attempt"),
+                source="guarded_completion",
+                notes=f"Model attempted 'hello' completion while mission pending. Failure mode: {PREMATURE_TASK_COMPLETE}",
+            )
+        harness._runlog("premature_completion_blocked", "blocked hello completion", task=harness.state.run_brief.original_task)
+        return LoopRoute.NEXT_STEP
 
-    if nudges < 4 and assistant_text:
+    stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
+
+    if not assistant_text.strip() and not graph_state.pending_tool_calls and not stream_halted:
+        blank_nudges = int(harness.state.scratchpad.get("_blank_message_nudges", 0))
+        if blank_nudges < 2:
+            harness.state.scratchpad["_blank_message_nudges"] = blank_nudges + 1
+            msg = _build_blank_message_nudge(harness, repeated=blank_nudges >= 1)
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=msg,
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "blank_message",
+                        "retry_count": blank_nudges + 1,
+                    },
+                )
+            )
+            harness._runlog(
+                "blank_message_recovery",
+                "injected recovery nudge for an empty assistant turn",
+                retry_count=blank_nudges + 1,
+            )
+            return LoopRoute.NEXT_STEP
+
+    if nudges < 4 and assistant_text and not stream_halted:
         harness.state.scratchpad["_no_tool_nudges"] = nudges + 1
         msg = (
             "You reached a conclusion but did not call `task_complete`. "
@@ -1776,7 +1866,6 @@ async def interpret_model_output(
         harness._runlog("no_tool_recovery", "injected recovery nudge", nudge_count=nudges+1)
         return LoopRoute.NEXT_STEP
 
-    stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
     if stream_halted or _looks_like_freeze_or_hang(harness, assistant_text):
         freeze_nudges = int(harness.state.scratchpad.get("_small_model_continue_nudges", 0))
         if freeze_nudges < 2:
@@ -1853,9 +1942,39 @@ async def interpret_chat_output(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
 ) -> LoopRoute:
-    del deps
+    harness = deps.harness
+    scratchpad = harness.state.scratchpad
+    signature = _chat_turn_signature(graph_state)
+    prior_signature = str(scratchpad.get("_chat_last_turn_signature") or "")
+    if signature:
+        scratchpad["_chat_last_turn_signature"] = signature
+
     if graph_state.pending_tool_calls:
         return LoopRoute.DISPATCH_TOOLS
+
+    if signature and signature == prior_signature:
+        nudge_key = f"{graph_state.thread_id}:{signature}"
+        if scratchpad.get("_chat_repeated_thinking_nudged") != nudge_key:
+            scratchpad["_chat_repeated_thinking_nudged"] = nudge_key
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=_build_repeated_chat_thinking_message(harness, graph_state),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "repeated_thinking",
+                        "thread_id": graph_state.thread_id,
+                    },
+                )
+            )
+            harness._runlog(
+                "chat_repeated_thinking_nudge",
+                "nudged model after repeated no-tool thinking",
+                thread_id=graph_state.thread_id,
+                signature=signature,
+            )
+        return LoopRoute.NEXT_STEP
+
     graph_state.final_result = {
         "status": "chat_completed",
         "assistant": graph_state.last_assistant_text,
@@ -1999,6 +2118,31 @@ async def dispatch_tools(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> 
                     step=harness.state.step_count,
                     tool_name=pending.tool_name,
                     arguments=json_safe_value(pending.args),
+                )
+                graph_state.pending_tool_calls = []
+                graph_state.last_tool_results = []
+                return
+
+            workspace_relative_shell_hint = _shell_workspace_relative_retry_hint(harness, pending)
+            if workspace_relative_shell_hint is not None:
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=workspace_relative_shell_hint,
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "shell_exec",
+                            "recovery_mode": "workspace_relative_path",
+                        },
+                    )
+                )
+                harness._runlog(
+                    "shell_exec_workspace_relative_nudge",
+                    "nudged model away from retrying a root-level /temp path",
+                    step=harness.state.step_count,
+                    tool_name=pending.tool_name,
+                    arguments=json_safe_value(pending.args),
+                    guard_error=repeat_error,
                 )
                 graph_state.pending_tool_calls = []
                 graph_state.last_tool_results = []
@@ -2166,14 +2310,6 @@ async def dispatch_tools(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> 
                             ),
                         )
                         graph_state.pending_tool_calls = []
-                        graph_state.final_result = {
-                            "status": "needs_human",
-                            "message": payload["question"],
-                            "assistant": graph_state.last_assistant_text,
-                            "thinking": graph_state.last_thinking_text,
-                            "usage": graph_state.last_usage,
-                            "interrupt": payload,
-                        }
                         return
                     harness.state.recent_errors.append(repeat_error)
                     log_kv(

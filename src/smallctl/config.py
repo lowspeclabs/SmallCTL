@@ -7,6 +7,7 @@ from typing import Any
 
 from .client import detect_provider_profile
 from .phases import normalize_phase
+from .presets import get_preset_defaults
 from .tools.profiles import parse_public_profiles
 
 try:
@@ -88,6 +89,7 @@ class SmallctlConfig:
     tui: bool = False
     task: str | None = None
     config_path: str | None = None
+    preset: str | None = None
     api_key: str | None = "local-dev-key"
     context_limit: int | None = None
     max_prompt_tokens: int | None = None
@@ -230,6 +232,7 @@ def _env_config() -> dict[str, Any]:
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
+        "preset": env_or_dotenv(f"{ENV_PREFIX}PRESET"),
         "indexer": env_or_dotenv(f"{ENV_PREFIX}INDEXER"),
         "api_key": env_or_dotenv(f"{ENV_PREFIX}API_KEY"),
         "context_limit": env_or_dotenv(f"{ENV_PREFIX}CONTEXT_LIMIT"),
@@ -358,20 +361,19 @@ def _env_config() -> dict[str, Any]:
 
 
 def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
-    # Precedence: CLI > env vars > local .smallctl.yaml > user config path.
-    # Env remains the shared source of truth for all entry points, while the
-    # config files provide fallback defaults when the environment is missing.
+    # Source precedence (before provider defaults):
+    # user config path -> local config -> env/.env -> CLI
     env_cfg = _env_config()
-    merged: dict[str, Any] = {}
+    user_cfg: dict[str, Any] = {}
+    local_cfg: dict[str, Any] = {}
 
     user_config_path = cli.get("config_path") or env_cfg.get("config_path")
     if user_config_path:
-        merged.update(_read_yaml(Path(user_config_path)))
-        merged["config_path"] = user_config_path
+        user_cfg = _read_yaml(Path(user_config_path))
+        user_cfg["config_path"] = user_config_path
+    local_cfg = _read_yaml(Path.cwd() / LOCAL_CONFIG)
 
-    merged.update(_read_yaml(Path.cwd() / LOCAL_CONFIG))
-    merged.update(env_cfg)
-
+    merged: dict[str, Any] = {}
     if "provider_profile" not in merged:
         merged["provider_profile"] = "auto"
 
@@ -450,7 +452,26 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["restart_command"] = cli_clean["backend_restart_command"]
     if "startup_grace_period_sec" not in cli_clean and "backend_restart_grace_sec" in cli_clean:
         cli_clean["startup_grace_period_sec"] = cli_clean["backend_restart_grace_sec"]
+
+    # Resolve selected preset from the fully merged explicit sources.
+    explicit_merged: dict[str, Any] = {}
+    explicit_merged.update(user_cfg)
+    explicit_merged.update(local_cfg)
+    explicit_merged.update(env_cfg)
+    explicit_merged.update(cli_clean)
+    preset_name = str(explicit_merged.get("preset") or "").strip().lower() or None
+    preset_defaults = get_preset_defaults(preset_name)
+
+    # Apply preset defaults first, then re-apply explicit user values.
+    if preset_defaults:
+        merged.update(preset_defaults)
+    merged.update(user_cfg)
+    merged.update(local_cfg)
+    merged.update(env_cfg)
     merged.update(cli_clean)
+    if preset_name:
+        merged["preset"] = preset_name
+
     explicit_prompt_budget = "max_prompt_tokens" in merged
     if not explicit_prompt_budget and "context_limit" in merged:
         merged["max_prompt_tokens"] = merged["context_limit"]
@@ -462,6 +483,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     elif "context_limit" in merged and explicit_prompt_budget:
         compatibility_warnings.append(
             "Legacy SMALLCTL_CONTEXT_LIMIT remains set; prefer SMALLCTL_MAX_PROMPT_TOKENS for per-turn budgeting."
+        )
+    if preset_name and not preset_defaults:
+        compatibility_warnings.append(
+            f"Unknown preset '{preset_name}' ignored."
         )
     merged["phase"] = normalize_phase(str(merged.get("phase", "explore")))
     merged["graph_checkpointer"] = _normalize_graph_checkpointer(

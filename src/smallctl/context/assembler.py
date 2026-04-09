@@ -372,7 +372,9 @@ class PromptAssembler:
             if state.last_failure_class:
                 repair_bits.append(f"Failure class: {state.last_failure_class}")
             if state.repair_cycle_id:
-                repair_bits.append(f"Repair cycle: {state.repair_cycle_id}")
+                repair_bits.append(
+                    f"System repair cycle: {state.repair_cycle_id} (diagnostic only; not a write_session_id)"
+                )
             if state.files_changed_this_cycle:
                 repair_bits.append(
                     "Files changed this cycle: " + ", ".join(state.files_changed_this_cycle[-5:])
@@ -496,9 +498,12 @@ class PromptAssembler:
             return message
 
         if message.role == "tool":
+            inline_limit = self.policy.tool_result_inline_token_limit
+            if message.name == "artifact_read":
+                inline_limit = self.policy.artifact_read_inline_token_limit
             token_limit = min(
                 max(48, transcript_token_limit),
-                max(48, self.policy.tool_result_inline_token_limit),
+                max(48, inline_limit),
             )
         else:
             token_limit = max(96, transcript_token_limit)
@@ -532,6 +537,8 @@ class PromptAssembler:
         if isinstance(message.metadata, dict):
             artifact_id = str(message.metadata.get("artifact_id", "") or "").strip()
         artifact = state.artifacts.get(artifact_id) if artifact_id else None
+        if message.name == "artifact_read":
+            return message.content or ""
         if artifact is None:
             return message.content or ""
 

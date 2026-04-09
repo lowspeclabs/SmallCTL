@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 from ..state import LoopState
+from ..write_session_fsm import record_write_session_event
 from .common import fail, ok
+
+FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_delete"}
+
+
+def is_file_mutating_tool(tool_name: str) -> bool:
+    return str(tool_name or "").strip() in FILE_MUTATING_TOOLS
 
 
 def _resolve(path: str, cwd: str | None = None) -> Path:
@@ -22,6 +30,91 @@ def _normalized_path_str(path: Path) -> str:
         return str(path.resolve())
     except Exception:
         return str(path)
+
+
+def _looks_like_system_repair_cycle_id(value: str | None) -> bool:
+    return str(value or "").strip().lower().startswith("repair-")
+
+
+def _suspicious_temp_root_details(path: str) -> dict[str, str] | None:
+    raw = str(path or "").strip()
+    normalized = raw.replace("\\", "/")
+    if not raw or (normalized != "/temp" and not normalized.startswith("/temp/")):
+        return None
+
+    suffix = normalized[len("/temp"):]
+    relative_suffix = suffix.lstrip("/")
+    return {
+        "path": raw,
+        "suggested_tmp_path": f"/tmp{suffix}",
+        "suggested_relative_path": "./temp" if not relative_suffix else f"./temp/{relative_suffix}",
+    }
+
+
+def _guard_suspicious_temp_root_path(path: str) -> dict[str, Any] | None:
+    details = _suspicious_temp_root_details(path)
+    if details is None:
+        return None
+    return fail(
+        f"Path `{details['path']}` points at the root-level `/temp` directory, which is usually a typo in this harness. "
+        f"Use `{details['suggested_tmp_path']}` for a system temp file or `{details['suggested_relative_path']}` for a workspace-local temp path instead.",
+        metadata={
+            "path": details["path"],
+            "error_kind": "suspicious_temp_root_path",
+            "suggested_tmp_path": details["suggested_tmp_path"],
+            "suggested_relative_path": details["suggested_relative_path"],
+        },
+    )
+
+
+def _write_session_resume_metadata(session: Any, *, path: str) -> dict[str, Any]:
+    section_name = str(
+        getattr(session, "write_next_section", "")
+        or getattr(session, "write_current_section", "")
+        or "imports"
+    ).strip() or "imports"
+    return {
+        "tool_name": "file_write",
+        "required_fields": ["path", "content", "write_session_id", "section_name"],
+        "required_arguments": {
+            "path": str(getattr(session, "write_target_path", "") or path or "").strip(),
+            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+            "section_name": section_name,
+        },
+        "optional_fields": ["next_section_name"],
+    }
+
+
+def _repair_cycle_session_id_failure(
+    *,
+    supplied_id: str,
+    path: str,
+    state: LoopState | None,
+) -> dict[str, Any]:
+    session = getattr(state, "write_session", None) if state is not None else None
+    if session is not None and str(getattr(session, "status", "")).strip().lower() == "complete":
+        session = None
+
+    metadata: dict[str, Any] = {
+        "path": path,
+        "error_kind": "repair_cycle_used_as_write_session_id",
+        "supplied_write_session_id": supplied_id,
+        "system_repair_cycle_id": str(getattr(state, "repair_cycle_id", "") or "").strip(),
+    }
+    if session is not None:
+        metadata["active_write_session_id"] = str(getattr(session, "write_session_id", "") or "").strip()
+        metadata["next_required_tool"] = _write_session_resume_metadata(session, path=path)
+        return fail(
+            f"`{supplied_id}` looks like a system repair cycle ID, not a `write_session_id`. "
+            f"Resume the active Write Session with `write_session_id='{session.write_session_id}'` for `{session.write_target_path}`.",
+            metadata=metadata,
+        )
+
+    return fail(
+        f"`{supplied_id}` looks like a system repair cycle ID, not a `write_session_id`. "
+        "There is no active write session to resume; omit `write_session_id` for a direct write or inspect `loop_status` for the current blocker.",
+        metadata=metadata,
+    )
 
 
 def _repair_cycle_reads(state: LoopState | None) -> list[str]:
@@ -97,6 +190,11 @@ def _normalize_replace_strategy(replace_strategy: str | None) -> str:
     if strategy == "append":
         return "append"
     return "auto"
+
+
+def _write_session_can_finalize(session: Any) -> bool:
+    mode = str(getattr(session, "write_session_mode", "") or "").strip().lower()
+    return mode in {"chunked_author", "local_repair", "stub_and_fill"}
 
 
 def _append_unique_section(completed_sections: list[str], section_name: str) -> bool:
@@ -369,13 +467,35 @@ def _replace_known_section(
 
 
 def _workspace_relative_hint(path: str, cwd: str | None = None) -> str | None:
-    candidate = Path(path)
-    if candidate.is_absolute() or not path or path[0] not in {"\\", "/"}:
+    raw = str(path or "").strip()
+    if not raw:
         return None
-    trimmed = path.lstrip("\\/")
+
+    candidate = Path(raw)
+    base = Path(cwd) if cwd else Path.cwd()
+
+    if candidate.is_absolute():
+        try:
+            relative = candidate.resolve().relative_to(base.resolve())
+        except Exception:
+            trimmed = raw.lstrip("\\/")
+            if not trimmed:
+                return None
+            workspace_candidate = (base / Path(trimmed)).resolve()
+            if not (workspace_candidate.exists() or workspace_candidate.parent.exists()):
+                return None
+            try:
+                relative = workspace_candidate.relative_to(base.resolve())
+            except Exception:
+                return None
+        return "." if str(relative) == "." else f"./{relative}"
+
+    if raw[0] not in {"\\", "/"}:
+        return None
+
+    trimmed = raw.lstrip("\\/")
     if not trimmed:
         return None
-    base = Path(cwd) if cwd else Path.cwd()
     suggested = (base / Path(trimmed)).resolve()
     try:
         relative = suggested.relative_to(base.resolve())
@@ -543,6 +663,10 @@ async def file_write(
     replace_strategy: str | None = None,
     expected_followup_verifier: str | None = None,
 ) -> dict[str, Any]:
+    suspicious_path = _guard_suspicious_temp_root_path(path)
+    if suspicious_path is not None:
+        return suspicious_path
+
     target = _resolve(path, cwd)
     if not write_session_id and session_id:
         write_session_id = session_id
@@ -554,13 +678,30 @@ async def file_write(
         )
     
     if write_session_id:
+        if _looks_like_system_repair_cycle_id(write_session_id):
+            return _repair_cycle_session_id_failure(
+                supplied_id=str(write_session_id or "").strip(),
+                path=path,
+                state=state,
+            )
         if state is None or state.write_session is None:
             return fail(f"No active write session found for session ID `{write_session_id}`. Start a session or write directly.")
         session = state.write_session
         if session.write_session_id != write_session_id:
             return fail(f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.")
         if not _same_target_path(session.write_target_path, path, cwd):
-            return fail(f"Session target path mismatch: expected `{session.write_target_path}`, got `{path}`.")
+            if not session.write_sections_completed:
+                # Allow path correction if no sections completed yet
+                parent_logger = getattr(state, "log", logging.getLogger("smallctl.tools.fs"))
+                parent_logger.info(f"Correcting session target path from `{session.write_target_path}` to `{path}`")
+                session.write_target_path = path
+                # Reset snapshot/staging paths so they are re-initialized for the new target
+                session.write_staging_path = ""
+                session.write_original_snapshot_path = ""
+                session.write_last_attempt_snapshot_path = ""
+                session.write_target_existed_at_start = False
+            else:
+                return fail(f"Session target path mismatch: expected `{session.write_target_path}`, got `{path}`.")
 
         normalized_section_name = _normalize_section_name(section_name, section_id)
         normalized_next_section = str(next_section_name or "").strip()
@@ -615,7 +756,7 @@ async def file_write(
                 "end": start + len(content),
             }
             effective_strategy = "append"
-        final_chunk = not normalized_next_section and session.write_session_mode == "chunked_author"
+        final_chunk = not normalized_next_section and _write_session_can_finalize(session)
 
         try:
             _write_text_file(staging_path, updated_content, encoding=encoding)
@@ -627,6 +768,14 @@ async def file_write(
         session.write_current_section = normalized_section_name
         session.write_next_section = normalized_next_section
         section_added = _append_unique_section(session.write_sections_completed, normalized_section_name)
+        if section_added and session.write_first_chunk_at <= 0:
+            session.write_first_chunk_at = time.time()
+            record_write_session_event(
+                state,
+                event="first_chunk_written",
+                session=session,
+                details={"section_name": normalized_section_name},
+            )
 
         _record_file_change(state, target)
 
@@ -678,7 +827,7 @@ async def file_write(
             "Repair cycle requires reading the target file before patching it again.",
             metadata={
                 "path": str(target),
-                "repair_cycle_id": getattr(state, "repair_cycle_id", ""),
+                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
                 "required_read_paths": _repair_cycle_reads(state),
             },
         )
@@ -706,6 +855,10 @@ async def file_append(
     replace_strategy: str | None = None,
     expected_followup_verifier: str | None = None,
 ) -> dict[str, Any]:
+    suspicious_path = _guard_suspicious_temp_root_path(path)
+    if suspicious_path is not None:
+        return suspicious_path
+
     if not write_session_id and session_id:
         write_session_id = session_id
     if write_session_id:
@@ -731,7 +884,7 @@ async def file_append(
             "Repair cycle requires reading the target file before patching it again.",
             metadata={
                 "path": str(target),
-                "repair_cycle_id": getattr(state, "repair_cycle_id", ""),
+                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
                 "required_read_paths": _repair_cycle_reads(state),
             },
         )
@@ -750,6 +903,10 @@ async def file_delete(
     cwd: str | None = None,
     state: LoopState | None = None,
 ) -> dict[str, Any]:
+    suspicious_path = _guard_suspicious_temp_root_path(path)
+    if suspicious_path is not None:
+        return suspicious_path
+
     target = _resolve(path, cwd)
     if not _repair_cycle_allows_patch(state, target):
         _mark_repeat_patch(state)
@@ -757,7 +914,7 @@ async def file_delete(
             "Repair cycle requires reading the target file before patching it again.",
             metadata={
                 "path": str(target),
-                "repair_cycle_id": getattr(state, "repair_cycle_id", ""),
+                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
                 "required_read_paths": _repair_cycle_reads(state),
             },
         )

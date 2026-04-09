@@ -38,6 +38,7 @@ from ..models.tool_result import ToolEnvelope
 from ..models.events import UIEvent, UIEventType
 from ..phases import normalize_phase
 from ..state import (
+    LOOP_STATE_SCHEMA_VERSION,
     ExperienceMemory,
     LoopState,
     PromptBudgetSnapshot,
@@ -830,6 +831,8 @@ class Harness:
             else Path(self.state.cwd).resolve() / ".smallctl-checkpoint.json"
         )
         payload = {
+            "checkpoint_schema_version": 1,
+            "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "result": json_safe_value(result),
             "state": self.state.to_dict(),

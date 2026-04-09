@@ -11,6 +11,7 @@ from .config import resolve_config
 from .harness import Harness
 from .logging_utils import create_run_logger, log_kv, setup_logging
 from .memory_cli import build_memory_parser, handle_memory_command, memory_cli
+from .presets import list_presets
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", help="Task string to run")
     parser.add_argument("--endpoint", help="OpenAI-compatible API base URL")
     parser.add_argument("--model", help="Model name")
+    parser.add_argument(
+        "--preset",
+        choices=list_presets(),
+        help="Named preset for common run profiles",
+    )
     parser.add_argument("--phase", help="Initial phase (explore|plan|execute|verify)")
     parser.add_argument(
         "--provider-profile",

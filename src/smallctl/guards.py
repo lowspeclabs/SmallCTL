@@ -77,7 +77,10 @@ def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
         for fingerprint, count in counts.items():
             if count >= cfg.max_repeated_actions:
                 tool_name = fingerprint.split("|")[0]
-                return f"Guard tripped: loop detected - tool '{tool_name}' repeated {count} times with identical args and outcome."
+                return (
+                    "Guard tripped: repeated tool call loop "
+                    f"({tool_name} repeated {count} times with identical args and outcome)"
+                )
 
     return None
 
@@ -91,6 +94,8 @@ def apply_triple_answer_guard(
     
     If any task_complete or task_fail tool call has a message that matches
     the assistant_text by > threshold, we strip the redundant text.
+    We also strip meta-commentary that only narrates the upcoming terminal
+    tool call instead of adding user-facing content.
     """
     if not assistant_text or not pending_tool_calls:
         return assistant_text
@@ -99,6 +104,9 @@ def apply_triple_answer_guard(
     clean_assistant = assistant_text.strip().lower()
     if not clean_assistant:
         return assistant_text
+
+    if _looks_like_terminal_tool_meta_commentary(clean_assistant, pending_tool_calls):
+        return ""
 
     for call in pending_tool_calls:
         if call.tool_name in ("task_complete", "task_fail"):
@@ -119,3 +127,42 @@ def apply_triple_answer_guard(
                 return ""
                 
     return assistant_text
+
+
+def _looks_like_terminal_tool_meta_commentary(
+    assistant_text: str,
+    pending_tool_calls: list["PendingToolCall"],
+) -> bool:
+    terminal_calls = [call for call in pending_tool_calls if call.tool_name in ("task_complete", "task_fail")]
+    if not terminal_calls:
+        return False
+
+    normalized = " ".join(str(assistant_text or "").strip().lower().split())
+    if not normalized:
+        return False
+
+    completion_meta_phrases = (
+        "task_complete",
+        "task complete",
+        "task completion",
+        "completion message",
+        "definitive answer",
+        "final answer message",
+        "call task_complete",
+    )
+    if not any(phrase in normalized for phrase in completion_meta_phrases):
+        return False
+
+    planning_phrases = (
+        "i will",
+        "i'll",
+        "i can conclude",
+        "the objective is",
+        "the task is",
+        "i can send",
+        "i will send",
+        "i'll send",
+        "i will provide",
+        "i'll provide",
+    )
+    return any(phrase in normalized for phrase in planning_phrases)

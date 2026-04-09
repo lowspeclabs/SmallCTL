@@ -128,7 +128,12 @@ class MemoryService:
             scratchpad.pop("_force_chunk_mode_targets", None)
 
     def update_working_memory(self, recent_messages_limit: int) -> None:
-        self.harness.state.run_brief.current_phase_objective = self.harness.state.current_phase
+        if not self.harness.state.run_brief.current_phase_objective:
+            self.harness.state.run_brief.current_phase_objective = (
+                self.harness.state.working_memory.current_goal
+                or self.harness.state.run_brief.original_task
+                or self.harness.state.current_phase
+            )
         if not self.harness.state.working_memory.current_goal:
             self.harness.state.working_memory.current_goal = (
                 self.harness.state.run_brief.current_phase_objective or self.harness.state.run_brief.original_task

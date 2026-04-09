@@ -19,6 +19,8 @@ from .normalization import (
     coerce_timestamp_string as _coerce_timestamp_string,
 )
 
+LOOP_STATE_SCHEMA_VERSION = 1
+
 
 def _coerce_int(value: Any, *, default: int = 0) -> int:
     return coerce_int(value, default=default)
@@ -334,6 +336,7 @@ class PromptBudgetSnapshot:
 
 @dataclass
 class LoopState:
+    schema_version: int = LOOP_STATE_SCHEMA_VERSION
     current_phase: str = "explore"
     thread_id: str = ""
     step_count: int = 0
@@ -698,6 +701,7 @@ class LoopState:
             for m in self.recent_messages
         ]
         payload = {
+            "schema_version": LOOP_STATE_SCHEMA_VERSION,
             "current_phase": self.current_phase,
             "thread_id": self.thread_id,
             "step_count": self.step_count,
@@ -759,9 +763,11 @@ class LoopState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LoopState":
-        raw_recent_messages = data.get("recent_messages")
+        incoming_version = _coerce_int(data.get("schema_version"), default=0)
+        migrated = _migrate_loop_state_payload(dict(data), incoming_version=incoming_version)
+        raw_recent_messages = migrated.get("recent_messages")
         if raw_recent_messages is None:
-            raw_recent_messages = _coerce_list_payload(data.get("conversation_history"))[-6:]
+            raw_recent_messages = _coerce_list_payload(migrated.get("conversation_history"))[-6:]
         else:
             raw_recent_messages = _coerce_list_payload(raw_recent_messages)
         recent_messages = [
@@ -769,84 +775,103 @@ class LoopState:
             for msg in raw_recent_messages
             if (message := _coerce_conversation_message(msg)) is not None
         ]
-        raw = dict(data)
+        raw = dict(migrated)
+        raw["schema_version"] = LOOP_STATE_SCHEMA_VERSION
         raw.pop("conversation_history", None)
-        recent_limit = max(_coerce_int(data.get("recent_message_limit"), default=6), 1)
+        recent_limit = max(_coerce_int(migrated.get("recent_message_limit"), default=6), 1)
         recent_messages = _trim_recent_messages(recent_messages, limit=recent_limit)
-        raw["current_phase"] = str(data.get("current_phase", "explore") or "explore")
-        raw["thread_id"] = str(data.get("thread_id", "") or "")
-        raw["step_count"] = _coerce_int(data.get("step_count"), default=0)
-        raw["token_usage"] = _coerce_int(data.get("token_usage"), default=0)
-        raw["elapsed_seconds"] = _coerce_float(data.get("elapsed_seconds"), default=0.0)
-        raw["inactive_steps"] = _coerce_int(data.get("inactive_steps"), default=0)
-        raw["recent_errors"] = _coerce_string_list(data.get("recent_errors"))
-        raw["strategy"] = _coerce_json_dict_payload(data.get("strategy"))
+        raw["current_phase"] = str(migrated.get("current_phase", "explore") or "explore")
+        raw["thread_id"] = str(migrated.get("thread_id", "") or "")
+        raw["step_count"] = _coerce_int(migrated.get("step_count"), default=0)
+        raw["token_usage"] = _coerce_int(migrated.get("token_usage"), default=0)
+        raw["elapsed_seconds"] = _coerce_float(migrated.get("elapsed_seconds"), default=0.0)
+        raw["inactive_steps"] = _coerce_int(migrated.get("inactive_steps"), default=0)
+        raw["recent_errors"] = _coerce_string_list(migrated.get("recent_errors"))
+        raw["strategy"] = _coerce_json_dict_payload(migrated.get("strategy"))
         raw["recent_messages"] = recent_messages
         raw["recent_message_limit"] = recent_limit
-        raw["run_brief"] = _coerce_run_brief(data.get("run_brief"))
+        raw["run_brief"] = _coerce_run_brief(migrated.get("run_brief"))
         raw["working_memory"] = _coerce_working_memory(
-            data.get("working_memory"),
+            migrated.get("working_memory"),
             current_step=raw["step_count"],
             current_phase=raw["current_phase"],
         )
-        raw["acceptance_ledger"] = _coerce_string_map(data.get("acceptance_ledger"))
-        raw["acceptance_waivers"] = _coerce_string_list(data.get("acceptance_waivers"))
-        raw["acceptance_waived"] = bool(data.get("acceptance_waived", False))
-        raw["last_verifier_verdict"] = _coerce_json_dict_payload(data.get("last_verifier_verdict"))
-        raw["last_failure_class"] = str(data.get("last_failure_class", "") or "")
-        raw["files_changed_this_cycle"] = _coerce_string_list(data.get("files_changed_this_cycle"))
-        raw["repair_cycle_id"] = str(data.get("repair_cycle_id", "") or "")
-        raw["stagnation_counters"] = _coerce_int_map(data.get("stagnation_counters"))
-        raw["draft_plan"] = _coerce_execution_plan(data.get("draft_plan"))
-        raw["active_plan"] = _coerce_execution_plan(data.get("active_plan"))
-        raw["planning_mode_enabled"] = bool(data.get("planning_mode_enabled", False))
-        raw["planner_requested_output_path"] = str(data.get("planner_requested_output_path", "") or "")
-        raw["planner_requested_output_format"] = str(data.get("planner_requested_output_format", "") or "")
-        raw["planner_resume_target_mode"] = str(data.get("planner_resume_target_mode", "loop") or "loop")
-        raw["planner_interrupt"] = _coerce_plan_interrupt(data.get("planner_interrupt"))
+        raw["acceptance_ledger"] = _coerce_string_map(migrated.get("acceptance_ledger"))
+        raw["acceptance_waivers"] = _coerce_string_list(migrated.get("acceptance_waivers"))
+        raw["acceptance_waived"] = bool(migrated.get("acceptance_waived", False))
+        raw["last_verifier_verdict"] = _coerce_json_dict_payload(migrated.get("last_verifier_verdict"))
+        raw["last_failure_class"] = str(migrated.get("last_failure_class", "") or "")
+        raw["files_changed_this_cycle"] = _coerce_string_list(migrated.get("files_changed_this_cycle"))
+        raw["repair_cycle_id"] = str(migrated.get("repair_cycle_id", "") or "")
+        raw["stagnation_counters"] = _coerce_int_map(migrated.get("stagnation_counters"))
+        raw["draft_plan"] = _coerce_execution_plan(migrated.get("draft_plan"))
+        raw["active_plan"] = _coerce_execution_plan(migrated.get("active_plan"))
+        raw["planning_mode_enabled"] = bool(migrated.get("planning_mode_enabled", False))
+        raw["planner_requested_output_path"] = str(migrated.get("planner_requested_output_path", "") or "")
+        raw["planner_requested_output_format"] = str(migrated.get("planner_requested_output_format", "") or "")
+        raw["planner_resume_target_mode"] = str(migrated.get("planner_resume_target_mode", "loop") or "loop")
+        raw["planner_interrupt"] = _coerce_plan_interrupt(migrated.get("planner_interrupt"))
         raw["artifacts"] = {
             key: _coerce_artifact_record(value, artifact_id=key)
-            for key, value in _coerce_dict_payload(data.get("artifacts")).items()
+            for key, value in _coerce_dict_payload(migrated.get("artifacts")).items()
         }
         raw["episodic_summaries"] = [
             _coerce_episodic_summary(item)
-            for item in _coerce_list_payload(data.get("episodic_summaries"))
+            for item in _coerce_list_payload(migrated.get("episodic_summaries"))
         ]
         raw["context_briefs"] = [
             _coerce_context_brief(item)
-            for item in _coerce_list_payload(data.get("context_briefs"))
+            for item in _coerce_list_payload(migrated.get("context_briefs"))
         ]
-        raw["prompt_budget"] = _coerce_prompt_budget(data.get("prompt_budget"))
-        raw["retrieval_cache"] = _coerce_string_list(data.get("retrieval_cache"))
-        raw["active_intent"] = str(data.get("active_intent", "") or "")
-        raw["secondary_intents"] = _coerce_string_list(data.get("secondary_intents"))
-        raw["intent_tags"] = _coerce_string_list(data.get("intent_tags"))
+        raw["prompt_budget"] = _coerce_prompt_budget(migrated.get("prompt_budget"))
+        raw["retrieval_cache"] = _coerce_string_list(migrated.get("retrieval_cache"))
+        raw["active_intent"] = str(migrated.get("active_intent", "") or "")
+        raw["secondary_intents"] = _coerce_string_list(migrated.get("secondary_intents"))
+        raw["intent_tags"] = _coerce_string_list(migrated.get("intent_tags"))
         raw["warm_experiences"] = [
             _coerce_experience_memory(item)
-            for item in _coerce_list_payload(data.get("warm_experiences"))
+            for item in _coerce_list_payload(migrated.get("warm_experiences"))
         ]
-        raw["retrieved_experience_ids"] = _coerce_string_list(data.get("retrieved_experience_ids"))
+        raw["retrieved_experience_ids"] = _coerce_string_list(migrated.get("retrieved_experience_ids"))
         raw["tool_execution_records"] = {
             str(key): _coerce_tool_execution_record(value, operation_id=str(key))
-            for key, value in _coerce_dict_payload(data.get("tool_execution_records")).items()
+            for key, value in _coerce_dict_payload(migrated.get("tool_execution_records")).items()
         }
-        raw["pending_interrupt"] = _coerce_pending_interrupt_payload(data.get("pending_interrupt"))
-        raw["scratchpad"] = _coerce_json_dict_payload(data.get("scratchpad"))
+        raw["pending_interrupt"] = _coerce_pending_interrupt_payload(migrated.get("pending_interrupt"))
+        raw["scratchpad"] = _coerce_json_dict_payload(migrated.get("scratchpad"))
         raw["background_processes"] = {
             str(key): _coerce_background_process_record(value, job_id=str(key))
-            for key, value in _coerce_dict_payload(data.get("background_processes")).items()
+            for key, value in _coerce_dict_payload(migrated.get("background_processes")).items()
         }
-        raw["cwd"] = str(data.get("cwd", Path.cwd()) or Path.cwd())
-        raw["inventory_state"] = _coerce_json_dict_payload(data.get("inventory_state"))
-        raw["active_tool_profiles"] = _coerce_string_list(data.get("active_tool_profiles")) or ["core"]
-        raw["tool_history"] = _coerce_string_list(data.get("tool_history"))
-        raw["write_session"] = _coerce_write_session(data.get("write_session"))
-        raw["created_at"] = _coerce_timestamp_string(data.get("created_at"))
-        raw["updated_at"] = _coerce_timestamp_string(data.get("updated_at"))
-        raw["last_completion_tokens"] = _coerce_int(data.get("last_completion_tokens"), default=0)
+        raw["cwd"] = str(migrated.get("cwd", Path.cwd()) or Path.cwd())
+        raw["inventory_state"] = _coerce_json_dict_payload(migrated.get("inventory_state"))
+        raw["active_tool_profiles"] = _coerce_string_list(migrated.get("active_tool_profiles")) or ["core"]
+        raw["tool_history"] = _coerce_string_list(migrated.get("tool_history"))
+        raw["write_session"] = _coerce_write_session(migrated.get("write_session"))
+        raw["created_at"] = _coerce_timestamp_string(migrated.get("created_at"))
+        raw["updated_at"] = _coerce_timestamp_string(migrated.get("updated_at"))
+        raw["last_completion_tokens"] = _coerce_int(migrated.get("last_completion_tokens"), default=0)
         state = cls(**_filter_dataclass_payload(cls, raw))
         state.sync_plan_mirror()
         return state
+
+
+def _migrate_loop_state_payload(payload: dict[str, Any], *, incoming_version: int) -> dict[str, Any]:
+    migrated = dict(payload)
+    if incoming_version >= LOOP_STATE_SCHEMA_VERSION:
+        return migrated
+
+    write_session = migrated.get("write_session")
+    if isinstance(write_session, dict):
+        ws = dict(write_session)
+        if ws.get("session_id") and not ws.get("write_session_id"):
+            ws["write_session_id"] = ws.get("session_id")
+        if ws.get("mode") and not ws.get("write_session_mode"):
+            ws["write_session_mode"] = ws.get("mode")
+        if ws.get("lifecycle_status") and not ws.get("status"):
+            ws["status"] = ws.get("lifecycle_status")
+        migrated["write_session"] = ws
+    return migrated
 
 
 def json_safe_value(value: Any) -> Any:
@@ -1218,7 +1243,10 @@ def _coerce_write_session(value: Any) -> WriteSession | None:
     payload["write_target_path"] = str(payload.get("write_target_path", "") or "")
     intent = str(payload.get("write_session_intent", "replace_file") or "replace_file").strip().lower()
     payload["write_session_intent"] = intent if intent in {"replace_file", "patch_existing"} else "replace_file"
-    payload["write_session_mode"] = str(payload.get("write_session_mode", "chunked_author") or "chunked_author")
+    mode = str(payload.get("write_session_mode", "chunked_author") or "chunked_author").strip().lower()
+    if mode not in {"single_write", "chunked_author", "local_repair", "stub_and_fill"}:
+        mode = "chunked_author"
+    payload["write_session_mode"] = mode
     payload["write_session_started_at"] = _coerce_float(payload.get("write_session_started_at"), default=0.0)
     payload["write_first_chunk_at"] = _coerce_float(payload.get("write_first_chunk_at"), default=0.0)
     payload["write_staging_path"] = str(payload.get("write_staging_path", "") or "")
@@ -1245,7 +1273,10 @@ def _coerce_write_session(value: Any) -> WriteSession | None:
     pending_finalize = payload.get("write_pending_finalize")
     payload["write_pending_finalize"] = bool(pending_finalize) if isinstance(pending_finalize, bool) else str(pending_finalize or "").strip().lower() in {"1", "true", "yes", "on"}
     payload["suggested_sections"] = _coerce_string_list(payload.get("suggested_sections"))
-    payload["status"] = str(payload.get("status", "open") or "open")
+    status = str(payload.get("status", "open") or "open").strip().lower()
+    if status not in {"open", "local_repair", "fallback", "complete"}:
+        status = "open"
+    payload["status"] = status
     
     return WriteSession(**payload)
 

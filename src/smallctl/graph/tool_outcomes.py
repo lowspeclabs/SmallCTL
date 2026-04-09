@@ -10,6 +10,7 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..plans import write_plan_file
 from ..state import clip_text_value, json_safe_value
+from ..write_session_fsm import record_write_session_event, transition_write_session
 from .deps import GraphRuntimeDeps
 from .display import format_tool_result_display
 from .interrupts import build_interrupt_payload, pause_for_plan_approval
@@ -158,6 +159,31 @@ def _shell_ssh_retry_hint(harness: Any, pending: Any) -> str | None:
     return (
         f"You are trying to run an SSH command through `shell_exec`: `{command}`. "
         "Use `ssh_exec` for remote SSH work and reserve `shell_exec` for local shell commands."
+    )
+
+
+def _shell_workspace_relative_retry_hint(harness: Any, pending: Any) -> str | None:
+    if getattr(pending, "tool_name", "") != "shell_exec":
+        return None
+
+    command = str(getattr(pending, "args", {}).get("command", "") or "").strip()
+    if not command:
+        return None
+
+    match = re.search(r"(?<![\w/])(/temp(?:/[^\s\"'`]+)*)", command)
+    if match is None:
+        return None
+
+    nudge_key = f"shell_exec::{command}::workspace_relative"
+    if harness.state.scratchpad.get("_shell_workspace_relative_retry_nudged") == nudge_key:
+        return None
+    harness.state.scratchpad["_shell_workspace_relative_retry_nudged"] = nudge_key
+
+    suspicious_path = match.group(1)
+    trimmed = suspicious_path.lstrip("/")
+    return (
+        f"You used the root-level `{suspicious_path}` path in `shell_exec`: `{command}`. "
+        f"Use the workspace copy at `{('./' + trimmed)}` instead of retrying the same absolute path."
     )
 
 
@@ -321,7 +347,7 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
         lead = f"Repair loop stalled on {failure_class} failures."
     bits = [lead]
     if repair_cycle_id:
-        bits.append(f"cycle {repair_cycle_id}")
+        bits.append(f"system repair cycle {repair_cycle_id} (diagnostic only)")
     if counter_bits:
         bits.append(f"stagnation: {counter_bits}")
     if path:
@@ -502,7 +528,7 @@ def _maybe_emit_repair_recovery_nudge(
                 "tool_name": record.tool_name,
                 "tool_call_id": record.tool_call_id,
                 "failure_class": getattr(harness.state, "last_failure_class", ""),
-                "repair_cycle_id": getattr(harness.state, "repair_cycle_id", ""),
+                "system_repair_cycle_id": getattr(harness.state, "repair_cycle_id", ""),
             },
         )
     )
@@ -512,7 +538,7 @@ def _maybe_emit_repair_recovery_nudge(
         tool_name=record.tool_name,
         tool_call_id=record.tool_call_id,
         failure_class=getattr(harness.state, "last_failure_class", ""),
-        repair_cycle_id=getattr(harness.state, "repair_cycle_id", ""),
+        system_repair_cycle_id=getattr(harness.state, "repair_cycle_id", ""),
         stagnation_counters=json_safe_value(counters),
     )
     return True
@@ -571,6 +597,12 @@ def _revert_unverified_section(harness: Any, session: Any, record: ToolExecution
         cwd=getattr(harness.state, "cwd", None),
     )
     if restored:
+        record_write_session_event(
+            harness.state,
+            event="revert_performed",
+            session=session,
+            details={"detail": detail, "tool_name": record.tool_name},
+        )
         harness._runlog(
             "write_session_reverted",
             "restored staged content after verifier failure",
@@ -596,8 +628,11 @@ def _maybe_trigger_write_session_fallback(harness: Any, session: Any) -> bool:
     if session.write_failed_local_patches < limit:
         return False
 
-    session.write_session_mode = session.write_session_fallback_mode or "stub_and_fill"
-    session.status = "fallback"
+    transition_write_session(
+        session,
+        next_mode=session.write_session_fallback_mode or "stub_and_fill",
+        next_status="fallback",
+    )
     msg = (
         f"Write Session `{session.write_session_id}` has encountered {session.write_failed_local_patches} failures "
         f"during verification/repair. Transitioning to `{session.write_session_mode}` mode. "
@@ -621,6 +656,12 @@ def _maybe_trigger_write_session_fallback(harness: Any, session: Any) -> bool:
         session_id=session.write_session_id,
         failures=session.write_failed_local_patches,
     )
+    record_write_session_event(
+        harness.state,
+        event="fallback_triggered",
+        session=session,
+        details={"failures": session.write_failed_local_patches},
+    )
     return True
 
 
@@ -639,8 +680,14 @@ def _register_write_session_stage_artifact(harness: Any, session: Any) -> str | 
     # We also support the expanded name the model used in 96c06dcc
     basename = Path(session.write_target_path).name
     legacy_id = f"{session.write_session_id}__{basename}__stage.py"
-    
-    stat = Path(stage_path).stat()
+
+    stage_file = Path(stage_path)
+    stat = stage_file.stat()
+    try:
+        preview_text = stage_file.read_text(encoding="utf-8")
+    except Exception:
+        preview_text = ""
+
     record = ArtifactRecord(
         artifact_id=artifact_id,
         kind="file",
@@ -649,6 +696,8 @@ def _register_write_session_stage_artifact(harness: Any, session: Any) -> str | 
         size_bytes=stat.st_size,
         summary=f"Staged content for {session.write_target_path} (session {session.write_session_id})",
         tool_name="file_write",
+        content_path=stage_path,
+        preview_text=preview_text[:2000] or None,
         metadata={
             "write_session_id": session.write_session_id,
             "target_path": session.write_target_path,
@@ -694,13 +743,25 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
                 session.write_last_verifier = verdict
                 if verdict.get("verdict") == "fail":
                     session.write_failed_local_patches += 1
-                    session.write_session_mode = "local_repair"
-                    session.status = "local_repair"
-                    session.write_pending_finalize = final_chunk
+                    transition_write_session(
+                        session,
+                        next_mode="local_repair",
+                        next_status="local_repair",
+                        pending_finalize=final_chunk,
+                    )
                     verify_path = write_session_verify_path(session, getattr(harness.state, "cwd", None))
                     if current_section:
-                        session.write_current_section = current_section
-                        session.write_next_section = current_section
+                        transition_write_session(
+                            session,
+                            current_section=current_section,
+                            next_section=current_section,
+                        )
+                    record_write_session_event(
+                        harness.state,
+                        event="verifier_fail",
+                        session=session,
+                        details={"section": current_section or "", "output": str(verdict.get("output") or "")[:240]},
+                    )
                     _revert_unverified_section(harness, session, record)
                     verifier_output, clipped = clip_text_value(str(verdict.get("output") or "").strip(), limit=500)
                     clipped_note = "\n[truncated]" if clipped else ""
@@ -732,25 +793,49 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
                     return
                 session.write_failed_local_patches = 0
                 if session.write_session_mode == "local_repair":
-                    session.write_session_mode = "chunked_author"
-                    session.status = "open"
+                    transition_write_session(
+                        session,
+                        next_mode="chunked_author",
+                        next_status="open",
+                    )
+                    record_write_session_event(
+                        harness.state,
+                        event="recovered_from_local_repair",
+                        session=session,
+                        details={"section": current_section or ""},
+                    )
                 if next_section:
-                    session.write_pending_finalize = False
+                    transition_write_session(session, pending_finalize=False)
                 
                 # Register the stage artifact so it can be read via artifact_read immediately
                 _register_write_session_stage_artifact(harness, session)
 
             # Check if it was the final chunk only after verifier success.
             if (final_chunk or session.write_pending_finalize) and not next_section:
+                record_write_session_event(
+                    harness.state,
+                    event="finalize_attempted",
+                    session=session,
+                    details={"final_chunk": bool(final_chunk)},
+                )
                 promoted, promote_detail = promote_write_session_target(
                     session,
                     cwd=getattr(harness.state, "cwd", None),
                 )
                 if not promoted:
                     session.write_failed_local_patches += 1
-                    session.write_session_mode = "local_repair"
-                    session.status = "local_repair"
-                    session.write_pending_finalize = True
+                    transition_write_session(
+                        session,
+                        next_mode="local_repair",
+                        next_status="local_repair",
+                        pending_finalize=True,
+                    )
+                    record_write_session_event(
+                        harness.state,
+                        event="finalize_failed",
+                        session=session,
+                        details={"reason": str(promote_detail)},
+                    )
                     verify_path = write_session_verify_path(session, getattr(harness.state, "cwd", None))
                     harness.state.append_message(
                         ConversationMessage(
@@ -789,8 +874,23 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
                 )
                 
                 # Update status
-                session.status = "complete"
-                session.write_pending_finalize = False
+                transition_write_session(
+                    session,
+                    next_status="complete",
+                    pending_finalize=False,
+                )
+                record_write_session_event(
+                    harness.state,
+                    event="finalize_succeeded",
+                    session=session,
+                    details={"path": str(promote_detail)},
+                )
+                record_write_session_event(
+                    harness.state,
+                    event="session_completed",
+                    session=session,
+                    details={"target_path": target_path},
+                )
                 
                 # Nudge for verification
                 harness.state.append_message(

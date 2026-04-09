@@ -13,6 +13,7 @@ from ..models.tool_result import ToolEnvelope
 from ..normalization import dedupe_keep_tail
 from ..redaction import redact_sensitive_data
 from ..state import json_safe_value
+from ..tools.fs import is_file_mutating_tool
 
 if TYPE_CHECKING:
     from ..harness import Harness
@@ -22,6 +23,33 @@ logger = logging.getLogger("smallctl.harness.tool_results")
 class ToolResultService:
     def __init__(self, harness: Harness):
         self.harness = harness
+
+    def _invalidate_file_read_cache(self, path: str) -> None:
+        cache = self.harness.state.scratchpad.get("file_read_cache")
+        if not isinstance(cache, dict) or not cache:
+            return
+
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = Path(self.harness.state.cwd) / candidate
+        try:
+            resolved = str(candidate.resolve())
+        except Exception:
+            resolved = str(candidate)
+
+        prefix = f"{resolved}|"
+        removed = [key for key in cache if isinstance(key, str) and (key == resolved or key.startswith(prefix))]
+        if not removed:
+            return
+
+        for key in removed:
+            cache.pop(key, None)
+        self.harness._runlog(
+            "tool_cache_invalidate",
+            "invalidated file_read cache after file mutation",
+            path=resolved,
+            removed_entries=len(removed),
+        )
 
     def _is_small_model(self) -> bool:
         scratchpad = getattr(self.harness.state, "scratchpad", {})
@@ -73,6 +101,41 @@ class ToolResultService:
                 content=compact_content,
                 metadata={"artifact_id": artifact_id, "cache_hit": True},
             )
+
+        if tool_name in {"artifact_print", "show_artifact"} and result.success:
+            referenced_artifact_id = str(
+                result.metadata.get("artifact_id")
+                or result.metadata.get("source_artifact_id")
+                or (
+                    arguments.get("artifact_id")
+                    if isinstance(arguments, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            artifact = self.harness.state.artifacts.get(referenced_artifact_id) if referenced_artifact_id else None
+            if artifact is not None:
+                from ..context import format_reused_artifact_message
+
+                self.harness.state.retrieval_cache = [artifact.artifact_id]
+                self.harness._runlog(
+                    "artifact_reused",
+                    "artifact print reused an existing artifact",
+                    artifact_id=artifact.artifact_id,
+                    tool_name=tool_name,
+                    source=artifact.source,
+                )
+                return ConversationMessage(
+                    role="tool",
+                    name=tool_name,
+                    tool_call_id=tool_call_id,
+                    content=format_reused_artifact_message(artifact),
+                    metadata={
+                        "artifact_id": artifact.artifact_id,
+                        "source_artifact_id": artifact.artifact_id,
+                        "cache_hit": True,
+                    },
+                )
 
         artifact = None
         # Optimization: Do NOT create new artifacts for tool snapshots of existing artifacts.
@@ -139,6 +202,14 @@ class ToolResultService:
                     cache = self.harness.state.scratchpad.setdefault("file_read_cache", {})
                     if isinstance(cache, dict):
                         cache[cache_key] = artifact.artifact_id
+            elif is_file_mutating_tool(tool_name) and result.success:
+                mutated_path = ""
+                if isinstance(result.metadata, dict):
+                    mutated_path = str(result.metadata.get("path") or "").strip()
+                if not mutated_path and isinstance(arguments, dict):
+                    mutated_path = str(arguments.get("path") or "").strip()
+                if mutated_path:
+                    self._invalidate_file_read_cache(mutated_path)
 
             if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
                 playbook_artifact_id = str(result.metadata.get("artifact_id", "") or "").strip()
@@ -194,17 +265,22 @@ class ToolResultService:
         request_text = self.harness.state.run_brief.original_task or self.harness._current_user_task()
         compact_full_file = self._is_small_model()
         preview_chars = max(180, int(self.harness.context_policy.tool_result_inline_token_limit * 2))
-        compact_content = (
-            self.harness.artifact_store.compact_tool_message(
-                artifact,
-                result,
-                request_text=request_text,
-                inline_full_file=not compact_full_file,
-                full_file_preview_chars=preview_chars if compact_full_file else None,
+        if tool_name == "artifact_read" and result.success and isinstance(result.output, str):
+            # Preserve the explicit read slice so the prompt layer can decide how much
+            # to keep, instead of collapsing it into a file-read reuse summary.
+            compact_content = result.output
+        else:
+            compact_content = (
+                self.harness.artifact_store.compact_tool_message(
+                    artifact,
+                    result,
+                    request_text=request_text,
+                    inline_full_file=not compact_full_file,
+                    full_file_preview_chars=preview_chars if compact_full_file else None,
+                )
+                if artifact
+                else str(result.output)
             )
-            if artifact
-            else str(result.output)
-        )
         if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
             playbook_artifact_id = str(result.metadata.get("artifact_id", "") or "").strip()
             if playbook_artifact_id:

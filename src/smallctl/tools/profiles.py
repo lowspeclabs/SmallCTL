@@ -130,7 +130,6 @@ def classify_tool_profiles(
             "set env",
             "background process",
             "background job",
-            "shell_background",
             "kill process",
             "process_kill",
             "checkpoint",

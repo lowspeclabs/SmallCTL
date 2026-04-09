@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, ClassVar, Literal
+from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Literal
 from urllib.parse import quote
 
 try:
@@ -23,13 +23,9 @@ from .chunk_parser import (
     format_tool_call_text,
     maybe_parse_tool_args,
 )
-from .provider_adapters import (
-    sanitize_messages_for_openrouter,
-    sanitize_messages_for_lmstudio,
-    should_retry_without_stream_options,
-)
+from .provider_adapters import get_provider_adapter
 from .streaming import SSEStreamer
-from .usage import extract_context_limit, extract_runtime_context_limit
+from .usage import detect_provider_profile, extract_context_limit, extract_runtime_context_limit
 
 
 @dataclass
@@ -56,8 +52,12 @@ class OpenAICompatClient:
     STREAM_CONNECT_TIMEOUT_SEC = 10.0
     STREAM_WRITE_TIMEOUT_SEC = 30.0
     STREAM_READ_TIMEOUT_SEC = 120.0
+    STREAM_FIRST_TOKEN_TIMEOUT_SEC = 30.0
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = 25.0
     STREAM_POOL_TIMEOUT_SEC = 30.0
     STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 30.0
+    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 12.0
+    LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 45.0
     _shared_clients: ClassVar[dict[tuple[str, str], Any]] = {}
 
     def __init__(
@@ -68,9 +68,11 @@ class OpenAICompatClient:
         *,
         chat_endpoint: str = "/chat/completions",
         provider_profile: str = "generic",
+        first_token_timeout_sec: float | None = None,
         tool_call_continuation_timeout_sec: float | None = None,
         runtime_context_probe: bool = True,
         run_logger: RunLogger | None = None,
+        backend_recovery_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.log = logging.getLogger("smallctl.client")
         self.run_logger = run_logger
@@ -78,19 +80,63 @@ class OpenAICompatClient:
         self.model = model
         self.api_key = api_key or "none"
         self.chat_endpoint = chat_endpoint if chat_endpoint.startswith("/") else f"/{chat_endpoint}"
-        self.provider_profile = str(provider_profile or "generic").strip().lower()
+        resolved_provider = str(provider_profile or "auto").strip().lower()
+        if resolved_provider == "auto":
+            resolved_provider = detect_provider_profile(self.base_url, self.model)
+        self.provider_profile = resolved_provider
+        self.adapter = get_provider_adapter(self.provider_profile)
+        self.is_small_model = is_four_b_or_under_model_name(self.model)
+        self.first_token_timeout_sec = self._resolve_first_token_timeout_sec(first_token_timeout_sec)
         self.tool_call_continuation_timeout_sec = self._resolve_tool_call_continuation_timeout_sec(
             tool_call_continuation_timeout_sec
         )
         self.runtime_context_probe = runtime_context_probe
+        self.backend_recovery_handler = backend_recovery_handler
+
+    def _resolve_first_token_timeout_sec(self, override: float | None) -> float:
+        if override is not None:
+            return max(1.0, float(override))
+        adapter_timeout = float(self.adapter.stream_policy.first_token_timeout_sec)
+        if adapter_timeout > 0:
+            return adapter_timeout
+        if self.provider_profile == "lmstudio":
+            return float(self.LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC)
+        return float(self.STREAM_FIRST_TOKEN_TIMEOUT_SEC)
+
+    def _request_first_token_timeout_sec(self, tools: list[dict[str, Any]]) -> float:
+        """Increase the first-token watchdog for heavy LM Studio tool requests.
+
+        Larger local models can take noticeably longer to emit the first stream
+        chunk once the prompt includes the full tool schema. The baseline LM
+        Studio timeout remains intentionally short for plain chat, but we relax
+        it for tool-bearing requests on non-small models to avoid false
+        "backend wedged" failures.
+        """
+        timeout = float(self.first_token_timeout_sec)
+        if self.provider_profile != "lmstudio":
+            return timeout
+        if self.is_small_model:
+            return timeout
+
+        tool_count = len(tools)
+        if tool_count >= 12:
+            return max(timeout, 60.0)
+        if tool_count > 0:
+            normalized_model = str(self.model or "").strip().lower()
+            if "gemma" in normalized_model:
+                return max(timeout, 60.0)
+        return timeout
 
     def _resolve_tool_call_continuation_timeout_sec(self, override: float | None) -> float:
         if override is not None:
             return max(1.0, float(override))
 
+        if self.provider_profile == "lmstudio" and self.is_small_model:
+            return float(self.LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
+
         timeout = float(self.STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
-        if self.provider_profile == "lmstudio" and is_four_b_or_under_model_name(self.model):
-            return max(timeout, 45.0)
+        if self.is_small_model:
+            return min(timeout, float(self.SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC))
         return timeout
 
     def _client_key(self) -> tuple[str, str]:
@@ -126,21 +172,16 @@ class OpenAICompatClient:
             raise RuntimeError("Dependency missing: httpx")
 
         # Apply provider-specific message sanitization
-        if self.provider_profile == "openrouter":
-            messages = sanitize_messages_for_openrouter(messages)
-        elif self.provider_profile == "lmstudio":
-            messages = sanitize_messages_for_lmstudio(messages)
+        messages = self.adapter.sanitize_messages(messages)
 
         url = f"{self.base_url}{self.chat_endpoint}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        if self.provider_profile == "openrouter":
-            headers["HTTP-Referer"] = "https://github.com/hocus-pocus/smallctl"
-            headers["X-Title"] = "smallctl"
+        headers = self.adapter.mutate_headers(headers)
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": True,
@@ -148,10 +189,10 @@ class OpenAICompatClient:
         if tools:
             payload["tools"] = tools
             
-        # Optional: Disable stream_options for providers that don't support it.
-        # OpenRouter and LM Studio can reject or silently ignore include_usage.
-        if self.provider_profile not in {"openrouter", "lmstudio"}:
+        # Only set stream_options when the active adapter supports usage options.
+        if self.adapter.stream_policy.supports_stream_options:
             payload["stream_options"] = {"include_usage": True}
+        payload = self.adapter.mutate_payload(payload)
 
         log_kv(
             self.log,
@@ -161,6 +202,15 @@ class OpenAICompatClient:
             model=self.model,
             message_count=len(messages),
             tool_count=len(tools),
+        )
+        log_kv(
+            self.log,
+            logging.INFO,
+            "backend_health_check",
+            url=url,
+            model=self.model,
+            provider_profile=self.provider_profile,
+            stream=True,
         )
         if self.run_logger:
             self.run_logger.log(
@@ -176,9 +226,12 @@ class OpenAICompatClient:
         last_error: Exception | None = None
         current_payload = dict(payload)
         client = self._get_async_client()
+        request_first_token_timeout_sec = self._request_first_token_timeout_sec(tools)
         streamer = SSEStreamer(
             provider_profile=self.provider_profile,
+            first_token_timeout_sec=request_first_token_timeout_sec,
             tool_call_continuation_timeout_sec=self.tool_call_continuation_timeout_sec,
+            aggressive_tool_call_timeout=self.is_small_model,
             run_logger=self.run_logger,
             log=self.log,
         )
@@ -186,13 +239,77 @@ class OpenAICompatClient:
         for attempt in range(1, self.STREAM_RETRY_ATTEMPTS + 1):
             saw_chunk = False
             saw_tool_call_chunk = False
+            retry_after_backend_recovery = False
             try:
                 async for event in streamer.stream_sse(client, url, headers, current_payload):
+                    if event.get("type") == "backend_first_token_timeout":
+                        details = dict(event.get("details") or {})
+                        log_kv(
+                            self.log,
+                            logging.WARNING,
+                            "chat_backend_first_token_timeout",
+                            attempt=attempt,
+                            provider_profile=self.provider_profile,
+                            timeout_sec=details.get("timeout_sec"),
+                        )
+                        if self.run_logger:
+                            self.run_logger.log(
+                                "chat",
+                                "backend_first_token_timeout",
+                                "backend stalled before first token",
+                                attempt=attempt,
+                                provider_profile=self.provider_profile,
+                                timeout_sec=details.get("timeout_sec"),
+                            )
+                        recovery: dict[str, Any] | None = None
+                        if self.backend_recovery_handler is not None:
+                            recovery = await self.backend_recovery_handler(
+                                {
+                                    "attempt": attempt,
+                                    "provider_profile": self.provider_profile,
+                                    "base_url": self.base_url,
+                                    "model": self.model,
+                                    "details": details,
+                                }
+                            )
+                        if isinstance(recovery, dict) and recovery.get("status") == "recovered":
+                            retry_after_backend_recovery = True
+                            log_kv(
+                                self.log,
+                                logging.WARNING,
+                                "chat_backend_recovery_succeeded",
+                                attempt=attempt,
+                                provider_profile=self.provider_profile,
+                                action=recovery.get("action"),
+                            )
+                            if self.run_logger:
+                                self.run_logger.log(
+                                    "chat",
+                                    "backend_recovery_succeeded",
+                                    "backend recovery succeeded after first-token timeout",
+                                    attempt=attempt,
+                                    provider_profile=self.provider_profile,
+                                    action=recovery.get("action"),
+                                )
+                            await self._reset_async_client()
+                            client = self._get_async_client()
+                            break
+                        wedge_details = dict(details)
+                        if isinstance(recovery, dict) and recovery:
+                            wedge_details["recovery"] = recovery
+                        yield {
+                            "type": "backend_wedged",
+                            "error": "Backend did not emit a first token before timeout",
+                            "details": wedge_details,
+                        }
+                        return
                     if event.get("type") == "chunk":
                         saw_chunk = True
                         if chunk_contains_tool_call_delta(event.get("data", {})):
                             saw_tool_call_chunk = True
                     yield event
+                if retry_after_backend_recovery:
+                    continue
                 return
             except httpx.HTTPStatusError as exc:
                 self._log_http_error("chat_stream_http_error", exc)
@@ -206,7 +323,9 @@ class OpenAICompatClient:
                     # Clear client to re-establish connection pool if needed
                     await self._reset_async_client()
                     client = self._get_async_client()
-                elif should_retry_without_stream_options(exc):
+                elif self.adapter.should_retry_without_stream_options(exc):
+                    if "stream_options" not in current_payload:
+                        raise
                     current_payload = dict(current_payload)
                     current_payload.pop("stream_options", None)
                     log_kv(
@@ -227,7 +346,7 @@ class OpenAICompatClient:
                     raise
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if saw_chunk:
-                    if self.provider_profile == "lmstudio":
+                    if self.provider_profile == "lmstudio" or self.is_small_model:
                         if saw_tool_call_chunk or self._is_tool_call_continuation_timeout(exc):
                             log_kv(
                                 self.log,
@@ -240,7 +359,7 @@ class OpenAICompatClient:
                                 self.run_logger.log(
                                     "chat",
                                     "stream_incomplete_tool_call",
-                                    "treating stalled lmstudio tool call as retryable chunk error",
+                                    "treating stalled tool call as retryable chunk error",
                                     error=str(exc),
                                     attempt=attempt,
                                 )
@@ -270,6 +389,16 @@ class OpenAICompatClient:
                                 error=str(exc),
                                 attempt=attempt,
                             )
+                        yield {
+                            "type": "stream_ended_without_done",
+                            "details": {
+                                "reason": "read_timeout_after_chunks",
+                                "attempt": attempt,
+                                "provider_profile": self.provider_profile,
+                                "message": str(exc),
+                                "tool_call_stream_active": saw_tool_call_chunk,
+                            },
+                        }
                         return
                     raise
                 last_error = exc

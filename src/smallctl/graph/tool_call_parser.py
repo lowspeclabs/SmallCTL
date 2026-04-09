@@ -7,8 +7,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..client.chunk_parser import extract_thinking_from_tags
 from ..state import WriteSession, json_safe_value
 from ..task_targets import extract_task_target_paths, primary_task_target_path
+from ..write_session_fsm import new_write_session, record_write_session_event
 from .state import PendingToolCall
 from .write_recovery import infer_write_target_path, normalize_write_argument_aliases
 
@@ -16,6 +18,43 @@ _REPEATED_TOOL_HISTORY_LIMIT = 12
 _IDENTICAL_TOOL_CALL_STREAK_LIMIT = 3
 _REPEATED_TOOL_WINDOW = 6
 _REPEATED_TOOL_UNIQUE_LIMIT = 3
+_PLACEHOLDER_TOOL_NAME_TOKENS = {
+    "tool_name",
+    "function_name",
+    "action_name",
+    "tool",
+    "function",
+    "action",
+    "name",
+}
+_PLACEHOLDER_ARG_KEY_TOKENS = {
+    "arg",
+    "args",
+    "argument",
+    "arguments",
+    "param",
+    "params",
+    "parameter",
+    "parameters",
+    "value",
+    "field",
+}
+_PLACEHOLDER_ARG_VALUE_TOKENS = {
+    "",
+    "arg",
+    "args",
+    "value",
+    "parameter",
+    "parameters",
+    "param",
+    "params",
+    "tool_name",
+    "function_name",
+    "action_name",
+    "placeholder",
+    "string",
+    "text",
+}
 _GLM_BOX_MODEL_MARKERS = (
     "zai-org/glm-4.6v-flash",
     "glm-4.6v-flash",
@@ -32,6 +71,26 @@ _GPT_OSS_MODEL_MARKERS = (
     "gpt-oss-20b",
     "openai/gpt-oss",
 )
+_QWEN_MODEL_MARKERS = (
+    "qwen/",
+    "qwen2.5",
+    "qwen-2.5",
+    "qwen3",
+    "qwen-3",
+    "qwen3.5",
+    "qwen-3.5",
+)
+_EXACT_QWEN_25_7B_INSTRUCT_MODELS = (
+    "qwen/qwen-2.5-7b-instruct",
+    "qwen-2.5-7b-instruct",
+    "qwen2.5-7b-instruct",
+)
+_EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
+    "gemma-4-e2b-it",
+    "gemma-4-e4b-it",
+)
+_RAW_FUNCTION_VALUE_PATTERN = r"(?:'[^']*'|\"[^\"]*\"|[0-9.]+)"
+_RAW_FUNCTION_ESCAPED_VALUE_PATTERN = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|[0-9.]+)"
 _GPT_OSS_TAGS = (
     "<|channel|>",
     "<|constrain|>",
@@ -39,6 +98,24 @@ _GPT_OSS_TAGS = (
     "<think",
     "<think<|message|>",
 )
+_GEMMA_MODEL_MARKERS = (
+    "google_gemma-4",
+    "google_gemma",
+    "gemma-4",
+    "gemma-3",
+    "gemma/",
+)
+_GEMMA_TAGS = (
+    "<channel|>",
+    "<thought>",
+    "<|channel|>",
+    "<|thought|>",
+)
+
+
+def _normalize_token(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return normalized.strip("_")
 
 
 def _clean_reasoning_fallback_text(text: str) -> str:
@@ -63,6 +140,123 @@ def _model_uses_gpt_oss_rules(model_name: str | None) -> bool:
     return bool(normalized and any(marker in normalized for marker in _GPT_OSS_MODEL_MARKERS))
 
 
+def _model_uses_gemma_rules(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
+
+
+def _model_uses_qwen_rules(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(normalized and any(marker in normalized for marker in _QWEN_MODEL_MARKERS))
+
+
+def _model_is_exact_qwen_25_7b_instruct(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return normalized in _EXACT_QWEN_25_7B_INSTRUCT_MODELS
+
+
+def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return bool(
+        normalized
+        and any(
+            normalized == suffix or normalized.endswith(f"/{suffix}")
+            for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
+        )
+    )
+
+
+def _raw_function_value_pattern(*, model_name: str | None = None) -> str:
+    if _model_is_exact_qwen_25_7b_instruct(model_name):
+        return _RAW_FUNCTION_ESCAPED_VALUE_PATTERN
+    return _RAW_FUNCTION_VALUE_PATTERN
+
+
+def _raw_function_kv_pattern(*, model_name: str | None = None) -> str:
+    value_pattern = _raw_function_value_pattern(model_name=model_name)
+    return rf"([a-zA-Z0-9_-]+)\s*=\s*({value_pattern})"
+
+
+def _raw_function_call_pattern(*, model_name: str | None = None) -> str:
+    kv_pattern = _raw_function_kv_pattern(model_name=model_name)
+    return rf"([a-zA-Z0-9_-]+)\(({kv_pattern}(?:\s*,\s*{kv_pattern})*)\)"
+
+
+def _parse_raw_function_call(
+    text: str,
+    *,
+    model_name: str | None = None,
+    allowed_tool_names: set[str] | None = None,
+) -> PendingToolCall | None:
+    candidate_text = str(text or "")
+    if _model_uses_gemma_rules(model_name):
+        angle_wrapped = re.match(
+            rf"^\s*<\s*(?P<body>{_raw_function_call_pattern(model_name=model_name)})\s*>\s*$",
+            candidate_text,
+            re.DOTALL,
+        )
+        if angle_wrapped is not None:
+            candidate_text = angle_wrapped.group("body")
+
+    match = re.match(
+        rf"^\s*{_raw_function_call_pattern(model_name=model_name)}\s*$",
+        candidate_text,
+        re.DOTALL,
+    )
+    if match is None:
+        return None
+
+    tool_name = match.group(1)
+    if allowed_tool_names is not None:
+        normalized_tool_name = _normalize_token(tool_name)
+        if tool_name not in allowed_tool_names and normalized_tool_name not in _PLACEHOLDER_TOOL_NAME_TOKENS:
+            return None
+    args_str = match.group(2).strip()
+    kv_pairs = re.findall(_raw_function_kv_pattern(model_name=model_name), args_str)
+    if not kv_pairs:
+        return None
+
+    try:
+        args = {key: ast.literal_eval(value) for key, value in kv_pairs}
+    except Exception:
+        return None
+
+    return PendingToolCall(
+        tool_name=tool_name,
+        args=args,
+        raw_arguments=args_str,
+    )
+
+
+def _recover_small_gemma_terminal_message_from_raw_function_syntax(
+    assistant_text: str,
+    pending_calls: list[PendingToolCall],
+    *,
+    model_name: str | None = None,
+    allowed_tool_names: set[str] | None = None,
+) -> str:
+    if not _model_is_exact_small_gemma_4_it(model_name):
+        return ""
+    if not assistant_text or not pending_calls:
+        return ""
+
+    raw_call = _parse_raw_function_call(
+        assistant_text,
+        model_name=model_name,
+        allowed_tool_names=allowed_tool_names,
+    )
+    if raw_call is None or raw_call.tool_name not in {"task_complete", "task_fail"}:
+        return ""
+
+    for call in pending_calls:
+        if call.tool_name != raw_call.tool_name:
+            continue
+        if dict(call.args or {}) != dict(raw_call.args or {}):
+            continue
+        return str(call.args.get("message", "") or "").strip()
+    return ""
+
+
 def _strip_gpt_oss_channel_prefix(text: str) -> str:
     """Remove the protocol wrapper that gpt-oss emits in assistant content."""
     stripped = re.sub(
@@ -74,10 +268,25 @@ def _strip_gpt_oss_channel_prefix(text: str) -> str:
     return stripped
 
 
+def _strip_exact_small_gemma_4_protocol_noise(text: str, *, model_name: str | None) -> str:
+    if not _model_is_exact_small_gemma_4_it(model_name):
+        return text
+    return re.sub(
+        r"</?\|?(?:channel|thought)\|?>",
+        "",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def _normalize_model_specific_text(text: str, *, model_name: str | None) -> str:
     if not text:
         return ""
     normalized = str(text)
+    if _model_uses_qwen_rules(model_name):
+        normalized = re.sub(r"^\s*<\|im_start\|>\s*assistant\s*", "", normalized, flags=re.IGNORECASE)
+        normalized = normalized.replace("<|im_start|>", "")
+        normalized = normalized.replace("<|im_end|>", "")
     if _model_uses_glm_box_rules(model_name):
         for tag in _GLM_BOX_TAGS:
             normalized = normalized.replace(tag, "")
@@ -85,15 +294,89 @@ def _normalize_model_specific_text(text: str, *, model_name: str | None) -> str:
         for tag in _GPT_OSS_TAGS:
             normalized = normalized.replace(tag, "")
         normalized = _strip_gpt_oss_channel_prefix(normalized)
+    if _model_uses_gemma_rules(model_name):
+        for tag in _GEMMA_TAGS:
+            normalized = normalized.replace(tag, "")
+        normalized = _strip_exact_small_gemma_4_protocol_noise(
+            normalized,
+            model_name=model_name,
+        )
     return normalized.strip()
 
 
-def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
+def _strip_qwen_25_duplicate_thinking(
+    text: str,
+    *,
+    thinking_text: str = "",
+    model_name: str | None = None,
+) -> str:
+    if not _model_is_exact_qwen_25_7b_instruct(model_name):
+        return text
+    if not text or not str(thinking_text or "").strip():
+        return text
+
+    lowered = text.lower()
+    if "<think>" not in lowered and "<thinking>" not in lowered:
+        return text
+
+    assistant_text, _ = extract_thinking_from_tags(
+        text,
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+    )
+    return assistant_text.strip()
+
+
+def _should_discard_qwen_25_structured_inline_tools(
+    harness: Any,
+    graph_state: Any,
+    stream: Any,
+    assistant_text: str,
+    *,
+    model_name: str | None = None,
+) -> bool:
+    if not _model_is_exact_qwen_25_7b_instruct(model_name):
+        return False
+    if str(getattr(graph_state, "run_mode", "") or "").strip().lower() != "chat":
+        return False
+    if getattr(stream, "tool_calls", None):
+        return False
+
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    if scratchpad.get("_chat_tools_exposed") is not False:
+        return False
+    if not str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip():
+        return False
+
+    lowered = str(assistant_text or "").lower()
+    if any(token in lowered for token in ("<execute", "<tool_call", "<tool_code", "<call>", "<function")):
+        return True
+    return bool(re.search(r'\{\s*"(?:name|tool_name|tool|action)"\s*:', str(assistant_text or "")))
+
+
+def _strip_empty_qwen_25_execute_wrappers(text: str, *, model_name: str | None = None) -> str:
+    if not _model_is_exact_qwen_25_7b_instruct(model_name):
+        return text
+    if not text:
+        return ""
+    cleaned = re.sub(r"<execute>\s*</execute>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned.strip()
+
+
+def _extract_inline_tool_calls(
+    text: str,
+    *,
+    model_name: str | None = None,
+    allowed_raw_function_names: set[str] | None = None,
+) -> tuple[str, list[PendingToolCall]]:
     if not text:
         return "", []
 
     results: list[PendingToolCall] = []
-    cleaned_text = text
+    cleaned_text = _strip_exact_small_gemma_4_protocol_noise(
+        text,
+        model_name=model_name,
+    )
 
     def _parse_bracketed_tool_block(block_text: str) -> PendingToolCall | None:
         if not block_text:
@@ -105,31 +388,92 @@ def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
         payload_text = match.group(2).strip()
         if not tool_name or not payload_text:
             return None
-        try:
-            data = json.loads(payload_text)
-        except Exception:
-            data = None
-        if isinstance(data, dict):
-            return PendingToolCall(
-                tool_name=tool_name,
-                args=data,
-                raw_arguments=json.dumps(data, ensure_ascii=True, sort_keys=True),
+        return PendingToolCall.from_payload(
+            {
+                "function": {
+                    "name": tool_name,
+                    "arguments": payload_text,
+                }
+            }
+        )
+
+    def _parse_xml_function_block(block_text: str) -> PendingToolCall | None:
+        if not block_text:
+            return None
+
+        compact_fn_match = re.match(r"^\s*<function=([\w_-]+)>\s*(\{.*\})\s*$", block_text, re.DOTALL)
+        if compact_fn_match:
+            return PendingToolCall.from_payload(
+                {
+                    "function": {
+                        "name": compact_fn_match.group(1).strip(),
+                        "arguments": compact_fn_match.group(2).strip(),
+                    }
+                }
             )
+
+        struct_patterns = (
+            r"<function=([\w_-]+)>(.*?)</function>",
+            r"<function\s+name=['\"]?([\w_-]+)['\"]?\s*>(.*?)</function>",
+        )
+        parameter_patterns = (
+            r"<parameter=([\w_-]+)>(.*?)</parameter>",
+            r"<parameter\s+name=['\"]?([\w_-]+)['\"]?\s*>(.*?)</parameter>",
+        )
+        for pattern in struct_patterns:
+            struct_fn_match = re.search(pattern, block_text, re.DOTALL)
+            if struct_fn_match is None:
+                continue
+            tool_name = struct_fn_match.group(1).strip()
+            inner_content = struct_fn_match.group(2).strip()
+            if not tool_name:
+                continue
+            if inner_content.startswith("{"):
+                pending = PendingToolCall.from_payload(
+                    {
+                        "function": {
+                            "name": tool_name,
+                            "arguments": inner_content,
+                        }
+                    }
+                )
+                if pending is not None:
+                    return pending
+            params = {}
+            for param_pattern in parameter_patterns:
+                for pk, pv in re.findall(param_pattern, inner_content, re.DOTALL):
+                    params[pk] = pv.strip()
+            if params:
+                return PendingToolCall(
+                    tool_name=tool_name,
+                    args=params,
+                    raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
+                )
         return None
 
     def _try_parse_data(data: Any) -> PendingToolCall | None:
         if not isinstance(data, dict):
             return None
+        if isinstance(data.get("function"), dict):
+            pending = PendingToolCall.from_payload(data)
+            if pending is not None:
+                return pending
         # Key Hallucination Handling: Support name, tool_name, tool, action
         name = str(data.get("name", data.get("tool_name", data.get("tool", data.get("action", ""))))).strip()
         if not name:
             return None
         # Args Hallucination Handling: Support arguments, args, params, parameters
         args = data.get("arguments", data.get("args", data.get("params", data.get("parameters", {}))))
+        if isinstance(args, dict):
+            raw_arguments = json.dumps(args)
+        elif isinstance(args, str):
+            raw_arguments = args
+        else:
+            raw_arguments = "{}"
         payload = {
             "function": {
                 "name": name,
-                "arguments": json.dumps(args) if isinstance(args, dict) else "{}"
+                "arguments": raw_arguments,
             }
         }
         return PendingToolCall.from_payload(payload)
@@ -146,45 +490,11 @@ def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
         for match in it:
             content = match.group(1).strip()
 
-            # 1a. Handle recursive/structured XML (Qwen-style: <function=name><parameter=key>val</parameter></function>)
-            struct_fn_match = re.search(r"<function=([\w_-]+)>(.*?)</function>", content, re.DOTALL)
             found = False
-            if struct_fn_match:
-                tool_name = struct_fn_match.group(1)
-                inner_content = struct_fn_match.group(2).strip()
-                params = {}
-                param_matches = re.findall(r"<parameter=([\w_-]+)>(.*?)</parameter>", inner_content, re.DOTALL)
-                for pk, pv in param_matches:
-                    params[pk] = pv.strip()
-
-                if tool_name:
-                    results.append(
-                        PendingToolCall(
-                            tool_name=tool_name,
-                            args=params,
-                            raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
-                        )
-                    )
-                    found = True
-
-            if not found:
-                # Qwen-style malformed compact wrapper:
-                # <tool_call><function=file_write>{...}</tool_call>
-                compact_fn_match = re.match(r"<function=([\w_-]+)>\s*(\{.*\})\s*$", content, re.DOTALL)
-                if compact_fn_match:
-                    tool_name = compact_fn_match.group(1).strip()
-                    args_text = compact_fn_match.group(2).strip()
-                    pending = PendingToolCall.from_payload(
-                        {
-                            "function": {
-                                "name": tool_name,
-                                "arguments": args_text,
-                            }
-                        }
-                    )
-                    if pending is not None:
-                        results.append(pending)
-                        found = True
+            pending = _parse_xml_function_block(content)
+            if pending is not None:
+                results.append(pending)
+                found = True
 
             if not found:
                 # 1b. Attempt JSON inside the tag
@@ -199,24 +509,14 @@ def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
 
             if not found:
                 # 1c. Attempt Function call style: name(arg='val', ...)
-                fn_call_regex = r"^([a-zA-Z0-9_-]+)\((.*)\)$"
-                fn_match = re.match(fn_call_regex, content, re.DOTALL)
-                if fn_match:
-                    tool_name = fn_match.group(1)
-                    args_str = fn_match.group(2).strip()
-                    try:
-                        kv_pairs = re.findall(r"([a-zA-Z0-9_-]+)\s*=\s*('[^']*'|\"[^\"]*\"|[0-9.]+)", args_str)
-                        args = {k: ast.literal_eval(v) for k, v in kv_pairs}
-                        pending = PendingToolCall(
-                            tool_name=tool_name,
-                            args=args,
-                            raw_arguments=args_str,
-                        )
-                        if pending:
-                            results.append(pending)
-                            found = True
-                    except Exception:
-                        pass
+                pending = _parse_raw_function_call(
+                    content,
+                    model_name=model_name,
+                    allowed_tool_names=allowed_raw_function_names,
+                )
+                if pending is not None:
+                    results.append(pending)
+                    found = True
 
             if found:
                 # Strip the matched block from cleaned_text
@@ -239,23 +539,18 @@ def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
         offset += (end - start)
 
     # 1d. Catch structured XML even if NOT wrapped in tags (paranoid)
-    struct_fn_matches = list(re.finditer(r"<function=([\w_-]+)>(.*?)</function>", cleaned_text, re.DOTALL))
+    struct_fn_matches = list(
+        re.finditer(
+            r"<function(?:=[\w_-]+|\s+name=['\"]?[\w_-]+['\"]?)>.*?</function>",
+            cleaned_text,
+            re.DOTALL,
+        )
+    )
     offset = 0
     for match in struct_fn_matches:
-        tool_name = match.group(1)
-        inner_content = match.group(2).strip()
-        params = {}
-        param_matches = re.findall(r"<parameter=([\w_-]+)>(.*?)</parameter>", inner_content, re.DOTALL)
-        for pk, pv in param_matches:
-            params[pk] = pv.strip()
-        if tool_name:
-            results.append(
-                PendingToolCall(
-                    tool_name=tool_name,
-                    args=params,
-                    raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
-                )
-            )
+        pending = _parse_xml_function_block(match.group(0))
+        if pending is not None:
+            results.append(pending)
             start, end = match.span()
             cleaned_text = cleaned_text[:start-offset] + cleaned_text[end-offset:]
             offset += (end - start)
@@ -308,24 +603,30 @@ def _extract_inline_tool_calls(text: str) -> tuple[str, list[PendingToolCall]]:
             else:
                 break
 
-    # 2c. Functional style name(arg='val') in raw text
-    raw_fn_regex = r"([a-zA-Z0-9_-]+)\(([a-zA-Z0-9_-]+\s*=\s*(?:'[^']*'|\"[^\"]*\"|[0-9.]+)(?:\s*,\s*[a-zA-Z0-9_-]+\s*=\s*(?:'[^']*'|\"[^\"]*\"|[0-9.]+))*)\)"
-    matches = list(re.finditer(raw_fn_regex, cleaned_text))
+    # 2c. Functional style name(arg='val') in raw text. Only consider standalone
+    # lines so ordinary source code like `parser = ArgumentParser(...)` does not
+    # get promoted into a tool call.
+    standalone_line_regex = r"(?m)^[ \t]*(?P<body>.+?)[ \t]*$"
+    matches = list(re.finditer(standalone_line_regex, cleaned_text))
     offset = 0
     for match in matches:
-        tool_name = match.group(1)
-        args_str = match.group(2)
-        try:
-            kv_pairs = re.findall(r"([a-zA-Z0-9_-]+)\s*=\s*('[^']*'|\"[^\"]*\"|[0-9.]+)", args_str)
-            args = {k: ast.literal_eval(v) for k, v in kv_pairs}
-            pending = _try_parse_data({"tool_name": tool_name, "arguments": args})
-            if pending:
-                results.append(pending)
-                start, end = match.span()
-                cleaned_text = cleaned_text[:start-offset] + cleaned_text[end-offset:]
-                offset += (end - start)
-        except Exception:
-            pass
+        line_body = _strip_exact_small_gemma_4_protocol_noise(
+            match.group("body"),
+            model_name=model_name,
+        )
+        pending = _parse_raw_function_call(
+            line_body,
+            model_name=model_name,
+            allowed_tool_names=allowed_raw_function_names,
+        )
+        if pending is None:
+            continue
+        pending = _try_parse_data({"tool_name": pending.tool_name, "arguments": pending.args})
+        if pending:
+            results.append(pending)
+            start, end = match.span()
+            cleaned_text = cleaned_text[:start-offset] + cleaned_text[end-offset:]
+            offset += (end - start)
 
     return cleaned_text, results
 
@@ -351,10 +652,77 @@ def _detect_hallucinated_tool_call(harness: Any, pending: PendingToolCall) -> st
     return None
 
 
+def _placeholder_token(value: Any) -> str:
+    return _normalize_token(value)
+
+
+def _placeholder_value_looks_generic(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        token = _placeholder_token(value)
+        return token in _PLACEHOLDER_ARG_VALUE_TOKENS or token.startswith("placeholder")
+    if isinstance(value, dict):
+        if not value:
+            return True
+        return all(
+            _placeholder_token(key) in _PLACEHOLDER_ARG_KEY_TOKENS
+            and _placeholder_value_looks_generic(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return bool(value) and all(_placeholder_value_looks_generic(item) for item in value)
+    return False
+
+
+def _detect_placeholder_tool_call(harness: Any, pending: PendingToolCall) -> tuple[str, dict[str, Any]] | None:
+    tool_name = str(getattr(pending, "tool_name", "") or "").strip()
+    if not tool_name:
+        return None
+
+    registry = getattr(harness, "registry", None)
+    if registry is not None:
+        try:
+            if tool_name in set(registry.names()):
+                return None
+        except Exception:
+            pass
+
+    if _placeholder_token(tool_name) not in _PLACEHOLDER_TOOL_NAME_TOKENS:
+        return None
+
+    args = dict(getattr(pending, "args", {}) or {})
+    if args:
+        placeholder_keys = all(_placeholder_token(key) in _PLACEHOLDER_ARG_KEY_TOKENS for key in args)
+        placeholder_values = all(_placeholder_value_looks_generic(value) for value in args.values())
+        if not (placeholder_keys and placeholder_values):
+            return None
+
+    message = (
+        "Placeholder tool schema detected. You emitted the literal tool name "
+        f"`{tool_name}` with example arguments instead of a real tool call. "
+        "Regenerate the full JSON tool call from scratch using an actual registered tool name "
+        "and concrete arguments. Do not send schema examples or placeholder fields like `arg: value`."
+    )
+    return message, {
+        "tool_name": tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "reason": "placeholder_tool_schema",
+        "offending_field": "tool_name",
+        "placeholder_arguments": json_safe_value(args),
+    }
+
+
 def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | None:
     if pending.tool_name in {"task_complete", "task_fail", "ask_human"}:
         _clear_tool_attempt_history(harness)
         return None
+    if pending.tool_name == "shell_exec":
+        command = str(pending.args.get("command") or "").strip()
+        job_id = str(pending.args.get("job_id") or "").strip()
+        # Polling an existing background job is an expected repeat, not a loop.
+        if job_id and not command:
+            return None
     if _dir_list_same_path_repeat_is_loop(harness, pending):
         return "Guard tripped: repeated dir_list loop (same path repeated without progress)"
     if _dir_list_exploration_progress_is_progress(harness, pending):
@@ -432,14 +800,32 @@ def _dir_list_same_path_repeat_is_loop(harness: Any, pending: PendingToolCall) -
         return False
 
     history = _tool_attempt_history(harness)
-    for item in reversed(history):
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
         if str(item.get("tool_name", "")) != "dir_list":
             continue
         fingerprint = str(item.get("fingerprint", ""))
         path = _extract_path_from_fingerprint(harness, fingerprint)
         if path is None:
             continue
-        return path == candidate_path
+        if path != candidate_path:
+            continue
+        if not _model_is_exact_small_gemma_4_it(getattr(getattr(harness, "client", None), "model", None)):
+            return True
+        return not _dir_list_repeat_has_intervening_progress(history, index)
+    return False
+
+
+def _dir_list_repeat_has_intervening_progress(
+    history: list[dict[str, str]],
+    prior_dir_list_index: int,
+) -> bool:
+    progress_tools = {"artifact_read", "file_read", "shell_exec", "ssh_exec", "bash_exec"}
+    if prior_dir_list_index < 0 or prior_dir_list_index >= len(history):
+        return False
+    for item in history[prior_dir_list_index + 1 :]:
+        if str(item.get("tool_name", "")) in progress_tools:
+            return True
     return False
 
 
@@ -791,6 +1177,9 @@ def _repair_active_write_session_args(
     def _is_blank(value: Any) -> bool:
         return value is None or (isinstance(value, str) and not value.strip())
 
+    def _looks_like_system_repair_cycle_id(value: Any) -> bool:
+        return str(value or "").strip().lower().startswith("repair-")
+
     session = getattr(getattr(harness, "state", None), "write_session", None)
     if session is not None and str(getattr(session, "status", "")).strip().lower() != "complete":
         session_id = str(args.get("write_session_id") or "").strip()
@@ -807,6 +1196,31 @@ def _repair_active_write_session_args(
                 if section_name:
                     args["section_name"] = section_name
                     repaired = True
+        elif session_id and _looks_like_system_repair_cycle_id(session_id):
+            inferred_path = str(args.get("path") or "").strip()
+            if not inferred_path:
+                inferred_path, _confidence, _evidence = infer_write_target_path(
+                    harness=harness,
+                    pending=pending,
+                    assistant_text=assistant_text,
+                    partial_tool_calls=None,
+                )
+            session_matches_target = not inferred_path
+            if inferred_path:
+                session_matches_target = _active_write_session_for_target(harness, inferred_path) is session
+            if session_matches_target:
+                args["write_session_id"] = session.write_session_id
+                repaired = True
+                if _is_blank(args.get("path")) and str(session.write_target_path or "").strip():
+                    args["path"] = session.write_target_path
+                if _is_blank(args.get("section_name")) and _is_blank(args.get("section_id")):
+                    section_name = str(
+                        session.write_next_section
+                        or session.write_current_section
+                        or ""
+                    ).strip()
+                    if section_name:
+                        args["section_name"] = section_name
 
     if _is_blank(args.get("path")):
         inferred_path, _confidence, _evidence = infer_write_target_path(
@@ -847,19 +1261,23 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     from ..tools.fs import infer_write_session_intent, new_write_session_id
 
     suggestions = _suggested_chunk_sections(target)
-    session = WriteSession(
-        write_session_id=new_write_session_id(),
-        write_target_path=target,
-        write_session_intent=infer_write_session_intent(target, getattr(harness.state, "cwd", None)),
-        write_session_mode="chunked_author",
-        write_session_started_at=time.time(),
+    session = new_write_session(
+        session_id=new_write_session_id(),
+        target_path=target,
+        intent=infer_write_session_intent(target, getattr(harness.state, "cwd", None)),
+        mode="chunked_author",
         suggested_sections=suggestions,
-        write_next_section=suggestions[0] if suggestions else "",
-        status="open",
+        next_section=suggestions[0] if suggestions else "",
     )
     harness.state.write_session = session
     from .tool_outcomes import _register_write_session_stage_artifact
     _register_write_session_stage_artifact(harness, session)
+    record_write_session_event(
+        harness.state,
+        event="session_opened",
+        session=session,
+        details={"source": "chunk_mode_recovery"},
+    )
     runlog = getattr(harness, "_runlog", None)
     if callable(runlog):
         runlog(
@@ -1463,6 +1881,17 @@ def parse_tool_calls(
     """Extract, deduplicate, and validate tool calls from a completed model stream."""
     harness = deps.harness
     active_model_name = model_name or getattr(getattr(harness, "client", None), "model", None)
+    allowed_raw_function_names: set[str] | None = None
+    registry = getattr(harness, "registry", None)
+    if registry is not None:
+        try:
+            allowed_raw_function_names = {
+                str(name).strip()
+                for name in registry.names()
+                if str(name).strip()
+            }
+        except Exception:
+            allowed_raw_function_names = None
 
     # Extract Native tool calls
     native_calls = [
@@ -1473,7 +1902,28 @@ def parse_tool_calls(
 
     # Extract Inline tool calls (from text body)
     assistant_text = _normalize_model_specific_text(stream.assistant_text, model_name=active_model_name)
-    cleaned_text, inline_calls = _extract_inline_tool_calls(assistant_text)
+    assistant_text = _strip_qwen_25_duplicate_thinking(
+        assistant_text,
+        thinking_text=str(getattr(stream, "thinking_text", "") or ""),
+        model_name=active_model_name,
+    )
+    cleaned_text, inline_calls = _extract_inline_tool_calls(
+        assistant_text,
+        model_name=active_model_name,
+        allowed_raw_function_names=allowed_raw_function_names,
+    )
+    if _should_discard_qwen_25_structured_inline_tools(
+        harness,
+        graph_state,
+        stream,
+        assistant_text,
+        model_name=active_model_name,
+    ):
+        inline_calls = []
+        cleaned_text = _strip_empty_qwen_25_execute_wrappers(
+            cleaned_text,
+            model_name=active_model_name,
+        )
 
     pending_calls = native_calls + inline_calls
 
@@ -1537,6 +1987,13 @@ def parse_tool_calls(
 
     if not final_assistant_text.strip() and not pending_calls:
         final_assistant_text = _clean_reasoning_fallback_text(stream.thinking_text)
+    elif not final_assistant_text.strip() and not native_calls:
+        final_assistant_text = _recover_small_gemma_terminal_message_from_raw_function_syntax(
+            assistant_text,
+            pending_calls,
+            model_name=active_model_name,
+            allowed_tool_names=allowed_raw_function_names,
+        )
 
     return ToolCallParseResult(
         pending_tool_calls=pending_calls,

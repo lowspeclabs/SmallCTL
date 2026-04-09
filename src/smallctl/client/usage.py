@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 
 def extract_context_limit(payload: Any) -> int | None:
@@ -83,6 +84,43 @@ def extract_runtime_context_limit(payload: Any) -> int | None:
         return None
     # Runtime slot/context values should be bounded and generally consistent.
     return min(candidates)
+
+
+def detect_provider_profile(
+    base_url: str | None,
+    model: str | None = None,
+    *,
+    default: str = "generic",
+) -> str:
+    """Best-effort provider/backend detection from endpoint and model hints."""
+    endpoint = str(base_url or "").strip().lower()
+    model_name = str(model or "").strip().lower()
+    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}", scheme="http")
+
+    host = str(parsed.hostname or "").lower()
+    path = str(parsed.path or "").lower()
+    port = parsed.port
+    blob = " ".join(
+        part for part in (endpoint, host, path, model_name) if part
+    )
+
+    if "openrouter" in blob:
+        return "openrouter"
+    if "api.openai.com" in blob or host.endswith(".openai.com") or "openai" in blob:
+        return "openai"
+    if "vllm" in blob:
+        return "vllm"
+    if "lmstudio" in blob or "lm-studio" in blob:
+        return "lmstudio"
+    if "ollama" in blob or port == 11434:
+        return "ollama"
+    if "llamacpp" in blob or "llama.cpp" in blob or "llama-cpp" in blob:
+        return "llamacpp"
+    if port == 1234 and host in {"localhost", "127.0.0.1", "::1"}:
+        return "lmstudio"
+    if "lmstudio" in model_name:
+        return "lmstudio"
+    return default
 
 
 def _parse_positive_int(value: Any) -> int | None:

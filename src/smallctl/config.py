@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from .client import detect_provider_profile
 from .phases import normalize_phase
 from .tools.profiles import parse_public_profiles
 
@@ -17,6 +18,9 @@ except Exception:  # pragma: no cover - fallback if dependency missing
 ENV_PREFIX = "SMALLCTL_"
 LOCAL_CONFIG = ".smallctl.yaml"
 PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
+    "auto": {
+        "runtime_context_probe": True,
+    },
     "generic": {
         "runtime_context_probe": True,
     },
@@ -89,6 +93,16 @@ class SmallctlConfig:
     max_prompt_tokens: int | None = None
     reserve_completion_tokens: int = 1024
     reserve_tool_tokens: int = 512
+    first_token_timeout_sec: int | None = None
+    healthcheck_url: str | None = None
+    restart_command: str | None = None
+    startup_grace_period_sec: int = 20
+    max_restarts_per_hour: int = 2
+    backend_healthcheck_url: str | None = None
+    backend_restart_command: str | None = None
+    backend_unload_command: str | None = None
+    backend_healthcheck_timeout_sec: int = 5
+    backend_restart_grace_sec: int = 20
     summarize_at_ratio: float = 0.8
     recent_message_limit: int = 6
     max_summary_items: int = 3
@@ -222,6 +236,16 @@ def _env_config() -> dict[str, Any]:
         "max_prompt_tokens": env_or_dotenv(f"{ENV_PREFIX}MAX_PROMPT_TOKENS"),
         "reserve_completion_tokens": env_or_dotenv(f"{ENV_PREFIX}RESERVE_COMPLETION_TOKENS"),
         "reserve_tool_tokens": env_or_dotenv(f"{ENV_PREFIX}RESERVE_TOOL_TOKENS"),
+        "first_token_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}FIRST_TOKEN_TIMEOUT_SEC"),
+        "healthcheck_url": env_or_dotenv(f"{ENV_PREFIX}HEALTHCHECK_URL"),
+        "restart_command": env_or_dotenv(f"{ENV_PREFIX}RESTART_COMMAND"),
+        "startup_grace_period_sec": env_or_dotenv(f"{ENV_PREFIX}STARTUP_GRACE_PERIOD_SEC"),
+        "max_restarts_per_hour": env_or_dotenv(f"{ENV_PREFIX}MAX_RESTARTS_PER_HOUR"),
+        "backend_healthcheck_url": env_or_dotenv(f"{ENV_PREFIX}BACKEND_HEALTHCHECK_URL"),
+        "backend_restart_command": env_or_dotenv(f"{ENV_PREFIX}BACKEND_RESTART_COMMAND"),
+        "backend_unload_command": env_or_dotenv(f"{ENV_PREFIX}BACKEND_UNLOAD_COMMAND"),
+        "backend_healthcheck_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}BACKEND_HEALTHCHECK_TIMEOUT_SEC"),
+        "backend_restart_grace_sec": env_or_dotenv(f"{ENV_PREFIX}BACKEND_RESTART_GRACE_SEC"),
         "summarize_at_ratio": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZE_AT_RATIO"),
         "recent_message_limit": env_or_dotenv(f"{ENV_PREFIX}RECENT_MESSAGE_LIMIT"),
         "max_summary_items": env_or_dotenv(f"{ENV_PREFIX}MAX_SUMMARY_ITEMS"),
@@ -296,6 +320,11 @@ def _env_config() -> dict[str, Any]:
         "max_prompt_tokens",
         "reserve_completion_tokens",
         "reserve_tool_tokens",
+        "first_token_timeout_sec",
+        "startup_grace_period_sec",
+        "max_restarts_per_hour",
+        "backend_healthcheck_timeout_sec",
+        "backend_restart_grace_sec",
         "recent_message_limit",
         "max_summary_items",
         "max_artifact_snippets",
@@ -319,6 +348,12 @@ def _env_config() -> dict[str, Any]:
             cfg.pop("summarize_at_ratio", None)
         else:
             cfg["summarize_at_ratio"] = parsed_ratio
+    if "healthcheck_url" not in cfg and "backend_healthcheck_url" in cfg:
+        cfg["healthcheck_url"] = cfg["backend_healthcheck_url"]
+    if "restart_command" not in cfg and "backend_restart_command" in cfg:
+        cfg["restart_command"] = cfg["backend_restart_command"]
+    if "startup_grace_period_sec" not in cfg and "backend_restart_grace_sec" in cfg:
+        cfg["startup_grace_period_sec"] = cfg["backend_restart_grace_sec"]
     return cfg
 
 
@@ -336,6 +371,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
 
     merged.update(_read_yaml(Path.cwd() / LOCAL_CONFIG))
     merged.update(env_cfg)
+
+    if "provider_profile" not in merged:
+        merged["provider_profile"] = "auto"
 
     cli_clean = {k: v for k, v in cli.items() if v is not None}
     if "no_ansible" in cli_clean:
@@ -384,6 +422,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "max_prompt_tokens",
         "reserve_completion_tokens",
         "reserve_tool_tokens",
+        "first_token_timeout_sec",
+        "startup_grace_period_sec",
+        "max_restarts_per_hour",
+        "backend_healthcheck_timeout_sec",
+        "backend_restart_grace_sec",
         "recent_message_limit",
         "max_summary_items",
         "max_artifact_snippets",
@@ -401,6 +444,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
             cli_clean.pop("summarize_at_ratio", None)
         else:
             cli_clean["summarize_at_ratio"] = parsed_ratio
+    if "healthcheck_url" not in cli_clean and "backend_healthcheck_url" in cli_clean:
+        cli_clean["healthcheck_url"] = cli_clean["backend_healthcheck_url"]
+    if "restart_command" not in cli_clean and "backend_restart_command" in cli_clean:
+        cli_clean["restart_command"] = cli_clean["backend_restart_command"]
+    if "startup_grace_period_sec" not in cli_clean and "backend_restart_grace_sec" in cli_clean:
+        cli_clean["startup_grace_period_sec"] = cli_clean["backend_restart_grace_sec"]
     merged.update(cli_clean)
     explicit_prompt_budget = "max_prompt_tokens" in merged
     if not explicit_prompt_budget and "context_limit" in merged:
@@ -436,7 +485,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
 
 
 def _apply_provider_profile(merged: dict[str, Any], cli_clean: dict[str, Any]) -> None:
-    profile = str(merged.get("provider_profile", "generic")).strip().lower()
+    profile = str(merged.get("provider_profile", "auto")).strip().lower()
+    if profile == "auto":
+        profile = detect_provider_profile(merged.get("endpoint"), merged.get("model"))
     merged["provider_profile"] = profile
     defaults = PROVIDER_PROFILES.get(profile, PROVIDER_PROFILES["generic"])
     for key, value in defaults.items():

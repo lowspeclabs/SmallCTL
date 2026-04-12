@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state import LoopState, _coerce_background_process_record
+from ..risk_policy import evaluate_risk_policy
 from .common import fail, needs_human, ok
 
 
@@ -472,6 +473,28 @@ async def _shell_exec_foreground(
             "Sudo execution requires a password. If interactive prompts are unavailable, "
             "configure passwordless sudo or ask the user for help."
         )
+        approval_fn = getattr(harness, "request_shell_approval", None)
+        approval_available = callable(approval_fn) and getattr(harness, "event_handler", None) is not None
+        risk_decision = evaluate_risk_policy(
+            state,
+            tool_name="shell_exec",
+            tool_risk="high",
+            phase=str(state.current_phase or ""),
+            action=command,
+            expected_effect="Run the requested shell command.",
+            rollback="Stop the command and undo any manual changes if needed.",
+            verification="Inspect the command output and follow-up verifier result.",
+            approval_available=approval_available,
+        )
+        if not risk_decision.allowed:
+            return fail(
+                risk_decision.reason,
+                metadata={
+                    "command": command,
+                    "reason": "missing_supported_claim",
+                    "proof_bundle": risk_decision.proof_bundle,
+                },
+            )
         authoring_guard = _shell_execution_authoring_guard(state, command)
         if authoring_guard is not None:
             return authoring_guard
@@ -481,12 +504,12 @@ async def _shell_exec_foreground(
                 unsupported_shell_message,
                 metadata={"command": command, "reason": "unsupported_shell_syntax"},
             )
-        approval_fn = getattr(harness, "request_shell_approval", None)
-        if callable(approval_fn) and getattr(harness, "event_handler", None) is not None:
+        if risk_decision.requires_approval and callable(approval_fn) and approval_available:
             approved = await approval_fn(
                 command=command,
                 cwd=state.cwd,
                 timeout_sec=timeout_sec,
+                proof_bundle=risk_decision.proof_bundle,
             )
             if not approved:
                 denied = fail(

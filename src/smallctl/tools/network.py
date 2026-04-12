@@ -8,6 +8,8 @@ import time
 from typing import Any, TYPE_CHECKING
 
 from .common import fail, ok
+from ..risk_policy import evaluate_risk_policy
+from ..state import LoopState
 from .shell import create_process
 
 if TYPE_CHECKING:
@@ -54,6 +56,19 @@ _SAFE_SSH_OPTION_KEYS = {
     "User",
 }
 _LOCAL_SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", ";&", ";;&"}
+_SSH_TRANSPORT_FAILURE_MARKERS = (
+    "permission denied",
+    "connection timed out",
+    "connection refused",
+    "connection closed by remote host",
+    "could not resolve hostname",
+    "no route to host",
+    "host key verification failed",
+    "kex_exchange_identification",
+    "connection reset by peer",
+    "operation timed out",
+    "network is unreachable",
+)
 
 
 def _shell_join(args: list[str]) -> str:
@@ -92,6 +107,12 @@ def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     normalized = dict(arguments)
+    target_text = _normalize_optional_ssh_string(normalized.pop("target", None))
+    explicit_host = _normalize_optional_ssh_string(normalized.get("host"))
+    if target_text:
+        if explicit_host and explicit_host != target_text:
+            raise ValueError("Conflicting SSH targets provided via `target` and `host`.")
+        normalized["host"] = target_text
     alias_user = _normalize_optional_ssh_string(normalized.pop("username", None))
     explicit_user = _normalize_optional_ssh_string(normalized.get("user"))
     if alias_user:
@@ -106,6 +127,8 @@ def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
     host_text = _normalize_optional_ssh_string(normalized.get("host")) or ""
     host_text, user_text = normalize_ssh_target(host=host_text, user=explicit_user)
+    if not host_text:
+        raise ValueError("SSH target requires either `target` or `host`.")
     normalized["host"] = host_text
     if user_text:
         normalized["user"] = user_text
@@ -340,6 +363,15 @@ def _build_ssh_command(
     return _shell_join([*command_args, *ssh_args]), env_overrides
 
 
+def _ssh_failure_kind(*, exit_code: int, stderr: str) -> str:
+    lowered = str(stderr or "").strip().lower()
+    if any(marker in lowered for marker in _SSH_TRANSPORT_FAILURE_MARKERS):
+        return "transport"
+    if exit_code == 255 and not lowered:
+        return "transport"
+    return "remote_command"
+
+
 async def ssh_exec(
     host: str,
     command: str,
@@ -377,6 +409,30 @@ async def ssh_exec(
                     "files_changed_this_cycle": state.files_changed_this_cycle,
                 },
             )
+    policy_state = state if state is not None else LoopState()
+    approval_fn = getattr(harness, "request_shell_approval", None)
+    approval_available = callable(approval_fn) and getattr(harness, "event_handler", None) is not None
+    risk_decision = evaluate_risk_policy(
+        policy_state,
+        tool_name="ssh_exec",
+        tool_risk="high",
+        phase=str(policy_state.current_phase or ""),
+        action=command,
+        expected_effect="Run the requested SSH command on the remote host.",
+        rollback="Stop the command and revert any in-progress remote changes if needed.",
+        verification="Inspect the remote command output and any follow-up verifier result.",
+        approval_available=approval_available,
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "host": host,
+                "command": command,
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
+            },
+        )
     try:
         host, user = normalize_ssh_target(host=host, user=user)
         full_cmd, env_overrides = _build_ssh_command(
@@ -409,6 +465,26 @@ async def ssh_exec(
                 },
             )
         raise
+    if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+        approved = await approval_fn(
+            command=command,
+            cwd=str(getattr(policy_state, "cwd", ".") or "."),
+            timeout_sec=timeout_sec,
+            proof_bundle=risk_decision.proof_bundle,
+        )
+        if not approved:
+            denied = fail(
+                "SSH execution denied by user.",
+                metadata={
+                    "approval_denied": True,
+                    "command": command,
+                    "cwd": str(getattr(policy_state, "cwd", ".") or "."),
+                    "timeout_sec": timeout_sec,
+                    "host": host,
+                },
+            )
+            denied["status"] = "denied"
+            return denied
 
     start_time = time.time()
     proc = None
@@ -487,8 +563,18 @@ async def ssh_exec(
             err_output = output.get("stderr", "")
             if not isinstance(err_output, str):
                 err_output = str(err_output or "")
-            error_msg = err_output.strip() or f"SSH failed with exit code {proc.returncode}"
+            failure_kind = _ssh_failure_kind(
+                exit_code=int(proc.returncode),
+                stderr=err_output,
+            )
             hints = []
+            if failure_kind == "transport":
+                error_msg = err_output.strip() or f"SSH transport failed with exit code {proc.returncode}"
+            else:
+                error_msg = err_output.strip() or f"Remote SSH command exited with code {proc.returncode}"
+                hints.append(
+                    "SSH transport appears to have succeeded; inspect the remote command, stdout, and exit code to decide whether the probe simply returned a non-zero status."
+                )
             if "Permission denied" in error_msg:
                 if password:
                     hints.append("Check the SSH username/password and verify that password authentication is enabled on the remote host.")
@@ -497,7 +583,15 @@ async def ssh_exec(
             if "Connection timed out" in error_msg:
                 hints.append("Verify the host is reachable and the port is open.")
             
-            return fail(error_msg, metadata={"output": output, "hints": hints})
+            return fail(
+                error_msg,
+                metadata={
+                    "output": output,
+                    "hints": hints,
+                    "failure_kind": failure_kind,
+                    "ssh_transport_succeeded": failure_kind == "remote_command",
+                },
+            )
 
         return ok(output)
 

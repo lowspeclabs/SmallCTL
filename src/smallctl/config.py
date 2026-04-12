@@ -83,6 +83,7 @@ class SmallctlConfig:
     fresh_run_turns: int = 1
     planning_mode: bool = False
     contract_flow_ui: bool = False
+    staged_reasoning: bool = False
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -229,6 +230,7 @@ def _env_config() -> dict[str, Any]:
         "fresh_run_turns": env_or_dotenv(f"{ENV_PREFIX}FRESH_RUN_TURNS"),
         "planning_mode": env_or_dotenv(f"{ENV_PREFIX}PLANNING_MODE"),
         "contract_flow_ui": env_or_dotenv(f"{ENV_PREFIX}CONTRACT_FLOW_UI"),
+        "staged_reasoning": env_or_dotenv(f"{ENV_PREFIX}STAGED_REASONING"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -295,6 +297,8 @@ def _env_config() -> dict[str, Any]:
         cfg["planning_mode"] = _to_bool(cfg["planning_mode"])
     if "contract_flow_ui" in cfg:
         cfg["contract_flow_ui"] = _to_bool(cfg["contract_flow_ui"])
+    if "staged_reasoning" in cfg:
+        cfg["staged_reasoning"] = _to_bool(cfg["staged_reasoning"])
     if "indexer" in cfg:
         cfg["indexer"] = _to_bool(cfg["indexer"])
     if "chunk_mode_new_file_only" in cfg:
@@ -402,6 +406,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["planning_mode"] = _to_bool(cli_clean["planning_mode"])
     if "contract_flow_ui" in cli_clean:
         cli_clean["contract_flow_ui"] = _to_bool(cli_clean["contract_flow_ui"])
+    if "staged_reasoning" in cli_clean:
+        cli_clean["staged_reasoning"] = _to_bool(cli_clean["staged_reasoning"])
     if "indexer" in cli_clean:
         cli_clean["indexer"] = _to_bool(cli_clean["indexer"])
     if "enable_write_intent_recovery" in cli_clean:
@@ -497,6 +503,24 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     if merged.get("fresh_run"):
         merged["restore_graph_state"] = False
     _apply_provider_profile(merged, cli_clean)
+    profile = str(merged.get("provider_profile", "auto")).strip().lower()
+    if profile == "lmstudio":
+        if not str(merged.get("backend_unload_command") or "").strip() and not str(
+            merged.get("backend_restart_command") or ""
+        ).strip():
+            compatibility_warnings.append(
+                "LM Studio native API unload will be attempted automatically; configure SMALLCTL_BACKEND_RESTART_COMMAND if you want restart fallback when unload does not recover."
+            )
+        configured_timeout = merged.get("first_token_timeout_sec")
+        if configured_timeout is not None:
+            try:
+                normalized_timeout = float(configured_timeout)
+            except (TypeError, ValueError):
+                normalized_timeout = 0.0
+            if 0.0 < normalized_timeout < 45.0:
+                compatibility_warnings.append(
+                    "LM Studio first_token_timeout_sec below 45s may cause false 'backend wedged' detections on slower local generations."
+                )
     merged["compatibility_warnings"] = compatibility_warnings
 
     allowed_keys = {f.name for f in fields(SmallctlConfig)}

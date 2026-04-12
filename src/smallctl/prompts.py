@@ -4,7 +4,8 @@ import json
 from typing import Any
 
 from .guards import is_small_model_name
-from .state import LoopState, clip_text_value
+from .phases import phase_contract
+from .state import LoopState, clip_text_value, normalize_intent_label
 
 _GEMMA_MODEL_MARKERS = (
     "google_gemma-4",
@@ -83,6 +84,7 @@ def build_system_prompt(
             "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. "
         )
     if exact_large_gemma_26b_mode:
+        contract = phase_contract(phase)
         parts = [
             "You are smallctl, an autonomous execution agent. ",
             response_structure,
@@ -94,10 +96,12 @@ def build_system_prompt(
             "REDUNDANCY: Reuse what you already know. Do not repeat identical or near-identical tool calls. ",
             f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
             f"Contract phase: {state.contract_phase()}. ",
+            f"Phase contract focus: {contract.focus}. ",
             "WORKSPACE: Prefer workspace-relative paths like `src/app.py`, not absolute paths. ",
             "If the task is complete, stop and call `task_complete(message='...')`. ",
         ]
     else:
+        contract = phase_contract(phase)
         parts = [
             "You are smallctl, an autonomous execution agent. ",
             response_structure,
@@ -109,6 +113,7 @@ def build_system_prompt(
             "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. These are FORBIDDEN. ",
             f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
             f"Contract phase: {state.contract_phase()}. ",
+            f"Phase contract focus: {contract.focus}. ",
             "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
             "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
             "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
@@ -126,13 +131,18 @@ def build_system_prompt(
             "SYSTEM IDS: `repair-*` values are system repair cycle IDs for diagnostics only. Never copy a system repair cycle ID into `write_session_id`. ",
             "CHUNKED AUTHORING: When writing large files or complex logic, the harness may initialize a Write Session. "
             "Break the file into logical sections (e.g., imports, constants, classes, main logic). "
-            "Use `file_write` or `file_append` with these parameters: "
+            "Use `file_write` or `file_append` for new files, large sections, or chunked authoring. "
+            "Use `file_patch` for small exact edits inside an existing file or active staged session. "
+            "When using `file_write` or `file_append`, include these parameters: "
             "`write_session_id`: Use the ID provided by the harness. "
             "`section_name` or `section_id`: A descriptive name for the current chunk (e.g., 'imports'). "
             "`section_role`: Optional role label for the chunk. "
             "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
-            "When resuming an active session, prefer `file_write`; the harness will track append/replace behavior from the session metadata. "
-            "During local repair, keep the same session and prefer `replace_strategy='overwrite'` so you repair the active section cleanly instead of appending duplicate code. "
+            "When resuming an active session, prefer `file_write` for chunk continuation; the harness will track append/replace behavior from the session metadata. "
+            "If you need a narrow exact repair inside the staged copy, prefer `file_patch` instead. "
+            "If prior chunks are no longer visible because tool previews were compacted or truncated, recover the current staged content first with `file_read(path=target)` before choosing `replace_strategy='overwrite'`. "
+            "Do not assume earlier chunks were lost and do not rewrite the whole file from memory unless you have reread the staged copy. "
+            "During local repair with `file_write`, keep the same session and prefer `replace_strategy='overwrite'` so you repair the active section cleanly instead of appending duplicate code. "
             "Complete the entire session before moving to other tasks or verification. ",
             "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. ",
             "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
@@ -168,6 +178,30 @@ def build_system_prompt(
                 repair_bits.append(f"stagnation counters: {counters}")
         if repair_bits:
             parts.append("REPAIR FOCUS: " + " | ".join(repair_bits) + ". ")
+    current_contract_phase = state.contract_phase()
+    if current_contract_phase == "explore":
+        parts.append(
+            "EXPLORE FOCUS: Collect verified observations, reduce uncertainty, and surface open questions before drafting a plan. "
+            "Prefer read-only tools and concise fact capture."
+        )
+    elif current_contract_phase == "plan":
+        parts.append(
+            "PLAN FOCUS: Rely on the compressed evidence packet, candidate causes, and handoff artifacts rather than a raw transcript dump. "
+            "Turn observations into hypotheses and an executable plan."
+        )
+    elif current_contract_phase == "author":
+        parts.append(
+            "AUTHOR FOCUS: Use the approved ExecutionPlan, the target files, and the active write session. "
+            "Prefer one bounded implementation change at a time."
+        )
+    elif current_contract_phase == "execute":
+        parts.append(
+            "EXECUTE FOCUS: Use the approved plan and evidence support, keep execution bounded to approved actions, and note the verification target."
+        )
+    elif current_contract_phase == "verify":
+        parts.append(
+            "VERIFY FOCUS: Compare the observed state against the acceptance criteria and recent evidence. Prefer verification reads over new writes."
+        )
     if state.write_session:
         session = state.write_session
         recovery_bits = [
@@ -176,6 +210,8 @@ def build_system_prompt(
             f"intent={session.write_session_intent}",
             f"target={session.write_target_path}",
         ]
+        if session.write_staging_path:
+            recovery_bits.append(f"staging={session.write_staging_path}")
         if session.write_current_section:
             recovery_bits.append(f"active_section={session.write_current_section}")
         if session.write_next_section:
@@ -184,6 +220,18 @@ def build_system_prompt(
             recovery_bits.append("completed=" + ", ".join(session.write_sections_completed))
         if session.write_failed_local_patches:
             recovery_bits.append(f"failures={session.write_failed_local_patches}")
+        if session.write_pending_finalize:
+            recovery_bits.append("pending_finalize=yes")
+        else:
+            recovery_bits.append("pending_finalize=no")
+        if session.write_next_section:
+            recovery_bits.append(f"next_action=continue section {session.write_next_section}")
+        elif session.write_current_section:
+            recovery_bits.append(f"next_action=finish section {session.write_current_section}")
+        elif session.write_pending_finalize:
+            recovery_bits.append("next_action=finalize staged copy")
+        else:
+            recovery_bits.append("next_action=continue writing target file")
         verifier = session.write_last_verifier or {}
         if verifier:
             verifier_bits = [f"verifier={verifier.get('verdict', 'unknown')}"]
@@ -198,7 +246,7 @@ def build_system_prompt(
         parts.append(
             "\n\n### WRITE RECOVERY\n"
             + "\n".join(f"- {item}" for item in recovery_bits)
-            + "\nContinue from the active section instead of restarting the file. Resume with `file_write` plus the active session metadata. Do not reread the whole file unless local context is genuinely insufficient."
+            + f"\nContinue from the active section instead of restarting the file. Resume with `file_write` plus the active session metadata for chunk continuation, or use `file_patch` for a narrow exact edit inside the staged copy. If prior chunks are not fully visible because previews were truncated or compacted, recover the current staged content first with `file_read(path='{session.write_target_path}')` or `artifact_read(artifact_id='{session.write_session_id}__stage')`. The staging path is for read/verify only; the target path is the real write destination. Do not assume the chunks were lost or rewrite the whole file from memory unless you intentionally reread the staged copy and then choose `replace_strategy='overwrite'`."
         )
     verifier_verdict = state.current_verifier_verdict() or {}
     if verifier_verdict:
@@ -227,7 +275,8 @@ def build_system_prompt(
         parts.append(
             "SMALL MODEL GUARD: If you seem frozen, hung, or stuck, continue from the last concrete step instead of restarting. "
             "The harness may nudge you to continue, so emit the next tool call or a short progress update immediately. "
-            "When writing code, keep each chunk under 50 lines and finish one logical section before starting the next."
+            "When writing code, keep each chunk under 50 lines and finish one logical section before starting the next. "
+            "Use tool names exactly as listed and never invent aliases like `use_shell_exec`."
         )
     if state.scratchpad.get("subtask_depth"):
         parts.append(
@@ -242,8 +291,15 @@ def build_system_prompt(
             if "ssh_exec" in available_tool_names:
                 parts.append(
                     "NETWORK: Use `ssh_exec` for remote SSH commands and `shell_exec` for local shell work only. "
-                    "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available."
+                    "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available. "
+                    "When the task includes a username, prefer `ssh_exec(target='user@host', command='...')`, "
+                    "for example `target='root@192.168.1.63'`, instead of sending only `host='...'`."
                 )
+                if is_small_model_name(state.scratchpad.get("_model_name")):
+                    parts.append(
+                        "SMALL MODEL TOOL ROUTING: Remote host/IP/user/password mentioned means `ssh_exec`. "
+                        "`shell_exec` is local-only."
+                    )
             if "shell_exec" in available_tool_names:
                 parts.append(
                     "SHELL: For long-running commands, start them with `shell_exec(background=True, command='...')`, then poll with `shell_exec(job_id='...')` every few seconds until the job completes or the timeout window is reached. "
@@ -281,16 +337,20 @@ def build_system_prompt(
         parts.append(
             "\n\n### WRITE-FIRST GUIDANCE\n"
             "The task is to create or edit a file. Use directory listing only to locate the target once, "
-            "then move directly to `file_write` or `file_append` instead of repeating `dir_list` on the same path. "
+            "then move directly to `file_write`, `file_append`, or `file_patch` instead of repeating `dir_list` on the same path. "
             "If you already know the destination directory, stop exploring and start writing."
         )
     plan = state.active_plan or state.draft_plan
     if plan is not None and state.plan_artifact_id:
+        claim_bits = ""
+        if getattr(plan, "claim_refs", None):
+            claim_bits = " Claim refs: " + ", ".join(plan.claim_refs)
         parts.append(
             "\n\n### PLAN PLAYBOOK\n"
             f"Plan artifact: {state.plan_artifact_id}\n"
             "Treat this artifact as the source of truth for staged implementation. "
             "Before a large script change, complete the playbook in order: file skeleton, function signatures, code, then debug."
+            f"{claim_bits}"
         )
     if indexer_mode and manifest:
         manifest_json = json.dumps(manifest, indent=2)
@@ -312,7 +372,7 @@ def build_system_prompt(
 
 
 def _is_write_first_task(state: LoopState) -> bool:
-    if getattr(state, "active_intent", "") == "use_write_file":
+    if normalize_intent_label(getattr(state, "active_intent", "")) == "requested_write_file":
         return True
     intent_tags = set(getattr(state, "intent_tags", []) or [])
     if "write_file" in intent_tags:

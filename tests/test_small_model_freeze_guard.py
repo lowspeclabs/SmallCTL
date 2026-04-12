@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from smallctl.guards import GuardConfig, check_guards
+from smallctl.graph.recovery_context import build_goal_recap
 from smallctl.graph.nodes import LoopRoute, interpret_model_output
 from smallctl.graph.state import PendingToolCall
 
@@ -42,7 +44,7 @@ class _FakeHarness:
         return None
 
 
-def test_small_model_empty_turn_gets_continue_nudge() -> None:
+def test_small_model_empty_turn_gets_blank_message_nudge() -> None:
     async def _run() -> tuple[object, object]:
         harness = _FakeHarness()
         deps = SimpleNamespace(harness=harness, event_handler=None)
@@ -63,10 +65,10 @@ def test_small_model_empty_turn_gets_continue_nudge() -> None:
     harness, route = asyncio.run(_run())
 
     assert route == LoopRoute.NEXT_STEP
-    assert harness.state.scratchpad["_small_model_continue_nudges"] == 1
+    assert harness.state.scratchpad["_blank_message_nudges"] == 1
     assert harness.state.recent_messages
     assert harness.state.recent_messages[-1].role == "user"
-    assert "Continue from the last concrete step" in harness.state.recent_messages[-1].content
+    assert "The assistant turn was empty." in harness.state.recent_messages[-1].content
 
 
 def test_stream_halt_without_done_gets_goal_recap_nudge_for_any_model() -> None:
@@ -105,6 +107,18 @@ def test_stream_halt_without_done_gets_goal_recap_nudge_for_any_model() -> None:
     assert "explore: wait for scan output" in message.content
 
 
+def test_goal_recap_omits_stale_task_boundary_goal() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "Read the latest harness log"
+    harness.state.working_memory.current_goal = "hello"
+    harness.state.scratchpad["_task_boundary_previous_task"] = "hello"
+
+    recap = build_goal_recap(harness)
+
+    assert recap == "Goal recap: Original task: Read the latest harness log"
+    assert "Current goal" not in recap
+
+
 def test_multiphase_discovery_uses_state_strategy_when_scratchpad_missing() -> None:
     async def _run() -> tuple[object, object, object]:
         harness = _FakeHarness()
@@ -136,3 +150,21 @@ def test_multiphase_discovery_uses_state_strategy_when_scratchpad_missing() -> N
     assert harness.state.recent_messages
     assert harness.state.recent_messages[-1].role == "user"
     assert "DISCOVERY phase" in harness.state.recent_messages[-1].content
+
+
+def test_check_guards_uses_the_updated_repeated_action_threshold() -> None:
+    state = _FakeState()
+    state.step_count = 0
+    state.token_usage = 0
+    state.recent_errors = []
+    state.stagnation_counters = {}
+    state.tool_history = ["artifact_print|A0002"] * 5
+
+    assert check_guards(state, GuardConfig()) is None
+
+    state.tool_history.append("artifact_print|A0002")
+
+    assert check_guards(state, GuardConfig()) == (
+        "Guard tripped: repeated tool call loop "
+        "(artifact_print repeated 6 times with identical args and outcome)"
+    )

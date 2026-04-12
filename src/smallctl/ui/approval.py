@@ -42,12 +42,14 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
         command: str,
         cwd: str,
         timeout_sec: int,
+        proof_bundle: dict[str, object] | None = None,
     ) -> None:
         super().__init__()
         self.approval_id = approval_id
         self.command = command
         self.cwd = cwd
         self.timeout_sec = timeout_sec
+        self.proof_bundle = proof_bundle or {}
 
     def compose(self) -> ComposeResult:
         with Container(id="approve-prompt-shell"):
@@ -101,6 +103,52 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
         ordered[(focused_index + direction) % len(ordered)].focus()
 
     def _build_body(self) -> str:
+        proof_lines = []
+        proof_lines.append("Proof bundle:")
+        if self.proof_bundle:
+            phase = str(self.proof_bundle.get("phase") or "").strip()
+            tool_risk = str(self.proof_bundle.get("tool_risk") or "").strip()
+            task_classification = str(self.proof_bundle.get("task_classification") or "").strip()
+            action = str(self.proof_bundle.get("action") or "").strip()
+            expected_effect = str(self.proof_bundle.get("expected_effect") or "").strip()
+            rollback = str(self.proof_bundle.get("rollback") or "").strip()
+            verification = str(self.proof_bundle.get("verification") or "").strip()
+            supported_claim_ids = self.proof_bundle.get("supported_claim_ids") or []
+            evidence_ids = self.proof_bundle.get("supporting_evidence_ids") or []
+            claim_summaries = self.proof_bundle.get("claims") or []
+            if phase:
+                proof_lines.append(f"Phase: {phase}")
+            if tool_risk:
+                proof_lines.append(f"Risk: {tool_risk}")
+            if task_classification:
+                proof_lines.append(f"Task: {task_classification}")
+            if action:
+                proof_lines.append(f"Action: {action}")
+            if expected_effect:
+                proof_lines.append(f"Expected effect: {expected_effect}")
+            if rollback:
+                proof_lines.append(f"Rollback: {rollback}")
+            if verification:
+                proof_lines.append(f"Verification: {verification}")
+            if supported_claim_ids:
+                proof_lines.append("Claims: " + ", ".join(str(item) for item in supported_claim_ids))
+            if evidence_ids:
+                proof_lines.append("Evidence: " + ", ".join(str(item) for item in evidence_ids))
+            if isinstance(claim_summaries, list) and claim_summaries:
+                proof_lines.append("Claim summaries:")
+                for item in claim_summaries[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    claim_id = str(item.get("claim_id") or "").strip()
+                    statement = str(item.get("statement") or "").strip()
+                    confidence = item.get("confidence")
+                    bits = [bit for bit in (claim_id, statement) if bit]
+                    if confidence not in (None, ""):
+                        bits.append(f"confidence={confidence}")
+                    if bits:
+                        proof_lines.append("- " + " | ".join(bits))
+        else:
+            proof_lines.append("No additional proof bundle supplied.")
         parts = [
             f"Approval ID: {self.approval_id}",
             f"CWD: {self.cwd}",
@@ -108,6 +156,8 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
             "",
             "Command:",
             self.command,
+            "",
+            *proof_lines,
             "",
             "Use left/right to choose, then Enter.",
             "Y approves once, S selects Yes for Session, N denies.",

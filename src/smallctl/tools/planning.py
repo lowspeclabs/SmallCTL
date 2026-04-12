@@ -45,6 +45,7 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
             )
         ],
         evidence_refs=[str(item) for item in (value.get("evidence_refs") or []) if str(item).strip()],
+        claim_refs=[str(item) for item in (value.get("claim_refs") or []) if str(item).strip()],
     )
 
 
@@ -108,6 +109,7 @@ def _format_plan_metadata(plan: ExecutionPlan) -> dict[str, Any]:
         "output_path": plan.requested_output_path,
         "output_format": plan.requested_output_format,
         "active_step": active_step.step_id if active_step else "",
+        "claim_refs": list(plan.claim_refs),
     }
 
 
@@ -204,6 +206,7 @@ async def plan_set(
     constraints: list[Any] | None = None,
     acceptance_criteria: list[Any] | None = None,
     implementation_plan: list[Any] | None = None,
+    claim_refs: list[Any] | None = None,
     steps: list[Any] | None = None,
     output_path: str | None = None,
     plan_output_path: str | None = None,
@@ -228,6 +231,7 @@ async def plan_set(
         constraints=_coerce_string_list(constraints),
         acceptance_criteria=_coerce_string_list(acceptance_criteria),
         implementation_plan=_coerce_string_list(implementation_plan),
+        claim_refs=_coerce_string_list(claim_refs),
         steps=[
             step
             for index, item in enumerate((steps or []), start=1)

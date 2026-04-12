@@ -9,6 +9,60 @@ from ..state import clip_text_value, json_safe_value
 
 _UI_TOOL_RESULT_PREVIEW_LIMIT = 1200
 _UI_ARTIFACT_READ_PREVIEW_LIMIT = 900
+_DIR_LIST_PREVIEW_ENTRY_LIMIT = 50
+
+
+def _trim_head_clip_boundary(text: str, *, scan: int = 32) -> str:
+    trimmed = text.rstrip()
+    if not trimmed:
+        return trimmed
+    window_start = max(0, len(trimmed) - scan)
+    boundary = max(
+        trimmed.rfind(" ", window_start),
+        trimmed.rfind("\n", window_start),
+        trimmed.rfind("\t", window_start),
+    )
+    if boundary > 0:
+        candidate = trimmed[:boundary].rstrip()
+        if candidate:
+            return candidate
+    return trimmed
+
+
+def _trim_tail_clip_boundary(text: str, *, scan: int = 32) -> str:
+    trimmed = text.lstrip()
+    if not trimmed:
+        return trimmed
+    for index, char in enumerate(trimmed[:scan]):
+        if char.isspace():
+            candidate = trimmed[index + 1 :].lstrip()
+            if candidate:
+                return candidate
+            break
+    return trimmed
+
+
+def _clip_error_display(text: str, *, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return "Tool failed."
+    if len(normalized) <= limit:
+        return normalized
+
+    # Preserve both the front context and the actionable tail of long errors.
+    # Bias toward the tail because recovery instructions often appear there.
+    separator = "\n...\n"
+    available = max(1, limit - len(separator))
+    head_budget = max(1, int(available * 0.35))
+    tail_budget = max(1, available - head_budget)
+
+    head = _trim_head_clip_boundary(normalized[:head_budget])
+    tail = _trim_tail_clip_boundary(normalized[-tail_budget:])
+    if not head:
+        return tail
+    if not tail:
+        return head
+    return f"{head}{separator}{tail}"
 
 
 def format_tool_result_display(
@@ -24,10 +78,7 @@ def format_tool_result_display(
 
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     if not result.success:
-        preview, clipped = clip_text_value(str(result.error or "Tool failed.").strip(), limit=400)
-        if clipped:
-            return f"{preview}\n... error truncated"
-        return preview
+        return _clip_error_display(str(result.error or "Tool failed."), limit=400)
 
     if tool_name == "artifact_read":
         return format_artifact_read_display(result=result, request_text=request_text)
@@ -93,8 +144,12 @@ def format_dir_list_display(*, result: Any) -> str:
     elif isinstance(count, int) and count >= 0:
         lines.append(f"{count} items")
 
-    preview_items = output[:8]
-    tree_preview = render_dir_list_tree(preview_items, max_depth=2, max_children=8)
+    preview_items = output[:_DIR_LIST_PREVIEW_ENTRY_LIMIT]
+    tree_preview = render_dir_list_tree(
+        preview_items,
+        max_depth=2,
+        max_children=_DIR_LIST_PREVIEW_ENTRY_LIMIT,
+    )
     if tree_preview:
         lines.append(tree_preview)
 

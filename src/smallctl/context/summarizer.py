@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 from ..models.conversation import ConversationMessage
 from ..state import ContextBrief, EpisodicSummary, LoopState
 from .policy import ContextPolicy, estimate_text_tokens
 from ..client import OpenAICompatClient
+
+
+@dataclass(slots=True)
+class CompactionAttemptResult:
+    summary: EpisodicSummary | None = None
+    messages_compacted: int = 0
+    noop_reason: str = ""
 
 
 class ContextSummarizer:
@@ -21,12 +29,18 @@ class ContextSummarizer:
             role = "commentary"
         return f"{role}: {message.content or ''}"
 
-    def compact_recent_messages(self, *, state: LoopState, keep_recent: int, artifact_store: Any | None = None) -> EpisodicSummary | None:
+    def compact_recent_messages_with_status(
+        self,
+        *,
+        state: LoopState,
+        keep_recent: int,
+        artifact_store: Any | None = None,
+    ) -> CompactionAttemptResult:
         if len(state.recent_messages) <= keep_recent:
-            return None
+            return CompactionAttemptResult(noop_reason="no_compactable_messages")
         old_messages = state.recent_messages[:-keep_recent]
         if not old_messages:
-            return None
+            return CompactionAttemptResult(noop_reason="no_compactable_messages")
         summary_id = f"S{len(state.episodic_summaries) + 1:04d}"
         artifact_ids = [
             message.metadata.get("artifact_id", "")
@@ -66,21 +80,34 @@ class ContextSummarizer:
                 state.working_memory.decisions
                 + [f"Compacted context into {summary.summary_id} with artifacts {', '.join(summary.artifact_ids)}"]
             )[-8:]
-        return summary
+        return CompactionAttemptResult(summary=summary, messages_compacted=len(old_messages))
 
-    async def compact_recent_messages_async(
+    def compact_recent_messages(
+        self,
+        *,
+        state: LoopState,
+        keep_recent: int,
+        artifact_store: Any | None = None,
+    ) -> EpisodicSummary | None:
+        return self.compact_recent_messages_with_status(
+            state=state,
+            keep_recent=keep_recent,
+            artifact_store=artifact_store,
+        ).summary
+
+    async def compact_recent_messages_async_with_status(
         self,
         *,
         state: LoopState,
         client: OpenAICompatClient,
         keep_recent: int,
         artifact_store: Any | None = None,
-    ) -> EpisodicSummary | None:
+    ) -> CompactionAttemptResult:
         if len(state.recent_messages) <= keep_recent:
-            return None
+            return CompactionAttemptResult(noop_reason="no_compactable_messages")
         old_messages = state.recent_messages[:-keep_recent]
         if not old_messages:
-            return None
+            return CompactionAttemptResult(noop_reason="no_compactable_messages")
 
         # Build summarization prompt
         conv_text = "\n".join([self._format_message_for_compaction(m) for m in old_messages])
@@ -134,7 +161,24 @@ class ContextSummarizer:
         state.episodic_summaries.append(summary)
         state.recent_messages = state.recent_messages[-keep_recent:]
         
-        return summary
+        return CompactionAttemptResult(summary=summary, messages_compacted=len(old_messages))
+
+    async def compact_recent_messages_async(
+        self,
+        *,
+        state: LoopState,
+        client: OpenAICompatClient,
+        keep_recent: int,
+        artifact_store: Any | None = None,
+    ) -> EpisodicSummary | None:
+        return (
+            await self.compact_recent_messages_async_with_status(
+                state=state,
+                client=client,
+                keep_recent=keep_recent,
+                artifact_store=artifact_store,
+            )
+        ).summary
 
     async def compact_to_brief_async(
         self,
@@ -224,6 +268,14 @@ class ContextSummarizer:
             artifact_ids=artifact_ids,
             next_action_hint=data.get("next_action_hint", ""),
             staleness_step=state.step_count,
+            facts_confirmed=data.get("facts_confirmed", data.get("key_discoveries", [])),
+            facts_unconfirmed=data.get("facts_unconfirmed", []),
+            open_questions=data.get("open_questions", []),
+            candidate_causes=data.get("candidate_causes", []),
+            disproven_causes=data.get("disproven_causes", []),
+            next_observations_needed=data.get("next_observations_needed", []),
+            evidence_refs=data.get("evidence_refs", artifact_ids),
+            claim_refs=data.get("claim_refs", []),
         )
         
         if artifact_store:

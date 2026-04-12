@@ -11,7 +11,7 @@ from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, json_safe_value
 
 
 def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    if tool_name not in {"file_write", "file_append"}:
+    if tool_name not in {"file_write", "file_append", "file_patch"}:
         return args
     if not isinstance(args, dict):
         return {}
@@ -22,6 +22,8 @@ def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> 
     write_session_id = str(normalized.get("write_session_id") or "").strip()
     if session_id and not write_session_id:
         normalized["write_session_id"] = session_id
+    if session_id:
+        normalized.pop("session_id", None)
 
     # Providers sometimes emit Python literals such as `None` for optional
     # write-session metadata. Treat those as omitted fields instead of letting
@@ -29,7 +31,15 @@ def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> 
     for key, value in list(normalized.items()):
         if value is None:
             normalized.pop(key, None)
-    for key in ("path", "write_session_id", "section_name", "next_section_name", "replace_strategy"):
+    for key in (
+        "path",
+        "write_session_id",
+        "section_name",
+        "next_section_name",
+        "replace_strategy",
+        "target_text",
+        "replacement_text",
+    ):
         value = normalized.get(key)
         if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
             normalized.pop(key, None)

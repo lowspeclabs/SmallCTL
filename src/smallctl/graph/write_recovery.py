@@ -9,6 +9,7 @@ from ..task_targets import extract_task_target_paths, task_target_paths_from_har
 from .state import PendingToolCall
 
 _WRITE_TOOLS = {"file_write", "file_append"}
+_SESSION_ROUTED_TOOLS = {"file_write", "file_append", "file_patch"}
 _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2, "certain": 3}
 _RAW_TEXT_TARGET_SUFFIXES = (".md", ".txt", ".text")
 
@@ -22,6 +23,7 @@ class RecoveredWriteIntent:
     section_name: str = ""
     next_section_name: str = ""
     next_section_name_supplied: bool = False
+    next_section_name_origin: str = ""
     replace_strategy: str = ""
     confidence: str = "low"
     evidence: list[str] = field(default_factory=list)
@@ -212,6 +214,8 @@ def recover_write_intent(
     intent.next_section_name_supplied = any(
         key in raw_args for key in ("next_section_name", "next_section")
     )
+    if intent.next_section_name:
+        intent.next_section_name_origin = "tool_args"
     intent.replace_strategy = str(args.get("replace_strategy") or "").strip()
 
     assistant_payload, assistant_payload_evidence = _extract_inline_tool_payload(
@@ -232,6 +236,7 @@ def recover_write_intent(
             intent.next_section_name = str(assistant_payload.get("next_section_name") or "").strip()
             if intent.next_section_name:
                 intent.next_section_name_supplied = True
+                intent.next_section_name_origin = "assistant_payload"
         if not intent.replace_strategy:
             intent.replace_strategy = str(assistant_payload.get("replace_strategy") or "").strip()
 
@@ -254,6 +259,7 @@ def recover_write_intent(
             intent.next_section_name = str(partial_payload.get("next_section_name") or "").strip()
             if intent.next_section_name:
                 intent.next_section_name_supplied = True
+                intent.next_section_name_origin = "partial_tool_calls"
         if not intent.replace_strategy:
             intent.replace_strategy = str(partial_payload.get("replace_strategy") or "").strip()
 
@@ -328,6 +334,8 @@ def write_recovery_metadata(intent: RecoveredWriteIntent, *, status: str) -> dic
         "recovery_kind": write_recovery_kind(intent),
         "source": intent.source,
         "write_session_id": intent.write_session_id,
+        "next_section_name": intent.next_section_name,
+        "next_section_name_origin": intent.next_section_name_origin,
         "content_chars": len(intent.content or ""),
     }
 
@@ -402,8 +410,12 @@ def _attach_session_metadata(intent: RecoveredWriteIntent, *, harness: Any) -> N
     if not intent.path and session_target:
         intent.path = session_target
         intent.evidence.append("active_write_session")
-    if not intent.write_session_id:
-        intent.write_session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    active_session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    if active_session_id and intent.write_session_id and intent.write_session_id != active_session_id:
+        intent.write_session_id = active_session_id
+        intent.evidence.append("active_write_session_id_rebound")
+    elif not intent.write_session_id:
+        intent.write_session_id = active_session_id
         if intent.write_session_id:
             intent.evidence.append("active_write_session_id")
     if not intent.section_name:
@@ -425,7 +437,80 @@ def _attach_session_metadata(intent: RecoveredWriteIntent, *, harness: Any) -> N
                 if idx + 1 < len(sections):
                     intent.next_section_name = sections[idx + 1]
                     intent.evidence.append("active_next_section_name")
+                    intent.next_section_name_origin = "session_default"
                 break
+
+
+def _python_content_looks_complete(content: str) -> bool:
+    line_count = len([line for line in str(content or "").splitlines() if line.strip()])
+    if line_count >= 120:
+        return True
+
+    has_imports = bool(re.search(r"(?m)^\s*(?:from\s+\S+\s+import|import\s+\S+)", content))
+    has_defs_or_classes = bool(re.search(r"(?m)^\s*(?:async\s+def|def|class)\s+\w+", content))
+    has_tests = bool(
+        re.search(r"(?m)^\s*(?:class\s+Test\w*|def\s+test_\w+)", content)
+        or "unittest.main" in content
+        or "pytest" in content
+    )
+    has_entrypoint = bool(re.search(r'(?m)^\s*if\s+__name__\s*==\s*["\']__main__["\']\s*:', content))
+    if has_imports and has_defs_or_classes and (has_tests or has_entrypoint):
+        return True
+    if line_count >= 60 and has_defs_or_classes and has_entrypoint:
+        return True
+    return False
+
+
+def _javascript_content_looks_complete(content: str) -> bool:
+    line_count = len([line for line in str(content or "").splitlines() if line.strip()])
+    if line_count >= 140:
+        return True
+
+    has_imports = bool(re.search(r"(?m)^\s*(?:import\s+.+from\s+|const\s+\w+\s*=\s*require\()", content))
+    has_exports = bool(re.search(r"(?m)^\s*export\s+", content) or "module.exports" in content)
+    has_tests = bool(re.search(r"\b(?:describe|it|test)\s*\(", content))
+    return has_imports and has_exports and has_tests
+
+
+def _go_content_looks_complete(content: str) -> bool:
+    line_count = len([line for line in str(content or "").splitlines() if line.strip()])
+    if line_count >= 140:
+        return True
+
+    has_package = bool(re.search(r"(?m)^\s*package\s+\w+", content))
+    has_imports = bool(re.search(r"(?m)^\s*import\s+(?:\(|\w)", content))
+    has_functions = bool(re.search(r"(?m)^\s*func\s+\w+", content))
+    has_tests = bool(re.search(r"(?m)^\s*func\s+Test\w+\s*\(", content))
+    return has_package and has_imports and has_functions and has_tests
+
+
+def recovered_content_looks_like_complete_file(intent: RecoveredWriteIntent) -> bool:
+    target_path = str(getattr(intent, "path", "") or "").strip().lower()
+    content = str(getattr(intent, "content", "") or "")
+    if not target_path or not content.strip():
+        return False
+    if target_path.endswith(".py"):
+        return _python_content_looks_complete(content)
+    if target_path.endswith((".js", ".ts", ".tsx")):
+        return _javascript_content_looks_complete(content)
+    if target_path.endswith(".go"):
+        return _go_content_looks_complete(content)
+    return False
+
+
+def maybe_finalize_recovered_assistant_write(intent: RecoveredWriteIntent) -> bool:
+    if str(getattr(intent, "source", "") or "").strip() != "assistant_text":
+        return False
+    if str(getattr(intent, "next_section_name_origin", "") or "").strip() != "session_default":
+        return False
+    if not recovered_content_looks_like_complete_file(intent):
+        return False
+
+    intent.next_section_name = ""
+    intent.next_section_name_origin = ""
+    intent.evidence.append("complete_file_content")
+    intent.evidence.append("cleared_session_default_next_section_name")
+    return True
 
 
 def _min_confidence(path_confidence: str, content_confidence: str) -> str:
@@ -492,7 +577,7 @@ def _extract_unclosed_final_fenced_block(
 
 def _extract_inline_tool_paths(text: str) -> list[str]:
     paths: list[str] = []
-    for pending in _extract_inline_write_calls(text):
+    for pending in _extract_inline_session_tool_calls(text):
         payload = normalize_write_argument_aliases(dict(getattr(pending, "args", {}) or {}))
         path = str(payload.get("path") or "").strip()
         if path:
@@ -642,6 +727,55 @@ def _extract_inline_write_calls(text: str) -> list[PendingToolCall]:
             block_format="assistant_fenced_tool_payload",
         )
 
+    return results
+
+
+def _extract_inline_session_tool_calls(text: str) -> list[PendingToolCall]:
+    cleaned = str(text or "")
+    if not cleaned.strip():
+        return []
+
+    results: list[PendingToolCall] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _remember(candidate: PendingToolCall | None) -> None:
+        if candidate is None or candidate.tool_name not in _SESSION_ROUTED_TOOLS:
+            return
+        candidate.args = normalize_write_argument_aliases(dict(getattr(candidate, "args", {}) or {}))
+        signature = (
+            candidate.tool_name,
+            json.dumps(candidate.args, ensure_ascii=True, sort_keys=True),
+        )
+        if signature in seen:
+            return
+        seen.add(signature)
+        results.append(candidate)
+
+    _remember(_pending_from_embedded_xml_text(cleaned))
+    _remember(_pending_from_embedded_json_text(cleaned))
+
+    for pattern in (r"<tool_code>(.*?)</tool_code>", r"<tool_call>(.*?)</tool_call>", r"<call>(.*?)</call>"):
+        for match in re.finditer(pattern, cleaned, re.DOTALL):
+            block = str(match.group(1) or "").strip()
+            _remember(_pending_from_embedded_xml_text(block))
+            _remember(_pending_from_embedded_json_text(block))
+
+    for match in re.finditer(r"\[(file_write|file_append|file_patch)\]\s*(\{.*?\})", cleaned, re.DOTALL):
+        _remember(
+            PendingToolCall.from_payload(
+                {
+                    "function": {
+                        "name": str(match.group(1) or "").strip(),
+                        "arguments": str(match.group(2) or "").strip(),
+                    }
+                }
+            )
+        )
+
+    fenced = _extract_first_fenced_block(cleaned)
+    if fenced:
+        _remember(_pending_from_embedded_xml_text(fenced))
+        _remember(_pending_from_embedded_json_text(fenced))
     return results
 
 

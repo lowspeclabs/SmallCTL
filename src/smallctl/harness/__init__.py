@@ -660,8 +660,14 @@ class Harness:
         command: str,
         cwd: str,
         timeout_sec: int,
+        proof_bundle: dict[str, Any] | None = None,
     ) -> bool:
-        return await self.approvals.request_shell_approval(command=command, cwd=cwd, timeout_sec=timeout_sec)
+        return await self.approvals.request_shell_approval(
+            command=command,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+            proof_bundle=proof_bundle,
+        )
 
     async def request_sudo_password(
         self,
@@ -684,8 +690,8 @@ class Harness:
         self.approvals.reject_pending_sudo_password_prompts()
 
     def _reject_shell_approval(self, approval_id: str) -> None:
-        # Service handles internal state; keeping as pass-through
-        pass
+        # Resolve explicit rejection for the specific approval prompt.
+        self.approvals.resolve_shell_approval(approval_id, False)
 
     async def run_task_with_events(
         self,
@@ -876,9 +882,12 @@ class Harness:
         status = "unrecovered"
         message = "Backend did not emit a first token before timeout."
         health_after = dict(health_before)
-        unload_available = self.backend_unload_command or self.provider_profile == "ollama"
+        restart_window: dict[str, Any] | None = None
+        attempted_actions: list[str] = []
+        unload_available = self.backend_unload_command or self.provider_profile in {"ollama", "lmstudio"}
         if health_before.get("ok") and unload_available:
-            action = "unload_command" if self.backend_unload_command else "ollama_keep_alive_zero"
+            action = self._backend_unload_action()
+            attempted_actions.append(action)
             command_result = await self._run_backend_unload_command(self.backend_unload_command)
             if command_result.get("ok"):
                 health_after = await self._wait_for_backend_health(
@@ -887,68 +896,47 @@ class Harness:
                 )
                 if health_after.get("ok"):
                     status = "recovered"
-                    if self.backend_unload_command:
-                        message = "Backend unload command succeeded and health probe recovered."
-                    else:
-                        message = "Ollama unload request succeeded and health probe recovered."
+                    message = self._backend_unload_message("succeeded and health probe recovered")
                 else:
-                    if self.backend_unload_command:
-                        message = "Backend unload command ran, but the health probe did not recover."
-                    else:
-                        message = "Ollama unload request ran, but the health probe did not recover."
+                    message = self._backend_unload_message("ran, but the health probe did not recover")
             else:
                 health_after = {"ok": False}
                 message = str(command_result.get("message") or "Backend unload command failed.")
-        elif self.backend_restart_command:
-            rate_limit = self._check_backend_restart_rate_limit()
-            if not rate_limit.get("allowed", False):
-                message = (
-                    f"Backend restart suppressed by supervisor rate limit "
-                    f"({rate_limit.get('count', 0)}/{self.backend_max_restarts_per_hour} in the last hour)."
-                )
-                result = {
-                    "status": status,
-                    "action": "rate_limited",
-                    "message": message,
-                    "health_url": health_url,
-                    "health_before": health_before,
-                    "health_after": health_after,
-                    "reason": str(details.get("reason") or ""),
-                    "restart_window": rate_limit,
-                }
-                self.state.scratchpad["_last_backend_recovery"] = result
-                self._runlog(
-                    "backend_recovery",
-                    message,
-                    provider_profile=self.provider_profile,
-                    status=status,
-                    action="rate_limited",
-                    health_url=health_url,
-                    health_before=health_before,
-                    health_after=health_after,
-                    details=details,
-                    restart_window=rate_limit,
-                )
-                return result
-            action = "restart_command"
-            self._record_backend_restart_attempt()
-            command_result = await self._run_backend_restart_command(self.backend_restart_command)
-            if command_result.get("ok"):
-                health_after = await self._wait_for_backend_health(
+            if status != "recovered" and self.backend_restart_command:
+                restart_result = await self._attempt_backend_restart_recovery(
                     health_url,
-                    timeout_sec=max(timeout_sec, int(self.backend_restart_grace_sec)),
+                    timeout_sec=timeout_sec,
                 )
-                if health_after.get("ok"):
-                    status = "recovered"
-                    message = "Backend restart command succeeded and health probe recovered."
-                else:
-                    message = "Backend restart command ran, but the health probe did not recover."
-            else:
-                health_after = {"ok": False}
-                message = str(command_result.get("message") or "Backend restart command failed.")
+                restart_action = str(restart_result.get("action") or "").strip()
+                if restart_action == "restart_command":
+                    attempted_actions.append(restart_action)
+                restart_message = str(restart_result.get("message") or "").strip()
+                if restart_message:
+                    message = f"{message} {restart_message}".strip()
+                action = restart_action or action
+                status = str(restart_result.get("status") or status)
+                if isinstance(restart_result.get("health_after"), dict):
+                    health_after = dict(restart_result["health_after"])
+                restart_window = restart_result.get("restart_window")
+        elif self.backend_restart_command:
+            restart_result = await self._attempt_backend_restart_recovery(
+                health_url,
+                timeout_sec=timeout_sec,
+            )
+            action = str(restart_result.get("action") or action)
+            status = str(restart_result.get("status") or status)
+            message = str(restart_result.get("message") or message)
+            if action == "restart_command":
+                attempted_actions.append(action)
+            if isinstance(restart_result.get("health_after"), dict):
+                health_after = dict(restart_result["health_after"])
+            restart_window = restart_result.get("restart_window")
         else:
             if health_before.get("ok"):
-                message = "Backend accepted health probes but appears wedged on generation; no unload or restart command configured."
+                message = (
+                    "Backend accepted health probes but appears wedged on generation; "
+                    "no unload or restart recovery is configured."
+                )
             else:
                 message = "Backend health probe failed and no restart command is configured."
         result = {
@@ -959,7 +947,10 @@ class Harness:
             "health_before": health_before,
             "health_after": health_after,
             "reason": str(details.get("reason") or ""),
+            "attempted_actions": attempted_actions,
         }
+        if restart_window is not None:
+            result["restart_window"] = restart_window
         self.state.scratchpad["_last_backend_recovery"] = result
         self._runlog(
             "backend_recovery",
@@ -971,6 +962,8 @@ class Harness:
             health_before=health_before,
             health_after=health_after,
             details=details,
+            attempted_actions=attempted_actions,
+            restart_window=restart_window,
         )
         return result
 
@@ -1027,6 +1020,52 @@ class Harness:
             await asyncio.sleep(1.0)
         return last_result
 
+    async def _attempt_backend_restart_recovery(
+        self,
+        health_url: str,
+        *,
+        timeout_sec: int,
+    ) -> dict[str, Any]:
+        rate_limit = self._check_backend_restart_rate_limit()
+        if not rate_limit.get("allowed", False):
+            return {
+                "status": "unrecovered",
+                "action": "rate_limited",
+                "message": (
+                    f"Backend restart suppressed by supervisor rate limit "
+                    f"({rate_limit.get('count', 0)}/{self.backend_max_restarts_per_hour} in the last hour)."
+                ),
+                "health_after": {"ok": False},
+                "restart_window": rate_limit,
+            }
+
+        self._record_backend_restart_attempt()
+        command_result = await self._run_backend_restart_command(self.backend_restart_command)
+        if command_result.get("ok"):
+            health_after = await self._wait_for_backend_health(
+                health_url,
+                timeout_sec=max(timeout_sec, int(self.backend_restart_grace_sec)),
+            )
+            if health_after.get("ok"):
+                return {
+                    "status": "recovered",
+                    "action": "restart_command",
+                    "message": "Backend restart command succeeded and health probe recovered.",
+                    "health_after": health_after,
+                }
+            return {
+                "status": "unrecovered",
+                "action": "restart_command",
+                "message": "Backend restart command ran, but the health probe did not recover.",
+                "health_after": health_after,
+            }
+        return {
+            "status": "unrecovered",
+            "action": "restart_command",
+            "message": str(command_result.get("message") or "Backend restart command failed."),
+            "health_after": {"ok": False},
+        }
+
     async def _run_backend_restart_command(self, command: str) -> dict[str, Any]:
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -1079,9 +1118,29 @@ class Harness:
                 "stdout": stdout_text,
                 "stderr": stderr_text,
             }
+        if self.provider_profile == "lmstudio":
+            return await self._run_lmstudio_backend_unload()
         if self.provider_profile != "ollama":
-            return {"ok": False, "message": "No backend unload command is configured."}
+            return {"ok": False, "message": "No backend unload strategy is available for this provider."}
         return await self._run_ollama_backend_unload()
+
+    def _backend_unload_action(self) -> str:
+        if self.backend_unload_command:
+            return "unload_command"
+        if self.provider_profile == "lmstudio":
+            return "lmstudio_api_unload"
+        if self.provider_profile == "ollama":
+            return "ollama_keep_alive_zero"
+        return "unload_command"
+
+    def _backend_unload_message(self, outcome: str) -> str:
+        if self.backend_unload_command:
+            return f"Backend unload command {outcome}."
+        if self.provider_profile == "lmstudio":
+            return f"LM Studio unload request {outcome}."
+        if self.provider_profile == "ollama":
+            return f"Ollama unload request {outcome}."
+        return f"Backend unload request {outcome}."
 
     async def _run_ollama_backend_unload(self) -> dict[str, Any]:
         try:
@@ -1119,6 +1178,105 @@ class Harness:
             "body": body_text,
             "message": "Ollama unload request completed.",
         }
+
+    async def _run_lmstudio_backend_unload(self) -> dict[str, Any]:
+        try:
+            import httpx
+        except Exception as exc:
+            return {"ok": False, "message": f"httpx unavailable: {exc}"}
+
+        base_url = str(self.client.base_url or "").rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        list_url = f"{base_url}/api/v1/models"
+        unload_url = f"{base_url}/api/v1/models/unload"
+        headers = {"Content-Type": "application/json"}
+        api_key = str(self.client.api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            async with httpx.AsyncClient(timeout=float(self.backend_healthcheck_timeout_sec)) as unload_client:
+                response = await unload_client.get(list_url, headers=headers)
+                if response.status_code >= 400:
+                    return {
+                        "ok": False,
+                        "message": f"LM Studio model list request failed with status {response.status_code}.",
+                    }
+                payload = response.json()
+                instance_ids, loaded_summary = self._find_lmstudio_loaded_instance_ids(payload)
+                if not instance_ids:
+                    loaded_blob = ", ".join(loaded_summary) if loaded_summary else "none"
+                    return {
+                        "ok": False,
+                        "message": (
+                            f"LM Studio model '{self.client.model}' is not currently loaded "
+                            f"(loaded instances: {loaded_blob})."
+                        ),
+                    }
+                for instance_id in instance_ids:
+                    unload_response = await unload_client.post(
+                        unload_url,
+                        headers=headers,
+                        json={"instance_id": instance_id},
+                    )
+                    if unload_response.status_code >= 400:
+                        return {
+                            "ok": False,
+                            "message": (
+                                f"LM Studio unload request failed for instance '{instance_id}' "
+                                f"with status {unload_response.status_code}."
+                            ),
+                        }
+        except Exception as exc:
+            return {"ok": False, "message": f"LM Studio unload request failed: {exc}"}
+        return {
+            "ok": True,
+            "instance_ids": instance_ids,
+            "message": f"LM Studio unload request completed for {len(instance_ids)} instance(s).",
+        }
+
+    def _find_lmstudio_loaded_instance_ids(self, payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+        if not isinstance(payload, dict):
+            return [], []
+        models = payload.get("models")
+        if not isinstance(models, list):
+            return [], []
+        target_model = str(self.client.model or "").strip()
+        instance_ids: list[str] = []
+        all_loaded_instance_ids: list[str] = []
+        seen: set[str] = set()
+        seen_all: set[str] = set()
+        loaded_summary: list[str] = []
+        target_known = False
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            model_key = str(entry.get("key") or "").strip()
+            if model_key == target_model:
+                target_known = True
+            loaded_instances = entry.get("loaded_instances")
+            if not isinstance(loaded_instances, list):
+                continue
+            for loaded_entry in loaded_instances:
+                if not isinstance(loaded_entry, dict):
+                    continue
+                instance_id = str(loaded_entry.get("id") or "").strip()
+                if not instance_id:
+                    continue
+                loaded_summary.append(f"{model_key}:{instance_id}" if model_key else instance_id)
+                if instance_id not in seen_all:
+                    seen_all.add(instance_id)
+                    all_loaded_instance_ids.append(instance_id)
+                if instance_id in seen:
+                    continue
+                if instance_id == target_model or model_key == target_model:
+                    seen.add(instance_id)
+                    instance_ids.append(instance_id)
+        if instance_ids:
+            return instance_ids, loaded_summary
+        if target_known:
+            return all_loaded_instance_ids, loaded_summary
+        return [], loaded_summary
 
     @staticmethod
     def _stream_print(text: str) -> None:
@@ -1188,12 +1346,14 @@ class Harness:
         tool_call_id: str | None,
         result: ToolEnvelope,
         arguments: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> ConversationMessage:
         return await self.tool_results.record_result(
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             result=result,
             arguments=arguments,
+            operation_id=operation_id,
         )
     def _record_assistant_message(
         self,
@@ -1456,6 +1616,7 @@ class Harness:
             "_model_is_small",
             "_max_steps",
             "strategy",
+            "_session_notepad",
             "_last_task_text",
             "_last_task_handoff",
             "_task_boundary_previous_task",
@@ -1587,8 +1748,10 @@ class Harness:
         collapsed = " ".join(tokens)
         return collapsed in {
             "continue",
+            "cntinue",
             "conitnue",
             "continune",
+            "cotinue",
             "keep going",
             "resume",
             "proceed",
@@ -1688,7 +1851,7 @@ class Harness:
         # Primary Intent logic from memory-upgrade.md
         primary = "general_task"
         if requested_tool:
-            primary = f"use_{requested_tool}"
+            primary = f"requested_{requested_tool}"
             secondary.append("complete_validation_task")
             tags.append(requested_tool)
             if requested_tool in {"scratch_list", "cwd_get", "loop_status"}:
@@ -1751,6 +1914,8 @@ class Harness:
             and any(marker in text for marker in creation_markers)
         ) or re.search(r"\b(?:\.py|\.sh|\.bash|\.ps1)\b", text):
             return "write_file"
+        if "file_patch" in text or "patch file" in text:
+            return "file_patch"
         if "read_file" in text or "cat" in text:
             return "read_file"
         if "write_file" in text:

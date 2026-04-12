@@ -10,10 +10,14 @@ from typing import Any, TYPE_CHECKING
 from ..guards import is_small_model_name
 from ..models.conversation import ConversationMessage
 from ..models.tool_result import ToolEnvelope
+from ..evidence import normalize_tool_result
 from ..normalization import dedupe_keep_tail
+from ..reasoning_policy import task_requires_claim_support
 from ..redaction import redact_sensitive_data
-from ..state import json_safe_value
+from ..risk_policy import _is_read_only_evidence_action
+from ..state import ClaimRecord, json_safe_value
 from ..tools.fs import is_file_mutating_tool
+from ..tools.memory import append_session_notepad_entry
 
 if TYPE_CHECKING:
     from ..harness import Harness
@@ -23,6 +27,96 @@ logger = logging.getLogger("smallctl.harness.tool_results")
 class ToolResultService:
     def __init__(self, harness: Harness):
         self.harness = harness
+
+    def _tool_execution_context(self, operation_id: str | None) -> dict[str, Any]:
+        if not operation_id:
+            return {}
+        records = getattr(self.harness.state, "tool_execution_records", None)
+        if not isinstance(records, dict):
+            return {}
+        record = records.get(operation_id)
+        return dict(record) if isinstance(record, dict) else {}
+
+    def _record_evidence(
+        self,
+        *,
+        tool_name: str,
+        result: ToolEnvelope,
+        artifact: Any,
+        operation_id: str | None,
+        replayed: bool = False,
+    ) -> Any:
+        context = self._tool_execution_context(operation_id)
+        evidence = normalize_tool_result(
+            tool_name=tool_name,
+            result=result,
+            artifact=artifact,
+            operation_id=operation_id or str(context.get("operation_id", "") or ""),
+            phase=str(getattr(self.harness.state, "current_phase", "") or context.get("phase", "") or ""),
+            evidence_context=context,
+            replayed=replayed,
+        )
+        reasoning_graph = getattr(self.harness.state, "reasoning_graph", None)
+        if reasoning_graph is not None:
+            reasoning_graph.evidence_records.append(evidence)
+            reasoning_graph.touch_ids()
+        if operation_id:
+            stored = self.harness.state.tool_execution_records.get(operation_id)
+            if isinstance(stored, dict):
+                stored["artifact_id"] = str(
+                    getattr(artifact, "artifact_id", "")
+                    or result.metadata.get("artifact_id")
+                    or context.get("artifact_id")
+                    or stored.get("artifact_id", "")
+                    or ""
+                )
+                stored["evidence_id"] = evidence.evidence_id
+                stored["evidence_type"] = evidence.evidence_type
+                stored["evidence_record"] = json_safe_value(evidence)
+                stored["evidence_context"] = context
+                self.harness.state.tool_execution_records[operation_id] = stored
+        if artifact is not None:
+            artifact.metadata.setdefault("evidence_id", evidence.evidence_id)
+            artifact.metadata.setdefault("evidence_type", evidence.evidence_type)
+            if operation_id:
+                artifact.metadata.setdefault("operation_id", operation_id)
+        return evidence
+
+    def _maybe_record_supported_claim(
+        self,
+        *,
+        tool_name: str,
+        result: ToolEnvelope,
+        evidence: Any,
+        operation_id: str | None,
+    ) -> ClaimRecord | None:
+        claim = _maybe_support_claim_from_evidence(
+            state=self.harness.state,
+            tool_name=tool_name,
+            result=result,
+            evidence=evidence,
+        )
+        if claim is None or not operation_id:
+            return claim
+
+        stored = self.harness.state.tool_execution_records.get(operation_id)
+        if isinstance(stored, dict):
+            claim_ids = stored.get("claim_ids")
+            if isinstance(claim_ids, list):
+                if claim.claim_id not in claim_ids:
+                    claim_ids.append(claim.claim_id)
+            else:
+                stored["claim_ids"] = [claim.claim_id]
+            evidence_record = stored.get("evidence_record")
+            if isinstance(evidence_record, dict):
+                record_claim_ids = evidence_record.get("claim_ids")
+                if isinstance(record_claim_ids, list):
+                    if claim.claim_id not in record_claim_ids:
+                        record_claim_ids.append(claim.claim_id)
+                else:
+                    evidence_record["claim_ids"] = [claim.claim_id]
+            self.harness.state.tool_execution_records[operation_id] = stored
+        return claim
 
     def _invalidate_file_read_cache(self, path: str) -> None:
         cache = self.harness.state.scratchpad.get("file_read_cache")
@@ -60,6 +154,71 @@ class ToolResultService:
             model_name = scratchpad.get("_model_name")
         return is_small_model_name(str(model_name or ""))
 
+    def _note_anchor(self, *, content: str, tag: str = "anchor") -> None:
+        entry, duplicate, count = append_session_notepad_entry(
+            self.harness.state,
+            content=content,
+            tag=tag,
+        )
+        if entry and not duplicate:
+            self.harness._runlog(
+                "session_notepad_append",
+                "appended session notepad entry",
+                entry=entry,
+                count=count,
+            )
+
+    def _auto_mirror_session_anchor(
+        self,
+        *,
+        tool_name: str,
+        result: ToolEnvelope,
+        arguments: dict[str, Any] | None,
+    ) -> None:
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        output = result.output
+
+        if tool_name == "cwd_get" and result.success:
+            cwd = ""
+            if isinstance(output, dict):
+                cwd = str(output.get("cwd") or "").strip()
+            if not cwd:
+                cwd = str(metadata.get("cwd") or self.harness.state.cwd or "").strip()
+            if cwd:
+                self._note_anchor(content=f"CWD is {cwd}", tag="env")
+            return
+
+        if tool_name in {"file_read", "file_write", "file_append", "file_patch", "file_delete", "dir_list"}:
+            path = str(metadata.get("path") or "").strip()
+            if not path and isinstance(arguments, dict):
+                path = str(arguments.get("path") or "").strip()
+            if path:
+                action = {
+                    "file_read": "read",
+                    "file_write": "wrote",
+                    "file_append": "appended",
+                    "file_patch": "patched",
+                    "file_delete": "deleted",
+                    "dir_list": "listed",
+                }.get(tool_name, tool_name)
+                self._note_anchor(content=f"{action} path: {path}", tag="path")
+            return
+
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            command = str(metadata.get("command") or "").strip()
+            if not command and isinstance(arguments, dict):
+                command = str(arguments.get("command") or "").strip()
+            if command:
+                self._note_anchor(content=f"{tool_name} command: {command}", tag="cmd")
+            return
+
+        if tool_name == "memory_update" and result.success:
+            section = str(metadata.get("section") or "").strip().lower()
+            if section == "known_facts":
+                text = str(arguments.get("content") or "").strip() if isinstance(arguments, dict) else ""
+                if text:
+                    self._note_anchor(content=f"known fact: {text}", tag="fact")
+
     async def record_result(
         self,
         *,
@@ -67,6 +226,7 @@ class ToolResultService:
         tool_call_id: str | None,
         result: ToolEnvelope,
         arguments: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> ConversationMessage:
         from ..context.policy import estimate_text_tokens
 
@@ -86,7 +246,7 @@ class ToolResultService:
             else:
                 from ..context import format_reused_artifact_message
                 self.harness.state.retrieval_cache = [artifact.artifact_id]
-                compact_content = format_reused_artifact_message(artifact)
+                compact_content = format_reused_artifact_message(artifact, tool_name=tool_name)
                 self.harness._runlog(
                     "artifact_reused",
                     "tool result satisfied from cached artifact",
@@ -94,6 +254,20 @@ class ToolResultService:
                     tool_name=tool_name,
                     source=artifact.source,
                 )
+            evidence = self._record_evidence(
+                tool_name=tool_name,
+                result=result,
+                artifact=artifact,
+                operation_id=operation_id,
+                replayed=True,
+            )
+            self._auto_mirror_session_anchor(
+                tool_name=tool_name,
+                result=result,
+                arguments=arguments,
+            )
+            if artifact is not None:
+                artifact.metadata.setdefault("evidence_statement", evidence.statement)
             return ConversationMessage(
                 role="tool",
                 name=tool_name,
@@ -125,11 +299,24 @@ class ToolResultService:
                     tool_name=tool_name,
                     source=artifact.source,
                 )
+                evidence = self._record_evidence(
+                    tool_name=tool_name,
+                    result=result,
+                    artifact=artifact,
+                    operation_id=operation_id,
+                    replayed=True,
+                )
+                self._auto_mirror_session_anchor(
+                    tool_name=tool_name,
+                    result=result,
+                    arguments=arguments,
+                )
+                artifact.metadata.setdefault("evidence_statement", evidence.statement)
                 return ConversationMessage(
                     role="tool",
                     name=tool_name,
                     tool_call_id=tool_call_id,
-                    content=format_reused_artifact_message(artifact),
+                    content=format_reused_artifact_message(artifact, tool_name=tool_name),
                     metadata={
                         "artifact_id": artifact.artifact_id,
                         "source_artifact_id": artifact.artifact_id,
@@ -245,8 +432,29 @@ class ToolResultService:
                         else:
                             self.harness.state.scratchpad["suppressed_truncated_artifact_ids"] = [artifact_id]
 
+            evidence = self._record_evidence(
+                tool_name=tool_name,
+                result=result,
+                artifact=artifact,
+                operation_id=operation_id,
+            )
+            self._maybe_record_supported_claim(
+                tool_name=tool_name,
+                result=result,
+                evidence=evidence,
+                operation_id=operation_id,
+            )
+            self._auto_mirror_session_anchor(
+                tool_name=tool_name,
+                result=result,
+                arguments=arguments,
+            )
+
             if tool_name != "shell_exec" and not result.metadata.get("skip_auto_fact_record"):
-                fact_label = artifact.summary or tool_name
+                fact_label = evidence.statement or artifact.summary or tool_name
+                prefix = f"{tool_name}: "
+                if fact_label.startswith(prefix):
+                    fact_label = fact_label[len(prefix):]
                 self.harness.state.working_memory.known_facts = dedupe_keep_tail(
                     self.harness.state.working_memory.known_facts + [f"{tool_name}: {fact_label}"],
                     limit=12,
@@ -261,6 +469,10 @@ class ToolResultService:
                     limit=8,
                 )
                 self.harness.state.recent_errors.append(f"{tool_name}: {result.error}")
+                self._note_anchor(
+                    content=f"{tool_name} failed: {str(result.error).strip()}",
+                    tag="fail",
+                )
         
         request_text = self.harness.state.run_brief.original_task or self.harness._current_user_task()
         compact_full_file = self._is_small_model()
@@ -414,6 +626,140 @@ def _file_read_cache_key(cwd: str, payload: dict[str, Any] | None) -> str | None
     end_line = payload.get("requested_end_line", payload.get("end_line"))
     max_bytes = payload.get("max_bytes", 100_000)
     return f"{resolved}|{start_line}|{end_line}|{max_bytes}"
+
+
+def _maybe_support_claim_from_evidence(
+    *,
+    state: Any,
+    tool_name: str,
+    result: ToolEnvelope,
+    evidence: Any,
+) -> ClaimRecord | None:
+    if not task_requires_claim_support(state):
+        return None
+    if evidence is None or not isinstance(getattr(evidence, "evidence_id", ""), str):
+        return None
+    if not evidence.evidence_id or getattr(evidence, "replayed", False):
+        return None
+    if getattr(evidence, "evidence_type", "") == "replayed_or_cached":
+        return None
+
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    reason = str(metadata.get("reason") or "").strip().lower()
+    if reason in {
+        "missing_supported_claim",
+        "approval_denied",
+        "spec_not_approved",
+        "authoring_target_missing",
+    }:
+        return None
+    if tool_name in {
+        "task_complete",
+        "task_fail",
+        "loop_status",
+        "memory_update",
+        "plan_set",
+        "plan_step_update",
+        "plan_request_execution",
+        "plan_export",
+        "artifact_print",
+        "show_artifact",
+    }:
+        return None
+    if is_file_mutating_tool(tool_name):
+        return None
+
+    if tool_name in {"shell_exec", "ssh_exec"}:
+        command = _claim_command_from_result(result)
+        if not getattr(evidence, "negative", False) and not _is_read_only_evidence_action(command):
+            return None
+    elif tool_name not in {"file_read", "artifact_read", "dir_list", "cwd_get"} and not getattr(evidence, "negative", False):
+        return None
+
+    graph = getattr(state, "reasoning_graph", None)
+    if graph is None:
+        return None
+
+    for claim in getattr(graph, "claim_records", []) or []:
+        if evidence.evidence_id in getattr(claim, "supporting_evidence_ids", []):
+            if claim.claim_id and claim.claim_id not in evidence.claim_ids:
+                evidence.claim_ids.append(claim.claim_id)
+            return claim
+
+    statement = _claim_statement_from_evidence(evidence)
+    if not statement:
+        return None
+
+    existing_claim = None
+    for claim in getattr(graph, "claim_records", []) or []:
+        if (
+            getattr(claim, "statement", "") == statement
+            and isinstance(getattr(claim, "metadata", None), dict)
+            and claim.metadata.get("auto_generated")
+        ):
+            existing_claim = claim
+            break
+
+    if existing_claim is not None:
+        if evidence.evidence_id not in existing_claim.supporting_evidence_ids:
+            existing_claim.supporting_evidence_ids.append(evidence.evidence_id)
+        existing_claim.status = "confirmed"
+        existing_claim.confidence = max(float(existing_claim.confidence or 0.0), _claim_confidence(evidence))
+        if existing_claim.claim_id and existing_claim.claim_id not in evidence.claim_ids:
+            evidence.claim_ids.append(existing_claim.claim_id)
+        graph.touch_ids()
+        return existing_claim
+
+    claim_id = _derive_claim_id(tool_name=tool_name, evidence_id=evidence.evidence_id, statement=statement)
+    claim = ClaimRecord(
+        claim_id=claim_id,
+        kind="causal" if getattr(evidence, "negative", False) else "state",
+        statement=statement,
+        supporting_evidence_ids=[evidence.evidence_id],
+        confidence=_claim_confidence(evidence),
+        status="confirmed",
+        metadata={
+            "auto_generated": True,
+            "source": "evidence",
+            "tool_name": tool_name,
+            "evidence_id": evidence.evidence_id,
+            "phase": str(getattr(evidence, "phase", "") or ""),
+        },
+    )
+    graph.claim_records.append(claim)
+    graph.touch_ids()
+    evidence.claim_ids.append(claim.claim_id)
+    return claim
+
+
+def _claim_command_from_result(result: ToolEnvelope) -> str:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    command = str(metadata.get("command") or "").strip()
+    if command:
+        return command
+    arguments = metadata.get("arguments")
+    if isinstance(arguments, dict):
+        return str(arguments.get("command") or "").strip()
+    return ""
+
+
+def _claim_statement_from_evidence(evidence: Any) -> str:
+    statement = str(getattr(evidence, "statement", "") or "").strip()
+    if not statement:
+        return ""
+    prefix = "Observed issue: " if getattr(evidence, "negative", False) else "Observed state: "
+    if statement.lower().startswith(prefix.lower()):
+        return statement
+    return prefix + statement
+
+
+def _claim_confidence(evidence: Any) -> float:
+    return max(0.75, min(1.0, float(getattr(evidence, "confidence", 0.0) or 0.0)))
+
+
+def _derive_claim_id(*, tool_name: str, evidence_id: str, statement: str) -> str:
+    digest = hashlib.sha1(f"{tool_name}|{evidence_id}|{statement}".encode("utf-8")).hexdigest()[:12]
+    return f"C-{digest}"
 
 
 def _consolidate_shell_attempt_family(

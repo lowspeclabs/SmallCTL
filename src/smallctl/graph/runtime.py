@@ -148,6 +148,7 @@ class LoopGraphRuntime:
             "apply_tool_outcomes": (
                 "_route_after_apply",
                 {
+                    "dispatch_tools": "dispatch_tools",
                     "prepare_step": "prepare_step",
                     "interrupt_for_human": "interrupt_for_human",
                     END: END,
@@ -442,6 +443,8 @@ class LoopGraphRuntime:
             return "interrupt_for_human"
         if payload.get("final_result") is not None:
             return END
+        if payload.get("pending_tool_calls"):
+            return "dispatch_tools"
         return "prepare_step"
 
 
@@ -492,6 +495,7 @@ class ChatGraphRuntime(LoopGraphRuntime):
             "apply_chat_tool_outcomes": (
                 "_route_after_chat_apply",
                 {
+                    "dispatch_tools": "dispatch_tools",
                     "prepare_step": "prepare_step",
                     "interrupt_for_human": "interrupt_for_human",
                     END: END,
@@ -563,7 +567,11 @@ class ChatGraphRuntime(LoopGraphRuntime):
     def _route_after_chat_apply(payload: LoopGraphPayload) -> str:
         if payload.get("interrupt_payload") is not None:
             return "interrupt_for_human"
-        return END if payload.get("final_result") is not None else "prepare_step"
+        if payload.get("final_result") is not None:
+            return END
+        if payload.get("pending_tool_calls"):
+            return "dispatch_tools"
+        return "prepare_step"
 
 
 class PlanningGraphRuntime(LoopGraphRuntime):

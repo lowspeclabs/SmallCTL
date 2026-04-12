@@ -13,8 +13,8 @@ class LMStudioAdapter:
     name = "lmstudio"
     stream_policy = StreamPolicy(
         supports_stream_options=False,
-        first_token_timeout_sec=25.0,
-        tool_call_continuation_timeout_sec=30.0,
+        first_token_timeout_sec=45.0,
+        tool_call_continuation_timeout_sec=60.0,
     )
 
     def sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

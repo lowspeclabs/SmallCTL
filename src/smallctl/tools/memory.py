@@ -9,6 +9,61 @@ from ..normalization import dedupe_keep_tail as _dedupe_keep_tail
 from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, clip_string_list, clip_text_value
 from .common import fail, ok
 
+SESSION_NOTEPAD_KEY = "_session_notepad"
+SESSION_NOTEPAD_LIMIT = 40
+SESSION_NOTEPAD_ITEM_CHAR_LIMIT = 240
+
+
+def _normalize_notepad_entry(content: str, *, tag: str = "") -> str:
+    clipped_content, _ = clip_text_value(content, limit=SESSION_NOTEPAD_ITEM_CHAR_LIMIT)
+    body = str(clipped_content or "").strip()
+    if not body:
+        return ""
+    clean_tag = str(tag or "").strip().lower()
+    if clean_tag:
+        return f"[{clean_tag}] {body}"
+    return body
+
+
+def _load_session_notepad(state: LoopState) -> dict[str, Any]:
+    payload = state.scratchpad.get(SESSION_NOTEPAD_KEY)
+    if not isinstance(payload, dict):
+        payload = {"entries": [], "updated_at": ""}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    normalized_entries: list[str] = []
+    for entry in entries:
+        text = str(entry or "").strip()
+        if text:
+            normalized_entries.append(text)
+    payload["entries"] = normalized_entries
+    payload["updated_at"] = str(payload.get("updated_at", "") or "").strip()
+    return payload
+
+
+def append_session_notepad_entry(
+    state: LoopState,
+    *,
+    content: str,
+    tag: str = "",
+) -> tuple[str, bool, int]:
+    entry = _normalize_notepad_entry(content, tag=tag)
+    if not entry:
+        return "", False, 0
+
+    payload = _load_session_notepad(state)
+    entries = list(payload.get("entries", []))
+    duplicate = entry in entries
+    if duplicate:
+        return entry, True, len(entries)
+
+    payload["entries"] = _dedupe_keep_tail(entries + [entry], limit=SESSION_NOTEPAD_LIMIT)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    state.scratchpad[SESSION_NOTEPAD_KEY] = payload
+    state.touch()
+    return entry, False, len(payload["entries"])
+
 
 async def scratch_set(key: str, value: Any, state: LoopState, persist: bool = False) -> dict[str, Any]:
     state.scratchpad[key] = value
@@ -130,4 +185,28 @@ async def memory_update(
     return fail(
         f"Invalid action: {action}. Must be 'add' or 'remove'.",
         metadata={"section": section, "action": action},
+    )
+
+
+async def log_note(
+    state: LoopState,
+    *,
+    content: str,
+    tag: str = "",
+) -> dict[str, Any]:
+    entry, duplicate, count = append_session_notepad_entry(
+        state,
+        content=content,
+        tag=tag,
+    )
+    if not entry:
+        return fail("Empty note. Provide non-empty `content`.")
+    if duplicate:
+        return ok(
+            "No-op: note already exists in session notepad.",
+            metadata={"duplicate": True, "count": count},
+        )
+    return ok(
+        {"entry": entry, "count": count},
+        metadata={"count": count, "tag": str(tag or "").strip().lower()},
     )

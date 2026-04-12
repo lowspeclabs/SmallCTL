@@ -15,7 +15,7 @@ from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
-from ..phases import normalize_phase
+from ..phases import filter_phase_blocked_tools, is_phase_contract_active, phase_contract, normalize_phase
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..plans import write_plan_file
 from ..normalization import coerce_int as _coerce_int_value, coerce_datetime as _coerce_datetime
@@ -38,6 +38,7 @@ from .recovery_context import build_goal_recap
 from .tool_call_parser import (
     parse_tool_calls,
     _detect_empty_file_write_payload,
+    _detect_patch_existing_stage_read_contract_violation,
     _detect_missing_required_tool_arguments,
     _detect_placeholder_tool_call,
     _build_schema_repair_message,
@@ -59,6 +60,7 @@ from .tool_call_parser import (
     _detect_oversize_write_payload,
     _repair_active_write_session_args,
     _salvage_active_write_session_append,
+    _recover_declared_read_before_write,
 )
 from .tool_outcomes import (
     apply_tool_outcomes,
@@ -122,6 +124,60 @@ def _record_empty_write_retry_metric(
     return count
 
 
+def _apply_declared_read_before_write_reroute(
+    graph_state: GraphRunState,
+    harness: Any,
+    pending: PendingToolCall,
+    *,
+    assistant_text: str = "",
+) -> bool:
+    declared_read_recovery = _recover_declared_read_before_write(
+        harness,
+        pending,
+        assistant_text=assistant_text,
+    )
+    if declared_read_recovery is None:
+        return False
+    redirected_pending, redirect_reason = declared_read_recovery
+
+    original_tool_name = pending.tool_name
+    original_args = json_safe_value(pending.args)
+    pending.tool_name = redirected_pending.tool_name
+    pending.args = redirected_pending.args
+    pending.raw_arguments = redirected_pending.raw_arguments
+    _increment_run_metric(graph_state, "declared_read_before_write_reroute_count")
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"You declared a read-first recovery step, so the pending `{original_tool_name}` call was "
+                f"rerouted to `file_read(path='{pending.args.get('path', '')}')`. "
+                "Inspect the staged/current content first, then choose one narrow follow-up write."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "declared_read_before_write",
+                "original_tool_name": original_tool_name,
+                "rerouted_tool_name": pending.tool_name,
+                "path": str(pending.args.get("path", "") or ""),
+                "redirect_reason": json_safe_value(redirect_reason),
+            },
+        )
+    )
+    harness._runlog(
+        "intent_mismatch_detected_redirection_activated",
+        "intent mismatch detected redirection activated",
+        tool_call_id=pending.tool_call_id,
+        mismatch_kind="declared_read_before_write",
+        original_tool_name=original_tool_name,
+        redirected_tool_name=pending.tool_name,
+        original_args=original_args,
+        rerouted_args=json_safe_value(pending.args),
+        reason=json_safe_value(redirect_reason),
+    )
+    return True
+
+
 class ToolNotFoundError(Exception):
     """Raised when a tool is requested but not found in the registry."""
     def __init__(self, tool_name: str):
@@ -140,7 +196,7 @@ _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
 
 
 def _matching_write_session_for_pending(harness: Any, pending: PendingToolCall) -> WriteSession | None:
-    if pending.tool_name not in {"file_write", "file_append"}:
+    if pending.tool_name not in {"file_write", "file_append", "file_patch"}:
         return None
     session = getattr(harness.state, "write_session", None)
     if session is None or str(getattr(session, "status", "")).strip().lower() == "complete":
@@ -174,13 +230,6 @@ def _remember_write_session_schema_failure(
         return
 
     pending_args = dict(getattr(pending, "args", {}) or {})
-    section_name = str(
-        pending_args.get("section_name")
-        or pending_args.get("section_id")
-        or session.write_next_section
-        or session.write_current_section
-        or "imports"
-    ).strip() or "imports"
     required_fields = [
         str(field)
         for field in (details.get("required_fields") or [])
@@ -199,10 +248,18 @@ def _remember_write_session_schema_failure(
             or ""
         ).strip(),
         "write_session_id": session.write_session_id,
-        "recommended_section_name": section_name,
         "nudge_count": int(nudge_count),
         "status": str(session.status or ""),
     }
+    if pending.tool_name in {"file_write", "file_append"}:
+        section_name = str(
+            pending_args.get("section_name")
+            or pending_args.get("section_id")
+            or session.write_next_section
+            or session.write_current_section
+            or "imports"
+        ).strip() or "imports"
+        payload["recommended_section_name"] = section_name
     harness.state.scratchpad[_WRITE_SESSION_SCHEMA_FAILURE_KEY] = payload
 
 
@@ -373,6 +430,68 @@ def _build_repeated_chat_thinking_message(harness: Any, graph_state: GraphRunSta
     )
 
 
+def _chat_completion_recovery_guard(harness: Any) -> dict[str, str] | None:
+    state = getattr(harness, "state", None)
+    if state is None:
+        return None
+
+    session = getattr(state, "write_session", None)
+    if session is not None and str(getattr(session, "status", "") or "").strip().lower() != "complete":
+        session_id = str(getattr(session, "write_session_id", "") or "").strip()
+        target_path = str(getattr(session, "write_target_path", "") or "").strip()
+        next_section = str(getattr(session, "write_next_section", "") or "").strip()
+        if next_section:
+            detail = f" Next required section: `{next_section}`."
+        elif bool(getattr(session, "write_pending_finalize", False)):
+            detail = " The staged file still needs verification and finalization."
+        else:
+            detail = " The staged file has not been finalized to the target path yet."
+        return {
+            "kind": "write_session_guard",
+            "signature": "|".join(
+                [
+                    "write_session",
+                    session_id,
+                    str(getattr(session, "status", "") or "").strip(),
+                    next_section,
+                    "pending_finalize=yes" if bool(getattr(session, "write_pending_finalize", False)) else "pending_finalize=no",
+                ]
+            ),
+            "message": (
+                f"Do not present the task as finished yet. Write Session `{session_id}` for `{target_path}` is still open."
+                f"{detail} Continue the active write session or explicitly finalize it before ending the run."
+            ),
+        }
+
+    current_verifier = getattr(state, "current_verifier_verdict", None)
+    verifier = current_verifier() if callable(current_verifier) else None
+    if not isinstance(verifier, dict) or not verifier:
+        return None
+    verdict = str(verifier.get("verdict") or "").strip().lower()
+    if verdict in {"", "pass"} or bool(getattr(state, "acceptance_waived", False)):
+        return None
+
+    target_text, target_clipped = clip_text_value(
+        str(verifier.get("command") or verifier.get("target") or "").strip(),
+        limit=180,
+    )
+    note_text, note_clipped = clip_text_value(
+        str(verifier.get("key_stderr") or verifier.get("key_stdout") or "").strip(),
+        limit=180,
+    )
+    message = "Do not present the task as finished yet. The latest verifier is still failing."
+    if target_text:
+        message += f" Latest verifier: `{target_text}{' [truncated]' if target_clipped else ''}`."
+    if note_text:
+        message += f" Result: {note_text}{' [truncated]' if note_clipped else ''}."
+    message += " Continue with one focused repair step or inspect `loop_status` before trying to finish."
+    return {
+        "kind": "verifier_guard",
+        "signature": "|".join(["verifier", verdict, target_text, note_text]),
+        "message": message,
+    }
+
+
 def _build_artifact_summary_exit_message(harness: Any, *, artifact_id: str = "") -> str:
     objective = str(getattr(getattr(harness, "state", None), "run_brief", None).original_task or "").strip()
     artifact_note = f" from artifact {artifact_id}" if artifact_id else ""
@@ -406,6 +525,13 @@ def _build_repeated_tool_loop_interrupt_payload(
         "Do not retry the same read/list/print command unless you are paging to unseen lines."
     )
     artifact_id = _extract_artifact_id_from_args(pending.args)
+    if pending.tool_name == "dir_list":
+        guidance = (
+            "Repeated dir_list loop detected. The chat preview shows up to 50 directory items, "
+            "so trust the visible listing if the target is present. "
+            "Move to a targeted next step or a different path instead of repeating dir_list "
+            "on the same directory."
+        )
     if pending.tool_name in {"artifact_read", "artifact_print"} and _task_prefers_summary_synthesis(harness):
         guidance = _build_artifact_summary_exit_message(harness, artifact_id=artifact_id)
     return {
@@ -809,7 +935,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             return
     harness.state.step_count += 1
     harness.state.decay_experiences()
-    harness.dispatcher.phase = normalize_phase(harness.state.current_phase)
+    harness.dispatcher.phase = normalize_phase(harness.state.contract_phase())
     harness.state.current_phase = harness.dispatcher.phase
 
     # Pre-arm chunked authoring before the first write attempt on risky write-first tasks.
@@ -1415,72 +1541,75 @@ async def interpret_model_output(
                     if last_msg.role == "assistant":
                         last_msg.metadata["thinking_insight"] = insight
 
-    if thought_arch == "multi_phase_discovery":
-        current_phase = harness.state.current_phase
+    if is_phase_contract_active(strategy):
+        contract_phase_fn = getattr(harness.state, "contract_phase", None)
+        current_phase = contract_phase_fn() if callable(contract_phase_fn) else harness.state.current_phase
         if graph_state.pending_tool_calls:
-            # If in explore, only allow gathering tools. Block task_complete/file_write.
-            if current_phase == "explore":
-                blocked = ["task_complete", "task_fail", "file_write"]
-                original_calls = list(graph_state.pending_tool_calls)
-                graph_state.pending_tool_calls = [c for c in original_calls if c.tool_name not in blocked]
-
-                # If the model ONLY called blocked completion tools, it's effectively a 'no tool' completion attempt.
-                if original_calls and not graph_state.pending_tool_calls:
-                    if all(c.tool_name in ["task_complete", "task_fail"] for c in original_calls):
-                        # Depth Lever: Rejection if too early
+            original_calls = list(graph_state.pending_tool_calls)
+            allowed_calls, blocked_tools = filter_phase_blocked_tools(
+                original_calls,
+                phase=current_phase,
+            )
+            if blocked_tools:
+                graph_state.pending_tool_calls = allowed_calls
+                if not allowed_calls:
+                    if current_phase == "explore" and all(
+                        c.tool_name in {"task_complete", "task_fail"} for c in original_calls
+                    ):
                         if harness.state.step_count < harness.config.min_exploration_steps:
-                             harness.state.append_message(ConversationMessage(
-                                 role="user",
-                                 content=f"ANTI-LAZINESS: You are trying to finish at step {harness.state.step_count}, but this task requires at least {harness.config.min_exploration_steps} discovery steps. Perform more deep-dive exploration before concluding."
-                             ))
-                             return LoopRoute.NEXT_STEP
-
-                        # Relax: If it's trying to finish, it probably has the info.
-                        # Allow transition to verify if it hasn't happened yet.
-                        if current_phase == "explore":
-                             harness.state.current_phase = "verify"
-                             harness._runlog("phase_transition", "auto-transition to VERIFICATION via premature completion attempt")
-                             # Fall through to transition logic below
-                if len(graph_state.pending_tool_calls) < len(original_calls):
+                            harness.state.append_message(ConversationMessage(
+                                role="user",
+                                content=(
+                                    f"ANTI-LAZINESS: You are trying to finish at step {harness.state.step_count}, "
+                                    f"but this task requires at least {harness.config.min_exploration_steps} discovery steps. "
+                                    "Perform more deep-dive exploration before concluding."
+                                )
+                            ))
+                            return LoopRoute.NEXT_STEP
+                        harness.state.current_phase = "verify"
+                        harness._runlog("phase_transition", "auto-transition to VERIFICATION via premature completion attempt")
+                    else:
+                        phase_bits = phase_contract(current_phase)
+                        harness.state.append_message(ConversationMessage(
+                            role="user",
+                            content=(
+                                f"You are in the DISCOVERY phase ({current_phase.upper()}). "
+                                f"Phase contract focus: {phase_bits.focus}. "
+                                f"Blocked tools: {', '.join(sorted(set(blocked_tools)))}. "
+                                "Use the phase handoff artifacts before trying a different kind of action."
+                            ),
+                        ))
+                        harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
+                        return LoopRoute.NEXT_STEP
+                else:
+                    phase_bits = phase_contract(current_phase)
                     harness.state.append_message(ConversationMessage(
                         role="user",
-                        content="You are still in the DISCOVERY phase. Gathering complete? Call `memory_update(section='known_facts', content='...')` to transition to VERIFICATION."
+                        content=(
+                            f"You are in the {current_phase.upper()} phase. "
+                            f"Phase contract focus: {phase_bits.focus}. "
+                            f"Some requested tools were blocked: {', '.join(sorted(set(blocked_tools)))}. "
+                            "Continue with the allowed tools and the current handoff artifacts."
+                        ),
                     ))
                     harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
                     return LoopRoute.NEXT_STEP
 
-            # If in verify, only allow memory_update
             if current_phase == "verify":
-                 blocked = ["task_complete", "task_fail", "file_write", "long_context_lookup", "summarize_report", "artifact_read", "grep"]
-                 if any(c.tool_name in blocked for c in graph_state.pending_tool_calls):
-                     graph_state.pending_tool_calls = [c for c in graph_state.pending_tool_calls if c.tool_name not in blocked]
-                     harness.state.append_message(ConversationMessage(
+                blocked = ["task_complete", "task_fail", "file_write", "file_patch", "long_context_lookup", "summarize_report", "artifact_read", "grep"]
+                if any(c.tool_name in blocked for c in graph_state.pending_tool_calls):
+                    graph_state.pending_tool_calls = [c for c in graph_state.pending_tool_calls if c.tool_name not in blocked]
+                    harness.state.append_message(ConversationMessage(
                         role="user",
-                        content="You are in VERIFICATION. List all required constants via `memory_update` then proceed to SYNTHESIS."
+                        content=(
+                            "You are in VERIFICATION. Review the verifier evidence and acceptance criteria before "
+                            "moving to execution or repair."
+                        ),
                     ))
-                     harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
-                     return LoopRoute.NEXT_STEP
+                    harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
+                    return LoopRoute.NEXT_STEP
 
         # Transition logic based on results
-        for record in graph_state.last_tool_results:
-            if record.tool_name == "memory_update" and record.result.success:
-                if current_phase == "explore":
-                    harness.state.current_phase = "verify"
-                    harness._runlog("phase_transition", "transition to VERIFICATION")
-                    harness.state.append_message(ConversationMessage(
-                        role="user",
-                        content="Transitioning to VERIFICATION phase. Please list/verify all constants."
-                    ))
-                    return LoopRoute.NEXT_STEP
-                elif current_phase == "verify":
-                    harness.state.current_phase = "execute"
-                    harness._runlog("phase_transition", "transition to SYNTHESIS")
-                    harness.state.append_message(ConversationMessage(
-                        role="user",
-                        content="Transitioning to SYNTHESIS phase. You may now implement the final answer and call task_complete."
-                   ))
-                    return LoopRoute.NEXT_STEP
-
     if graph_state.pending_tool_calls:
         incomplete_payload = harness.state.scratchpad.get("_last_incomplete_tool_call")
         fallback_assistant_text = str(
@@ -1498,6 +1627,13 @@ async def interpret_model_output(
                 pending,
                 assistant_text=recovery_assistant_text,
             )
+            if _apply_declared_read_before_write_reroute(
+                graph_state,
+                harness,
+                pending,
+                assistant_text=recovery_assistant_text,
+            ):
+                pass
             if pending.tool_name in {"file_write", "file_append"}:
                 intent = recover_write_intent(
                     harness=harness,
@@ -1587,12 +1723,14 @@ async def interpret_model_output(
             if missing_args is None:
                 missing_args = _detect_missing_required_tool_arguments(harness, pending)
             if missing_args is None:
+                missing_args = _detect_patch_existing_stage_read_contract_violation(harness, pending)
+            if missing_args is None:
                 continue
             err_msg, details = missing_args
             target_path = None
-            if pending.tool_name == "file_write":
+            if pending.tool_name in {"file_write", "file_patch"}:
                 target_path = primary_task_target_path(harness)
-                if target_path:
+                if pending.tool_name == "file_write" and target_path:
                     _ensure_chunk_write_session(harness, target_path)
                 if target_path:
                     details = dict(details)
@@ -1975,6 +2113,36 @@ async def interpret_chat_output(
             )
         return LoopRoute.NEXT_STEP
 
+    completion_guard = _chat_completion_recovery_guard(harness)
+    if completion_guard is not None:
+        nudge_key = "|".join(
+            [
+                graph_state.thread_id,
+                _chat_turn_signature(graph_state),
+                str(completion_guard.get("signature") or ""),
+            ]
+        )
+        if scratchpad.get("_chat_completion_guard_nudged") != nudge_key:
+            scratchpad["_chat_completion_guard_nudged"] = nudge_key
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=str(completion_guard.get("message") or "").strip(),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": str(completion_guard.get("kind") or "chat_completion_guard"),
+                        "thread_id": graph_state.thread_id,
+                    },
+                )
+            )
+            harness._runlog(
+                "chat_completion_guard_nudge",
+                "blocked plain-text chat completion while recovery blockers remain",
+                thread_id=graph_state.thread_id,
+                recovery_kind=str(completion_guard.get("kind") or ""),
+            )
+        return LoopRoute.NEXT_STEP
+
     graph_state.final_result = {
         "status": "chat_completed",
         "assistant": graph_state.last_assistant_text,
@@ -2043,27 +2211,110 @@ async def dispatch_tools(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> 
     harness = deps.harness
     graph_state.last_tool_results = []
     dispatch_start = time.perf_counter()
+    dispatch_assistant_text = str(
+        graph_state.last_assistant_text
+        or harness.state.scratchpad.get("_last_text_write_fallback_assistant_text")
+        or ""
+    )
     if _apply_small_model_authoring_budget(harness, graph_state):
         graph_state.last_tool_results = []
         graph_state.pending_tool_calls = graph_state.pending_tool_calls[:1]
     for pending in graph_state.pending_tool_calls:
         registry = getattr(harness, "registry", None)
         if registry is not None:
-            normalized_tool_name, normalized_args, intercepted_result, _ = normalize_tool_request(
+            normalized_tool_name, normalized_args, intercepted_result, normalization_metadata = normalize_tool_request(
                 registry,
                 pending.tool_name,
                 pending.args,
                 phase=getattr(getattr(harness, "dispatcher", None), "phase", None),
+                state=harness.state,
             )
         else:
-            normalized_tool_name, normalized_args, intercepted_result = (
+            normalized_tool_name, normalized_args, intercepted_result, normalization_metadata = (
                 pending.tool_name,
                 pending.args,
                 None,
+                {},
             )
+        if intercepted_result is not None:
+            intercepted_metadata = intercepted_result.metadata if isinstance(intercepted_result.metadata, dict) else {}
+            if intercepted_metadata.get("reason") == "remote_task_requires_ssh_exec":
+                message = str(intercepted_result.error or "This is a remote task. Use `ssh_exec`, not local `shell_exec`.")
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=message,
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "ssh_exec",
+                            "recovery_mode": "remote_task_guard",
+                            "tool_name": normalized_tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            **normalization_metadata,
+                        },
+                    )
+                )
+                harness._runlog(
+                    "remote_shell_exec_guard_nudge",
+                    "blocked local shell_exec for remote SSH task",
+                    step=harness.state.step_count,
+                    tool_name=pending.tool_name,
+                    arguments=json_safe_value(pending.args),
+                )
+                graph_state.pending_tool_calls = []
+                graph_state.last_tool_results = []
+                return
         if intercepted_result is None:
             pending.tool_name = normalized_tool_name
             pending.args = normalized_args
+            _apply_declared_read_before_write_reroute(
+                graph_state,
+                harness,
+                pending,
+                assistant_text=dispatch_assistant_text,
+            )
+            contract_violation = _detect_patch_existing_stage_read_contract_violation(harness, pending)
+            if contract_violation is not None:
+                err_msg, details = contract_violation
+                harness.state.recent_errors.append(err_msg)
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="user",
+                        content=err_msg,
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "schema_validation",
+                            "tool_name": pending.tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            "target_path": details.get("target_path"),
+                        },
+                    )
+                )
+                harness._runlog(
+                    "patch_existing_stage_read_contract_violation",
+                    "blocked ambiguous same-target write after staged read recovery",
+                    tool_name=pending.tool_name,
+                    tool_call_id=pending.tool_call_id,
+                    target_path=details.get("target_path"),
+                    session_id=details.get("write_session_id"),
+                )
+                await harness._emit(
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content=err_msg,
+                        data={
+                            "repair_kind": "schema_validation",
+                            "tool_name": pending.tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            "target_path": details.get("target_path"),
+                            "session_id": details.get("write_session_id"),
+                        },
+                    ),
+                )
+                graph_state.pending_tool_calls = []
+                graph_state.last_tool_results = []
+                return
 
         repeat_error = _detect_repeated_tool_loop(harness, pending)
 
@@ -2388,15 +2639,35 @@ async def dispatch_tools(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> 
             result = _tool_envelope_from_dict(existing["result"])
         else:
             try:
-                # Check for registry presence to satisfy the 'catch ToolNotFoundError' requirement
-                if pending.tool_name not in harness.registry.names():
-                    raise ToolNotFoundError(pending.tool_name)
+                registry = getattr(harness, "registry", None)
+                names_fn = getattr(registry, "names", None) if registry is not None else None
+                if callable(names_fn):
+                    # Check for registry presence to satisfy the 'catch ToolNotFoundError' requirement
+                    if pending.tool_name not in names_fn():
+                        raise ToolNotFoundError(pending.tool_name)
 
                 if intercepted_result is not None:
                     result = intercepted_result
                 else:
+                    dispatch_fn = getattr(harness, "_dispatch_tool_call", None)
+                    if not callable(dispatch_fn):
+                        result = ToolEnvelope(
+                            success=False,
+                            error="Tool dispatcher is unavailable in the current harness context.",
+                            metadata={"tool_name": pending.tool_name, "reason": "dispatcher_unavailable"},
+                        )
+                        graph_state.last_tool_results.append(
+                            ToolExecutionRecord(
+                                operation_id=operation_id,
+                                tool_name=pending.tool_name,
+                                args=pending.args,
+                                tool_call_id=pending.tool_call_id,
+                                result=result,
+                            )
+                        )
+                        continue
                     harness._active_dispatch_task = asyncio.create_task(
-                        harness._dispatch_tool_call(pending.tool_name, pending.args)
+                        dispatch_fn(pending.tool_name, pending.args)
                     )
                     result = await harness._active_dispatch_task
             except ToolNotFoundError:
@@ -2523,6 +2794,7 @@ async def persist_tool_results(graph_state: GraphRunState, deps: GraphRuntimeDep
                 tool_call_id=record.tool_call_id,
                 result=record.result,
                 arguments=record.args,
+                operation_id=record.operation_id,
             )
             stored["tool_message"] = message.to_dict()
             artifact_id = message.metadata.get("artifact_id")

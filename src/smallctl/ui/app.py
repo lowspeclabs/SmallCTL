@@ -387,12 +387,16 @@ class SmallctlApp(App[None]):
             timeout_sec = int(timeout_raw)
         except (TypeError, ValueError):
             timeout_sec = 30
+        proof_bundle = event.data.get("proof_bundle")
+        if not isinstance(proof_bundle, dict):
+            proof_bundle = {}
 
         prompt = ApprovePromptScreen(
             approval_id=approval_id or "pending",
             command=command or "(empty command)",
             cwd=cwd or harness.state.cwd,
             timeout_sec=max(1, timeout_sec),
+            proof_bundle=proof_bundle,
         )
         self._active_approval_prompt = prompt
         self._refresh_status()
@@ -409,6 +413,7 @@ class SmallctlApp(App[None]):
                 command=command or "(empty command)",
                 cwd=cwd or harness.state.cwd,
                 timeout_sec=prompt_timeout_sec,
+                proof_bundle=proof_bundle,
             )
         try:
             loop = asyncio.get_running_loop()

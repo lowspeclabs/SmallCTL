@@ -24,6 +24,7 @@ class ApprovalService:
         command: str,
         cwd: str,
         timeout_sec: int,
+        proof_bundle: dict[str, Any] | None = None,
     ) -> bool:
         if not self.harness.allow_interactive_shell_approval or getattr(self.harness, "event_handler", None) is None:
             return True
@@ -43,6 +44,7 @@ class ApprovalService:
                 "command": command,
                 "cwd": cwd,
                 "timeout_sec": timeout_sec,
+                "proof_bundle": proof_bundle or {},
                 "status_activity": "awaiting approval...",
             },
         )

@@ -15,6 +15,15 @@ def test_loop_state_to_dict_includes_schema_version() -> None:
     assert payload["schema_version"] == LOOP_STATE_SCHEMA_VERSION
 
 
+def test_loop_state_strategy_round_trip_preserves_staged_reasoning_toggle() -> None:
+    state = LoopState(cwd="/tmp", strategy={"thought_architecture": "staged_reasoning"})
+    payload = state.to_dict()
+
+    restored = LoopState.from_dict(payload)
+
+    assert restored.strategy == {"thought_architecture": "staged_reasoning"}
+
+
 def test_loop_state_from_dict_migrates_legacy_write_session_aliases() -> None:
     legacy_payload = {
         "current_phase": "execute",
@@ -67,3 +76,18 @@ def test_legacy_graph_state_payload_migrates_loop_state_schema() -> None:
     serialized = serialize_graph_state(graph_state)
     assert serialized["loop_state"]["schema_version"] == LOOP_STATE_SCHEMA_VERSION
     assert serialized["graph_state_schema_version"] == 1
+
+
+def test_graph_state_round_trip_preserves_staged_reasoning_toggle() -> None:
+    state = LoopState(cwd="/tmp", strategy={"thought_architecture": "staged_reasoning"})
+    graph_state = inflate_graph_state(
+        {
+            "thread_id": "th2",
+            "run_mode": "loop",
+            "loop_state": state.to_dict(),
+        }
+    )
+
+    assert graph_state.loop_state.strategy == {"thought_architecture": "staged_reasoning"}
+    serialized = serialize_graph_state(graph_state)
+    assert serialized["loop_state"]["strategy"] == {"thought_architecture": "staged_reasoning"}

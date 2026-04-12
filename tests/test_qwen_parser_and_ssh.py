@@ -121,6 +121,44 @@ def test_ssh_exec_distinguishes_remote_exit_from_transport_failure() -> None:
     assert not any("username/password" in hint.lower() for hint in result["metadata"]["hints"])
 
 
+def test_ssh_exec_retries_when_accept_new_is_rejected() -> None:
+    state = LoopState(cwd="/tmp")
+    create_process = AsyncMock(
+        side_effect=[
+            _FakeProc(
+                returncode=255,
+                stderr=b"command-line line 0: keyword StrictHostKeyChecking extra arguments at end of line\n",
+            ),
+            _FakeProc(
+                returncode=0,
+                stdout=b"ii  guacamole 1.5.0\n",
+            ),
+        ]
+    )
+
+    with patch.object(network, "create_process", create_process):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command="dpkg -l | grep guacamole",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
+    assert result["output"]["stdout"] == "ii  guacamole 1.5.0\n"
+    assert result["metadata"]["ssh_option_retry"] == "strict_host_key_checking_no"
+    assert result["metadata"]["ssh_option_retry_reason"] == "accept_new_incompatible"
+    assert create_process.await_count == 2
+    first_command = create_process.await_args_list[0].kwargs["command"]
+    second_command = create_process.await_args_list[1].kwargs["command"]
+    assert "StrictHostKeyChecking=accept-new" in first_command
+    assert "StrictHostKeyChecking=no" in second_command
+
+
 def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
@@ -144,6 +182,29 @@ def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     assert tool_name == "ssh_exec"
     assert args["user"] == "root"
     assert metadata["recovered_ssh_user"] == "root"
+
+
+def test_ssh_exec_recovers_connection_probe_command_from_task_context() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = 'ssh into root@192.168.1.63 password "@S02v1735"'
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.63",
+            "password": "@S02v1735",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["user"] == "root"
+    assert args["command"] == "whoami"
+    assert metadata["recovered_ssh_user"] == "root"
+    assert metadata["recovered_ssh_command"] == "whoami"
 
 
 def test_normalize_tool_request_repairs_small_model_tool_aliases() -> None:
@@ -225,3 +286,13 @@ def test_normalize_ssh_arguments_requires_host_or_target() -> None:
         assert str(exc) == "SSH target requires either `target` or `host`."
     else:
         raise AssertionError("expected ValueError for missing SSH target")
+
+
+def test_parse_ssh_exec_args_from_shell_command_recovers_connection_probe() -> None:
+    normalized = network.parse_ssh_exec_args_from_shell_command("ssh root@192.168.1.63")
+
+    assert normalized == {
+        "host": "192.168.1.63",
+        "user": "root",
+        "command": "whoami",
+    }

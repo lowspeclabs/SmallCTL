@@ -131,10 +131,33 @@ def test_diagnosis_task_allows_segmented_read_only_ssh_pipeline_without_supporte
     assert decision.requires_approval is True
 
 
+def test_diagnosis_task_allows_package_query_fallback_pipeline_without_supported_claim() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.scratchpad["_task_classification"] = "diagnosis_remediation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="ssh_exec",
+        tool_risk="high",
+        phase="repair",
+        action="dpkg -l | grep guacamole || rpm -qa | grep guacamole",
+        expected_effect="Check whether Guacamole packages are installed on the remote host.",
+        rollback="No rollback required.",
+        verification="Inspect the remote package query output.",
+        approval_available=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_approval is True
+
+
 def test_diagnosis_task_blocks_compound_shell_when_any_segment_is_mutating() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"
     state.scratchpad["_task_classification"] = "diagnosis_remediation"
+    # Simulate a prior SSH probe so the first-probe exemption doesn't apply
+    state.tool_execution_records["prior_ssh"] = {"tool_name": "ssh_exec", "success": True}
 
     decision = evaluate_risk_policy(
         state,

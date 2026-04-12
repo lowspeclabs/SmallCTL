@@ -604,6 +604,11 @@ class ToolResultService:
                     original_tokens=estimate_text_tokens(content),
                     compacted_tokens=estimate_text_tokens(compact),
                 )
+                if artifact and str(artifact.tool_name or "").strip() in {"shell_exec", "ssh_exec"}:
+                    exit_code = artifact.metadata.get("exit_code")
+                    if exit_code is not None:
+                        status_tag = "EXIT_CODE=0" if exit_code == 0 else f"EXIT_CODE={exit_code} (FAILED)"
+                        compact = f"{status_tag}\n{compact}"
                 message.content = compact
                 compacted_any = True
         return compacted_any

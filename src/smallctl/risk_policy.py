@@ -45,6 +45,21 @@ _READ_ONLY_ROOT_COMMANDS = {
     "uname",
     "id",
     "whoami",
+    "hostname",
+    "df",
+    "free",
+    "uptime",
+    "env",
+    "printenv",
+    "date",
+    "lsblk",
+    "ip",
+    "ss",
+    "netstat",
+    "lsof",
+    "ps",
+    "top",
+    "file",
 }
 
 
@@ -141,6 +156,22 @@ def evaluate_risk_policy(
             approval_kind="shell" if tool_name in _SHELL_TOOLS else "",
         )
 
+    if (
+        task_classification == "diagnosis_remediation"
+        and tool_name == "ssh_exec"
+        and not has_supported_claim(state)
+        and _ssh_first_probe_allowed(state)
+    ):
+        requires_approval = approval_available and tool_risk in {"medium", "high"}
+        return RiskPolicyDecision(
+            allowed=True,
+            requires_approval=requires_approval,
+            proof_bundle=proof_bundle,
+            tool_risk=tool_risk,
+            task_classification=task_classification,
+            approval_kind="shell",
+        )
+
     if task_classification == "diagnosis_remediation" and not has_supported_claim(state):
         return RiskPolicyDecision(
             allowed=False,
@@ -163,6 +194,24 @@ def evaluate_risk_policy(
         task_classification=task_classification,
         approval_kind="shell" if tool_name in _SHELL_TOOLS else "generic" if tool_risk == "high" else "",
     )
+
+
+
+_SSH_FIRST_PROBE_LIMIT = 1
+
+
+def _ssh_first_probe_allowed(state: LoopState) -> bool:
+    """Allow a limited number of ssh_exec probes before requiring a claim."""
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict):
+        return True
+    ssh_attempt_count = 0
+    for _op_id, record in records.items():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "").strip() == "ssh_exec":
+            ssh_attempt_count += 1
+    return ssh_attempt_count < _SSH_FIRST_PROBE_LIMIT
 
 
 def _is_read_only_evidence_action(action: str) -> bool:
@@ -271,8 +320,18 @@ def _segment_is_read_only(segment: str) -> bool:
         return len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "pytest"
     if root == "dpkg":
         return len(tokens) >= 2 and tokens[1] in {"-l", "--list"}
+    if root == "rpm":
+        return len(tokens) >= 2 and tokens[1] in {"-q", "-qa", "--query", "--queryformat", "--querytags"}
     if root == "systemctl":
         return len(tokens) >= 2 and tokens[1] in {"status", "show", "is-active", "is-enabled", "list-units", "list-unit-files"}
+    if root in {"docker", "podman", "docker-compose"}:
+        if len(tokens) < 2:
+            return False
+        return tokens[1] in {
+            "--version", "version", "ps", "images", "inspect", "info",
+            "logs", "stats", "top", "port", "network", "volume",
+            "container", "image", "system",
+        }
     return False
 
 

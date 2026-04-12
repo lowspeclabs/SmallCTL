@@ -40,6 +40,21 @@ _RECENT_ARTIFACT_ALIASES = {
     "the most recent output",
     "the previous artifact",
 }
+_SSH_USERNAME_TASK_PATTERNS = (
+    re.compile(r"\busername\s+(?:is\s+)?(?P<user>[A-Za-z0-9._-]+)\b", re.IGNORECASE),
+    re.compile(r"\buser\s+(?:is\s+)?(?P<user>[A-Za-z0-9._-]+)\b", re.IGNORECASE),
+)
+_TOOL_ALIAS_REPAIRS = {
+    "use_shell_exec": "shell_exec",
+    "use_ssh_exec": "ssh_exec",
+}
+_SSH_TASK_TARGET_RE = re.compile(
+    r"\b(?:ssh|scp|sftp)\s+(?:[A-Za-z0-9._-]+@)?(?P<host>[A-Za-z0-9._-]+)\b",
+    re.IGNORECASE,
+)
+_AT_HOST_TARGET_RE = re.compile(r"\b[A-Za-z0-9._-]+@(?P<host>[A-Za-z0-9._-]+)\b", re.IGNORECASE)
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_REMOTE_TASK_HINT_RE = re.compile(r"\b(?:remote|ssh|username|password|server|host)\b", re.IGNORECASE)
 
 
 @runtime_checkable
@@ -120,6 +135,13 @@ class ToolDispatcher:
             category=spec.category,
             risk=spec.risk,
         )
+        dispatch_metadata = {
+            "tool_name": tool_name,
+            "tier": spec.tier,
+            "tool_risk": spec.risk,
+            "tool_category": spec.category,
+            "dispatch_phase": self.phase,
+        }
         if self.run_logger:
             self.run_logger.log(
                 "tools",
@@ -154,6 +176,7 @@ class ToolDispatcher:
 
         if intercepted_result is not None:
             intercepted_result.metadata = {
+                **dispatch_metadata,
                 **normalization_metadata,
                 **(intercepted_result.metadata if isinstance(intercepted_result.metadata, dict) else {}),
             }
@@ -244,7 +267,7 @@ class ToolDispatcher:
             result.keys()
         ):
             result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-            result_metadata = {**normalization_metadata, **result_metadata}
+            result_metadata = {**dispatch_metadata, **normalization_metadata, **result_metadata}
             log_kv(
                 self.log,
                 logging.INFO,
@@ -263,7 +286,7 @@ class ToolDispatcher:
                     tier=spec.tier,
                     output=result.get("output"),
                     error=result.get("error"),
-                )
+            )
             return ToolEnvelope(
                 success=bool(result["success"]),
                 status=result.get("status"),
@@ -274,7 +297,7 @@ class ToolDispatcher:
         return ToolEnvelope(
             success=True,
             output=result,
-            metadata={**normalization_metadata, "tool_name": tool_name, "tier": spec.tier},
+            metadata={**dispatch_metadata, **normalization_metadata},
         )
 
     @staticmethod
@@ -340,13 +363,31 @@ def normalize_tool_request(
     state: Any | None = None,
 ) -> tuple[str, dict[str, Any], ToolEnvelope | None, dict[str, Any]]:
     normalization_metadata: dict[str, Any] = {}
+    original_tool_name = str(tool_name or "").strip()
+    repaired_tool_name = _TOOL_ALIAS_REPAIRS.get(original_tool_name, original_tool_name)
+    if repaired_tool_name != original_tool_name:
+        normalization_metadata.update(
+            {
+                "repaired_tool_alias_from": original_tool_name,
+                "repaired_tool_alias_to": repaired_tool_name,
+                "routing_reason": "tool_alias_repair",
+            }
+        )
+    tool_name = repaired_tool_name
+
     if tool_name == "artifact_read":
         tool_name, arguments, artifact_metadata = _normalize_artifact_read_request(arguments, state=state)
         normalization_metadata.update(artifact_metadata)
 
     if tool_name == "ssh_exec":
         try:
-            return tool_name, network.normalize_ssh_arguments(arguments), None, normalization_metadata
+            normalized_arguments = network.normalize_ssh_arguments(arguments)
+            normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
+                normalized_arguments,
+                state=state,
+            )
+            normalization_metadata.update(ssh_metadata)
+            return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
             return (
                 tool_name,
@@ -392,6 +433,21 @@ def normalize_tool_request(
             normalization_metadata,
         )
     if rewritten_args is None:
+        if _task_clearly_targets_remote_ssh_host(state) and not re.search(r"\b(?:ssh|scp|sftp)\b", command):
+            return (
+                tool_name,
+                arguments,
+                ToolEnvelope(
+                    success=False,
+                    error="This is a remote task. Use `ssh_exec`, not local `shell_exec`.",
+                    metadata={
+                        "tool_name": tool_name,
+                        "reason": "remote_task_requires_ssh_exec",
+                        "suggested_tool": "ssh_exec",
+                    },
+                ),
+                normalization_metadata,
+            )
         return tool_name, arguments, None, normalization_metadata
 
     if "timeout_sec" in arguments and "timeout_sec" not in rewritten_args:
@@ -401,6 +457,95 @@ def normalize_tool_request(
         "routing_reason": "ssh_shell_command",
     }
     return "ssh_exec", rewritten_args, None, normalization_metadata
+
+
+def _recover_ssh_arguments_from_task_context(
+    arguments: dict[str, Any],
+    *,
+    state: Any | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(arguments, dict):
+        return arguments, {}
+
+    repaired = dict(arguments)
+    host = str(repaired.get("host") or "").strip()
+    user = str(repaired.get("user") or "").strip()
+    if user or not host:
+        return repaired, {}
+
+    inferred_user = _infer_ssh_user_from_state_context(host, state=state)
+    if not inferred_user:
+        return repaired, {}
+
+    repaired["user"] = inferred_user
+    return repaired, {
+        "recovered_ssh_user": inferred_user,
+        "routing_reason": "ssh_task_context_user_recovery",
+    }
+
+
+def _infer_ssh_user_from_state_context(host: str, *, state: Any | None = None) -> str:
+    target_host = str(host or "").strip().lower()
+    if not target_host or state is None:
+        return ""
+
+    for text in _ssh_task_context_texts(state):
+        if not text:
+            continue
+        embedded_match = re.search(
+            rf"\b(?P<user>[A-Za-z0-9._-]+)@{re.escape(target_host)}\b",
+            text,
+            re.IGNORECASE,
+        )
+        if embedded_match is not None:
+            return str(embedded_match.group("user") or "").strip()
+
+        lowered = text.lower()
+        if target_host not in lowered:
+            continue
+        for pattern in _SSH_USERNAME_TASK_PATTERNS:
+            match = pattern.search(text)
+            if match is not None:
+                return str(match.group("user") or "").strip()
+    return ""
+
+
+def _ssh_task_context_texts(state: Any) -> list[str]:
+    texts: list[str] = []
+
+    run_brief = getattr(state, "run_brief", None)
+    original_task = str(getattr(run_brief, "original_task", "") or "").strip()
+    if original_task:
+        texts.append(original_task)
+
+    current_goal = str(getattr(getattr(state, "working_memory", None), "current_goal", "") or "").strip()
+    if current_goal:
+        texts.append(current_goal)
+
+    for message in getattr(state, "recent_messages", []) or []:
+        if str(getattr(message, "role", "") or "").strip().lower() != "user":
+            continue
+        content = str(getattr(message, "content", "") or "").strip()
+        if content:
+            texts.append(content)
+
+    return texts
+
+
+def _task_clearly_targets_remote_ssh_host(state: Any | None) -> bool:
+    if state is None:
+        return False
+
+    for text in _ssh_task_context_texts(state):
+        if not text:
+            continue
+        if _SSH_TASK_TARGET_RE.search(text) is not None:
+            return True
+        if _AT_HOST_TARGET_RE.search(text) is not None:
+            return True
+        if _IPV4_RE.search(text) is not None and _REMOTE_TASK_HINT_RE.search(text) is not None:
+            return True
+    return False
 
 
 def _normalize_artifact_read_request(

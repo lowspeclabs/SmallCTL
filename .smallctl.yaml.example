@@ -18,6 +18,7 @@ max_prompt_tokens: null
 reserve_completion_tokens: 1024
 reserve_tool_tokens: 512
 first_token_timeout_sec: null
+# For LM Studio, prefer 45-60s here to avoid false first-token wedges.
 healthcheck_url: null
 restart_command: null
 startup_grace_period_sec: 20
@@ -25,6 +26,12 @@ max_restarts_per_hour: 2
 backend_healthcheck_url: null
 backend_restart_command: null
 backend_unload_command: null
+# Example LM Studio recovery:
+# provider_profile: lmstudio
+# first_token_timeout_sec: 45
+# Native unload is attempted automatically for LM Studio.
+# backend_restart_command: "systemctl --user restart lmstudio.service"
+# backend_unload_command: null
 backend_healthcheck_timeout_sec: 5
 backend_restart_grace_sec: 20
 summarize_at_ratio: 0.8

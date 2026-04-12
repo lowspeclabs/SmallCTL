@@ -29,7 +29,7 @@ def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None)
     ]
     if plan.summary:
         stage_lines.extend(["", "## Plan Summary", plan.summary.strip()])
-    if any([plan.inputs, plan.outputs, plan.constraints, plan.acceptance_criteria, plan.implementation_plan]):
+    if any([plan.inputs, plan.outputs, plan.constraints, plan.acceptance_criteria, plan.implementation_plan, plan.claim_refs]):
         stage_lines.append("")
         stage_lines.append("## Spec Contract")
         if plan.inputs:
@@ -47,6 +47,9 @@ def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None)
         if plan.implementation_plan:
             stage_lines.append("Implementation Plan:")
             stage_lines.extend([f"- {item}" for item in plan.implementation_plan])
+        if plan.claim_refs:
+            stage_lines.append("Claim References:")
+            stage_lines.extend([f"- {item}" for item in plan.claim_refs])
     if plan.requested_output_path:
         stage_lines.extend(["", f"Export target: {plan.requested_output_path}"])
     if state is not None and state.run_brief.original_task:
@@ -156,6 +159,8 @@ def _render_markdown_step(step: PlanStep, *, depth: int = 0) -> list[str]:
         lines.append(f"{indent}  - note: {note}")
     if step.evidence_refs:
         lines.append(f"{indent}  - evidence: {', '.join(step.evidence_refs)}")
+    if step.claim_refs:
+        lines.append(f"{indent}  - claims: {', '.join(step.claim_refs)}")
     for substep in step.substeps:
         lines.extend(_render_markdown_step(substep, depth=depth + 1))
     return lines
@@ -173,6 +178,8 @@ def _render_text_plan(plan: ExecutionPlan) -> str:
     spec = plan.spec_summary()
     if spec:
         lines.extend(["", f"Spec: {spec}"])
+    if plan.claim_refs:
+        lines.extend(["", f"Claims: {', '.join(plan.claim_refs)}"])
     if plan.requested_output_path:
         lines.extend(["", f"Output: {plan.requested_output_path}"])
     lines.extend(["", "Steps:"])
@@ -193,6 +200,8 @@ def _render_text_step(step: PlanStep, *, depth: int = 0) -> list[str]:
         lines.append(f"{indent}  note: {note}")
     if step.evidence_refs:
         lines.append(f"{indent}  evidence: {', '.join(step.evidence_refs)}")
+    if step.claim_refs:
+        lines.append(f"{indent}  claims: {', '.join(step.claim_refs)}")
     for substep in step.substeps:
         lines.extend(_render_text_step(substep, depth=depth + 1))
     return lines
@@ -208,6 +217,8 @@ def _render_playbook_step(step: PlanStep, *, depth: int = 0) -> list[str]:
             lines.append(f"{indent}  - note: {note}")
     if step.evidence_refs:
         lines.append(f"{indent}  - evidence: {', '.join(step.evidence_refs)}")
+    if step.claim_refs:
+        lines.append(f"{indent}  - claims: {', '.join(step.claim_refs)}")
     for substep in step.substeps:
         lines.extend(_render_playbook_step(substep, depth=depth + 1))
     return lines

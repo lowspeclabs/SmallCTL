@@ -140,6 +140,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hide refined contract-phase and verifier details in the UI",
     )
     parser.add_argument(
+        "--staged-reasoning",
+        dest="staged_reasoning",
+        action="store_true",
+        default=None,
+        help="Enable the staged reasoning strategy toggle for rollout testing",
+    )
+    parser.add_argument(
+        "--no-staged-reasoning",
+        dest="staged_reasoning",
+        action="store_false",
+        default=None,
+        help="Disable the staged reasoning strategy toggle",
+    )
+    parser.add_argument(
         "--graph-thread-id",
         help=argparse.SUPPRESS,
     )
@@ -242,6 +256,7 @@ def cli(argv: list[str] | None = None) -> int:
         phase=config.phase,
         provider_profile=config.provider_profile,
         use_ansible=config.use_ansible,
+        staged_reasoning=config.staged_reasoning,
         tui=bool(args.tui),
         run_log_dir=str(run_logger.run_dir),
     )
@@ -270,6 +285,7 @@ def cli(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(json.dumps({"status": "failed", "reason": f"TUI unavailable: {exc}"}, indent=2))
             return 1
+        strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
         harness_kwargs = {
             "endpoint": config.endpoint,
             "model": config.model,
@@ -293,6 +309,7 @@ def cli(argv: list[str] | None = None) -> int:
             "fresh_run_turns": config.fresh_run_turns,
             "planning_mode": config.planning_mode,
             "contract_flow_ui": config.contract_flow_ui,
+            "strategy": strategy,
             "restore_graph_state_on_startup": config.restore_graph_state,
             "restore_thread_id": config.graph_thread_id,
             "context_limit": config.context_limit,
@@ -348,6 +365,7 @@ def cli(argv: list[str] | None = None) -> int:
         if getattr(app, "closed_by_ctrl_c", False):
             _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
     elif config.task or config.restore_graph_state:
+        strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
         harness = Harness(
             endpoint=config.endpoint,
             model=config.model,
@@ -370,6 +388,7 @@ def cli(argv: list[str] | None = None) -> int:
             fresh_run=config.fresh_run,
             fresh_run_turns=config.fresh_run_turns,
             contract_flow_ui=config.contract_flow_ui,
+            strategy=strategy,
             context_limit=config.context_limit,
             max_prompt_tokens=config.max_prompt_tokens,
             reserve_completion_tokens=config.reserve_completion_tokens,

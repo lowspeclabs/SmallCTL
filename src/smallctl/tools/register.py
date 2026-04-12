@@ -113,7 +113,8 @@ def build_registry(
             name="file_write",
             description=(
                 "Write content to a file. For large files or complex implementations, use chunked mode by providing "
-                "`write_session_id`, section metadata, and an optional `replace_strategy`. Overwrites existing files unless in an active session."
+                "`write_session_id`, section metadata, and an optional `replace_strategy`. Overwrites existing files unless in an active session. "
+                "During an active write session, always pass the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
             ),
             schema=build_tool_schema(
                 required=["path", "content"],
@@ -153,6 +154,30 @@ def build_registry(
                 },
             ),
             handler=_inject_state_and_cwd(fs.file_append),
+            category="filesystem",
+            risk="high",
+            allowed_modes={"loop"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="file_patch",
+            description=(
+                "Patch a file by replacing exact target text with replacement text. "
+                "Use this for small, precise edits to an existing file or active staged write session. "
+                "During an active write session, always patch the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
+            ),
+            schema=build_tool_schema(
+                required=["path", "target_text", "replacement_text"],
+                properties={
+                    "path": {"type": "string", "description": "Path to file."},
+                    "target_text": {"type": "string", "description": "Exact text to replace, including whitespace."},
+                    "replacement_text": {"type": "string", "description": "Text to insert in place of the target text."},
+                    "expected_occurrences": {"type": "integer", "description": "Expected number of exact matches. Defaults to 1."},
+                    "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
+                    "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
+                },
+            ),
+            handler=_inject_state_and_cwd(fs.file_patch),
             category="filesystem",
             risk="high",
             allowed_modes={"loop"},
@@ -372,13 +397,19 @@ def build_registry(
         # Network
         ToolRegistration(
             name="ssh_exec",
-            description="Execute a command on a remote host via SSH with live streaming support.",
+            description=(
+                "Execute a command on a remote host via SSH with live streaming support. "
+                "Prefer `target='user@host'` when a username is known, for example "
+                "`target='root@192.168.1.63'`, rather than splitting identity across separate fields."
+            ),
             schema=build_tool_schema(
-                required=["host", "command"],
+                required=["command"],
                 properties={
+                    "target": {"type": "string", "description": "Preferred SSH target in `user@host` or `host` form."},
                     "host": {"type": "string", "description": "Target hostname or IP."},
                     "command": {"type": "string", "description": "Command to run remotely."},
                     "user": {"type": "string", "description": "SSH username."},
+                    "username": {"type": "string", "description": "Alias for `user`; useful when the task says 'username root'."},
                     "port": {"type": "integer", "default": 22},
                     "identity_file": {"type": "string", "description": "Path to SSH private key."},
                     "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
@@ -589,6 +620,22 @@ def build_registry(
                 },
             ),
             handler=_inject_state(memory.memory_update),
+            category="memory",
+            risk="low",
+            allowed_modes={"loop", "planning"},
+            profiles={CORE_PROFILE},
+        ),
+        ToolRegistration(
+            name="log_note",
+            description="Append a concise note to the session notepad. Notes persist across task-boundary resets within this session.",
+            schema=build_tool_schema(
+                required=["content"],
+                properties={
+                    "content": {"type": "string"},
+                    "tag": {"type": "string"},
+                },
+            ),
+            handler=_inject_state(memory.log_note),
             category="memory",
             risk="low",
             allowed_modes={"loop", "planning"},

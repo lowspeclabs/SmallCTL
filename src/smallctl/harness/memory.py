@@ -202,6 +202,15 @@ class MemoryService:
             limit=recent_messages_limit,
         )
 
+        compact_oversized = getattr(self.harness, "_compact_oversized_tool_messages", None)
+        if callable(compact_oversized):
+            soft_limit = (
+                self.harness.context_policy.soft_prompt_token_limit
+                or self.harness.context_policy.max_prompt_tokens
+                or 0
+            )
+            compact_oversized(soft_limit=soft_limit)
+
     def _refresh_active_intent(self) -> None:
         task = self.harness.state.run_brief.original_task or self.harness._current_user_task()
         self.prime_write_policy(task)
@@ -218,7 +227,7 @@ class MemoryService:
         
         primary = "general_task"
         if requested_tool:
-            primary = f"use_{requested_tool}"
+            primary = f"requested_{requested_tool}"
             secondary.append("complete_validation_task")
             tags.append(requested_tool)
             if requested_tool in {"scratch_list", "cwd_get", "loop_status"}:
@@ -281,6 +290,8 @@ class MemoryService:
             and any(marker in text for marker in creation_markers)
         ) or any(ext in text for ext in (".py", ".sh", ".bash", ".ps1")):
             return "write_file"
+        if "file_patch" in text or "patch file" in text:
+            return "file_patch"
         memory_markers = (
             "save this in memory",
             "save memory",
@@ -372,12 +383,19 @@ class MemoryService:
         confidence = 0.85 if result.success else 0.60
         if tool_name == "task_complete" and result.success:
             confidence = 0.95
+        if tool_name in {"artifact_print", "show_artifact"} and result.success:
+            confidence = 0.55
         
         op_notes = notes
         if not op_notes:
             if result.success:
                 if tool_name == "task_complete":
                     op_notes = "Task finished successfully. Call task_complete when objectives met."
+                elif tool_name in {"artifact_print", "show_artifact"}:
+                    op_notes = (
+                        "Displayed artifact contents for inspection. "
+                        "Treat this as already-shown evidence, not a reusable progress step."
+                    )
                 else:
                     args_meta = result.metadata.get("arguments") or {}
                     if not args_meta:
@@ -434,6 +452,8 @@ class MemoryService:
             return
         for memory in self.harness.state.warm_experiences:
             if memory.memory_id in self.harness.state.retrieved_experience_ids and memory.tool_name == tool_name:
+                if memory.tool_name in {"artifact_print", "show_artifact"}:
+                    continue
                 self.harness.state.reinforce_experience(memory.memory_id, success=success)
                 self.harness.warm_memory_store.upsert(memory)
                 if memory.confidence >= 0.9 or memory.reuse_count >= 3:

@@ -19,7 +19,7 @@ from .normalization import (
     coerce_timestamp_string as _coerce_timestamp_string,
 )
 
-LOOP_STATE_SCHEMA_VERSION = 1
+LOOP_STATE_SCHEMA_VERSION = 2
 
 
 def _coerce_int(value: Any, *, default: int = 0) -> int:
@@ -46,6 +46,21 @@ def _coerce_write_section_ranges(value: Any) -> dict[str, dict[str, int]]:
         if start < 0 or end < start:
             continue
         normalized[str(key)] = {"start": start, "end": end}
+    return normalized
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_intent_label(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if normalized.startswith("use_") and len(normalized) > 4:
+        return f"requested_{normalized[4:]}"
     return normalized
 
 
@@ -85,6 +100,7 @@ class PlanStep:
     depends_on: list[str] = field(default_factory=list)
     substeps: list["PlanStep"] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    claim_refs: list[str] = field(default_factory=list)
 
     def iter_steps(self) -> list["PlanStep"]:
         steps = [self]
@@ -115,6 +131,7 @@ class ExecutionPlan:
     constraints: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     implementation_plan: list[str] = field(default_factory=list)
+    claim_refs: list[str] = field(default_factory=list)
     steps: list[PlanStep] = field(default_factory=list)
     status: str = "draft"
     requested_output_path: str | None = None
@@ -177,7 +194,91 @@ class ExecutionPlan:
             parts.append("acceptance=" + "; ".join(self.acceptance_criteria))
         if self.implementation_plan:
             parts.append("implementation=" + " | ".join(self.implementation_plan))
+        if self.claim_refs:
+            parts.append("claims=" + ", ".join(self.claim_refs))
         return " ; ".join(parts)
+
+
+@dataclass
+class EvidenceRecord:
+    evidence_id: str
+    kind: str = "observation"
+    statement: str = ""
+    phase: str = ""
+    tool_name: str = ""
+    operation_id: str = ""
+    artifact_id: str = ""
+    source: str = ""
+    evidence_type: str = "direct_observation"
+    confidence: float = 0.0
+    negative: bool = False
+    replayed: bool = False
+    claim_ids: list[str] = field(default_factory=list)
+    decision_ids: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DecisionRecord:
+    decision_id: str
+    phase: str = ""
+    intent_label: str = ""
+    requested_tool: str = ""
+    argument_fingerprint: str = ""
+    plan_step_id: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    rationale_summary: str = ""
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+    status: str = "active"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ClaimRecord:
+    claim_id: str
+    kind: str = "hypothesis"
+    statement: str = ""
+    supporting_evidence_ids: list[str] = field(default_factory=list)
+    missing_evidence: list[str] = field(default_factory=list)
+    alternative_explanations: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    status: str = "candidate"
+    decision_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ReasoningGraph:
+    graph_version: int = 1
+    evidence_records: list[EvidenceRecord] = field(default_factory=list)
+    decision_records: list[DecisionRecord] = field(default_factory=list)
+    claim_records: list[ClaimRecord] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    decision_ids: list[str] = field(default_factory=list)
+    claim_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.touch_ids()
+
+    def touch_ids(self) -> None:
+        self.evidence_ids = [record.evidence_id for record in self.evidence_records if record.evidence_id]
+        self.decision_ids = [record.decision_id for record in self.decision_records if record.decision_id]
+        self.claim_ids = [record.claim_id for record in self.claim_records if record.claim_id]
+
+    def to_dict(self) -> dict[str, Any]:
+        self.touch_ids()
+        return {
+            "graph_version": self.graph_version,
+            "evidence_records": [json_safe_value(record) for record in self.evidence_records],
+            "decision_records": [json_safe_value(record) for record in self.decision_records],
+            "claim_records": [json_safe_value(record) for record in self.claim_records],
+            "evidence_ids": list(self.evidence_ids),
+            "decision_ids": list(self.decision_ids),
+            "claim_ids": list(self.claim_ids),
+        }
 
 
 @dataclass
@@ -281,6 +382,14 @@ class ContextBrief:
     artifact_ids: list[str]            # artifact IDs referenced
     next_action_hint: str              # what the model was about to do
     staleness_step: int                # step at which this was created
+    facts_confirmed: list[str] = field(default_factory=list)
+    facts_unconfirmed: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    candidate_causes: list[str] = field(default_factory=list)
+    disproven_causes: list[str] = field(default_factory=list)
+    next_observations_needed: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    claim_refs: list[str] = field(default_factory=list)
     full_artifact_id: str | None = None # link to full-text artifact
 
 
@@ -332,6 +441,16 @@ class PromptBudgetSnapshot:
     max_prompt_tokens: int | None = None
     reserve_completion_tokens: int = 0
     reserve_tool_tokens: int = 0
+    compaction_estimated_prompt_tokens_before: int = 0
+    compaction_estimated_prompt_tokens_after: int = 0
+    compaction_threshold: int = 0
+    compaction_recent_messages_before: int = 0
+    compaction_recent_messages_after: int = 0
+    compaction_keep_recent_initial: int = 0
+    compaction_keep_recent_final: int = 0
+    compaction_messages_compacted: int = 0
+    compaction_attempt_count: int = 0
+    compaction_stopped_reason: str = ""
 
 
 @dataclass
@@ -349,6 +468,7 @@ class LoopState:
     recent_messages: list[ConversationMessage] = field(default_factory=list)
     run_brief: RunBrief = field(default_factory=RunBrief)
     working_memory: WorkingMemory = field(default_factory=WorkingMemory)
+    reasoning_graph: ReasoningGraph = field(default_factory=ReasoningGraph)
     acceptance_ledger: dict[str, str] = field(default_factory=dict)
     acceptance_waivers: list[str] = field(default_factory=list)
     acceptance_waived: bool = False
@@ -489,7 +609,15 @@ class LoopState:
             return True
         if self.run_brief.acceptance_criteria or self.run_brief.implementation_plan:
             return True
-        if self.active_intent in {"write_file", "use_file_write", "use_file_append", "use_file_delete"}:
+        normalized_intent = normalize_intent_label(self.active_intent)
+        if normalized_intent in {
+            "write_file",
+            "requested_write_file",
+            "requested_file_write",
+            "requested_file_append",
+            "requested_file_patch",
+            "requested_file_delete",
+        }:
             return True
 
         intent_tags = {
@@ -497,7 +625,7 @@ class LoopState:
             for tag in (self.intent_tags or [])
             if str(tag).strip()
         }
-        if intent_tags & {"write_file", "file_write", "mutate_repo"}:
+        if intent_tags & {"write_file", "file_write", "file_patch", "mutate_repo"}:
             return True
 
         target_paths = self.scratchpad.get("_task_target_paths")
@@ -696,6 +824,7 @@ class LoopState:
         return list(self.recent_messages)
 
     def to_dict(self) -> dict[str, Any]:
+        self.reasoning_graph.touch_ids()
         serialized_messages = [
             json_safe_value(m.to_dict(include_retrieval_safe_text=True))
             for m in self.recent_messages
@@ -714,6 +843,7 @@ class LoopState:
             "recent_messages": serialized_messages,
             "run_brief": json_safe_value(self.run_brief),
             "working_memory": json_safe_value(self.working_memory),
+            "reasoning_graph": json_safe_value(self.reasoning_graph),
             "acceptance_ledger": json_safe_value(self.acceptance_ledger),
             "acceptance_waivers": json_safe_value(self.acceptance_waivers),
             "acceptance_waived": self.acceptance_waived,
@@ -796,6 +926,7 @@ class LoopState:
             current_step=raw["step_count"],
             current_phase=raw["current_phase"],
         )
+        raw["reasoning_graph"] = _coerce_reasoning_graph(migrated.get("reasoning_graph"))
         raw["acceptance_ledger"] = _coerce_string_map(migrated.get("acceptance_ledger"))
         raw["acceptance_waivers"] = _coerce_string_list(migrated.get("acceptance_waivers"))
         raw["acceptance_waived"] = bool(migrated.get("acceptance_waived", False))
@@ -871,6 +1002,8 @@ def _migrate_loop_state_payload(payload: dict[str, Any], *, incoming_version: in
         if ws.get("lifecycle_status") and not ws.get("status"):
             ws["status"] = ws.get("lifecycle_status")
         migrated["write_session"] = ws
+    if incoming_version < LOOP_STATE_SCHEMA_VERSION and "reasoning_graph" not in migrated:
+        migrated["reasoning_graph"] = {}
     return migrated
 
 
@@ -1008,6 +1141,8 @@ def _compact_plan_step_lines(step: PlanStep, *, depth: int = 0) -> list[str]:
             lines.append(f"{prefix}  note: {note}")
     if step.evidence_refs:
         lines.append(f"{prefix}  evidence: {', '.join(step.evidence_refs)}")
+    if step.claim_refs:
+        lines.append(f"{prefix}  claims: {', '.join(step.claim_refs)}")
     for substep in step.substeps:
         lines.extend(_compact_plan_step_lines(substep, depth=depth + 1))
     return lines
@@ -1030,6 +1165,7 @@ def _coerce_plan_step(value: Any) -> PlanStep | None:
     payload["notes"] = _coerce_string_list(payload.get("notes"))
     payload["depends_on"] = _coerce_string_list(payload.get("depends_on"))
     payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
+    payload["claim_refs"] = _coerce_string_list(payload.get("claim_refs"))
     payload["substeps"] = [
         substep
         for item in _coerce_list_payload(payload.get("substeps"))
@@ -1056,6 +1192,7 @@ def _coerce_execution_plan(value: Any) -> ExecutionPlan | None:
     payload["constraints"] = _coerce_string_list(payload.get("constraints"))
     payload["acceptance_criteria"] = _coerce_string_list(payload.get("acceptance_criteria"))
     payload["implementation_plan"] = _coerce_string_list(payload.get("implementation_plan"))
+    payload["claim_refs"] = _coerce_string_list(payload.get("claim_refs"))
     payload["status"] = str(payload.get("status", "draft") or "draft")
     payload["requested_output_path"] = (
         None if payload.get("requested_output_path") in (None, "") else str(payload.get("requested_output_path"))
@@ -1167,6 +1304,14 @@ def _coerce_context_brief(value: Any) -> ContextBrief:
             "blockers",
             "files_touched",
             "artifact_ids",
+            "facts_confirmed",
+            "facts_unconfirmed",
+            "open_questions",
+            "candidate_causes",
+            "disproven_causes",
+            "next_observations_needed",
+            "evidence_refs",
+            "claim_refs",
         ):
             payload[key] = _coerce_string_list(payload.get(key))
             
@@ -1186,7 +1331,122 @@ def _coerce_context_brief(value: Any) -> ContextBrief:
         artifact_ids=[],
         next_action_hint="",
         staleness_step=0,
+        facts_confirmed=[],
+        facts_unconfirmed=[],
+        open_questions=[],
+        candidate_causes=[],
+        disproven_causes=[],
+        next_observations_needed=[],
+        evidence_refs=[],
+        claim_refs=[],
     )
+
+
+def _coerce_evidence_record(value: Any) -> EvidenceRecord | None:
+    if isinstance(value, EvidenceRecord):
+        return value
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    evidence_id = str(payload.get("evidence_id", "") or "").strip()
+    if not evidence_id:
+        return None
+    payload["evidence_id"] = evidence_id
+    payload["kind"] = str(payload.get("kind", "observation") or "observation")
+    payload["statement"] = str(payload.get("statement", "") or "")
+    payload["phase"] = str(payload.get("phase", "") or "")
+    payload["tool_name"] = str(payload.get("tool_name", "") or "")
+    payload["operation_id"] = str(payload.get("operation_id", "") or "")
+    payload["artifact_id"] = str(payload.get("artifact_id", "") or "")
+    payload["source"] = str(payload.get("source", "") or "")
+    payload["evidence_type"] = str(payload.get("evidence_type", "direct_observation") or "direct_observation")
+    payload["confidence"] = max(0.0, min(1.0, _coerce_float(payload.get("confidence"), default=0.0)))
+    payload["negative"] = _coerce_bool(payload.get("negative"), default=False)
+    payload["replayed"] = _coerce_bool(payload.get("replayed"), default=False)
+    payload["claim_ids"] = _coerce_string_list(payload.get("claim_ids"))
+    payload["decision_ids"] = _coerce_string_list(payload.get("decision_ids"))
+    payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
+    metadata = json_safe_value(payload.get("metadata") or {})
+    payload["metadata"] = metadata if isinstance(metadata, dict) else {}
+    return EvidenceRecord(**_filter_dataclass_payload(EvidenceRecord, payload))
+
+
+def _coerce_decision_record(value: Any) -> DecisionRecord | None:
+    if isinstance(value, DecisionRecord):
+        return value
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    decision_id = str(payload.get("decision_id", "") or "").strip()
+    if not decision_id:
+        return None
+    payload["decision_id"] = decision_id
+    payload["phase"] = str(payload.get("phase", "") or "")
+    payload["intent_label"] = str(payload.get("intent_label", "") or "")
+    payload["requested_tool"] = str(payload.get("requested_tool", "") or "")
+    payload["argument_fingerprint"] = str(payload.get("argument_fingerprint", "") or "")
+    payload["plan_step_id"] = str(payload.get("plan_step_id", "") or "")
+    payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
+    payload["rationale_summary"] = str(payload.get("rationale_summary", "") or "")
+    payload["created_at"] = _coerce_timestamp_string(payload.get("created_at"))
+    payload["status"] = str(payload.get("status", "active") or "active")
+    metadata = json_safe_value(payload.get("metadata") or {})
+    payload["metadata"] = metadata if isinstance(metadata, dict) else {}
+    return DecisionRecord(**_filter_dataclass_payload(DecisionRecord, payload))
+
+
+def _coerce_claim_record(value: Any) -> ClaimRecord | None:
+    if isinstance(value, ClaimRecord):
+        return value
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    claim_id = str(payload.get("claim_id", "") or "").strip()
+    if not claim_id:
+        return None
+    payload["claim_id"] = claim_id
+    payload["kind"] = str(payload.get("kind", "hypothesis") or "hypothesis")
+    payload["statement"] = str(payload.get("statement", "") or "")
+    payload["supporting_evidence_ids"] = _coerce_string_list(payload.get("supporting_evidence_ids"))
+    payload["missing_evidence"] = _coerce_string_list(payload.get("missing_evidence"))
+    payload["alternative_explanations"] = _coerce_string_list(payload.get("alternative_explanations"))
+    payload["confidence"] = max(0.0, min(1.0, _coerce_float(payload.get("confidence"), default=0.0)))
+    payload["status"] = str(payload.get("status", "candidate") or "candidate")
+    payload["decision_ids"] = _coerce_string_list(payload.get("decision_ids"))
+    metadata = json_safe_value(payload.get("metadata") or {})
+    payload["metadata"] = metadata if isinstance(metadata, dict) else {}
+    return ClaimRecord(**_filter_dataclass_payload(ClaimRecord, payload))
+
+
+def _coerce_reasoning_graph(value: Any) -> ReasoningGraph:
+    if isinstance(value, ReasoningGraph):
+        graph = value
+    elif isinstance(value, dict):
+        payload = dict(value)
+        payload["graph_version"] = _coerce_int(payload.get("graph_version"), default=1)
+        payload["evidence_records"] = [
+            record
+            for item in _coerce_list_payload(payload.get("evidence_records"))
+            if (record := _coerce_evidence_record(item)) is not None
+        ]
+        payload["decision_records"] = [
+            record
+            for item in _coerce_list_payload(payload.get("decision_records"))
+            if (record := _coerce_decision_record(item)) is not None
+        ]
+        payload["claim_records"] = [
+            record
+            for item in _coerce_list_payload(payload.get("claim_records"))
+            if (record := _coerce_claim_record(item)) is not None
+        ]
+        payload["evidence_ids"] = _coerce_string_list(payload.get("evidence_ids"))
+        payload["decision_ids"] = _coerce_string_list(payload.get("decision_ids"))
+        payload["claim_ids"] = _coerce_string_list(payload.get("claim_ids"))
+        graph = ReasoningGraph(**_filter_dataclass_payload(ReasoningGraph, payload))
+    else:
+        graph = ReasoningGraph()
+    graph.touch_ids()
+    return graph
 
 
 def _coerce_prompt_budget(value: Any) -> PromptBudgetSnapshot:
@@ -1213,6 +1473,34 @@ def _coerce_prompt_budget(value: Any) -> PromptBudgetSnapshot:
         )
         payload["reserve_tool_tokens"] = _coerce_int(
             payload.get("reserve_tool_tokens"), default=0
+        )
+        payload["compaction_estimated_prompt_tokens_before"] = _coerce_int(
+            payload.get("compaction_estimated_prompt_tokens_before"), default=0
+        )
+        payload["compaction_estimated_prompt_tokens_after"] = _coerce_int(
+            payload.get("compaction_estimated_prompt_tokens_after"), default=0
+        )
+        payload["compaction_threshold"] = _coerce_int(payload.get("compaction_threshold"), default=0)
+        payload["compaction_recent_messages_before"] = _coerce_int(
+            payload.get("compaction_recent_messages_before"), default=0
+        )
+        payload["compaction_recent_messages_after"] = _coerce_int(
+            payload.get("compaction_recent_messages_after"), default=0
+        )
+        payload["compaction_keep_recent_initial"] = _coerce_int(
+            payload.get("compaction_keep_recent_initial"), default=0
+        )
+        payload["compaction_keep_recent_final"] = _coerce_int(
+            payload.get("compaction_keep_recent_final"), default=0
+        )
+        payload["compaction_messages_compacted"] = _coerce_int(
+            payload.get("compaction_messages_compacted"), default=0
+        )
+        payload["compaction_attempt_count"] = _coerce_int(
+            payload.get("compaction_attempt_count"), default=0
+        )
+        payload["compaction_stopped_reason"] = str(
+            payload.get("compaction_stopped_reason", "") or ""
         )
         return PromptBudgetSnapshot(**payload)
     return PromptBudgetSnapshot()

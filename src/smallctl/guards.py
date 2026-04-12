@@ -16,11 +16,14 @@ class GuardConfig:
     max_steps: int = 35
     max_tokens: int | None = None
     max_consecutive_errors: int = 5
-    max_repeated_actions: int = 3
+    max_repeated_actions: int = 6
 
 
 _SMALL_MODEL_SIZE_RE = re.compile(r"(?<![xX])\b(?P<size>\d+(?:\.\d+)?)b\b", re.IGNORECASE)
 _SMALL_MODEL_HINTS = ("tiny", "mini", "small", "compact")
+_TRIPLE_ANSWER_META_MAX_CHARS = 120
+_TRIPLE_ANSWER_META_MAX_WORDS = 20
+_TRIPLE_ANSWER_FUZZY_MIN_LENGTH_RATIO = 0.85
 
 
 def is_small_model_name(model_name: str | None) -> bool:
@@ -121,11 +124,11 @@ def apply_triple_answer_guard(
             # Fuzzy match
             matcher = difflib.SequenceMatcher(None, clean_assistant, message)
             ratio = matcher.ratio()
-            
-            if ratio >= threshold:
+
+            if ratio >= threshold and _assistant_and_message_are_similarly_scoped(clean_assistant, message):
                 # Redundancy detected! Return empty string to strip the text
                 return ""
-                
+
     return assistant_text
 
 
@@ -139,6 +142,10 @@ def _looks_like_terminal_tool_meta_commentary(
 
     normalized = " ".join(str(assistant_text or "").strip().lower().split())
     if not normalized:
+        return False
+    if len(normalized) > _TRIPLE_ANSWER_META_MAX_CHARS:
+        return False
+    if len(normalized.split()) > _TRIPLE_ANSWER_META_MAX_WORDS:
         return False
 
     completion_meta_phrases = (
@@ -166,3 +173,13 @@ def _looks_like_terminal_tool_meta_commentary(
         "i'll provide",
     )
     return any(phrase in normalized for phrase in planning_phrases)
+
+
+def _assistant_and_message_are_similarly_scoped(assistant_text: str, message: str) -> bool:
+    assistant_len = len(assistant_text.strip())
+    message_len = len(message.strip())
+    if assistant_len == 0 or message_len == 0:
+        return False
+
+    length_ratio = min(assistant_len, message_len) / max(assistant_len, message_len)
+    return length_ratio >= _TRIPLE_ANSWER_FUZZY_MIN_LENGTH_RATIO

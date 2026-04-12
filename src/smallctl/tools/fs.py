@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..state import LoopState
+from ..state import LoopState, clip_text_value
+from ..risk_policy import evaluate_risk_policy
 from ..write_session_fsm import record_write_session_event
 from .common import fail, ok
 
-FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_delete"}
+FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_patch", "file_delete"}
 
 
 def is_file_mutating_tool(tool_name: str) -> bool:
@@ -83,6 +86,157 @@ def _write_session_resume_metadata(session: Any, *, path: str) -> dict[str, Any]
         },
         "optional_fields": ["next_section_name"],
     }
+
+
+def _write_session_staging_mutation_failure(
+    *,
+    tool_name: str,
+    path: str,
+    session: Any,
+    cwd: str | None = None,
+    section_name: str | None = None,
+) -> dict[str, Any]:
+    target_path = str(getattr(session, "write_target_path", "") or "").strip()
+    staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
+    write_session_id = str(getattr(session, "write_session_id", "") or "").strip()
+
+    if tool_name in {"file_write", "file_append"}:
+        recommended_section = (
+            str(section_name or "").strip()
+            or str(getattr(session, "write_next_section", "") or getattr(session, "write_current_section", "") or "imports").strip()
+            or "imports"
+        )
+        next_required_tool = {
+            "tool_name": tool_name,
+            "required_fields": ["path", "content", "write_session_id", "section_name"],
+            "required_arguments": {
+                "path": target_path,
+                "write_session_id": write_session_id,
+                "section_name": recommended_section,
+            },
+            "optional_fields": ["next_section_name"],
+            "notes": [
+                "Reuse the same content payload; only correct the path back to the target file.",
+                "The staging path is for read/verify only and must not be used as the write target.",
+            ],
+        }
+    elif tool_name == "file_patch":
+        next_required_tool = {
+            "tool_name": "file_patch",
+            "required_fields": ["path", "target_text", "replacement_text"],
+            "required_arguments": {
+                "path": target_path,
+                "write_session_id": write_session_id,
+            },
+            "optional_fields": ["expected_occurrences"],
+            "notes": [
+                "Reuse the same patch arguments; only correct the path back to the target file.",
+                "The staging path is for read/verify only and must not be patched directly.",
+            ],
+        }
+    elif tool_name == "file_delete":
+        next_required_tool = {
+            "tool_name": "file_delete",
+            "required_fields": ["path"],
+            "required_arguments": {
+                "path": target_path,
+            },
+            "optional_fields": [],
+            "notes": [
+                "Delete the target path only if you still intend to remove the generated file.",
+                "The staging path is for read/verify only and must not be deleted directly.",
+            ],
+        }
+    else:
+        next_required_tool = {
+            "tool_name": tool_name,
+            "required_fields": ["path"],
+            "required_arguments": {
+                "path": target_path,
+            },
+            "optional_fields": [],
+            "notes": [
+                "Retry the same tool with the target path instead of the staging path.",
+            ],
+        }
+
+    return fail(
+        f"Write Session `{write_session_id}` targets `{target_path}`. "
+        f"You passed the active staged copy `{path}` to `{tool_name}`, but the staging path "
+        f"`{staging_path}` is for read/verify only. Retry the same `{tool_name}` call with "
+        f"`path='{target_path}'` instead.",
+        metadata={
+            "path": str(_resolve(target_path or path, cwd)),
+            "requested_path": path,
+            "error_kind": "write_session_staging_path_used_as_target",
+            "tool_name": tool_name,
+            "target_path": target_path,
+            "staging_path": staging_path,
+            "write_session_id": write_session_id,
+            "staged_only": True,
+            "next_required_tool": next_required_tool,
+        },
+    )
+
+
+def _guard_write_session_staging_mutation(
+    *,
+    tool_name: str,
+    path: str,
+    state: LoopState | None,
+    cwd: str | None = None,
+    session: Any | None = None,
+    write_session_id: str | None = None,
+    encoding: str = "utf-8",
+    section_name: str | None = None,
+) -> dict[str, Any] | None:
+    active_session = session
+    if active_session is None and state is not None:
+        candidate = getattr(state, "write_session", None)
+        if candidate is not None and str(getattr(candidate, "status", "") or "").strip().lower() != "complete":
+            active_session = candidate
+
+    if active_session is None:
+        return None
+
+    active_session_id = str(getattr(active_session, "write_session_id", "") or "").strip()
+    if write_session_id and active_session_id and write_session_id != active_session_id:
+        return None
+
+    target_path = str(getattr(active_session, "write_target_path", "") or "").strip()
+    if not target_path:
+        return None
+
+    try:
+        session_target = _resolve(target_path, cwd)
+    except Exception:
+        return None
+
+    staging_path = str(getattr(active_session, "write_staging_path", "") or "").strip()
+    if not staging_path:
+        try:
+            staging = _ensure_write_session_files(
+                active_session,
+                session_target,
+                cwd=cwd,
+                encoding=encoding,
+            )
+        except Exception:
+            return None
+        staging_path = str(staging)
+
+    if not staging_path:
+        return None
+    if not _same_target_path(staging_path, path, cwd):
+        return None
+
+    return _write_session_staging_mutation_failure(
+        tool_name=tool_name,
+        path=path,
+        session=active_session,
+        cwd=cwd,
+        section_name=section_name,
+    )
 
 
 def _repair_cycle_session_id_failure(
@@ -285,8 +439,6 @@ def _active_session_staging_path(
     if session is None or str(getattr(session, "status", "")).strip().lower() == "complete":
         return None
     staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
-    if not staging_path:
-        return None
     try:
         target = _resolve(path, cwd)
         session_target = _resolve(session.write_target_path, cwd)
@@ -295,7 +447,55 @@ def _active_session_staging_path(
     if target != session_target:
         return None
     staging = Path(staging_path)
-    return staging if staging.exists() else None
+    if staging_path and staging.exists():
+        return staging
+    session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    if not session_id:
+        return None
+    try:
+        restored = _ensure_write_session_files(session, target, cwd=cwd)
+    except Exception:
+        return None
+    return restored if restored.exists() else None
+
+
+def _resolve_patch_source(
+    state: LoopState | None,
+    path: str,
+    *,
+    cwd: str | None = None,
+    encoding: str = "utf-8",
+    write_session_id: str | None = None,
+) -> tuple[Path, Path, Any | None, bool]:
+    target = _resolve(path, cwd)
+    session = getattr(state, "write_session", None) if state is not None else None
+
+    if write_session_id:
+        if session is None or str(getattr(session, "status", "")).strip().lower() == "complete":
+            raise ValueError(f"No active write session found for session ID `{write_session_id}`.")
+        if str(getattr(session, "write_session_id", "") or "").strip() != write_session_id:
+            raise LookupError(
+                f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`."
+            )
+        if not _same_target_path(session.write_target_path, path, cwd):
+            raise LookupError(
+                f"Session target path mismatch: expected `{session.write_target_path}`, got `{path}`."
+            )
+        staging_path = _ensure_write_session_files(session, target, cwd=cwd, encoding=encoding)
+        return staging_path, target, session, True
+
+    if session is not None and str(getattr(session, "status", "")).strip().lower() != "complete":
+        session_target = str(getattr(session, "write_target_path", "") or "").strip()
+        if session_target and _same_target_path(session_target, path, cwd):
+            staging_path = _ensure_write_session_files(session, target, cwd=cwd, encoding=encoding)
+            return staging_path, target, session, True
+
+    staging = _active_session_staging_path(state, path, cwd)
+    if staging is not None and session is not None:
+        staging_path = _ensure_write_session_files(session, target, cwd=cwd, encoding=encoding)
+        return staging_path, target, session, True
+
+    return target, target, None, False
 
 
 def _ensure_write_session_files(
@@ -464,6 +664,150 @@ def _replace_known_section(
         updated_ranges[name] = {"start": item_start, "end": item_end}
     updated_ranges[section_name] = {"start": start, "end": start + len(new_content)}
     return updated_content, updated_ranges
+
+
+def _count_exact_occurrences(text: str, target_text: str) -> int:
+    if target_text == "":
+        return 0
+    return text.count(target_text)
+
+
+def _build_patch_text_preview(text: str, *, limit: int = 120) -> dict[str, Any]:
+    preview, clipped = clip_text_value(text, limit=limit)
+    return {
+        "preview": preview.replace("\n", "\\n"),
+        "clipped": clipped,
+        "bytes": len(text.encode("utf-8")),
+        "line_count": text.count("\n") + (1 if text else 0),
+    }
+
+
+def _build_patch_ambiguity_hint(
+    *,
+    actual_occurrences: int,
+    expected_occurrences: int,
+) -> str:
+    if actual_occurrences <= 0:
+        return (
+            "The target text was not found. Read the smallest relevant slice first, then retry with an exact "
+            "substring from the current file contents."
+        )
+    if actual_occurrences == 1:
+        return "The target text matched once, but the patch still failed. Read the smallest relevant slice and retry."
+    if expected_occurrences == 1:
+        return (
+            f"The target text matched {actual_occurrences} times. Read a smaller slice and make `target_text` more "
+            "specific, or set `expected_occurrences` to the exact number of matches only if you intend to replace "
+            "every one of them."
+        )
+    return (
+        f"The target text matched {actual_occurrences} times and `expected_occurrences` was {expected_occurrences}. "
+        "Read a smaller slice and make the target more specific, or keep the explicit multi-match replacement if "
+        "every match should be updated."
+    )
+
+
+def _build_patch_failure_metadata(
+    *,
+    path: Path,
+    requested_path: str,
+    error_kind: str,
+    source_path: Path | None = None,
+    staged_only: bool = False,
+    session: Any | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "path": str(path),
+        "requested_path": requested_path,
+        "error_kind": error_kind,
+        "staged_only": staged_only,
+    }
+    if source_path is not None:
+        metadata["source_path"] = str(source_path)
+    if session is not None:
+        metadata["write_session_id"] = str(getattr(session, "write_session_id", "") or "").strip()
+    if extra:
+        metadata.update(extra)
+    return metadata
+
+
+def _build_patch_failure_message(
+    *,
+    requested_path: str,
+    source_path: Path | None,
+    staged_only: bool,
+    error_kind: str,
+    actual_occurrences: int | None = None,
+    expected_occurrences: int | None = None,
+) -> str:
+    target_label = f"`{requested_path}`" if requested_path else "the requested path"
+    if staged_only and source_path is not None:
+        stage_label = f"`{source_path}`"
+        if error_kind == "patch_target_not_found":
+            return f"Patch target text was not found in active staged copy {stage_label} for target {target_label}."
+        if error_kind == "patch_occurrence_mismatch":
+            return (
+                f"Patch target text occurred {actual_occurrences} times in active staged copy {stage_label} "
+                f"for target {target_label}, but expected {expected_occurrences}."
+            )
+    if error_kind == "patch_target_not_found":
+        return f"Patch target text was not found in `{requested_path}`."
+    if error_kind == "patch_occurrence_mismatch":
+        return (
+            f"Patch target text occurred {actual_occurrences} times in `{requested_path}`, "
+            f"but expected {expected_occurrences}."
+        )
+    return f"Patch failed for {target_label}."
+
+
+def _apply_exact_patch(
+    text: str,
+    target_text: str,
+    replacement_text: str,
+    *,
+    expected_occurrences: int = 1,
+) -> tuple[str, int]:
+    actual_occurrences = _count_exact_occurrences(text, target_text)
+    if actual_occurrences != expected_occurrences:
+        raise ValueError(str(actual_occurrences))
+    return text.replace(target_text, replacement_text, expected_occurrences), actual_occurrences
+
+
+def _build_patch_metadata(
+    *,
+    path: Path,
+    requested_path: str,
+    target_text: str,
+    replacement_text: str,
+    occurrence_count: int,
+    expected_occurrences: int,
+    source_path: Path,
+    staged_only: bool,
+    encoding: str = "utf-8",
+    session: Any | None = None,
+    staging_path: Path | None = None,
+    status_block: str | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "path": str(path),
+        "requested_path": requested_path,
+        "bytes": len(_read_text_file(source_path, encoding=encoding).encode(encoding)),
+        "target_text_bytes": len(target_text.encode(encoding)),
+        "replacement_text_bytes": len(replacement_text.encode(encoding)),
+        "occurrence_count": occurrence_count,
+        "expected_occurrences": expected_occurrences,
+        "source_path": str(source_path),
+        "staged_only": staged_only,
+        "target_text_preview": _build_patch_text_preview(target_text),
+        "replacement_text_preview": _build_patch_text_preview(replacement_text),
+    }
+    if staging_path is not None:
+        metadata["staging_path"] = str(staging_path)
+    if session is not None:
+        metadata["write_session_id"] = str(getattr(session, "write_session_id", "") or "").strip()
+        metadata["write_session_status_block"] = status_block or ""
+    return metadata
 
 
 def _workspace_relative_hint(path: str, cwd: str | None = None) -> str | None:
@@ -689,6 +1033,18 @@ async def file_write(
         session = state.write_session
         if session.write_session_id != write_session_id:
             return fail(f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.")
+        staging_guard = _guard_write_session_staging_mutation(
+            tool_name="file_write",
+            path=path,
+            state=state,
+            cwd=cwd,
+            session=session,
+            write_session_id=write_session_id,
+            encoding=encoding,
+            section_name=_normalize_section_name(section_name, section_id),
+        )
+        if staging_guard is not None:
+            return staging_guard
         if not _same_target_path(session.write_target_path, path, cwd):
             if not session.write_sections_completed:
                 # Allow path correction if no sections completed yet
@@ -745,8 +1101,22 @@ async def file_write(
                 and strategy == "auto"
             ):
                 return fail(
-                    "Patch-existing write sessions require an explicit `replace_strategy` of "
-                    "`overwrite` to replace the file or `append` to add a new tracked section."
+                    "Patch-existing write sessions need an explicit first-chunk choice. "
+                    "Use `file_patch` for a narrow exact edit inside the staged copy, "
+                    "`replace_strategy='overwrite'` to replace the staged file, or "
+                    "`replace_strategy='append'` to add a new tracked section. "
+                    "If earlier chunks are not fully visible in local context, call "
+                    f"`file_read(path='{path}')` first; during an active write session that reads from the staged copy. "
+                    "Do not assume earlier chunks were lost or rewrite the whole staged file from memory.",
+                    metadata={
+                        "path": str(target),
+                        "staging_path": str(staging_path),
+                        "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                        "write_session_intent": session.write_session_intent,
+                        "replace_strategy": strategy,
+                        "staged_only": True,
+                        "error_kind": "patch_existing_requires_explicit_replace_strategy",
+                    },
                 )
             start = len(staged_content)
             updated_content = staged_content + content
@@ -831,6 +1201,25 @@ async def file_write(
                 "required_read_paths": _repair_cycle_reads(state),
             },
         )
+    risk_decision = evaluate_risk_policy(
+        state if state is not None else LoopState(cwd=str(Path.cwd())),
+        tool_name="file_write",
+        tool_risk="high",
+        phase=str((state.current_phase if state is not None else "") or ""),
+        action=f"Write file {path}",
+        expected_effect="Update the target file with the requested content.",
+        rollback="Restore the previous file contents from the snapshot or staging file.",
+        verification="Read back the file and run the smallest useful verifier.",
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "path": path,
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
+            },
+        )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding=encoding)
@@ -838,6 +1227,315 @@ async def file_write(
         return fail(f"Unable to write file: {exc}")
     _record_file_change(state, target)
     return ok("written", metadata={"path": str(target), "bytes": len(content.encode(encoding))})
+
+
+async def file_patch(
+    path: str,
+    target_text: str | None = None,
+    replacement_text: str | None = None,
+    cwd: str | None = None,
+    encoding: str = "utf-8",
+    state: LoopState | None = None,
+    session_id: str | None = None,
+    write_session_id: str | None = None,
+    expected_occurrences: int = 1,
+    expected_followup_verifier: str | None = None,
+) -> dict[str, Any]:
+    suspicious_path = _guard_suspicious_temp_root_path(path)
+    if suspicious_path is not None:
+        return suspicious_path
+
+    target = _resolve(path, cwd)
+    if not write_session_id and session_id:
+        write_session_id = session_id
+
+    normalized_target_text = str(target_text or "")
+    normalized_replacement_text = str(replacement_text or "")
+
+    if normalized_target_text == "":
+        return fail(
+            "Patch target text cannot be empty.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "error_kind": "patch_target_empty",
+                "expected_occurrences": expected_occurrences,
+            },
+        )
+
+    try:
+        normalized_expected_occurrences = int(expected_occurrences)
+    except (TypeError, ValueError):
+        return fail(
+            "Patch received an invalid `expected_occurrences` value.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "error_kind": "patch_occurrence_mismatch",
+                "expected_occurrences": expected_occurrences,
+            },
+        )
+    if normalized_expected_occurrences < 1:
+        return fail(
+            "`expected_occurrences` must be at least 1.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "error_kind": "patch_occurrence_mismatch",
+                "expected_occurrences": normalized_expected_occurrences,
+            },
+        )
+
+    staging_guard = _guard_write_session_staging_mutation(
+        tool_name="file_patch",
+        path=path,
+        state=state,
+        cwd=cwd,
+        write_session_id=write_session_id,
+        encoding=encoding,
+    )
+    if staging_guard is not None:
+        return staging_guard
+
+    if write_session_id:
+        try:
+            source_path, _, session, staged_only = _resolve_patch_source(
+                state,
+                path,
+                cwd=cwd,
+                encoding=encoding,
+                write_session_id=write_session_id,
+            )
+        except LookupError as exc:
+            return fail(
+                str(exc),
+                metadata={
+                    "path": str(target),
+                    "requested_path": path,
+                    "error_kind": "session_id_mismatch",
+                    "write_session_id": write_session_id,
+                },
+            )
+        except ValueError as exc:
+            return fail(
+                str(exc),
+                metadata={
+                    "path": str(target),
+                    "requested_path": path,
+                    "error_kind": "session_id_mismatch",
+                    "write_session_id": write_session_id,
+                },
+            )
+    else:
+        session = getattr(state, "write_session", None) if state is not None else None
+        source_path, _, session, staged_only = _resolve_patch_source(
+            state,
+            path,
+            cwd=cwd,
+            encoding=encoding,
+        )
+
+    if not staged_only and not _repair_cycle_allows_patch(state, target):
+        _mark_repeat_patch(state)
+        return fail(
+            "Repair cycle requires reading the target file before patching it again.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
+                "required_read_paths": _repair_cycle_reads(state),
+                "error_kind": "repair_cycle_read_required",
+            },
+        )
+
+    if not source_path.exists():
+        message = (
+            f"Active staged copy `{source_path}` is missing for target `{path}`."
+            if staged_only
+            else _missing_path_error(requested_path=path, resolved_path=target, cwd=cwd)
+        )
+        return fail(
+            message,
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="patch_target_not_found",
+                extra={
+                    "actual_occurrences": 0,
+                    "expected_occurrences": normalized_expected_occurrences,
+                },
+            ),
+        )
+
+    if not staged_only:
+        risk_decision = evaluate_risk_policy(
+            state if state is not None else LoopState(cwd=str(Path.cwd())),
+            tool_name="file_patch",
+            tool_risk="high",
+            phase=str((state.current_phase if state is not None else "") or ""),
+            action=f"Patch file {path}",
+            expected_effect="Replace exact text in the target file.",
+            rollback="Restore the previous file contents from the snapshot or revert the patch.",
+            verification="Read back the file and run the smallest useful verifier.",
+        )
+        if not risk_decision.allowed:
+            return fail(
+                risk_decision.reason,
+                metadata={
+                    "path": path,
+                    "reason": "missing_supported_claim",
+                    "proof_bundle": risk_decision.proof_bundle,
+                },
+            )
+
+    try:
+        source_text = _read_text_file(source_path, encoding=encoding)
+    except Exception as exc:
+        return fail(f"Unable to read file for patching: {exc}")
+
+    actual_occurrences = _count_exact_occurrences(source_text, normalized_target_text)
+    if actual_occurrences == 0:
+        ambiguity_hint = _build_patch_ambiguity_hint(
+            actual_occurrences=actual_occurrences,
+            expected_occurrences=normalized_expected_occurrences,
+        )
+        return fail(
+            _build_patch_failure_message(
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                error_kind="patch_target_not_found",
+                actual_occurrences=actual_occurrences,
+                expected_occurrences=normalized_expected_occurrences,
+            ),
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="patch_target_not_found",
+                extra={
+                    "actual_occurrences": 0,
+                    "expected_occurrences": normalized_expected_occurrences,
+                    "ambiguity_hint": ambiguity_hint,
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                },
+            ),
+        )
+    if actual_occurrences != normalized_expected_occurrences:
+        ambiguity_hint = _build_patch_ambiguity_hint(
+            actual_occurrences=actual_occurrences,
+            expected_occurrences=normalized_expected_occurrences,
+        )
+        return fail(
+            _build_patch_failure_message(
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                error_kind="patch_occurrence_mismatch",
+                actual_occurrences=actual_occurrences,
+                expected_occurrences=normalized_expected_occurrences,
+            ),
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="patch_occurrence_mismatch",
+                extra={
+                    "actual_occurrences": actual_occurrences,
+                    "expected_occurrences": normalized_expected_occurrences,
+                    "ambiguity_hint": ambiguity_hint,
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                },
+            ),
+        )
+
+    try:
+        updated_text, occurrence_count = _apply_exact_patch(
+            source_text,
+            normalized_target_text,
+            normalized_replacement_text,
+            expected_occurrences=normalized_expected_occurrences,
+        )
+    except ValueError:
+        return fail(
+            _build_patch_failure_message(
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                error_kind="patch_occurrence_mismatch",
+                actual_occurrences=actual_occurrences,
+                expected_occurrences=normalized_expected_occurrences,
+            ),
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="patch_occurrence_mismatch",
+                extra={
+                    "actual_occurrences": actual_occurrences,
+                    "expected_occurrences": normalized_expected_occurrences,
+                    "ambiguity_hint": _build_patch_ambiguity_hint(
+                        actual_occurrences=actual_occurrences,
+                        expected_occurrences=normalized_expected_occurrences,
+                    ),
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                },
+            ),
+        )
+
+    try:
+        _write_text_file(source_path, updated_text, encoding=encoding)
+    except Exception as exc:
+        return fail(f"Unable to patch file: {exc}")
+
+    if session is not None:
+        session.write_last_staged_hash = _content_hash(updated_text)
+        session.write_last_attempt_sections = list(getattr(session, "write_sections_completed", []) or [])
+        session.write_last_attempt_ranges = _clone_section_ranges(getattr(session, "write_section_ranges", {}) or {})
+        status_snapshot = write_session_status_snapshot(
+            session,
+            cwd=cwd,
+            finalized=False,
+            encoding=encoding,
+        )
+        status_block = format_write_session_status_block(status_snapshot)
+    else:
+        status_block = None
+
+    _record_file_change(state, target)
+    metadata = _build_patch_metadata(
+        path=target,
+        requested_path=path,
+        target_text=normalized_target_text,
+        replacement_text=normalized_replacement_text,
+        occurrence_count=occurrence_count,
+        expected_occurrences=normalized_expected_occurrences,
+        source_path=source_path,
+        staged_only=staged_only,
+        encoding=encoding,
+        session=session,
+        staging_path=source_path if staged_only else None,
+        status_block=status_block,
+    )
+    metadata["expected_followup_verifier"] = str(expected_followup_verifier or "")
+    message = f"Patched {occurrence_count} occurrence(s) in `{path}`."
+    if staged_only:
+        message += f" Staged copy: `{source_path}`."
+        if status_block:
+            message += f"\n{status_block}"
+    return ok(message, metadata=metadata)
 
 
 async def file_append(
@@ -877,6 +1575,16 @@ async def file_append(
             replace_strategy=replace_strategy or "append",
             expected_followup_verifier=expected_followup_verifier,
         )
+    staging_guard = _guard_write_session_staging_mutation(
+        tool_name="file_append",
+        path=path,
+        state=state,
+        cwd=cwd,
+        encoding=encoding,
+        section_name=_normalize_section_name(section_name, section_id),
+    )
+    if staging_guard is not None:
+        return staging_guard
     target = _resolve(path, cwd)
     if not _repair_cycle_allows_patch(state, target):
         _mark_repeat_patch(state)
@@ -886,6 +1594,25 @@ async def file_append(
                 "path": str(target),
                 "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
                 "required_read_paths": _repair_cycle_reads(state),
+            },
+        )
+    risk_decision = evaluate_risk_policy(
+        state if state is not None else LoopState(cwd=str(Path.cwd())),
+        tool_name="file_append",
+        tool_risk="high",
+        phase=str((state.current_phase if state is not None else "") or ""),
+        action=f"Append to file {path}",
+        expected_effect="Append the requested content to the target file.",
+        rollback="Remove the appended content or restore from the snapshot if needed.",
+        verification="Read back the file and run the smallest useful verifier.",
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "path": path,
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
             },
         )
     try:
@@ -907,6 +1634,15 @@ async def file_delete(
     if suspicious_path is not None:
         return suspicious_path
 
+    staging_guard = _guard_write_session_staging_mutation(
+        tool_name="file_delete",
+        path=path,
+        state=state,
+        cwd=cwd,
+    )
+    if staging_guard is not None:
+        return staging_guard
+
     target = _resolve(path, cwd)
     if not _repair_cycle_allows_patch(state, target):
         _mark_repeat_patch(state)
@@ -916,6 +1652,25 @@ async def file_delete(
                 "path": str(target),
                 "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
                 "required_read_paths": _repair_cycle_reads(state),
+            },
+        )
+    risk_decision = evaluate_risk_policy(
+        state if state is not None else LoopState(cwd=str(Path.cwd())),
+        tool_name="file_delete",
+        tool_risk="high",
+        phase=str((state.current_phase if state is not None else "") or ""),
+        action=f"Delete file {path}",
+        expected_effect="Remove the target file.",
+        rollback="Restore the file from version control or backup if needed.",
+        verification="Confirm the file is gone and the task state still matches expectations.",
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "path": path,
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
             },
         )
     try:

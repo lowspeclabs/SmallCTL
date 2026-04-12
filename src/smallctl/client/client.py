@@ -21,6 +21,7 @@ from .chunk_parser import (
     extract_thinking_from_tags,
     extract_content_fragments,
     format_tool_call_text,
+    merge_reasoning_text,
     maybe_parse_tool_args,
 )
 from .provider_adapters import get_provider_adapter
@@ -53,11 +54,12 @@ class OpenAICompatClient:
     STREAM_WRITE_TIMEOUT_SEC = 30.0
     STREAM_READ_TIMEOUT_SEC = 120.0
     STREAM_FIRST_TOKEN_TIMEOUT_SEC = 30.0
-    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = 25.0
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = 45.0
     STREAM_POOL_TIMEOUT_SEC = 30.0
     STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 30.0
     SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 12.0
     LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 45.0
+    LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 60.0
     _shared_clients: ClassVar[dict[tuple[str, str], Any]] = {}
 
     def __init__(
@@ -115,7 +117,10 @@ class OpenAICompatClient:
         timeout = float(self.first_token_timeout_sec)
         if self.provider_profile != "lmstudio":
             return timeout
-        if self.is_small_model:
+        # Tool-bearing requests on LM Studio often need more time for prompt ingestion,
+        # even for small models, due to the complexity of the schema and system prompt.
+        # We skip the early return for small models if tools are present.
+        if self.is_small_model and not tools:
             return timeout
 
         tool_count = len(tools)
@@ -131,8 +136,10 @@ class OpenAICompatClient:
         if override is not None:
             return max(1.0, float(override))
 
-        if self.provider_profile == "lmstudio" and self.is_small_model:
-            return float(self.LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
+        if self.provider_profile == "lmstudio":
+            if self.is_small_model:
+                return float(self.LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
+            return float(self.LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
 
         timeout = float(self.STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
         if self.is_small_model:
@@ -627,12 +634,9 @@ class OpenAICompatClient:
             thinking_text = field_thinking
         elif reasoning_mode == "auto":
             assistant_text = tag_assistant
-            if field_thinking:
-                thinking_text = field_thinking
-            elif tag_thinking:
-                thinking_text = tag_thinking
+            thinking_text = merge_reasoning_text(field_thinking, tag_thinking)
         elif reasoning_mode == "off":
-            thinking_text = field_thinking or tag_thinking
+            thinking_text = merge_reasoning_text(field_thinking, tag_thinking)
 
         ordered_tool_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
         return StreamResult(

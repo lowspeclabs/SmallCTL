@@ -228,8 +228,15 @@ def _format_shell_exec_message(
     return msg
 
 
-def format_reused_artifact_message(artifact: ArtifactRecord) -> str:
+def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str | None = None) -> str:
     summary = artifact.summary or artifact.source or artifact.kind or "cached artifact"
+    normalized_tool = str(tool_name or "").strip().lower()
+    if normalized_tool in {"artifact_print", "show_artifact"}:
+        return (
+            f"Reused Artifact {artifact.artifact_id}: {summary}. "
+            "This evidence is already visible in context, so do not print it again. "
+            "Synthesize the answer from it or call `task_complete(message='...')` if you are finished."
+        )
     if artifact.kind == "file_read":
         path = str(artifact.source or artifact.metadata.get("path") or artifact.content_path or "").strip()
         path_note = f" for `{path}`" if path else ""

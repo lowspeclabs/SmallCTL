@@ -14,10 +14,13 @@ from ..write_session_fsm import new_write_session, record_write_session_event
 from .state import PendingToolCall
 from .write_recovery import infer_write_target_path, normalize_write_argument_aliases
 
-_REPEATED_TOOL_HISTORY_LIMIT = 12
-_IDENTICAL_TOOL_CALL_STREAK_LIMIT = 3
-_REPEATED_TOOL_WINDOW = 6
-_REPEATED_TOOL_UNIQUE_LIMIT = 3
+_REPEATED_TOOL_HISTORY_LIMIT = 24
+_IDENTICAL_TOOL_CALL_STREAK_LIMIT = 6
+_REPEATED_TOOL_WINDOW = 12
+_REPEATED_TOOL_UNIQUE_LIMIT = 6
+_STRICT_LOOP_GUARD_TOOLS = {"dir_list", "file_read", "artifact_read"}
+_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY = "_repeat_guard_one_shot_fingerprints"
+_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY = "_patch_existing_stage_read_contract"
 _PLACEHOLDER_TOOL_NAME_TOKENS = {
     "tool_name",
     "function_name",
@@ -122,7 +125,7 @@ def _clean_reasoning_fallback_text(text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(
-        r"</?(?:tool_call|tool_code|call|function|parameter|thinking|reasoning)(?:=[^>]+)?>",
+        r"</?(?:tool_call|tool_code|call|function|parameter|thinking|reasoning|analysis|plan|execution)(?:=[^>]+)?>",
         "",
         str(text),
         flags=re.IGNORECASE,
@@ -633,7 +636,13 @@ def _extract_inline_tool_calls(
 
 def _detect_hallucinated_tool_call(harness: Any, pending: PendingToolCall) -> str | None:
     """Detect if a tool call is missing all its required arguments."""
-    meta = harness.registry.get(pending.tool_name)
+    registry = getattr(harness, "registry", None)
+    if registry is None:
+        return None
+    get_meta = getattr(registry, "get", None)
+    if not callable(get_meta):
+        return None
+    meta = get_meta(pending.tool_name)
     if not meta:
         return None
 
@@ -650,6 +659,18 @@ def _detect_hallucinated_tool_call(harness: Any, pending: PendingToolCall) -> st
         )
 
     return None
+
+
+def _repeat_loop_limits(harness: Any, pending: PendingToolCall) -> tuple[int, int, int]:
+    del harness
+    identical_limit = _IDENTICAL_TOOL_CALL_STREAK_LIMIT
+    window_limit = _REPEATED_TOOL_WINDOW
+    unique_limit = _REPEATED_TOOL_UNIQUE_LIMIT
+    if pending.tool_name in {"artifact_print", "show_artifact"}:
+        return (2, 4, 2)
+    if pending.tool_name in _STRICT_LOOP_GUARD_TOOLS:
+        return (3, 6, 3)
+    return (identical_limit, window_limit, unique_limit)
 
 
 def _placeholder_token(value: Any) -> str:
@@ -723,6 +744,8 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         # Polling an existing background job is an expected repeat, not a loop.
         if job_id and not command:
             return None
+    if _consume_repeat_guard_one_shot_allowance(harness, pending):
+        return None
     if _dir_list_same_path_repeat_is_loop(harness, pending):
         return "Guard tripped: repeated dir_list loop (same path repeated without progress)"
     if _dir_list_exploration_progress_is_progress(harness, pending):
@@ -736,21 +759,22 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         "tool_name": pending.tool_name,
         "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
     }
-    recent_window = history[-(_REPEATED_TOOL_WINDOW - 1) :] + [candidate]
-    exact_streak = history[-(_IDENTICAL_TOOL_CALL_STREAK_LIMIT - 1) :] + [candidate]
+    identical_limit, window_limit, unique_limit = _repeat_loop_limits(harness, pending)
+    recent_window = history[-(window_limit - 1) :] + [candidate]
+    exact_streak = history[-(identical_limit - 1) :] + [candidate]
     if (
-        len(exact_streak) >= _IDENTICAL_TOOL_CALL_STREAK_LIMIT
+        len(exact_streak) >= identical_limit
         and len({str(item.get("fingerprint", "")) for item in exact_streak}) == 1
     ):
         return (
             "Guard tripped: repeated tool call loop "
             f"({pending.tool_name} repeated with identical arguments)"
         )
-    if len(recent_window) < _REPEATED_TOOL_WINDOW:
+    if len(recent_window) < window_limit:
         return None
     tool_names = {str(item.get("tool_name", "")) for item in recent_window}
     fingerprints = [str(item.get("fingerprint", "")) for item in recent_window]
-    if len(tool_names) == 1 and len(set(fingerprints)) <= _REPEATED_TOOL_UNIQUE_LIMIT:
+    if len(tool_names) == 1 and len(set(fingerprints)) <= unique_limit:
         return (
             "Guard tripped: repeated tool exploration loop "
             f"({pending.tool_name} cycling through near-identical arguments without progress)"
@@ -1031,7 +1055,8 @@ def _detect_empty_file_write_payload(
 
     message = (
         f"Empty payload rejected for `{pending.tool_name}`. Provide concrete content. "
-        "If a write session is active, resume it with `file_write` and full session metadata."
+        "If a write session is active, resume it with `file_write` and full session metadata for chunk continuation, "
+        "or use `file_patch` for a narrow exact edit inside the staged copy."
     )
     return message, {
         "tool_name": pending.tool_name,
@@ -1039,6 +1064,170 @@ def _detect_empty_file_write_payload(
         "reason": "empty_payload",
         "required_fields": required_fields,
     }
+
+
+def _detect_patch_existing_stage_read_contract_violation(
+    harness: Any,
+    pending: PendingToolCall,
+) -> tuple[str, dict[str, Any]] | None:
+    state = getattr(harness, "state", None)
+    if state is None:
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    contract = scratchpad.get(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY)
+    if not isinstance(contract, dict):
+        return None
+
+    session = getattr(state, "write_session", None)
+    if session is None or str(getattr(session, "status", "") or "").strip().lower() == "complete":
+        scratchpad.pop(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY, None)
+        return None
+
+    contract_session_id = str(contract.get("session_id") or "").strip()
+    if contract_session_id and str(getattr(session, "write_session_id", "") or "").strip() != contract_session_id:
+        scratchpad.pop(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY, None)
+        return None
+
+    contract_target = str(contract.get("target_path") or getattr(session, "write_target_path", "") or "").strip()
+    if not contract_target:
+        scratchpad.pop(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY, None)
+        return None
+
+    if pending.tool_name not in {"file_write", "file_append", "file_patch"}:
+        return None
+
+    from ..tools.fs import _same_target_path
+
+    pending_path = str(pending.args.get("path") or "").strip()
+    if pending_path and not _same_target_path(contract_target, pending_path, getattr(state, "cwd", None)):
+        return None
+
+    if pending.tool_name == "file_patch":
+        scratchpad.pop(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY, None)
+        return None
+
+    strategy = str(pending.args.get("replace_strategy") or "auto").strip().lower() or "auto"
+    if strategy == "overwrite":
+        scratchpad.pop(_PATCH_EXISTING_STAGE_READ_CONTRACT_KEY, None)
+        return None
+
+    staging_path = str(contract.get("staging_path") or getattr(session, "write_staging_path", "") or "").strip()
+    message = (
+        "Patch-existing recovery already reread the staged copy. "
+        "The next same-target write must choose one explicit repair shape: "
+        "`file_patch` for a narrow exact edit inside the staged copy, or "
+        "`file_write` with `replace_strategy='overwrite'` to replace the entire staged file. "
+        "Do not send another implicit first-chunk `file_write`/`file_append` with `replace_strategy='auto'`."
+    )
+    return message, {
+        "tool_name": pending.tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "reason": "patch_existing_stage_read_requires_explicit_shape",
+        "target_path": contract_target,
+        "write_session_id": contract_session_id or str(getattr(session, "write_session_id", "") or "").strip(),
+        "staging_path": staging_path,
+        "required_followup_tools": ["file_patch", "file_write"],
+        "allowed_replace_strategy": "overwrite",
+        "offending_field": "replace_strategy",
+    }
+
+
+def _declared_read_before_write_reason(assistant_text: str) -> dict[str, Any] | None:
+    text = str(assistant_text or "").strip().lower()
+    if not text:
+        return None
+
+    explicit_tool = "file_read(" in text or "artifact_read(" in text
+    read_phrases = (
+        "let me read",
+        "i'll read",
+        "i will read",
+        "need to read",
+        "going to read",
+        "read exactly what we have so far",
+        "read what we have so far",
+        "read the current staged",
+        "read the staged copy",
+        "read the current file",
+        "recover the current staged content",
+        "recover the staged copy",
+        "inspect the staged content",
+        "inspect the staged copy",
+        "check what we have so far",
+    )
+    matched_phrase = next((phrase for phrase in read_phrases if phrase in text), "")
+    read_intent = explicit_tool or bool(matched_phrase)
+    if not read_intent:
+        return None
+
+    context_hints = (
+        "what we have so far",
+        "current staged",
+        "staged copy",
+        "staged content",
+        "current file",
+        "current content",
+        "exactly what we have",
+        "recover",
+        "read first",
+    )
+    matched_hint = next((hint for hint in context_hints if hint in text), "")
+    if not explicit_tool and not matched_hint:
+        return None
+
+    excerpt = str(assistant_text or "").strip()
+    if len(excerpt) > 220:
+        excerpt = excerpt[:217].rstrip() + "..."
+    return {
+        "reason_kind": "declared_read_before_write",
+        "explicit_tool": explicit_tool,
+        "matched_phrase": matched_phrase,
+        "matched_hint": matched_hint,
+        "assistant_excerpt": excerpt,
+    }
+
+
+def _assistant_declares_read_before_write(assistant_text: str) -> bool:
+    return _declared_read_before_write_reason(assistant_text) is not None
+
+
+def _recover_declared_read_before_write(
+    harness: Any,
+    pending: PendingToolCall,
+    *,
+    assistant_text: str = "",
+) -> tuple[PendingToolCall, dict[str, Any]] | None:
+    if pending.tool_name not in {"file_write", "file_append", "file_patch"}:
+        return None
+    reason = _declared_read_before_write_reason(assistant_text)
+    if reason is None:
+        return None
+
+    target_path = str(pending.args.get("path") or primary_task_target_path(harness) or "").strip()
+    session = _active_write_session_for_target(harness, target_path)
+    if session is None:
+        session = getattr(getattr(harness, "state", None), "write_session", None)
+        if session is not None and str(getattr(session, "status", "")).strip().lower() == "complete":
+            session = None
+    if session is None:
+        return None
+
+    target_path = str(target_path or getattr(session, "write_target_path", "") or "").strip()
+    if not target_path:
+        return None
+
+    args = {"path": target_path}
+    return (
+        PendingToolCall(
+            tool_name="file_read",
+            args=args,
+            tool_call_id=pending.tool_call_id,
+            raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+        ),
+        reason,
+    )
 
 
 def _write_policy_value(harness: Any, name: str, default: Any) -> Any:
@@ -1177,12 +1366,20 @@ def _repair_active_write_session_args(
     def _is_blank(value: Any) -> bool:
         return value is None or (isinstance(value, str) and not value.strip())
 
-    def _looks_like_system_repair_cycle_id(value: Any) -> bool:
-        return str(value or "").strip().lower().startswith("repair-")
-
     session = getattr(getattr(harness, "state", None), "write_session", None)
     if session is not None and str(getattr(session, "status", "")).strip().lower() != "complete":
         session_id = str(args.get("write_session_id") or "").strip()
+        inferred_path = str(args.get("path") or "").strip()
+        if not inferred_path:
+            inferred_path, _confidence, _evidence = infer_write_target_path(
+                harness=harness,
+                pending=pending,
+                assistant_text=assistant_text,
+                partial_tool_calls=None,
+            )
+        session_matches_target = not inferred_path
+        if inferred_path:
+            session_matches_target = _active_write_session_for_target(harness, inferred_path) is session
         if session_id and session_id == session.write_session_id:
             if _is_blank(args.get("path")) and str(session.write_target_path or "").strip():
                 args["path"] = session.write_target_path
@@ -1196,31 +1393,19 @@ def _repair_active_write_session_args(
                 if section_name:
                     args["section_name"] = section_name
                     repaired = True
-        elif session_id and _looks_like_system_repair_cycle_id(session_id):
-            inferred_path = str(args.get("path") or "").strip()
-            if not inferred_path:
-                inferred_path, _confidence, _evidence = infer_write_target_path(
-                    harness=harness,
-                    pending=pending,
-                    assistant_text=assistant_text,
-                    partial_tool_calls=None,
-                )
-            session_matches_target = not inferred_path
-            if inferred_path:
-                session_matches_target = _active_write_session_for_target(harness, inferred_path) is session
-            if session_matches_target:
-                args["write_session_id"] = session.write_session_id
-                repaired = True
-                if _is_blank(args.get("path")) and str(session.write_target_path or "").strip():
-                    args["path"] = session.write_target_path
-                if _is_blank(args.get("section_name")) and _is_blank(args.get("section_id")):
-                    section_name = str(
-                        session.write_next_section
-                        or session.write_current_section
-                        or ""
-                    ).strip()
-                    if section_name:
-                        args["section_name"] = section_name
+        elif session_id and session_matches_target:
+            args["write_session_id"] = session.write_session_id
+            repaired = True
+            if _is_blank(args.get("path")) and str(session.write_target_path or "").strip():
+                args["path"] = session.write_target_path
+            if _is_blank(args.get("section_name")) and _is_blank(args.get("section_id")):
+                section_name = str(
+                    session.write_next_section
+                    or session.write_current_section
+                    or ""
+                ).strip()
+                if section_name:
+                    args["section_name"] = section_name
 
     if _is_blank(args.get("path")):
         inferred_path, _confidence, _evidence = infer_write_target_path(
@@ -1328,7 +1513,7 @@ def _salvage_active_write_session_append(
 
     for item in reversed(raw_calls):
         candidate = PendingToolCall.from_payload(item)
-        if candidate is None or candidate.tool_name not in {"file_write", "file_append"}:
+        if candidate is None or candidate.tool_name not in {"file_write", "file_append", "file_patch"}:
             continue
         candidate_content = candidate.args.get("content")
         if candidate_content is None or not str(candidate_content).strip():
@@ -1439,6 +1624,31 @@ def _build_schema_repair_message(
 ) -> str:
     field_names = [str(field) for field in required_fields if str(field).strip()]
     required_text = ", ".join(field_names) or "path, content"
+    if pending.tool_name == "file_patch":
+        target_path = str(pending.args.get("path") or primary_task_target_path(harness) or "").strip()
+        target_hint = f" Target path for this task: `{target_path}`." if target_path else ""
+        session = _active_write_session_for_target(harness, target_path)
+        if session is None:
+            session = getattr(getattr(harness, "state", None), "write_session", None)
+            if session is not None and str(getattr(session, "status", "")).strip().lower() == "complete":
+                session = None
+        if session is not None:
+            return (
+                f"Tool call '{pending.tool_name}' was emitted without arguments. "
+                f"Continue with the active staged copy for `{session.write_target_path}` if this is the current target. "
+                f"Resend `file_patch` with these required fields: {required_text}."
+                f"{target_hint} "
+                "Use exact target text and replacement text including whitespace. The target path remains the "
+                "canonical destination while the staged copy is the read/verify source. If the target appears more "
+                "than once, read the smallest relevant slice first and make the target text more specific."
+            )
+        return (
+            f"Tool call '{pending.tool_name}' was emitted without arguments. "
+            f"Please resend the tool call with these required fields: {required_text}."
+            f"{target_hint} "
+            "Use exact target text and replacement text including whitespace. If the target appears more "
+            "than once, read the smallest relevant slice first and make the target text more specific."
+        )
     if pending.tool_name in {"file_write", "file_append"}:
         target_path = str(pending.args.get("path") or primary_task_target_path(harness) or "").strip()
         target_hint = f" Target path for this task: `{target_path}`." if target_path else ""
@@ -1460,6 +1670,7 @@ def _build_schema_repair_message(
                 f"Resend `file_write` with these required fields: {required_text}, plus "
                 f"`write_session_id='{session.write_session_id}'` and `section_name='{section_name}'`."
                 f"{next_hint} Do not switch back to `file_append` or `file_read` unless you truly need local context for a repair."
+                " For a narrow exact edit inside the staged copy, use `file_patch` instead of `file_write`."
             )
         return (
             f"Tool call '{pending.tool_name}' was emitted without arguments. "
@@ -1794,6 +2005,40 @@ def _record_tool_attempt(harness: Any, pending: PendingToolCall) -> None:
 
 def _clear_tool_attempt_history(harness: Any) -> None:
     harness.state.scratchpad.pop("_tool_attempt_history", None)
+
+
+def allow_repeated_tool_call_once(harness: Any, tool_name: str, args: dict[str, Any]) -> None:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    fingerprints = scratchpad.get(_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY)
+    if not isinstance(fingerprints, list):
+        fingerprints = []
+    normalized = [str(item) for item in fingerprints if str(item).strip()]
+    fingerprint = _tool_call_fingerprint(tool_name, args)
+    if fingerprint not in normalized:
+        normalized.append(fingerprint)
+    scratchpad[_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY] = normalized[-8:]
+
+
+def _consume_repeat_guard_one_shot_allowance(harness: Any, pending: PendingToolCall) -> bool:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    fingerprints = scratchpad.get(_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY)
+    if not isinstance(fingerprints, list) or not fingerprints:
+        return False
+    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+    normalized = [str(item) for item in fingerprints if str(item).strip()]
+    if fingerprint not in normalized:
+        scratchpad[_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY] = normalized
+        return False
+    normalized.remove(fingerprint)
+    if normalized:
+        scratchpad[_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY] = normalized
+    else:
+        scratchpad.pop(_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY, None)
+    return True
 
 
 def _tool_attempt_history(harness: Any) -> list[dict[str, str]]:

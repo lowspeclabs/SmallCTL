@@ -16,6 +16,7 @@ from ..state import (
     LoopState,
     MemoryEntry,
     memory_entry_is_stale,
+    normalize_intent_label,
 )
 from .policy import ContextPolicy, estimate_text_tokens
 
@@ -431,10 +432,10 @@ class LexicalRetriever:
     def _score_experience(self, m: ExperienceMemory, state: LoopState, *, query_override: str | None = None) -> float:
         query_text = query_override or build_retrieval_query(state)
         query_tokens = _tokens(query_text)
-        item_tokens = _tokens(f"{m.intent} {m.tool_name} {m.notes} {m.failure_mode}")
+        item_tokens = _tokens(f"{normalize_intent_label(m.intent)} {m.tool_name} {m.notes} {m.failure_mode}")
 
         score = 0.0
-        if m.intent == state.active_intent:
+        if normalize_intent_label(m.intent) == normalize_intent_label(state.active_intent):
             score += 15.0
         requested_tool = self._infer_requested_tool(state)
         if m.tool_name and requested_tool and m.tool_name == requested_tool:
@@ -520,18 +521,32 @@ class LexicalRetriever:
         return ranked[0][0] - ranked[1][0]
 
     @staticmethod
+    def _normalized_goal_text(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip()).lower()
+
+    @classmethod
+    def _effective_current_goal(cls, state: LoopState) -> str:
+        current_goal = str(getattr(state.working_memory, "current_goal", "") or "").strip()
+        if not current_goal:
+            return ""
+        previous_task = str(state.scratchpad.get("_task_boundary_previous_task") or "").strip()
+        if previous_task and cls._normalized_goal_text(previous_task) == cls._normalized_goal_text(current_goal):
+            return ""
+        return current_goal
+
+    @staticmethod
     def _state_environment_tags(state: LoopState) -> set[str]:
         return _tokens(" ".join([state.current_phase, state.cwd, *state.active_tool_profiles]))
 
-    @staticmethod
-    def _state_entity_tags(state: LoopState) -> set[str]:
+    @classmethod
+    def _state_entity_tags(cls, state: LoopState) -> set[str]:
         return _tokens(
             " ".join(
                 filter(
                     None,
                     [
                         state.run_brief.original_task,
-                        getattr(state.working_memory, "current_goal", ""),
+                        cls._effective_current_goal(state),
                         " ".join(state.working_memory.open_questions),
                     ],
                 )
@@ -723,11 +738,12 @@ def build_retrieval_query(state: LoopState) -> str:
         if plan.requested_output_path:
             parts.append(f"Plan export: {plan.requested_output_path}")
     if state.active_intent:
-        parts.append(f"Intent: {state.active_intent}")
+        parts.append(f"Intent: {normalize_intent_label(state.active_intent)}")
     if state.intent_tags:
         parts.append(f"Tags: {' '.join(state.intent_tags)}")
-    if getattr(state.working_memory, "current_goal", ""):
-        parts.append(f"Current goal: {state.working_memory.current_goal}")
+    current_goal = LexicalRetriever._effective_current_goal(state)
+    if current_goal:
+        parts.append(f"Current goal: {current_goal}")
     parts.extend(state.working_memory.plan[-3:])
     parts.extend(state.working_memory.decisions[-3:])
     parts.extend(
@@ -774,8 +790,9 @@ def build_refined_retrieval_query(
     parts = [base_query]
     if state.run_brief.task_contract:
         parts.append(f"Contract: {state.run_brief.task_contract}")
-    if getattr(state.working_memory, "current_goal", ""):
-        parts.append(f"Current goal: {state.working_memory.current_goal}")
+    current_goal = LexicalRetriever._effective_current_goal(state)
+    if current_goal:
+        parts.append(f"Current goal: {current_goal}")
     if bundle.artifacts:
         top_snippet = bundle.artifacts[0]
         top_artifact = state.artifacts.get(top_snippet.artifact_id)
@@ -795,7 +812,9 @@ def build_refined_retrieval_query(
             parts.append("Summary notes: " + " ".join(summary.notes[:2]))
     if bundle.experiences:
         memory = bundle.experiences[0]
-        parts.append(f"Prior outcome: {memory.intent} / {memory.tool_name} / {memory.outcome}")
+        parts.append(
+            f"Prior outcome: {normalize_intent_label(memory.intent)} / {memory.tool_name} / {memory.outcome}"
+        )
         if memory.failure_mode:
             parts.append(f"Failure mode: {memory.failure_mode}")
         if memory.intent_tags:

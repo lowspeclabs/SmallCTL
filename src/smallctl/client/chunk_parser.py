@@ -3,7 +3,64 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal
+
+_REASONING_WRAPPER_TAGS = ("analysis", "plan")
+_ASSISTANT_WRAPPER_TAGS = ("execution",)
+
+
+def _normalize_thinking_tag_aliases(
+    text: str,
+    *,
+    thinking_start_tag: str,
+    thinking_end_tag: str,
+) -> str:
+    normalized = str(text or "")
+    if thinking_start_tag == "<think>":
+        normalized = normalized.replace("<thinking>", thinking_start_tag)
+    if thinking_end_tag == "</think>":
+        normalized = normalized.replace("</thinking>", thinking_end_tag)
+    return normalized
+
+
+def _extract_reasoning_wrapper_blocks(text: str) -> tuple[str, str]:
+    normalized = str(text or "")
+    reasoning_parts: list[str] = []
+
+    for tag_name in _REASONING_WRAPPER_TAGS:
+        pattern = re.compile(
+            rf"<{tag_name}>(?P<body>.*?)</{tag_name}>",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        def _capture(match: re.Match[str]) -> str:
+            body = match.group("body")
+            if body:
+                reasoning_parts.append(body)
+            return ""
+
+        normalized = pattern.sub(_capture, normalized)
+
+    for tag_name in _ASSISTANT_WRAPPER_TAGS:
+        normalized = re.sub(rf"</?{tag_name}>", "", normalized, flags=re.IGNORECASE)
+
+    return normalized, "".join(reasoning_parts)
+
+
+def merge_reasoning_text(*parts: str) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        text = str(part or "")
+        if not text.strip():
+            continue
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(text)
+    return "".join(merged)
 
 
 def extract_thinking_from_tags(
@@ -13,18 +70,14 @@ def extract_thinking_from_tags(
     thinking_end_tag: str,
 ) -> tuple[str, str]:
     """Extract thinking content from tags and return (assistant_text, thinking_text)."""
-    if not text or thinking_start_tag not in text:
-        if thinking_start_tag == "<think>":
-            text = text.replace("<thinking>", thinking_start_tag)
-        if thinking_end_tag == "</think>":
-            text = text.replace("</thinking>", thinking_end_tag)
-        if thinking_start_tag not in text:
-            return text, ""
-    normalized = text
-    if thinking_start_tag == "<think>":
-        normalized = normalized.replace("<thinking>", thinking_start_tag)
-    if thinking_end_tag == "</think>":
-        normalized = normalized.replace("</thinking>", thinking_end_tag)
+    normalized = _normalize_thinking_tag_aliases(
+        text,
+        thinking_start_tag=thinking_start_tag,
+        thinking_end_tag=thinking_end_tag,
+    )
+    normalized, wrapped_reasoning = _extract_reasoning_wrapper_blocks(normalized)
+    if not normalized or thinking_start_tag not in normalized:
+        return normalized, wrapped_reasoning
 
     assistant_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -44,7 +97,7 @@ def extract_thinking_from_tags(
         thinking_parts.append(normalized[content_start:end])
         cursor = end + len(thinking_end_tag)
 
-    return "".join(assistant_parts), "".join(thinking_parts)
+    return "".join(assistant_parts), merge_reasoning_text(wrapped_reasoning, "".join(thinking_parts))
 
 
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:
@@ -107,7 +160,7 @@ def _content_fragment_kind(
 ) -> Literal["assistant", "thinking"]:
     """Determine content fragment kind from type string."""
     value = str(raw_type or "").strip().lower()
-    if value in {"reasoning", "reasoning_content", "thinking", "summary_text"}:
+    if value in {"reasoning", "reasoning_content", "thinking", "summary_text", "analysis", "plan"}:
         return "thinking"
     if value in {"text", "output_text", "input_text", "message", "output_message"}:
         return "assistant"

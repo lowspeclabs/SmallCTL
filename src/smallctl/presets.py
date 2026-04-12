@@ -27,7 +27,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_prompt_tokens": 4096,
         "reserve_completion_tokens": 768,
         "reserve_tool_tokens": 384,
-        "first_token_timeout_sec": 25,
+        "first_token_timeout_sec": 45,
     },
 }
 

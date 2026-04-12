@@ -29,6 +29,7 @@ from .write_recovery import (
     build_synthetic_file_write_call,
     can_safely_synthesize,
     infer_write_target_path,
+    maybe_finalize_recovered_assistant_write,
     recover_write_intent,
     recover_content_from_assistant_text,
     write_recovery_kind,
@@ -127,6 +128,29 @@ def _build_tool_specific_recovery_hint(
         if not tool_name:
             continue
 
+        if tool_name == "file_patch":
+            target_path = primary_task_target_path(harness)
+            path_hint = f" Target path for this task: `{target_path}`." if target_path else ""
+            session = _active_text_write_fallback_session(harness)
+            if session is not None and str(getattr(session, "write_session_intent", "") or "").strip().lower() in {
+                "replace_file",
+                "patch_existing",
+            }:
+                return (
+                    f"For `{tool_name}`, continue Write Session `{session.write_session_id}` for "
+                    f"`{session.write_target_path}`. The target path is still the canonical destination; use the "
+                    "staged copy for read/verify context. Include required fields `path`, `target_text`, and "
+                    f"`replacement_text`, plus `write_session_id='{session.write_session_id}'` when the harness "
+                    "supplies an active session. Use exact text including whitespace, and regenerate the complete "
+                    "JSON tool call from scratch."
+                )
+            return (
+                f"For `{tool_name}`, include the required fields `path`, `target_text`, and `replacement_text`."
+                f"{path_hint} "
+                "Use exact text including whitespace. If the target appears more than once, read the smallest "
+                "relevant slice first and regenerate the call with a more specific `target_text`."
+            )
+
         if tool_name in {"file_write", "file_append"}:
             target_path = primary_task_target_path(harness)
             session = _ensure_chunk_write_session(harness, target_path) if target_path else None
@@ -141,7 +165,8 @@ def _build_tool_specific_recovery_hint(
                     f"`{session.write_target_path}`. Include required fields `path` and `content`, plus "
                     f"`write_session_id='{session.write_session_id}'` and `section_name='{section_name}'`. "
                     "If additional chunks remain, include `next_section_name='...'`; omit it on the final chunk. "
-                    "When resuming an active write session, prefer `file_write` rather than a bare `file_append`. "
+                    "When resuming an active write session, prefer `file_write` for chunk continuation rather than a bare `file_append`. "
+                    "If you need a narrow exact edit inside the staged copy, switch to `file_patch`. "
                     "Regenerate the complete JSON tool call from scratch."
                 )
             path_hint = f" Target path for this task: `{target_path}`." if target_path else ""
@@ -813,6 +838,19 @@ async def _attempt_text_write_fallback(
         path_confidence="high" if str(getattr(session_context, "write_target_path", "") or "").strip() else "low",
     )
     next_section_name = _fallback_next_section_name(session_context, current_section)
+    fallback_intent = recover_write_intent(
+        harness=harness,
+        pending=None,
+        assistant_text=fallback_stream.assistant_text,
+        partial_tool_calls=partial_tool_calls,
+    )
+    if fallback_intent is not None:
+        maybe_finalize_recovered_assistant_write(fallback_intent)
+    resolved_next_section_name = (
+        str(getattr(fallback_intent, "next_section_name", "") or "").strip()
+        if fallback_intent is not None
+        else next_section_name
+    )
     await _emit_text_write_fallback_trace(
         harness,
         deps,
@@ -821,14 +859,8 @@ async def _attempt_text_write_fallback(
         prompt=fallback_prompt,
         assistant_text=fallback_stream.assistant_text,
         extracted_code=extracted_code,
-        next_section_name=next_section_name,
+        next_section_name=resolved_next_section_name,
         tool_names=tool_names,
-    )
-    fallback_intent = recover_write_intent(
-        harness=harness,
-        pending=None,
-        assistant_text=fallback_stream.assistant_text,
-        partial_tool_calls=partial_tool_calls,
     )
     if fallback_intent is not None:
         graph_state.latency_metrics["write_recovery_attempt_count"] = (
@@ -873,7 +905,7 @@ async def _attempt_text_write_fallback(
             write_session_id=fallback_intent.write_session_id,
             target_path=fallback_intent.path,
             current_section=fallback_intent.section_name or current_section,
-            next_section_name=fallback_intent.next_section_name or next_section_name,
+            next_section_name=resolved_next_section_name,
             recovery_kind=write_recovery_kind(fallback_intent),
             reason=reason,
         )
@@ -898,7 +930,7 @@ async def _attempt_text_write_fallback(
             prompt=fallback_prompt,
             assistant_text=fallback_stream.assistant_text,
             extracted_code=extracted_code,
-            next_section_name=next_section_name,
+            next_section_name=resolved_next_section_name,
             tool_names=tool_names,
         )
         graph_state.latency_metrics["text_write_fallback_success_count"] = (

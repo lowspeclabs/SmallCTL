@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import time
@@ -9,19 +10,30 @@ from ..harness.tool_results import _classify_execution_failure
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..plans import write_plan_file
-from ..state import clip_text_value, json_safe_value
+from ..state import WriteSession, clip_text_value, json_safe_value
 from ..write_session_fsm import record_write_session_event, transition_write_session
 from .deps import GraphRuntimeDeps
 from .display import format_tool_result_display
 from .interrupts import build_interrupt_payload, pause_for_plan_approval
 from .routing import LoopRoute
-from .state import GraphRunState, ToolExecutionRecord
+from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
+from .tool_call_parser import allow_repeated_tool_call_once
 
 
 _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
 _CHAT_PROGRESS_GUARD_KEY = "_chat_progress_guard"
 _CHAT_STALL_REPEAT_LIMIT = 2
 _CHAT_PROGRESS_CONTROL_TOOLS = {"task_complete", "task_fail", "ask_human"}
+_PATCH_EXISTING_STAGE_READ_AUTOCONTINUE_LIMIT = 1
+
+
+async def _emit_ui_event(harness: Any, event_handler: Any, event: UIEvent) -> None:
+    emit = getattr(harness, "_emit", None)
+    if not callable(emit):
+        return
+    maybe_awaitable = emit(event_handler, event)
+    if inspect.isawaitable(maybe_awaitable):
+        await maybe_awaitable
 
 
 def _is_plan_export_validation_error(error: str | None) -> bool:
@@ -336,6 +348,7 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
     failure_class = str(getattr(harness.state, "last_failure_class", "") or "").strip()
     repair_cycle_id = str(getattr(harness.state, "repair_cycle_id", "") or "").strip()
     path = str(record.args.get("path") or record.args.get("command") or record.args.get("host") or "").strip()
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
     counters = getattr(harness.state, "stagnation_counters", {}) or {}
     counter_bits = ", ".join(
         f"{name}={value}"
@@ -352,7 +365,22 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
         bits.append(f"stagnation: {counter_bits}")
     if path:
         bits.append(f"focus target: {path}")
-    if tool_name in {"file_write", "file_append", "file_delete"}:
+    if tool_name in {"file_write", "file_append", "file_patch", "file_delete"}:
+        if tool_name == "file_patch":
+            source_path = str(metadata.get("source_path") or "").strip()
+            if str(metadata.get("staged_only") or "").lower() in {"true", "1"} and source_path:
+                bits.append(f"staged copy: {source_path}")
+            ambiguity_hint = str(metadata.get("ambiguity_hint") or "").strip()
+            if ambiguity_hint:
+                bits.append(ambiguity_hint)
+            elif str(metadata.get("error_kind") or "") == "patch_occurrence_mismatch":
+                actual = metadata.get("actual_occurrences")
+                expected = metadata.get("expected_occurrences")
+                if actual is not None and expected is not None:
+                    bits.append(
+                        f"patch ambiguity: target matched {actual} time(s), expected {expected}. "
+                        "Read a smaller slice and make `target_text` more specific before retrying."
+                    )
         return (
             " | ".join(bits)
             + ". Do not broad-rewrite the file. Read the current file or failing evidence first, "
@@ -369,6 +397,506 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
         + ". Do not repeat the same recovery shape; read the smallest relevant evidence first, "
         "classify the failure, then make one narrow change."
     )
+
+
+def _maybe_emit_patch_existing_first_choice_nudge(
+    harness: Any,
+    session: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name not in {"file_write", "file_append"} or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "patch_existing_requires_explicit_replace_strategy":
+        return False
+    if str(metadata.get("write_session_id") or "").strip() != str(getattr(session, "write_session_id", "") or "").strip():
+        return False
+
+    target_path = str(getattr(session, "write_target_path", "") or record.args.get("path") or "").strip()
+    stage_path = str(metadata.get("staging_path") or getattr(session, "write_staging_path", "") or "").strip()
+    artifact_id = _register_write_session_stage_artifact(harness, session)
+    artifact_hint = ""
+    if artifact_id:
+        artifact_hint = f" or `artifact_read(artifact_id='{artifact_id}')`"
+
+    signature = "|".join(
+        [
+            str(getattr(session, "write_session_id", "") or ""),
+            str(target_path or ""),
+            str(stage_path or ""),
+            str(record.operation_id or ""),
+            "patch_existing_first_choice",
+        ]
+    )
+    if harness.state.scratchpad.get("_patch_existing_first_choice_nudged") == signature:
+        return False
+    harness.state.scratchpad["_patch_existing_first_choice_nudged"] = signature
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Write Session `{session.write_session_id}` is a `patch_existing` session with no tracked sections yet. "
+                f"Before retrying, recover the current staged content with `file_read(path='{target_path}')`{artifact_hint}. "
+                f"The active staged copy is `{stage_path}`. "
+                "Then choose exactly one recovery shape: use `file_patch` for a narrow exact edit, or resend `file_write` with "
+                "`replace_strategy='overwrite'` only if you intentionally want to replace the entire staged file. "
+                "Do not assume earlier chunks were lost or rewrite the whole file from memory."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "patch_existing_first_choice",
+                "session_id": session.write_session_id,
+                "target_path": target_path,
+                "staging_path": stage_path,
+                "artifact_id": artifact_id or "",
+            },
+        )
+    )
+    return True
+
+
+def _maybe_schedule_patch_existing_stage_read_recovery(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name not in {"file_write", "file_append"} or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "patch_existing_requires_explicit_replace_strategy":
+        return False
+
+    session_id = str(metadata.get("write_session_id") or record.args.get("write_session_id") or "").strip()
+    target_path = str(
+        metadata.get("path")
+        or record.args.get("path")
+        or ""
+    ).strip()
+    if not target_path:
+        return False
+    staging_path = str(metadata.get("staging_path") or "").strip()
+
+    session = _recover_patch_existing_recovery_session(
+        harness,
+        session_id=session_id,
+        target_path=target_path,
+        staging_path=staging_path,
+        metadata=metadata,
+    )
+    resolved_intent = str(
+        getattr(session, "write_session_intent", "")
+        or metadata.get("write_session_intent")
+        or ""
+    ).strip()
+    if resolved_intent != "patch_existing":
+        return False
+
+    recovery_session_id = str(getattr(session, "write_session_id", "") or session_id or "").strip()
+    recovery_staging_path = str(staging_path or getattr(session, "write_staging_path", "") or "").strip()
+    recovery_key = "|".join([recovery_session_id, target_path])
+    raw_counts = harness.state.scratchpad.get("_patch_existing_stage_read_autocontinue_counts")
+    counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+    attempt_count = int(counts.get(recovery_key, 0) or 0) + 1
+    counts[recovery_key] = attempt_count
+    harness.state.scratchpad["_patch_existing_stage_read_autocontinue_counts"] = counts
+    if attempt_count > _PATCH_EXISTING_STAGE_READ_AUTOCONTINUE_LIMIT:
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    (
+                        f"Auto-recovery stopped for Write Session `{recovery_session_id}` after repeated patch-existing "
+                        "first-chunk failures. "
+                    )
+                    if recovery_session_id
+                    else "Auto-recovery stopped after repeated patch-existing first-chunk failures. "
+                )
+                + "Do not retry `file_write` with the same implicit first-chunk choice. "
+                + (
+                    f"Inspect the staged copy at `{recovery_staging_path}` or reread the target with "
+                    f"`file_read(path='{target_path}')`, then choose exactly one repair shape: "
+                    if recovery_staging_path
+                    else f"Reread the target with `file_read(path='{target_path}')`, then choose exactly one repair shape: "
+                )
+                + "`file_patch` for a narrow exact edit, or `file_write` with "
+                + "`replace_strategy='overwrite'` only if you intentionally want to replace the entire staged file.",
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "patch_existing_stage_read_circuit_breaker",
+                    "session_id": recovery_session_id,
+                    "target_path": target_path,
+                    "staging_path": recovery_staging_path,
+                    "retry_count": attempt_count,
+                },
+            )
+        )
+        harness._runlog(
+            "patch_existing_stage_read_circuit_breaker",
+            "stopped automatic staged reads after repeated patch_existing first-choice failures",
+            tool_call_id=record.tool_call_id,
+            operation_id=record.operation_id,
+            session_id=recovery_session_id,
+            target_path=target_path,
+            staging_path=recovery_staging_path,
+            retry_count=attempt_count,
+        )
+        return False
+
+    signature = "|".join(
+        [
+            str(record.operation_id or ""),
+            recovery_session_id,
+            target_path,
+            "patch_existing_stage_read_autocontinue",
+        ]
+    )
+    if harness.state.scratchpad.get("_patch_existing_stage_read_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_patch_existing_stage_read_autocontinue"] = signature
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="file_read",
+            args={"path": target_path},
+            raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
+        )
+    ]
+    harness.state.scratchpad["_patch_existing_stage_read_contract"] = {
+        "session_id": recovery_session_id,
+        "target_path": target_path,
+        "staging_path": recovery_staging_path,
+    }
+    allow_repeated_tool_call_once(harness, "file_read", {"path": target_path})
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                (
+                    f"Auto-continuing recovery for Write Session `{getattr(session, 'write_session_id', '')}`: "
+                    if session is not None and str(getattr(session, "write_session_id", "") or "").strip()
+                    else "Auto-continuing patch-existing recovery: "
+                )
+                + f"reading the current staged content with `file_read(path='{target_path}')` before asking for another write."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "patch_existing_stage_read_autocontinue",
+                "session_id": recovery_session_id,
+                "target_path": target_path,
+                "staging_path": recovery_staging_path,
+                "requires_explicit_followup_shape": True,
+                "session_recovered": bool(session is not None and session_id and str(getattr(session, "write_session_id", "") or "").strip() == session_id),
+            },
+        )
+    )
+    harness._runlog(
+        "patch_existing_stage_read_autocontinue",
+        "scheduled automatic staged read after patch_existing first-choice failure",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        session_id=recovery_session_id,
+        target_path=target_path,
+        error_kind=str(metadata.get("error_kind") or ""),
+        session_recovered=bool(session is not None and session_id and str(getattr(session, "write_session_id", "") or "").strip() == session_id),
+    )
+    return True
+
+
+def _recover_patch_existing_recovery_session(
+    harness: Any,
+    *,
+    session_id: str,
+    target_path: str,
+    staging_path: str,
+    metadata: dict[str, Any],
+) -> WriteSession | Any | None:
+    session = getattr(harness.state, "write_session", None)
+    if session is not None:
+        active_id = str(getattr(session, "write_session_id", "") or "").strip()
+        active_target = str(getattr(session, "write_target_path", "") or "").strip()
+        active_intent = str(getattr(session, "write_session_intent", "") or "").strip()
+        if session_id and active_id == session_id:
+            return session
+        if active_target and target_path:
+            try:
+                from ..tools.fs import _same_target_path
+
+                if _same_target_path(active_target, target_path, getattr(harness.state, "cwd", None)):
+                    if active_intent == "patch_existing" and not session_id:
+                        if staging_path and not str(getattr(session, "write_staging_path", "") or "").strip():
+                            session.write_staging_path = staging_path
+                        return session
+            except Exception:
+                if active_target == target_path and active_intent == "patch_existing" and not session_id:
+                    if staging_path and not str(getattr(session, "write_staging_path", "") or "").strip():
+                        session.write_staging_path = staging_path
+                    return session
+
+    recovered_intent = str(metadata.get("write_session_intent") or "").strip()
+    if recovered_intent != "patch_existing":
+        return session
+    if not target_path:
+        return session
+
+    recovered_session = WriteSession(
+        write_session_id=session_id,
+        write_target_path=target_path,
+        write_session_intent="patch_existing",
+        write_staging_path=staging_path,
+        write_target_existed_at_start=True,
+        status="open",
+    )
+    harness.state.write_session = recovered_session
+    return recovered_session
+
+
+def _maybe_schedule_file_patch_read_recovery(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "file_patch" or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    error_kind = str(metadata.get("error_kind") or "").strip()
+    if error_kind not in {"patch_target_not_found", "patch_occurrence_mismatch"}:
+        return False
+
+    target_path = str(
+        metadata.get("requested_path")
+        or metadata.get("path")
+        or record.args.get("path")
+        or ""
+    ).strip()
+    if not target_path:
+        return False
+
+    signature = "|".join(
+        [
+            str(record.operation_id or ""),
+            target_path,
+            error_kind,
+            "file_patch_read_autocontinue",
+        ]
+    )
+    if harness.state.scratchpad.get("_file_patch_read_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_file_patch_read_autocontinue"] = signature
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="file_read",
+            args={"path": target_path},
+            raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
+        )
+    ]
+    allow_repeated_tool_call_once(harness, "file_read", {"path": target_path})
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Auto-continuing patch recovery for `{target_path}`: "
+                f"reading the current file with `file_read(path='{target_path}')` before asking for another patch."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "file_patch_read_autocontinue",
+                "target_path": target_path,
+                "error_kind": error_kind,
+            },
+        )
+    )
+    harness._runlog(
+        "file_patch_read_autocontinue",
+        "scheduled automatic file read after patch mismatch",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        target_path=target_path,
+        error_kind=error_kind,
+    )
+    return True
+
+
+def _maybe_emit_write_session_target_path_redirect_nudge(harness: Any, record: ToolExecutionRecord) -> bool:
+    if record.tool_name not in {"file_write", "file_append", "file_patch", "file_delete"} or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "write_session_staging_path_used_as_target":
+        return False
+
+    session_id = str(metadata.get("write_session_id") or "").strip()
+    target_path = str(metadata.get("target_path") or "").strip()
+    staging_path = str(metadata.get("staging_path") or "").strip()
+    if not session_id or not target_path or not staging_path:
+        return False
+
+    signature = "|".join(
+        [
+            str(record.operation_id or ""),
+            session_id,
+            str(record.tool_name or ""),
+            target_path,
+            staging_path,
+            "write_session_target_path_redirect",
+        ]
+    )
+    if harness.state.scratchpad.get("_write_session_target_path_redirect_nudged") == signature:
+        return False
+    harness.state.scratchpad["_write_session_target_path_redirect_nudged"] = signature
+
+    if record.tool_name in {"file_write", "file_append"}:
+        same_args_hint = "Reuse the same content and section metadata; only correct the path."
+    elif record.tool_name == "file_patch":
+        same_args_hint = "Reuse the same patch arguments; only correct the path."
+    else:
+        same_args_hint = "Only retry if deleting the target file is still the intended action."
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Write Session `{session_id}` uses target `{target_path}`. "
+                f"The last `{record.tool_name}` call addressed the staged copy `{staging_path}` directly. "
+                f"Retry the same `{record.tool_name}` call with `path='{target_path}'` instead. "
+                f"{same_args_hint} Keep the staging path only for `file_read` or `artifact_read`."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "write_session_target_path_redirect",
+                "tool_name": str(record.tool_name or ""),
+                "session_id": session_id,
+                "target_path": target_path,
+                "staging_path": staging_path,
+            },
+        )
+    )
+    harness._runlog(
+        "write_session_target_path_redirect_nudge",
+        "injected recovery nudge after direct staging-path mutation attempt",
+        tool_name=str(record.tool_name or ""),
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        session_id=session_id,
+        target_path=target_path,
+        staging_path=staging_path,
+    )
+    return True
+
+
+def _maybe_schedule_task_complete_verifier_loop_status(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "task_complete" or record.result.success:
+        return False
+
+    error_text = str(record.result.error or "").strip().lower()
+    if "latest verifier verdict is still failing" not in error_text:
+        return False
+
+    signature = "|".join(
+        [
+            str(record.tool_call_id or ""),
+            str(record.operation_id or ""),
+            "task_complete_verifier_loop_status",
+        ]
+    )
+    if harness.state.scratchpad.get("_task_complete_verifier_loop_status_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_task_complete_verifier_loop_status_autocontinue"] = signature
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="loop_status",
+            args={},
+            raw_arguments="{}",
+        )
+    ]
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content="Auto-continuing verifier recovery with `loop_status` before requesting another completion attempt.",
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "task_complete_verifier_loop_status_autocontinue",
+            },
+        )
+    )
+    harness._runlog(
+        "task_complete_verifier_loop_status_autocontinue",
+        "scheduled automatic loop_status after blocked task completion",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+    )
+    return True
+
+
+def _maybe_schedule_task_complete_repair_loop_status(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "task_complete" or record.result.success:
+        return False
+
+    error_text = str(record.result.error or "").strip().lower()
+    if "not allowed in phase 'repair'" not in error_text:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    blocked_phase = str(
+        metadata.get("phase")
+        or metadata.get("dispatch_phase")
+        or ""
+    ).strip().lower()
+    if blocked_phase and blocked_phase != "repair":
+        return False
+
+    signature = "|".join(
+        [
+            str(record.tool_call_id or ""),
+            str(record.operation_id or ""),
+            "task_complete_repair_loop_status",
+        ]
+    )
+    if harness.state.scratchpad.get("_task_complete_repair_loop_status_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_task_complete_repair_loop_status_autocontinue"] = signature
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="loop_status",
+            args={},
+            raw_arguments="{}",
+        )
+    ]
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "Auto-continuing repair recovery with `loop_status` after blocked "
+                "`task_complete` in the REPAIR phase."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "task_complete_repair_loop_status_autocontinue",
+                "phase": "repair",
+            },
+        )
+    )
+    harness._runlog(
+        "task_complete_repair_loop_status_autocontinue",
+        "scheduled automatic loop_status after repair-phase task completion block",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+    )
+    return True
 
 
 def _maybe_emit_task_complete_verifier_nudge(harness: Any, record: ToolExecutionRecord) -> bool:
@@ -458,7 +986,7 @@ def _maybe_record_write_session_first_chunk_metric(
     session = getattr(harness.state, "write_session", None)
     if session is None:
         return None
-    if record.tool_name not in {"file_write", "file_append"} or not record.result.success:
+    if record.tool_name not in {"file_write", "file_append", "file_patch"} or not record.result.success:
         return None
     if str(record.result.metadata.get("write_session_id") or "").strip() != session.write_session_id:
         return None
@@ -717,7 +1245,7 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
         return
 
     # Success Handling for Writes
-    if record.tool_name in {"file_write", "file_append"}:
+    if record.tool_name in {"file_write", "file_append", "file_patch"}:
         res_session_id = record.result.metadata.get("write_session_id")
         if not res_session_id or res_session_id != session.write_session_id:
             return
@@ -920,6 +1448,7 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
             return
         else:
             # Failed chunk write
+            _maybe_emit_patch_existing_first_choice_nudge(harness, session, record)
             session.write_failed_local_patches += 1
             _maybe_trigger_write_session_fallback(harness, session)
             return
@@ -940,7 +1469,8 @@ async def apply_tool_outcomes(
     for record in graph_state.last_tool_results:
         if record.tool_name == "task_complete" and record.result.success:
             _auto_update_active_plan_step(harness, status="completed", note=str(record.result.output or ""))
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(event_type=UIEventType.SYSTEM, content="Task marked complete."),
             )
@@ -953,7 +1483,20 @@ async def apply_tool_outcomes(
             }
             return LoopRoute.FINALIZE
         if record.tool_name == "task_complete" and not record.result.success:
+            scheduled_loop_status = _maybe_schedule_task_complete_repair_loop_status(graph_state, harness, record)
+            if not scheduled_loop_status:
+                scheduled_loop_status = _maybe_schedule_task_complete_verifier_loop_status(graph_state, harness, record)
             _maybe_emit_task_complete_verifier_nudge(harness, record)
+            if scheduled_loop_status:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing recovery with `loop_status` after blocked task completion.",
+                        data={"status_activity": "auto-continuing verifier recovery"},
+                    ),
+                )
         if record.tool_name == "shell_exec":
             if record.result.success:
                 _clear_shell_human_retry_state(harness)
@@ -964,7 +1507,8 @@ async def apply_tool_outcomes(
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
         if record.tool_name == "task_fail" and record.result.success:
             _auto_update_active_plan_step(harness, status="blocked", note=str(record.result.output or ""))
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(event_type=UIEventType.ERROR, content="Task marked failed."),
             )
@@ -989,7 +1533,8 @@ async def apply_tool_outcomes(
             )
             graph_state.interrupt_payload = payload
             harness.state.pending_interrupt = payload
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.SYSTEM,
@@ -1028,7 +1573,8 @@ async def apply_tool_outcomes(
             }
             graph_state.interrupt_payload = payload
             harness.state.pending_interrupt = payload
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.SYSTEM,
@@ -1045,8 +1591,31 @@ async def apply_tool_outcomes(
                 "interrupt": payload,
             }
             return LoopRoute.FINALIZE
-        if record.tool_name in {"file_write", "file_append", "file_delete"} and not record.result.success:
+        if record.tool_name in {"file_write", "file_append", "file_patch", "file_delete"} and not record.result.success:
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
+            _maybe_emit_write_session_target_path_redirect_nudge(harness, record)
+            scheduled_stage_read = _maybe_schedule_patch_existing_stage_read_recovery(graph_state, harness, record)
+            scheduled_patch_read = _maybe_schedule_file_patch_read_recovery(graph_state, harness, record)
+            if scheduled_stage_read:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing recovery by reading the current staged content.",
+                        data={"status_activity": "auto-continuing staged read"},
+                    ),
+                )
+            elif scheduled_patch_read:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing patch recovery by reading the current file before another patch.",
+                        data={"status_activity": "auto-continuing patch read"},
+                    ),
+                )
 
         _maybe_record_write_session_first_chunk_metric(graph_state, harness, record)
         # Handle Write Sessions
@@ -1062,8 +1631,31 @@ async def apply_chat_tool_outcomes(
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
-        if record.tool_name in {"file_write", "file_append", "file_delete"} and not record.result.success:
+        if record.tool_name in {"file_write", "file_append", "file_patch", "file_delete"} and not record.result.success:
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
+            _maybe_emit_write_session_target_path_redirect_nudge(harness, record)
+            scheduled_stage_read = _maybe_schedule_patch_existing_stage_read_recovery(graph_state, harness, record)
+            scheduled_patch_read = _maybe_schedule_file_patch_read_recovery(graph_state, harness, record)
+            if scheduled_stage_read:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing recovery by reading the current staged content.",
+                        data={"status_activity": "auto-continuing staged read"},
+                    ),
+                )
+            elif scheduled_patch_read:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing patch recovery by reading the current file before another patch.",
+                        data={"status_activity": "auto-continuing patch read"},
+                    ),
+                )
 
         _maybe_record_write_session_first_chunk_metric(graph_state, harness, record)
         # Chat mode needs the same staged-write promotion/finalization path as loop mode.
@@ -1083,7 +1675,20 @@ async def apply_chat_tool_outcomes(
             }
             return LoopRoute.FINALIZE
         if record.tool_name == "task_complete" and not record.result.success:
+            scheduled_loop_status = _maybe_schedule_task_complete_repair_loop_status(graph_state, harness, record)
+            if not scheduled_loop_status:
+                scheduled_loop_status = _maybe_schedule_task_complete_verifier_loop_status(graph_state, harness, record)
             _maybe_emit_task_complete_verifier_nudge(harness, record)
+            if scheduled_loop_status:
+                await _emit_ui_event(
+                    harness,
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Auto-continuing recovery with `loop_status` after blocked task completion.",
+                        data={"status_activity": "auto-continuing verifier recovery"},
+                    ),
+                )
         if record.tool_name == "shell_exec":
             if record.result.success:
                 _clear_shell_human_retry_state(harness)
@@ -1144,7 +1749,8 @@ async def apply_chat_tool_outcomes(
             }
             graph_state.interrupt_payload = payload
             harness.state.pending_interrupt = payload
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.SYSTEM,
@@ -1203,7 +1809,8 @@ async def apply_planning_tool_outcomes(
                     retry_count=repair_attempts + 1,
                     error=str(record.result.error or ""),
                 )
-                await harness._emit(
+                await _emit_ui_event(
+                    harness,
                     deps.event_handler,
                     UIEvent(
                         event_type=UIEventType.ALERT,
@@ -1228,7 +1835,8 @@ async def apply_planning_tool_outcomes(
                 plan.touch()
                 harness.state.draft_plan = plan
                 harness.state.sync_plan_mirror()
-                await harness._emit(
+                await _emit_ui_event(
+                    harness,
                     deps.event_handler,
                     UIEvent(
                         event_type=UIEventType.ALERT,
@@ -1238,7 +1846,8 @@ async def apply_planning_tool_outcomes(
                 )
                 export_warning = str(record.result.metadata.get("export_warning", "") or "").strip()
                 if export_warning:
-                    await harness._emit(
+                    await _emit_ui_event(
+                        harness,
                         deps.event_handler,
                         UIEvent(
                             event_type=UIEventType.ALERT,
@@ -1267,7 +1876,8 @@ async def apply_planning_tool_outcomes(
                 harness.state.sync_plan_mirror()
                 active_step = plan.find_step(str(record.args.get("step_id", "")).strip())
                 step_label = active_step.step_id if active_step is not None else str(record.args.get("step_id", "")).strip()
-                await harness._emit(
+                await _emit_ui_event(
+                    harness,
                     deps.event_handler,
                     UIEvent(
                         event_type=UIEventType.ALERT,
@@ -1284,7 +1894,8 @@ async def apply_planning_tool_outcomes(
         if record.tool_name == "plan_export" and record.result.success:
             plan = harness.state.active_plan or harness.state.draft_plan
             if plan is not None:
-                await harness._emit(
+                await _emit_ui_event(
+                    harness,
                     deps.event_handler,
                     UIEvent(
                         event_type=UIEventType.ALERT,
@@ -1306,7 +1917,8 @@ async def apply_planning_tool_outcomes(
             }
             graph_state.interrupt_payload = payload
             harness.state.pending_interrupt = payload
-            await harness._emit(
+            await _emit_ui_event(
+                harness,
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.ALERT,
@@ -1402,6 +2014,17 @@ def _store_tool_execution_record(
             "tool_call_id": pending.tool_call_id,
             "args": dict(pending.args),
             "result": result.to_dict(),
+            "evidence_context": {
+                "operation_id": operation_id,
+                "thread_id": thread_id,
+                "step_count": step_count,
+                "phase": str(getattr(harness.state, "current_phase", "") or ""),
+                "tool_name": pending.tool_name,
+                "tool_call_id": pending.tool_call_id,
+                "args": dict(pending.args),
+                "replayed": bool(result.metadata.get("cache_hit")) if isinstance(result.metadata, dict) else False,
+                "artifact_id": str(result.metadata.get("artifact_id", "") or "").strip() if isinstance(result.metadata, dict) else "",
+            },
         }
     )
     harness.state.tool_execution_records[operation_id] = existing

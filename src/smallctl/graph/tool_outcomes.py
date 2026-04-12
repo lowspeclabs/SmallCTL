@@ -20,6 +20,68 @@ from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from .tool_call_parser import allow_repeated_tool_call_once
 
 
+def _maybe_schedule_write_recovery_readback(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "file_write" or not record.result.success:
+        return False
+
+    tool_call_id = str(record.tool_call_id or "").strip()
+    if not tool_call_id.startswith("write_recovery_"):
+        return False
+
+    config = getattr(harness, "config", None)
+    if not bool(getattr(config, "enforce_write_recovery_readback", False)):
+        return False
+
+    path = str(record.args.get("path") or "").strip()
+    if not path:
+        return False
+
+    verifiable_extensions = {".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".txt", ".json", ".yaml", ".yml"}
+    from pathlib import Path
+    if Path(path).suffix.lower() not in verifiable_extensions:
+        return False
+
+    signature = "|".join([tool_call_id, path, "write_recovery_readback"])
+    if harness.state.scratchpad.get("_write_recovery_readback_scheduled") == signature:
+        return False
+    harness.state.scratchpad["_write_recovery_readback_scheduled"] = signature
+
+    graph_state.pending_tool_calls.append(
+        PendingToolCall(
+            tool_name="file_read",
+            args={"path": path},
+            raw_arguments=json.dumps({"path": path}, ensure_ascii=True, sort_keys=True),
+        )
+    )
+    allow_repeated_tool_call_once(harness, "file_read", {"path": path})
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Synthesized write-recovery for `{path}` succeeded. "
+                "Performing a mandatory read-back verification to ensure the file content is correct."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "write_recovery_readback",
+                "target_path": path,
+            },
+        )
+    )
+    harness._runlog(
+        "write_recovery_readback_scheduled",
+        "scheduled mandatory read-back after synthesized write success",
+        tool_call_id=tool_call_id,
+        path=path,
+    )
+    return True
+
+
 _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
 _CHAT_PROGRESS_GUARD_KEY = "_chat_progress_guard"
 _CHAT_STALL_REPEAT_LIMIT = 2
@@ -881,7 +943,9 @@ def _maybe_schedule_task_complete_repair_loop_status(
             role="system",
             content=(
                 "Auto-continuing repair recovery with `loop_status` after blocked "
-                "`task_complete` in the REPAIR phase."
+                "`task_complete` in the REPAIR phase. The verifier still has a "
+                "non-zero exit code. Fix the failing command (re-run it and "
+                "achieve exit_code 0) to exit the repair phase."
             ),
             metadata={
                 "is_recovery_nudge": True,
@@ -1783,6 +1847,8 @@ async def apply_planning_tool_outcomes(
         for record in graph_state.last_tool_results
     )
     for record in graph_state.last_tool_results:
+        _maybe_schedule_write_recovery_readback(graph_state, harness, record)
+
         if not record.result.success and _is_plan_export_validation_error(record.result.error):
             repair_attempts = int(harness.state.scratchpad.get("_plan_export_recovery_nudges", 0))
             if repair_attempts < 1:

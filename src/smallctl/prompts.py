@@ -293,7 +293,8 @@ def build_system_prompt(
                     "NETWORK: Use `ssh_exec` for remote SSH commands and `shell_exec` for local shell work only. "
                     "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available. "
                     "When the task includes a username, prefer `ssh_exec(target='user@host', command='...')`, "
-                    "for example `target='root@192.168.1.63'`, instead of sending only `host='...'`."
+                    "for example `target='root@192.168.1.63'`, instead of sending only `host='...'`. "
+                    "If the user explicitly asks to rerun, recheck, or confirm live, do not rely on retrieved historical notes alone; issue a fresh `ssh_exec` unless the tool is unavailable or blocked."
                 )
                 if is_small_model_name(state.scratchpad.get("_model_name")):
                     parts.append(

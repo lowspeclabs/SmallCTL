@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -608,7 +609,7 @@ def promote_write_session_target(
         return False, f"Staging file is missing for write session `{session.write_session_id}`."
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        staging.replace(target)
+        shutil.copy2(staging, target)
     except Exception as exc:
         return False, f"Unable to finalize staged write for `{session.write_target_path}`: {exc}"
     return True, str(target)

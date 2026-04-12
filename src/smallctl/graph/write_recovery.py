@@ -28,6 +28,7 @@ class RecoveredWriteIntent:
     confidence: str = "low"
     evidence: list[str] = field(default_factory=list)
     source: str = ""
+    _is_append: bool = False
 
 
 def normalize_write_argument_aliases(args: dict[str, Any]) -> dict[str, Any]:
@@ -163,7 +164,22 @@ def recover_write_intent(
     args = normalize_write_argument_aliases(raw_args) if pending is not None else {}
     intent = RecoveredWriteIntent()
     if pending is not None:
+        intent._is_append = (pending.tool_name == "file_append")
+    elif partial_tool_calls:
+        # If we are recovering before the tool call is even fully parsed,
+        # check if any of the partial calls are for file_append.
+        for partial in partial_tool_calls:
+            if str(partial.get("function", {}).get("name", "")) == "file_append":
+                intent._is_append = True
+                break
+
+    if pending is not None:
         intent.tool_name = "file_write" if pending.tool_name in _WRITE_TOOLS else pending.tool_name
+    elif intent._is_append:
+        intent.tool_name = "file_append"
+    else:
+        intent.tool_name = "file_write"
+
 
     path, path_confidence, path_evidence = infer_write_target_path(
         harness=harness,
@@ -310,6 +326,36 @@ def build_synthetic_write_args(intent: RecoveredWriteIntent) -> dict[str, Any]:
     if intent.replace_strategy:
         args["replace_strategy"] = intent.replace_strategy
     return args
+
+
+def _maybe_prepend_existing_content(intent: RecoveredWriteIntent, *, harness: Any) -> None:
+    if not intent._is_append or not intent.path or not intent.content:
+        return
+
+    from pathlib import Path
+    cwd = getattr(getattr(harness, "state", None), "cwd", None)
+    path = Path(intent.path)
+    if not path.is_absolute():
+        base = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+        try:
+            path = (base / path).resolve()
+        except Exception:
+            path = base / path
+
+    if path.is_file():
+        try:
+            existing = path.read_text(encoding="utf-8")
+            if existing:
+                intent.content = existing + intent.content
+                harness._runlog(
+                    "write_recovery_append_merge",
+                    "prepended existing file content for write-recovery append synthesis",
+                    path=str(path),
+                    existing_chars=len(existing),
+                    new_chars=len(intent.content),
+                )
+        except Exception as exc:
+            harness.log.warning("failed to read existing file for write-recovery append merge: %s", exc)
 
 
 def build_synthetic_file_write_call(intent: RecoveredWriteIntent, *, tool_call_id: str = "") -> dict[str, Any]:

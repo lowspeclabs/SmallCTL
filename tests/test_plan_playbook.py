@@ -1635,6 +1635,7 @@ def test_system_prompt_surfaces_small_model_tool_routing_card() -> None:
     assert "never invent aliases like `use_shell_exec`" in prompt
     assert "Remote host/IP/user/password mentioned means `ssh_exec`." in prompt
     assert "`shell_exec` is local-only." in prompt
+    assert "do not rely on retrieved historical notes alone" in prompt
 
 
 def test_system_prompt_write_recovery_surfaces_stage_read_before_overwrite() -> None:

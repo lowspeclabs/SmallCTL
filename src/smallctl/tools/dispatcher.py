@@ -168,9 +168,18 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     phase=self.phase,
                 )
+            if tool_name == "task_complete" and self.phase == "repair":
+                error = (
+                    f"Tool '{tool_name}' is not allowed in phase 'repair'. "
+                    "The last verifier run still shows a non-zero exit code. "
+                    "Fix the failing command first (re-run it and achieve exit_code 0), "
+                    "then call task_complete."
+                )
+            else:
+                error = f"Tool '{tool_name}' is not allowed in phase '{self.phase}'"
             return ToolEnvelope(
                 success=False,
-                error=f"Tool '{tool_name}' is not allowed in phase '{self.phase}'",
+                error=error,
                 metadata={"tool_name": tool_name, "phase": self.phase},
             )
 
@@ -468,20 +477,29 @@ def _recover_ssh_arguments_from_task_context(
         return arguments, {}
 
     repaired = dict(arguments)
+    metadata: dict[str, Any] = {}
     host = str(repaired.get("host") or "").strip()
     user = str(repaired.get("user") or "").strip()
-    if user or not host:
-        return repaired, {}
+    command = str(repaired.get("command") or "").strip()
 
-    inferred_user = _infer_ssh_user_from_state_context(host, state=state)
-    if not inferred_user:
-        return repaired, {}
+    if host and not user:
+        inferred_user = _infer_ssh_user_from_state_context(host, state=state)
+        if inferred_user:
+            repaired["user"] = inferred_user
+            user = inferred_user
+            metadata.update(
+                {
+                    "recovered_ssh_user": inferred_user,
+                    "routing_reason": "ssh_task_context_user_recovery",
+                }
+            )
 
-    repaired["user"] = inferred_user
-    return repaired, {
-        "recovered_ssh_user": inferred_user,
-        "routing_reason": "ssh_task_context_user_recovery",
-    }
+    if not command and _task_requests_ssh_connection_probe(state):
+        repaired["command"] = "whoami"
+        metadata["recovered_ssh_command"] = "whoami"
+        metadata["routing_reason"] = metadata.get("routing_reason") or "ssh_connection_probe_recovery"
+
+    return repaired, metadata
 
 
 def _infer_ssh_user_from_state_context(host: str, *, state: Any | None = None) -> str:
@@ -544,6 +562,29 @@ def _task_clearly_targets_remote_ssh_host(state: Any | None) -> bool:
         if _AT_HOST_TARGET_RE.search(text) is not None:
             return True
         if _IPV4_RE.search(text) is not None and _REMOTE_TASK_HINT_RE.search(text) is not None:
+            return True
+    return False
+
+
+def _task_requests_ssh_connection_probe(state: Any | None) -> bool:
+    if state is None:
+        return False
+
+    for text in _ssh_task_context_texts(state):
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            continue
+        if any(
+            marker in lowered
+            for marker in (
+                "ssh into ",
+                "ssh to ",
+                "ssh in to ",
+                "log into ",
+                "login to ",
+                "connect to ",
+            )
+        ) and "?" not in lowered:
             return True
     return False
 

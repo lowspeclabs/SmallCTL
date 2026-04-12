@@ -32,6 +32,7 @@ from .write_recovery import (
     maybe_finalize_recovered_assistant_write,
     recover_write_intent,
     recover_content_from_assistant_text,
+    _maybe_prepend_existing_content,
     write_recovery_kind,
     write_recovery_metadata,
 )
@@ -881,6 +882,7 @@ async def _attempt_text_write_fallback(
             reason=reason,
         )
     if fallback_intent is not None and can_safely_synthesize(fallback_intent, harness=harness):
+        _maybe_prepend_existing_content(fallback_intent, harness=harness)
         synthetic_call = build_synthetic_file_write_call(fallback_intent)
         await harness._emit(
             deps.event_handler,

@@ -100,7 +100,6 @@ class SubtaskService:
         factory = harness_factory or self.harness.__class__
         child = factory(**child_kwargs)
         child.state.cwd = self.harness.state.cwd
-        child.state.inventory_state = dict(self.harness.state.inventory_state)
         return child
 
     def build_subtask_result(

@@ -16,6 +16,7 @@ from .policy import estimate_text_tokens
 
 _ARTIFACT_INLINE_TOKEN_LIMIT_BASE = 1300
 _ARTIFACT_INLINE_TOKEN_LIMIT_SCALE = 1.4
+_SAFE_ARTIFACT_DIR_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
 @dataclass
@@ -32,9 +33,6 @@ class ArtifactPolicy:
         "yaml_read",
         "shell_exec",
         "find_files",
-        "ansible_inventory",
-        "ansible_task",
-        "ansible_playbook",
     )
 
     def should_externalize(self, *, tool_name: str, serialized_output: str) -> bool:
@@ -48,12 +46,15 @@ class ArtifactStore:
         self, 
         base_dir: Path, 
         run_id: str, 
+        session_id: str = "",
         policy: ArtifactPolicy | None = None,
         artifact_start_index: int | None = None,
     ) -> None:
         self.policy = policy or ArtifactPolicy()
-        self.run_id = run_id
-        self.run_dir = base_dir / run_id
+        self.run_id = str(run_id or "").strip()
+        self.session_id = str(session_id or "").strip()
+        self.storage_id = artifact_storage_id(run_id=self.run_id, session_id=self.session_id)
+        self.run_dir = base_dir / self.storage_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         discovered = self._discover_next_index()
         self._next_index = max(discovered, artifact_start_index or 1)
@@ -74,9 +75,21 @@ class ArtifactStore:
         artifact_id = f"A{self._next_index:04d}"
         self._next_index += 1
         metadata = _coerce_metadata_payload(result.metadata)
+        metadata.setdefault("success", bool(result.success))
+        if result.status is not None:
+            metadata.setdefault("status", result.status)
+        if result.error:
+            metadata.setdefault("error", result.error)
         if tool_name in {"shell_exec", "ssh_exec"}:
             metadata["model_visible"] = False
             metadata["hidden"] = True
+            arguments = metadata.get("arguments")
+            if isinstance(arguments, dict):
+                command = str(arguments.get("command") or "").strip()
+                if command:
+                    metadata.setdefault("command", command)
+            if isinstance(result.output, dict) and result.output.get("exit_code") is not None:
+                metadata.setdefault("exit_code", result.output.get("exit_code"))
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         txt_path = self.run_dir / f"{artifact_id}.txt"
         json_path = self.run_dir / f"{artifact_id}.json"
@@ -274,6 +287,9 @@ class ArtifactStore:
     def _summarize(*, tool_name: str, result: ToolEnvelope, metadata: dict[str, Any]) -> str:
         if not result.success and result.error:
             return result.error[:160]
+        mutation_summary = ArtifactStore._filesystem_mutation_summary(tool_name=tool_name, metadata=metadata)
+        if mutation_summary:
+            return mutation_summary
         source = metadata.get("path") or metadata.get("url") or metadata.get("command")
         output = result.output
         if isinstance(output, str):
@@ -293,6 +309,12 @@ class ArtifactStore:
                 return f"{tool_name} text ({len(output)} chars)"
             return compact[:160] or tool_name
         if isinstance(output, dict):
+            if ArtifactStore._is_shell_output(output):
+                if isinstance(source, str) and source:
+                    return source[:160]
+                exit_code = output.get("exit_code")
+                if exit_code is not None:
+                    return f"{tool_name} exit {exit_code}"
             keys = ", ".join(sorted(output.keys())[:5])
             return f"{tool_name} keys: {keys}" if keys else tool_name
         if isinstance(output, list):
@@ -300,6 +322,60 @@ class ArtifactStore:
         if source:
             return str(source)
         return tool_name
+
+    @staticmethod
+    def _filesystem_mutation_summary(*, tool_name: str, metadata: dict[str, Any]) -> str | None:
+        if tool_name not in {"file_write", "file_append", "file_patch", "file_delete"}:
+            return None
+
+        path = str(metadata.get("path") or "").strip()
+        if not path:
+            return None
+
+        label = Path(path).name or path
+        if tool_name == "file_patch":
+            occurrence_count = metadata.get("occurrence_count")
+            base = f"{label} patched"
+            if isinstance(occurrence_count, int) and occurrence_count > 0:
+                suffix = "" if occurrence_count == 1 else "s"
+                base = f"{base} ({occurrence_count} occurrence{suffix})"
+        elif tool_name == "file_append":
+            base = f"{label} appended"
+        elif tool_name == "file_delete":
+            base = f"{label} deleted"
+        else:
+            base = f"{label} written"
+
+        write_session_id = str(metadata.get("write_session_id") or "").strip()
+        if not write_session_id:
+            return base
+
+        section_name = str(metadata.get("section_name") or metadata.get("write_current_section") or "").strip()
+        if section_name:
+            noun, _, verb = base.partition(" ")
+            base = f"{noun} section {section_name} {verb}".strip()
+
+        summary = f"{base} in Write Session {write_session_id}"
+        details: list[str] = []
+
+        next_section = str(metadata.get("write_next_section") or metadata.get("next_section_name") or "").strip()
+        if next_section:
+            details.append(f"next={next_section}")
+        elif bool(metadata.get("write_session_final_chunk")) and metadata.get("write_session_finalized") is not True:
+            details.append("pending verifier")
+
+        if bool(metadata.get("staged_only")):
+            details.append("staged-only")
+
+        finalized = metadata.get("write_session_finalized")
+        if finalized is True:
+            details.append("finalized")
+        elif finalized is False:
+            details.append("not finalized")
+
+        if details:
+            summary = f"{summary}; {'; '.join(details)}"
+        return summary
 
     @staticmethod
     def _keywords(*, source: str, summary: str, metadata: dict[str, Any]) -> list[str]:
@@ -418,27 +494,26 @@ class ArtifactStore:
             return value.strip()
         return None
 
-    @staticmethod
-    def _preview_line(item: Any) -> str:
-        if isinstance(item, dict):
-            name = item.get("name") or item.get("relative") or item.get("path") or item.get("id")
-            if isinstance(name, str) and name:
-                line = name
-                item_type = item.get("type")
-                if isinstance(item_type, str) and item_type:
-                    line = f"{line} [{item_type}]"
-                size = item.get("size")
-                if isinstance(size, int) and size >= 0:
-                    line = f"{line} ({size} bytes)"
-                children_count = item.get("children_count")
-                if isinstance(children_count, int) and children_count >= 0:
-                    line = f"{line} ({children_count} children)"
-                return line
-            rendered = json.dumps(item, ensure_ascii=True, default=str)
-            return rendered
-        if item is None:
-            return ""
-        return str(item)
+
+def artifact_storage_id(*, run_id: str, session_id: str = "") -> str:
+    normalized_run_id = _sanitize_artifact_dir_component(run_id) or "run"
+    normalized_session_id = _sanitize_artifact_dir_component(session_id)
+    if not normalized_session_id:
+        return normalized_run_id
+    if normalized_run_id == normalized_session_id:
+        return normalized_run_id
+    if normalized_run_id.startswith(f"{normalized_session_id}-"):
+        return normalized_run_id
+    return f"{normalized_session_id}-{normalized_run_id}"
+
+
+def _sanitize_artifact_dir_component(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    sanitized = "".join(ch if ch in _SAFE_ARTIFACT_DIR_CHARS else "_" for ch in text)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("._-")
+    return sanitized
 
 
 def _coerce_metadata_payload(value: Any) -> dict[str, Any]:

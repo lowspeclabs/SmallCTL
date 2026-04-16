@@ -1,6 +1,4 @@
 aiofiles
-ansible-core
-ansible-runner
 click
 httpx
 jmespath

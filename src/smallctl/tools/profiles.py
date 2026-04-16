@@ -5,7 +5,6 @@ from .base import ToolProfile
 CORE_PROFILE: ToolProfile = "core"
 DATA_PROFILE: ToolProfile = "data"
 NETWORK_PROFILE: ToolProfile = "network"
-OPS_PROFILE: ToolProfile = "ops"
 SUPPORT_PROFILE: ToolProfile = "support"
 MUTATE_PROFILE: ToolProfile = "mutate"
 INDEXER_PROFILE: ToolProfile = "indexer"
@@ -15,7 +14,6 @@ PUBLIC_PROFILES: tuple[ToolProfile, ...] = (
     CORE_PROFILE,
     DATA_PROFILE,
     NETWORK_PROFILE,
-    OPS_PROFILE,
     MUTATE_PROFILE,
     INDEXER_PROFILE,
 )
@@ -23,8 +21,6 @@ PUBLIC_PROFILES: tuple[ToolProfile, ...] = (
 
 def classify_tool_profiles(
     task: str,
-    *,
-    use_ansible: bool,
 ) -> set[ToolProfile]:
     text = task.strip().lower()
     profiles: set[ToolProfile] = set(DEFAULT_PROFILES)
@@ -83,25 +79,6 @@ def classify_tool_profiles(
     ):
         profiles.add(NETWORK_PROFILE)
 
-    if use_ansible and _matches_any(
-        text,
-        (
-            "ansible",
-            "playbook",
-            "inventory",
-            "hosts",
-            "host group",
-            "check mode",
-            "deploy",
-            "configure",
-            "configuration management",
-            "provision",
-            "multi-host",
-            "multihost",
-        ),
-    ):
-        profiles.add(OPS_PROFILE)
-
     if _matches_any(
         text,
         (
@@ -121,22 +98,10 @@ def classify_tool_profiles(
             "directory contents",
             "change directory",
             "cwd",
-            "cwd_get",
-            "cwd_set",
-            "environment variable",
-            "env var",
-            "env_get",
-            "env_set",
-            "set env",
             "background process",
             "background job",
             "kill process",
             "process_kill",
-            "checkpoint",
-            "scratch_set",
-            "scratch_get",
-            "scratch_list",
-            "scratch_delete",
             "scratchpad",
         ),
     ):

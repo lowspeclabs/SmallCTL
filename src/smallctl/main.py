@@ -30,27 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "generic", "openai", "ollama", "vllm", "lmstudio", "openrouter", "llamacpp"],
         help="Compatibility profile for OpenAI-compatible provider behavior",
     )
-    parser.add_argument("--inventory", help="Inventory file path")
     parser.add_argument(
         "--tool-profiles",
-        help="Comma-separated static tool profiles to expose: core,data,network,ops,mutate",
+        help="Comma-separated static tool profiles to expose: core,data,network,mutate,indexer",
     )
     parser.add_argument("--config", dest="config_path", help="User config path")
-    parser.add_argument("--no-ansible", action="store_true", help="Disable Ansible tools")
-    parser.add_argument(
-        "--ansible-check-mode-in-plan",
-        dest="ansible_check_mode_in_plan",
-        action="store_true",
-        default=None,
-        help="Force Ansible check mode while in plan phase",
-    )
-    parser.add_argument(
-        "--no-ansible-check-mode-in-plan",
-        dest="ansible_check_mode_in_plan",
-        action="store_false",
-        default=None,
-        help="Do not force Ansible check mode while in plan phase",
-    )
     parser.add_argument(
         "--reasoning-mode",
         choices=["auto", "tags", "field", "off"],
@@ -255,7 +239,6 @@ def cli(argv: list[str] | None = None) -> int:
         debug=config.debug,
         phase=config.phase,
         provider_profile=config.provider_profile,
-        use_ansible=config.use_ansible,
         staged_reasoning=config.staged_reasoning,
         tui=bool(args.tui),
         run_log_dir=str(run_logger.run_dir),
@@ -293,9 +276,6 @@ def cli(argv: list[str] | None = None) -> int:
             "provider_profile": config.provider_profile,
             "api_key": config.api_key,
             "tool_profiles": config.tool_profiles,
-            "use_ansible": config.use_ansible,
-            "inventory_path": config.inventory,
-            "ansible_check_mode_in_plan": config.ansible_check_mode_in_plan,
             "reasoning_mode": config.reasoning_mode,
             "thinking_visibility": config.thinking_visibility,
             "thinking_start_tag": config.thinking_start_tag,
@@ -373,9 +353,6 @@ def cli(argv: list[str] | None = None) -> int:
             provider_profile=config.provider_profile,
             api_key=config.api_key,
             tool_profiles=config.tool_profiles,
-            use_ansible=config.use_ansible,
-            inventory_path=config.inventory,
-            ansible_check_mode_in_plan=config.ansible_check_mode_in_plan,
             reasoning_mode=config.reasoning_mode,
             thinking_visibility=config.thinking_visibility,
             thinking_start_tag=config.thinking_start_tag,

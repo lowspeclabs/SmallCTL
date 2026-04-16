@@ -92,7 +92,6 @@ class ConsolePane(VerticalScroll):
             UIEventType.USER: "user",
             UIEventType.TOOL_RESULT: "tool_result",
             UIEventType.ERROR: "error",
-            UIEventType.ANSIBLE: "ansible",
             UIEventType.SYSTEM: "system",
             UIEventType.ALERT: "alert",
         }

@@ -9,8 +9,6 @@ from ..models.tool_result import ToolEnvelope
 from . import network
 from .registry import ToolRegistry
 
-Tier2Adapter = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
-
 _ARTIFACT_TOKEN_RE = re.compile(r"\bA\d+\b", re.IGNORECASE)
 _RECENT_ARTIFACT_ALIASES = {
     "above",
@@ -44,6 +42,19 @@ _SSH_USERNAME_TASK_PATTERNS = (
     re.compile(r"\busername\s+(?:is\s+)?(?P<user>[A-Za-z0-9._-]+)\b", re.IGNORECASE),
     re.compile(r"\buser\s+(?:is\s+)?(?P<user>[A-Za-z0-9._-]+)\b", re.IGNORECASE),
 )
+_SSH_PASSWORD_TASK_PATTERNS = (
+    re.compile(r'\bpassword\s*(?:is\s+|=|:)?\s*"(?P<password>[^"\r\n]+)"', re.IGNORECASE),
+    re.compile(r"\bpassword\s*(?:is\s+|=|:)?\s*'(?P<password>[^'\r\n]+)'", re.IGNORECASE),
+    re.compile(r"\bpassword\s*(?:is\s+|=|:)?\s+(?P<password>[^\s,;]+)", re.IGNORECASE),
+)
+_SSH_PASSWORD_INVALID_TOKENS = {
+    "authentication",
+    "auth",
+    "enabled",
+    "required",
+    "prompt",
+    "prompted",
+}
 _TOOL_ALIAS_REPAIRS = {
     "use_shell_exec": "shell_exec",
     "use_ssh_exec": "ssh_exec",
@@ -77,8 +88,6 @@ class ToolDispatcher:
         *,
         state: Any | None = None,
         phase: str = "explore",
-        ansible_check_mode_in_plan: bool = True,
-        tier2_adapter: Tier2Adapter | None = None,
         run_logger: RunLogger | None = None,
     ) -> None:
         self.log = logging.getLogger("smallctl.dispatcher")
@@ -86,8 +95,6 @@ class ToolDispatcher:
         self.registry = registry
         self.state = state
         self.phase = phase
-        self.ansible_check_mode_in_plan = ansible_check_mode_in_plan
-        self.tier2_adapter = tier2_adapter
 
     async def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> ToolEnvelope:
         requested_tool_name = tool_name
@@ -234,20 +241,8 @@ class ToolDispatcher:
                 metadata={"tool_name": tool_name},
             )
 
-        if (
-            self.phase == "plan"
-            and self.ansible_check_mode_in_plan
-            and tool_name in {"ansible_task", "ansible_playbook"}
-        ):
-            args["check"] = True
-
         try:
-            if spec.tier == "tier2":
-                if self.tier2_adapter is None:
-                    raise RuntimeError("No tier2 adapter configured")
-                result = await self.tier2_adapter(tool_name, args)
-            else:
-                result = await spec.invoke(**args)
+            result = await spec.invoke(**args)
         except Exception as exc:
             log_kv(
                 self.log,
@@ -480,7 +475,9 @@ def _recover_ssh_arguments_from_task_context(
     metadata: dict[str, Any] = {}
     host = str(repaired.get("host") or "").strip()
     user = str(repaired.get("user") or "").strip()
+    password = str(repaired.get("password") or "").strip()
     command = str(repaired.get("command") or "").strip()
+    password_source = "explicit" if password else "none"
 
     if host and not user:
         inferred_user = _infer_ssh_user_from_state_context(host, state=state)
@@ -494,12 +491,49 @@ def _recover_ssh_arguments_from_task_context(
                 }
             )
 
+    if host and not password:
+        inferred_password, password_source = _infer_ssh_password(
+            host,
+            user=user,
+            state=state,
+        )
+        if inferred_password:
+            repaired["password"] = inferred_password
+            password = inferred_password
+            metadata.update(
+                {
+                    "recovered_ssh_password": True,
+                    "recovered_ssh_password_source": password_source,
+                }
+            )
+            metadata["routing_reason"] = metadata.get("routing_reason") or f"ssh_password_recovery_{password_source}"
+
     if not command and _task_requests_ssh_connection_probe(state):
         repaired["command"] = "whoami"
         metadata["recovered_ssh_command"] = "whoami"
         metadata["routing_reason"] = metadata.get("routing_reason") or "ssh_connection_probe_recovery"
 
+    metadata.update(_ssh_auth_debug_metadata(repaired, password_source=password_source))
     return repaired, metadata
+
+
+def _ssh_auth_debug_metadata(
+    arguments: dict[str, Any],
+    *,
+    password_source: str,
+) -> dict[str, Any]:
+    password = str(arguments.get("password") or "").strip()
+    identity_file = str(arguments.get("identity_file") or "").strip()
+    auth_mode = "password" if password else "key"
+    auth_transport = "sshpass_env" if password else "ssh"
+    origin = str(password_source or "").strip() or ("explicit" if password else "none")
+    return {
+        "ssh_auth_mode": auth_mode,
+        "ssh_auth_transport": auth_transport,
+        "ssh_password_origin": origin,
+        "ssh_password_recovered": origin in {"task_context", "prior_ssh_exec"},
+        "ssh_identity_file_supplied": bool(identity_file),
+    }
 
 
 def _infer_ssh_user_from_state_context(host: str, *, state: Any | None = None) -> str:
@@ -526,6 +560,124 @@ def _infer_ssh_user_from_state_context(host: str, *, state: Any | None = None) -
             if match is not None:
                 return str(match.group("user") or "").strip()
     return ""
+
+
+def _infer_ssh_password(
+    host: str,
+    *,
+    user: str | None = None,
+    state: Any | None = None,
+) -> tuple[str, str]:
+    inferred_from_records = _infer_ssh_password_from_execution_records(host, user=user, state=state)
+    if inferred_from_records:
+        return inferred_from_records, "prior_ssh_exec"
+
+    inferred_from_task = _infer_ssh_password_from_state_context(host, user=user, state=state)
+    if inferred_from_task:
+        return inferred_from_task, "task_context"
+
+    return "", ""
+
+
+def _infer_ssh_password_from_execution_records(
+    host: str,
+    *,
+    user: str | None = None,
+    state: Any | None = None,
+) -> str:
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict) or not records:
+        return ""
+
+    target_host = str(host or "").strip().lower()
+    target_user = str(user or "").strip().lower()
+    if not target_host:
+        return ""
+
+    for record in reversed(list(records.values())):
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "").strip() != "ssh_exec":
+            continue
+        if not _ssh_record_likely_authenticated(record):
+            continue
+
+        args = record.get("args")
+        if not isinstance(args, dict):
+            continue
+        record_host = str(args.get("host") or "").strip()
+        record_user = str(args.get("user") or "").strip()
+        try:
+            record_host, record_user_or_none = network.normalize_ssh_target(
+                host=record_host,
+                user=record_user or None,
+            )
+        except ValueError:
+            continue
+        if str(record_host or "").strip().lower() != target_host:
+            continue
+
+        normalized_record_user = str(record_user_or_none or "").strip().lower()
+        if target_user and normalized_record_user != target_user:
+            continue
+
+        password = str(args.get("password") or "").strip()
+        if password:
+            return password
+    return ""
+
+
+def _ssh_record_likely_authenticated(record: dict[str, Any]) -> bool:
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return False
+    if bool(result.get("success")):
+        return True
+    metadata = result.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return bool(metadata.get("ssh_transport_succeeded")) or str(metadata.get("failure_kind") or "").strip() == "remote_command"
+
+
+def _infer_ssh_password_from_state_context(
+    host: str,
+    *,
+    user: str | None = None,
+    state: Any | None = None,
+) -> str:
+    target_host = str(host or "").strip().lower()
+    target_user = str(user or "").strip().lower()
+    if not target_host or state is None:
+        return ""
+
+    for text in _ssh_task_context_texts(state):
+        if not _text_mentions_ssh_target(text, host=target_host, user=target_user):
+            continue
+        for pattern in _SSH_PASSWORD_TASK_PATTERNS:
+            match = pattern.search(text)
+            if match is None:
+                continue
+            candidate = str(match.group("password") or "").strip()
+            if _looks_like_ssh_password(candidate):
+                return candidate
+    return ""
+
+
+def _text_mentions_ssh_target(text: str, *, host: str, user: str | None = None) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if host and host in lowered:
+        return True
+    normalized_user = str(user or "").strip().lower()
+    return bool(host and normalized_user and f"{normalized_user}@{host}" in lowered)
+
+
+def _looks_like_ssh_password(candidate: str) -> bool:
+    stripped = str(candidate or "").strip()
+    if not stripped:
+        return False
+    return stripped.lower() not in _SSH_PASSWORD_INVALID_TOKENS
 
 
 def _ssh_task_context_texts(state: Any) -> list[str]:

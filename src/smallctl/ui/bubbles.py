@@ -19,7 +19,6 @@ KIND_LABEL = {
     "tool_call": "TOOL",
     "tool_result": "RESULT",
     "error": "ERROR",
-    "ansible": "ANSIBLE",
     "system": "SYSTEM",
     "alert": "ALERT",
 }
@@ -360,7 +359,7 @@ class AssistantTurnWidget(Vertical):
     async def add_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         target_detail = None
         for detail in reversed(self._tool_call_details):
-            if detail.tool_name in {"artifact_print", "show_artifact"}:
+            if detail.tool_name == "artifact_print":
                 target_detail = detail
                 break
 

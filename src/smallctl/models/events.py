@@ -13,7 +13,6 @@ class UIEventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     ERROR = "error"
-    ANSIBLE = "ansible"
     SYSTEM = "system"
     METRICS = "metrics"
     SHELL_STREAM = "shell_stream"
@@ -36,4 +35,3 @@ class UIEvent:
             "data": self.data,
             "timestamp": self.timestamp,
         }
-

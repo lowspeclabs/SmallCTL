@@ -9,8 +9,6 @@ description = "Terminal UI agentic harness with OpenAI-compatible API support"
 requires-python = ">=3.10"
 dependencies = [
   "aiofiles",
-  "ansible-core",
-  "ansible-runner",
   "click",
   "httpx",
   "jmespath",

@@ -39,7 +39,6 @@ class SubtaskRunner:
         child_state = LoopState(
             current_phase=request.phase,
             cwd=parent_state.cwd,
-            inventory_state=dict(parent_state.inventory_state),
             recent_message_limit=request.recent_message_limit,
         )
         parent_thread_id = parent_state.thread_id or "thread"

@@ -8,7 +8,7 @@ ToolHandler = Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]]
 ToolTier = Literal["tier1", "tier2"]
 ToolRisk = Literal["low", "medium", "high"]
 ToolMode = Literal["chat", "loop", "indexer", "planning"]
-ToolProfile = Literal["core", "data", "network", "ops", "support", "mutate", "indexer"]
+ToolProfile = Literal["core", "data", "network", "support", "mutate", "indexer"]
 
 
 @dataclass

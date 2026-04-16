@@ -52,11 +52,6 @@ src/smallctl/tools/register.py
 src/smallctl/tools/registry.py
 src/smallctl/tools/search.py
 src/smallctl/tools/shell.py
-src/smallctl/tools/ansible/__init__.py
-src/smallctl/tools/ansible/inventory.py
-src/smallctl/tools/ansible/playbook.py
-src/smallctl/tools/ansible/runner.py
-src/smallctl/tools/ansible/task.py
 src/smallctl/ui/__init__.py
 src/smallctl/ui/app.py
 src/smallctl/ui/bubbles.py
@@ -78,7 +73,6 @@ tests/test_retrieval.py
 tests/test_subtasks.py
 tests/test_summarizer.py
 tests/test_tool_registry.py
-tests/test_tools_ansible_runner.py
 tests/test_tools_control.py
 tests/test_tools_data.py
 tests/test_tools_fs.py

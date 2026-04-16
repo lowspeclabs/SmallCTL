@@ -11,7 +11,7 @@ from smallctl.graph.state import PendingToolCall
 from smallctl.prompts import build_system_prompt
 from smallctl.phases import filter_phase_blocked_tools, phase_contract
 from smallctl.tools.register import build_registry
-from smallctl.state import ContextBrief, EvidenceRecord, ExecutionPlan, LoopState, PlanStep, WriteSession
+from smallctl.state import ArtifactSnippet, ContextBrief, EvidenceRecord, ExecutionPlan, LoopState, PlanStep, WriteSession
 
 
 def test_prompt_assembler_includes_plan_phase_handoff_artifacts() -> None:
@@ -146,6 +146,21 @@ def test_prompt_context_sanitizes_legacy_tool_intent_labels() -> None:
     assert "use_shell_exec" not in retrieval_query
 
 
+def test_prompt_assembler_marks_artifact_snippets_as_not_full_reads() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Continue writing temp/app.py from the latest staged content"
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+        retrieved_artifacts=[ArtifactSnippet(artifact_id="A0007", text="temp/app.py preview snippet")],
+    )
+
+    combined_content = "\n".join(str(message.get("content") or "") for message in assembly.messages)
+    assert "Artifact summaries (compressed evidence only; these snippets are not full artifact reads):" in combined_content
+    assert "temp/app.py preview snippet" in combined_content
+
+
 def test_staged_phase_contract_blocks_disallowed_tools_in_explore() -> None:
     events: list[object] = []
 
@@ -216,13 +231,42 @@ def test_registry_exposes_file_patch_tool() -> None:
             self.state = LoopState(cwd="/tmp")
             self.log = SimpleNamespace(info=lambda *args, **kwargs: None)
 
-    registry = build_registry(_FakeStateProvider(), include_ansible=False, registry_profiles={"core"})
+    registry = build_registry(_FakeStateProvider(), registry_profiles={"core"})
     spec = registry.get("file_patch")
 
     assert spec is not None
     assert spec.risk == "high"
     assert spec.allowed_modes == {"loop"}
     assert spec.schema["required"] == ["path", "target_text", "replacement_text"]
+
+
+def test_registry_excludes_removed_general_surface_tools() -> None:
+    class _FakeStateProvider:
+        def __init__(self) -> None:
+            self.state = LoopState(cwd="/tmp")
+            self.log = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    registry = build_registry(
+        _FakeStateProvider(),
+        registry_profiles={"core", "data", "network", "mutate", "indexer"},
+    )
+
+    for removed in {
+        "show_artifact",
+        "artifact_recall",
+        "file_append",
+        "cwd_get",
+        "cwd_set",
+        "env_get",
+        "env_set",
+        "checkpoint",
+        "scratch_set",
+        "scratch_get",
+        "scratch_list",
+        "scratch_delete",
+        "plan_subtask",
+    }:
+        assert registry.get(removed) is None
 
 
 def test_verify_phase_blocks_file_patch_like_other_read_only_phases() -> None:

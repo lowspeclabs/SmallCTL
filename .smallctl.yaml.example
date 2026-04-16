@@ -2,9 +2,6 @@ endpoint: http://localhost:8000/v1
 model: qwen3.5:4b
 phase: explore
 provider_profile: generic
-inventory: null
-use_ansible: true
-ansible_check_mode_in_plan: true
 reasoning_mode: auto
 thinking_visibility: true
 thinking_start_tag: "<thinking>"
@@ -39,3 +36,12 @@ recent_message_limit: 6
 max_summary_items: 3
 max_artifact_snippets: 4
 artifact_snippet_token_limit: 400
+loop_guard_enabled: true
+loop_guard_stagnation_threshold: 3
+loop_guard_level2_threshold: 5
+loop_guard_recent_writes_limit: 5
+loop_guard_tail_lines: 50
+loop_guard_similarity_threshold: 0.9
+loop_guard_cumulative_write_gate: true
+loop_guard_checkpoint_gate: true
+loop_guard_diff_gate: true

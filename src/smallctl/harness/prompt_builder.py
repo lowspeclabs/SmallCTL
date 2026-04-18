@@ -80,10 +80,35 @@ class PromptBuilderService:
                 }
                 for exp in experiences
             ],
+            lane_routes=retrieval_bundle.lane_routes,
+        )
+        self.harness._runlog(
+            "retrieval_ranked_with_intent",
+            "retrieval ranked using phase/intent/subsystem routing",
+            active_phase=self.harness.state.current_phase,
+            active_intent=self.harness.state.active_intent,
+            secondary_intents=list(self.harness.state.secondary_intents),
+            failure_mode=self.harness.state.last_failure_class,
+            write_session_target=(
+                self.harness.state.write_session.write_target_path
+                if self.harness.state.write_session is not None
+                else ""
+            ),
+            lane_routes=retrieval_bundle.lane_routes,
+            score_gaps=retrieval_bundle.score_gaps,
+            best_scores=retrieval_bundle.best_scores,
         )
         
         recent_limit = self.harness.context_policy.recent_message_limit
-        include_structured_sections = bool(summaries or artifacts or experiences or self.harness.state.episodic_summaries)
+        include_structured_sections = bool(
+            summaries
+            or artifacts
+            or experiences
+            or self.harness.state.episodic_summaries
+            or self.harness.state.turn_bundles
+            or self.harness.state.context_briefs
+            or self.harness.state.reasoning_graph.evidence_records
+        )
         soft_limit = self.harness.context_policy.soft_prompt_token_limit
         
         assembly = self.harness.prompt_assembler.build_messages(
@@ -110,6 +135,39 @@ class PromptBuilderService:
             message_count=len(assembly.messages),
             retrieval_cache=self.harness.state.retrieval_cache,
         )
+        frame = getattr(assembly, "frame", None)
+        if frame is not None:
+            included_lane_counts = frame.included_lane_counts()
+            dropped_lane_counts = frame.dropped_lane_counts()
+            self.harness._runlog(
+                "prompt_state_frame_compiled",
+                "compiled deterministic prompt-state frame",
+                active_phase=frame.spine.current_phase,
+                active_intent=frame.spine.active_intent,
+                included_lane_counts=included_lane_counts,
+                dropped_lane_counts=dropped_lane_counts,
+                selected_artifact_ids=[item.artifact_id for item in frame.artifact_packet.snippets],
+                selected_experience_ids=[item.memory_id for item in frame.experience_packet.memories],
+                selected_turn_bundle_ids=[item.bundle_id for item in frame.evidence_packet.turn_bundles],
+                selected_brief_ids=[item.brief_id for item in frame.evidence_packet.context_briefs],
+                selected_summary_ids=[item.summary_id for item in frame.evidence_packet.summaries],
+            )
+            for lane, count in included_lane_counts.items():
+                self.harness._runlog(
+                    "context_lane_selected",
+                    "context lane selected for prompt frame",
+                    lane=lane,
+                    count=count,
+                )
+            for drop in frame.drop_log:
+                self.harness._runlog(
+                    "context_lane_dropped",
+                    "context lane dropped from prompt frame",
+                    lane=drop.lane,
+                    reason=drop.reason,
+                    dropped_count=drop.dropped_count,
+                    dropped_ids=list(drop.dropped_ids),
+                )
 
         limit = self.harness.context_policy.max_prompt_tokens
         if limit and assembly.estimated_prompt_tokens > limit:

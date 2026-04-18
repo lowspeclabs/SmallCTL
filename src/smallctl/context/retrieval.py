@@ -6,7 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..experience_tags import PHASE_TAG_PREFIX, is_generic_experience_tag
+from ..memory_namespace import (
+    NamespaceRouting,
+    infer_memory_namespace,
+    namespace_bucket,
+    namespace_preferences_for_task_mode,
+    normalize_memory_namespace,
+)
 from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
+from ..redaction import redact_sensitive_text
 from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
 from ..state import (
     ArtifactRecord,
@@ -18,8 +27,29 @@ from ..state import (
     memory_entry_is_stale,
     normalize_intent_label,
 )
+from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
 from .policy import ContextPolicy, estimate_text_tokens
 
+_CHAT_SUPPRESSED_TOOL_NAMES = {
+    "shell_exec",
+    "ssh_exec",
+    "file_write",
+    "file_append",
+    "file_patch",
+    "file_delete",
+    "process_kill",
+    "http_post",
+    "file_download",
+}
+_CHAT_SUPPRESSED_MEMORY_TAGS = {
+    "shell_exec",
+    "ssh_exec",
+    "scripts",
+    "bash",
+    "terminal",
+    "command",
+    "command_line",
+}
 
 @dataclass
 class RetrievalBundle:
@@ -34,6 +64,7 @@ class RetrievalBundle:
     candidate_counts: dict[str, int] = field(default_factory=dict)
     best_scores: dict[str, float] = field(default_factory=dict)
     score_gaps: dict[str, float] = field(default_factory=dict)
+    lane_routes: dict[str, list[str]] = field(default_factory=dict)
 
 
 class LexicalRetriever:
@@ -207,6 +238,11 @@ class LexicalRetriever:
                 "summaries": self._score_gap(ranked_summaries),
                 "experiences": self._score_gap(ranked_experiences),
             },
+            lane_routes={
+                "evidence_packet": [summary.summary_id for summary in summaries if summary.summary_id],
+                "artifact_packet": [snippet.artifact_id for snippet in artifacts if snippet.artifact_id],
+                "experience_packet": [memory.memory_id for memory in experiences if memory.memory_id],
+            },
         )
 
     def _rank_artifacts(self, *, state: LoopState, query: str) -> list[tuple[float, ArtifactRecord]]:
@@ -236,11 +272,16 @@ class LexicalRetriever:
             ):
                 continue
             artifact = state.artifacts[artifact_id]
-            if _is_superseded_artifact(artifact):
+            if is_superseded_artifact(artifact):
                 continue
             if not _is_retrieval_visible_artifact(artifact):
                 continue
-            score = self._score_artifact(artifact=artifact, query_tokens=query_tokens, recency=index)
+            score = self._score_artifact(
+                artifact=artifact,
+                query_tokens=query_tokens,
+                recency=index,
+                state=state,
+            )
             if score > 0:
                 scored.append((score, artifact))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -264,7 +305,12 @@ class LexicalRetriever:
         query_tokens = _tokens(query)
         scored: list[tuple[float, EpisodicSummary]] = []
         for index, summary in enumerate(state.episodic_summaries):
-            score = self._score_summary(summary=summary, query_tokens=query_tokens, recency=index)
+            score = self._score_summary(
+                summary=summary,
+                query_tokens=query_tokens,
+                recency=index,
+                state=state,
+            )
             if score > 0:
                 scored.append((score, summary))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -287,9 +333,23 @@ class LexicalRetriever:
                 superseded_ids.update(memory.supersedes)
 
         all_memories = [memory for memory in all_pool if memory.memory_id not in superseded_ids]
+        available_namespaces = {
+            namespace
+            for memory in all_memories
+            if (namespace := self._resolved_memory_namespace(memory, state=state))
+        }
+        routing = namespace_preferences_for_task_mode(
+            str(getattr(state, "task_mode", "") or ""),
+            available_namespaces=available_namespaces,
+        )
         scored: list[tuple[float, ExperienceMemory]] = []
         for memory in all_memories:
-            score = self._score_experience(memory, state, query_override=query_override)
+            score = self._score_experience(
+                memory,
+                state,
+                query_override=query_override,
+                routing=routing,
+            )
             if score > 0:
                 scored.append((score, memory))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -429,14 +489,45 @@ class LexicalRetriever:
     def _build_refined_query(self, *, state: LoopState, bundle: RetrievalBundle) -> str:
         return build_refined_retrieval_query(state, base_query=bundle.query, bundle=bundle)
 
-    def _score_experience(self, m: ExperienceMemory, state: LoopState, *, query_override: str | None = None) -> float:
+    def _score_experience(
+        self,
+        m: ExperienceMemory,
+        state: LoopState,
+        *,
+        query_override: str | None = None,
+        routing: NamespaceRouting | None = None,
+    ) -> float:
+        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+        if task_mode == "chat" and str(m.tool_name or "").strip().lower() in _CHAT_SUPPRESSED_TOOL_NAMES:
+            return 0.0
+        memory_namespace = self._resolved_memory_namespace(m, state=state)
+        if routing is None:
+            available_namespaces = {memory_namespace} if memory_namespace else set()
+            routing = namespace_preferences_for_task_mode(task_mode, available_namespaces=available_namespaces)
+        if namespace_bucket(memory_namespace, routing) == "blocked":
+            return 0.0
         query_text = query_override or build_retrieval_query(state)
         query_tokens = _tokens(query_text)
-        item_tokens = _tokens(f"{normalize_intent_label(m.intent)} {m.tool_name} {m.notes} {m.failure_mode}")
+        safe_notes = redact_sensitive_text(m.notes)
+        item_tokens = _tokens(f"{normalize_intent_label(m.intent)} {m.tool_name} {safe_notes} {m.failure_mode}")
+        active_intent = normalize_intent_label(state.active_intent)
 
         score = 0.0
+        if namespace_bucket(memory_namespace, routing) == "preferred":
+            score += routing.preferred_bonus
+        elif namespace_bucket(memory_namespace, routing) == "allowed":
+            score += routing.allowed_bonus
+        else:
+            score += routing.neutral_penalty
         if normalize_intent_label(m.intent) == normalize_intent_label(state.active_intent):
             score += 15.0
+        secondary_intents = {
+            normalize_intent_label(intent)
+            for intent in (getattr(state, "secondary_intents", []) or [])
+            if normalize_intent_label(intent)
+        }
+        if normalize_intent_label(m.intent) in secondary_intents:
+            score += 6.0
         requested_tool = self._infer_requested_tool(state)
         if m.tool_name and requested_tool and m.tool_name == requested_tool:
             score += 10.0
@@ -458,6 +549,9 @@ class LexicalRetriever:
 
         if m.failure_mode and m.failure_mode in query_text.lower():
             score += 2.0
+        state_failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        if state_failure_mode and str(m.failure_mode or "").strip().lower() == state_failure_mode:
+            score += 4.0
 
         if m.pinned:
             score += 5.0
@@ -487,9 +581,49 @@ class LexicalRetriever:
         if m.confidence < self.policy.memory_low_confidence_threshold and not m.pinned:
             score *= 0.75
 
+        write_target = str(getattr(getattr(state, "write_session", None), "write_target_path", "") or "").strip()
+        if write_target:
+            write_target_tokens = _tokens(write_target)
+            if write_target_tokens & item_tokens:
+                score += 3.0
+
+        # Terminal summaries are useful for coarse history, but they should not
+        # outrank actionable tool patterns during a live execution/resteer turn.
+        if m.tool_name == "task_complete":
+            score *= 0.7
+            if requested_tool in {"shell_exec", "ssh_exec"}:
+                score *= 0.7
+            if requested_tool is None and active_intent == "general_task":
+                score *= 0.35
+
         return score
 
-    def _score_summary(self, summary: EpisodicSummary, *, query_tokens: set[str], recency: int) -> float:
+    @staticmethod
+    def _resolved_memory_namespace(memory: ExperienceMemory, *, state: LoopState) -> str:
+        namespace = normalize_memory_namespace(getattr(memory, "namespace", ""))
+        if namespace:
+            return namespace
+        namespace = infer_memory_namespace(
+            task_mode=str(getattr(state, "task_mode", "") or ""),
+            tool_name=memory.tool_name,
+            intent=memory.intent,
+            intent_tags=memory.intent_tags,
+            environment_tags=memory.environment_tags,
+            entity_tags=memory.entity_tags,
+            notes=memory.notes,
+            original_task=state.run_brief.original_task,
+        )
+        memory.namespace = namespace
+        return namespace
+
+    def _score_summary(
+        self,
+        summary: EpisodicSummary,
+        *,
+        query_tokens: set[str],
+        recency: int,
+        state: LoopState,
+    ) -> float:
         haystack = " ".join(
             summary.decisions
             + summary.files_touched
@@ -502,16 +636,34 @@ class LexicalRetriever:
         if overlap <= 0:
             return 0.0
         score = float(overlap)
+        target_paths = self._state_target_paths(state)
+        if summary.files_touched:
+            touched_paths = {Path(path).as_posix().lower() for path in summary.files_touched if str(path).strip()}
+            if touched_paths & target_paths:
+                score += 3.0
         if summary.decisions:
             score += 0.5
         if summary.files_touched:
             score += 0.5
         if summary.failed_approaches:
             score += 0.25
+            failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+            if failure_mode and any(failure_mode in str(item).lower() for item in summary.failed_approaches):
+                score += 2.0
         if summary.artifact_ids:
             score += 0.5
         if summary.remaining_plan:
             score += 0.5
+        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+        if active_intent and active_intent in _tokens(" ".join(summary.remaining_plan + summary.notes)):
+            score += 1.0
+        secondary_intents = {
+            normalize_intent_label(intent)
+            for intent in getattr(state, "secondary_intents", []) or []
+            if normalize_intent_label(intent)
+        }
+        if secondary_intents and secondary_intents & _tokens(" ".join(summary.notes)):
+            score += 0.8
         score += max(0.0, 0.05 * recency)
         return score
 
@@ -536,7 +688,55 @@ class LexicalRetriever:
 
     @staticmethod
     def _state_environment_tags(state: LoopState) -> set[str]:
-        return _tokens(" ".join([state.current_phase, state.cwd, *state.active_tool_profiles]))
+        phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        if not phase:
+            return set()
+        return {f"{PHASE_TAG_PREFIX}{phase}"}
+
+    @staticmethod
+    def _is_generic_retrieval_tag(tag: str) -> bool:
+        return is_generic_experience_tag(tag)
+
+    @classmethod
+    def _prompt_visible_memory_tags(cls, state: LoopState, memory: ExperienceMemory) -> list[str]:
+        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+        state_tags = {
+            str(tag).strip().lower()
+            for tag in (getattr(state, "intent_tags", []) or [])
+            if str(tag).strip()
+        }
+        visible: list[str] = []
+        for tag in getattr(memory, "intent_tags", []) or []:
+            normalized = str(tag or "").strip()
+            lowered = normalized.lower()
+            if not normalized or cls._is_generic_retrieval_tag(lowered):
+                continue
+            if task_mode == "chat" and lowered in _CHAT_SUPPRESSED_MEMORY_TAGS:
+                continue
+            if lowered.startswith(PHASE_TAG_PREFIX):
+                continue
+            if lowered == active_intent or lowered in state_tags or lowered.endswith("_exec"):
+                visible.append(normalized)
+                continue
+            if lowered.startswith(("task_", "tool_")):
+                visible.append(normalized)
+        return visible
+
+    @classmethod
+    def _is_generic_terminal_memory(cls, state: LoopState, memory: ExperienceMemory) -> bool:
+        if str(memory.tool_name or "").strip().lower() != "task_complete":
+            return False
+        if normalize_intent_label(memory.intent) != "general_task":
+            return False
+        if normalize_intent_label(getattr(state, "active_intent", "") or "") != "general_task":
+            return False
+        if cls._prompt_visible_memory_tags(state, memory):
+            return False
+        current_goal = cls._effective_current_goal(state)
+        if current_goal and (_tokens(current_goal) & _tokens(memory.notes or "")):
+            return False
+        return True
 
     @classmethod
     def _state_entity_tags(cls, state: LoopState) -> set[str]:
@@ -552,6 +752,37 @@ class LexicalRetriever:
                 )
             )
         )
+
+    @staticmethod
+    def _state_target_paths(state: LoopState) -> set[str]:
+        paths: set[str] = set()
+        for value in list(getattr(state, "files_changed_this_cycle", []) or []):
+            text = str(value or "").strip()
+            if text:
+                paths.add(Path(text).as_posix().lower())
+        task_targets = state.scratchpad.get("_task_target_paths")
+        if isinstance(task_targets, list):
+            for value in task_targets:
+                text = str(value or "").strip()
+                if text:
+                    paths.add(Path(text).as_posix().lower())
+        write_session = getattr(state, "write_session", None)
+        if write_session is not None:
+            for key in ("write_target_path", "write_staging_path"):
+                text = str(getattr(write_session, key, "") or "").strip()
+                if text:
+                    paths.add(Path(text).as_posix().lower())
+        return paths
+
+    @staticmethod
+    def _path_match(left: str, right: str) -> bool:
+        lhs = str(left or "").strip().lower()
+        rhs = str(right or "").strip().lower()
+        if not lhs or not rhs:
+            return False
+        if lhs == rhs:
+            return True
+        return lhs.endswith(rhs) or rhs.endswith(lhs)
 
     def _infer_requested_tool(self, state: LoopState) -> str | None:
         if state.working_memory.next_actions:
@@ -652,6 +883,7 @@ class LexicalRetriever:
         artifact: ArtifactRecord,
         query_tokens: set[str],
         recency: int,
+        state: LoopState,
     ) -> float:
         expanded_query_tokens = set(query_tokens)
         for token in list(query_tokens):
@@ -682,7 +914,65 @@ class LexicalRetriever:
             confidence_bonus = max(0.0, min(1.5, float(confidence) * 1.5)) if confidence is not None else 0.0
         except (TypeError, ValueError):
             confidence_bonus = 0.0
-        relevance = overlap + filename_bonus + path_bonus + tool_bonus + verifier_bonus + confidence_bonus
+        phase_bonus = 0.0
+        metadata_phase = str(metadata.get("phase") or "").strip().lower()
+        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        if metadata_phase and current_phase and metadata_phase == current_phase:
+            phase_bonus = 2.5
+
+        intent_bonus = 0.0
+        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+        metadata_intent = normalize_intent_label(metadata.get("intent"))
+        if active_intent and metadata_intent and metadata_intent == active_intent:
+            intent_bonus += 2.5
+        secondary_intents = {
+            normalize_intent_label(intent)
+            for intent in getattr(state, "secondary_intents", []) or []
+            if normalize_intent_label(intent)
+        }
+        if metadata_intent and metadata_intent in secondary_intents:
+            intent_bonus += 1.2
+
+        target_path_bonus = 0.0
+        target_paths = LexicalRetriever._state_target_paths(state)
+        source_path = Path(artifact.source).as_posix().lower() if artifact.source else ""
+        if source_path and target_paths and any(LexicalRetriever._path_match(source_path, target) for target in target_paths):
+            target_path_bonus += 4.0
+        write_target = str(getattr(getattr(state, "write_session", None), "write_target_path", "") or "").strip()
+        if write_target and source_path and LexicalRetriever._path_match(source_path, Path(write_target).as_posix().lower()):
+            target_path_bonus += 2.0
+
+        entity_bonus = 0.0
+        entity_overlap = len(LexicalRetriever._state_entity_tags(state) & (keyword_tokens | path_tokens | metadata_tokens))
+        if entity_overlap:
+            entity_bonus = min(2.0, entity_overlap * 0.5)
+
+        failure_bonus = 0.0
+        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        if failure_mode:
+            failure_haystack = " ".join(
+                [
+                    str(artifact.summary or ""),
+                    str(metadata.get("failure_mode") or ""),
+                    str(metadata.get("error") or ""),
+                ]
+            ).lower()
+            if failure_mode in failure_haystack:
+                failure_bonus += 2.0
+
+        relevance = (
+            overlap
+            + filename_bonus
+            + path_bonus
+            + tool_bonus
+            + verifier_bonus
+            + confidence_bonus
+            + phase_bonus
+            + intent_bonus
+            + target_path_bonus
+            + entity_bonus
+            + failure_bonus
+        )
         if relevance <= 0:
             return 0.0
         recency_bonus = recency * 0.05
@@ -725,7 +1015,30 @@ def _retrieval_message_text(message: Any) -> str:
     )
 
 
+def _is_execution_oriented_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(
+        token in lowered
+        for token in (
+            "shell_exec",
+            "ssh_exec",
+            "run ",
+            "execute",
+            "exec ",
+            "command",
+            "script",
+            "terminal",
+            "pytest",
+            "apt-get",
+            "git ",
+        )
+    )
+
+
 def build_retrieval_query(state: LoopState) -> str:
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
     parts = [
         state.run_brief.original_task,
         state.run_brief.task_contract,
@@ -737,6 +1050,8 @@ def build_retrieval_query(state: LoopState) -> str:
         parts.append(f"Plan status: {plan.status}")
         if plan.requested_output_path:
             parts.append(f"Plan export: {plan.requested_output_path}")
+    if task_mode:
+        parts.append(f"Task mode: {task_mode}")
     if state.active_intent:
         parts.append(f"Intent: {normalize_intent_label(state.active_intent)}")
     if state.intent_tags:
@@ -773,6 +1088,8 @@ def build_retrieval_query(state: LoopState) -> str:
             current_phase=state.current_phase,
         )[-3:]
     )
+    if task_mode == "chat":
+        parts = [part for part in parts if not _is_execution_oriented_text(part)]
     for content in _dedupe_nonempty_texts([
         _retrieval_message_text(message)
         for message in state.recent_messages[-3:]
@@ -812,13 +1129,24 @@ def build_refined_retrieval_query(
             parts.append("Summary notes: " + " ".join(summary.notes[:2]))
     if bundle.experiences:
         memory = bundle.experiences[0]
-        parts.append(
-            f"Prior outcome: {normalize_intent_label(memory.intent)} / {memory.tool_name} / {memory.outcome}"
-        )
-        if memory.failure_mode:
-            parts.append(f"Failure mode: {memory.failure_mode}")
-        if memory.intent_tags:
-            parts.append("Memory tags: " + " ".join(memory.intent_tags[:4]))
+        if not LexicalRetriever._is_generic_terminal_memory(state, memory):
+            parts.append(
+                f"Prior outcome: {normalize_intent_label(memory.intent)} / {memory.tool_name} / {memory.outcome}"
+            )
+            memory_namespace = LexicalRetriever._resolved_memory_namespace(memory, state=state)
+            if (
+                memory_namespace in {"ssh_remote", "local_shell", "planning", "debugging", "incidents"}
+                and (
+                    memory.tool_name in {"task_complete", "task_fail", "memory_update", "artifact_read", "file_read", "dir_list"}
+                    or bundle.score_gaps.get("experiences", 999.0) <= 1.0
+                )
+            ):
+                parts.append(f"Memory namespace: {memory_namespace}")
+            if memory.failure_mode:
+                parts.append(f"Failure mode: {memory.failure_mode}")
+            visible_memory_tags = LexicalRetriever._prompt_visible_memory_tags(state, memory)
+            if visible_memory_tags:
+                parts.append("Memory tags: " + " ".join(visible_memory_tags[:4]))
     if state.working_memory.open_questions:
         parts.append("Open questions: " + " ".join(state.working_memory.open_questions[-2:]))
     retrieval_failures = _retrieval_failure_texts(state.working_memory.failures[-2:])
@@ -838,17 +1166,6 @@ def build_refined_retrieval_query(
         if last_user:
             parts.append(f"Latest user context: {last_user[:240]}")
     return "\n".join(part for part in parts if part)
-
-
-def _is_superseded_artifact(artifact: ArtifactRecord) -> bool:
-    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-    superseded_by = metadata.get("superseded_by")
-    return isinstance(superseded_by, str) and bool(superseded_by.strip())
-
-
-def _is_prompt_visible_artifact(artifact: ArtifactRecord) -> bool:
-    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-    return metadata.get("model_visible", True) is not False
 
 
 def _is_retrieval_visible_artifact(artifact: ArtifactRecord) -> bool:

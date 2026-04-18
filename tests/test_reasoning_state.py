@@ -9,6 +9,7 @@ from smallctl.state import (
     LoopState,
     PlanStep,
     ReasoningGraph,
+    TurnBundle,
 )
 
 
@@ -75,6 +76,10 @@ def test_reasoning_graph_round_trip_preserves_records() -> None:
             next_observations_needed=["Read README.md"],
             evidence_refs=["E1"],
             claim_refs=["C1"],
+            new_facts=["README summary is pending extraction"],
+            invalidated_facts=["Assumed README had no summary section"],
+            state_changes=["Moved from explore to plan"],
+            decision_deltas=["Prioritized reading README before drafting output"],
         )
     ]
     state.active_plan = ExecutionPlan(
@@ -90,6 +95,20 @@ def test_reasoning_graph_round_trip_preserves_records() -> None:
             )
         ],
     )
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB1",
+            created_at="2026-04-18T00:00:00+00:00",
+            step_range=(2, 3),
+            phase="author",
+            intent="requested_file_read",
+            summary_lines=["Read README and staged summary updates"],
+            files_touched=["README.md"],
+            artifact_ids=["A1"],
+            evidence_refs=["E1"],
+            source_message_count=3,
+        )
+    ]
 
     payload = state.to_dict()
     restored = LoopState.from_dict(payload)
@@ -103,9 +122,16 @@ def test_reasoning_graph_round_trip_preserves_records() -> None:
     assert restored.reasoning_graph.claim_records[0].supporting_evidence_ids == ["E1"]
     assert restored.context_briefs[0].facts_confirmed == ["README.md exists"]
     assert restored.context_briefs[0].claim_refs == ["C1"]
+    assert restored.context_briefs[0].new_facts == ["README summary is pending extraction"]
+    assert restored.context_briefs[0].invalidated_facts == ["Assumed README had no summary section"]
+    assert restored.context_briefs[0].state_changes == ["Moved from explore to plan"]
+    assert restored.context_briefs[0].decision_deltas == ["Prioritized reading README before drafting output"]
     assert restored.active_plan is not None
     assert restored.active_plan.claim_refs == ["C1"]
     assert restored.active_plan.steps[0].claim_refs == ["C1"]
+    assert restored.turn_bundles
+    assert restored.turn_bundles[0].bundle_id == "TB1"
+    assert restored.turn_bundles[0].summary_lines == ["Read README and staged summary updates"]
 
 
 def test_legacy_payload_without_reasoning_graph_loads_with_empty_graph() -> None:

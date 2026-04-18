@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..models.conversation import ConversationMessage
-from ..state import ContextBrief, EpisodicSummary, LoopState
+from ..state import ContextBrief, EpisodicSummary, LoopState, TurnBundle
 from .policy import ContextPolicy, estimate_text_tokens
 from ..client import OpenAICompatClient
 
@@ -203,7 +203,11 @@ class ContextSummarizer:
             "  \"key_discoveries\": [\"fact 1\", ...],  // Critical facts learned\n"
             "  \"tools_tried\": [\"tool1\", ...],        // List of tool names used\n"
             "  \"blockers\": [\"error 1\", ...],         // Failures or blockers encountered\n"
-            "  \"next_action_hint\": \"...\"             // What was about to happen next\n"
+            "  \"next_action_hint\": \"...\",            // What was about to happen next\n"
+            "  \"new_facts\": [\"...\", ...],            // Newly established facts in this span\n"
+            "  \"invalidated_facts\": [\"...\", ...],    // Facts that were invalidated\n"
+            "  \"state_changes\": [\"...\", ...],        // Important state transitions\n"
+            "  \"decision_deltas\": [\"...\", ...]       // Decision-level updates\n"
             "}"
         )
         
@@ -276,6 +280,10 @@ class ContextSummarizer:
             next_observations_needed=data.get("next_observations_needed", []),
             evidence_refs=data.get("evidence_refs", artifact_ids),
             claim_refs=data.get("claim_refs", []),
+            new_facts=data.get("new_facts", data.get("facts_confirmed", data.get("key_discoveries", []))),
+            invalidated_facts=data.get("invalidated_facts", []),
+            state_changes=data.get("state_changes", []),
+            decision_deltas=data.get("decision_deltas", []),
         )
         
         if artifact_store:
@@ -283,6 +291,14 @@ class ContextSummarizer:
             full_text += f"Goal: {brief.task_goal}\n"
             full_text += f"Phase: {brief.current_phase}\n"
             full_text += "Discoveries:\n- " + "\n- ".join(brief.key_discoveries) + "\n\n"
+            if brief.new_facts:
+                full_text += "New Facts:\n- " + "\n- ".join(brief.new_facts) + "\n\n"
+            if brief.invalidated_facts:
+                full_text += "Invalidated Facts:\n- " + "\n- ".join(brief.invalidated_facts) + "\n\n"
+            if brief.state_changes:
+                full_text += "State Changes:\n- " + "\n- ".join(brief.state_changes) + "\n\n"
+            if brief.decision_deltas:
+                full_text += "Decision Deltas:\n- " + "\n- ".join(brief.decision_deltas) + "\n\n"
             full_text += "Blockers:\n- " + "\n- ".join(brief.blockers) + "\n\n"
             full_text += f"Next Action Hint: {brief.next_action_hint}\n"
             
@@ -294,6 +310,112 @@ class ContextSummarizer:
             brief.full_artifact_id = art.artifact_id
             state.artifacts[art.artifact_id] = art
 
+        return brief
+
+    def compact_to_turn_bundle(
+        self,
+        *,
+        state: LoopState,
+        messages: list[ConversationMessage],
+        step_range: tuple[int, int],
+    ) -> TurnBundle | None:
+        if not messages:
+            return None
+        bundle_id = f"TB{len(state.turn_bundles) + 1:04d}"
+        artifact_ids = [
+            str(message.metadata.get("artifact_id") or "").strip()
+            for message in messages
+            if isinstance(message.metadata, dict) and message.metadata.get("artifact_id")
+        ]
+        artifact_ids = _dedupe([artifact_id for artifact_id in artifact_ids if artifact_id])
+        files_touched: list[str] = []
+        for artifact_id in artifact_ids:
+            artifact = state.artifacts.get(artifact_id)
+            if artifact and artifact.source:
+                files_touched.append(artifact.source)
+        files_touched = _dedupe(files_touched)
+        summary_lines = _dedupe(
+            _collect_messages(messages, role="assistant", limit=3)
+            + _collect_messages(messages, role="tool", limit=2)
+            + _collect_messages(messages, role="user", limit=1)
+        )[:6]
+        return TurnBundle(
+            bundle_id=bundle_id,
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            step_range=step_range,
+            phase=state.current_phase,
+            intent=state.active_intent,
+            summary_lines=summary_lines,
+            files_touched=files_touched[:6],
+            artifact_ids=artifact_ids[:8],
+            evidence_refs=[record.evidence_id for record in state.reasoning_graph.evidence_records[-4:] if record.evidence_id],
+            source_message_count=len(messages),
+        )
+
+    def compact_turn_bundles_to_brief(
+        self,
+        *,
+        state: LoopState,
+        bundles: list[TurnBundle],
+        step_range: tuple[int, int],
+        artifact_store: Any | None = None,
+    ) -> ContextBrief | None:
+        if not bundles:
+            return None
+        brief_id = f"B{len(state.context_briefs) + 1:04d}"
+        summary_lines: list[str] = []
+        files_touched: list[str] = []
+        artifact_ids: list[str] = []
+        evidence_refs: list[str] = []
+        for bundle in bundles:
+            summary_lines.extend(bundle.summary_lines)
+            files_touched.extend(bundle.files_touched)
+            artifact_ids.extend(bundle.artifact_ids)
+            evidence_refs.extend(bundle.evidence_refs)
+        summary_lines = _dedupe(summary_lines)
+        files_touched = _dedupe(files_touched)
+        artifact_ids = _dedupe(artifact_ids)
+        evidence_refs = _dedupe(evidence_refs)
+        key_discoveries = summary_lines[:4] or ["Turn-bundle compaction captured recent progress"]
+        next_action_hint = (
+            state.working_memory.next_actions[-1]
+            if state.working_memory.next_actions
+            else (state.run_brief.current_phase_objective or state.run_brief.original_task)
+        )
+        brief = ContextBrief(
+            brief_id=brief_id,
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            tier="warm",
+            step_range=step_range,
+            task_goal=state.run_brief.original_task,
+            current_phase=state.current_phase,
+            key_discoveries=key_discoveries,
+            tools_tried=_dedupe([record.tool_name for record in state.reasoning_graph.evidence_records[-6:] if record.tool_name])[:6],
+            blockers=state.working_memory.failures[-4:],
+            files_touched=files_touched[:8],
+            artifact_ids=artifact_ids[:10],
+            next_action_hint=next_action_hint,
+            staleness_step=state.step_count,
+            facts_confirmed=key_discoveries[:4],
+            evidence_refs=evidence_refs[:12],
+            new_facts=key_discoveries[:4],
+            state_changes=_dedupe([f"Compacted turn bundle {bundle.bundle_id}" for bundle in bundles])[:4],
+            decision_deltas=summary_lines[:4],
+        )
+        if artifact_store is not None:
+            lines = [
+                f"Turn-bundle brief {brief_id}",
+                f"Step range: {step_range[0]}-{step_range[1]}",
+                "Summary lines:",
+                *[f"- {line}" for line in summary_lines[:12]],
+            ]
+            artifact = artifact_store.persist_thinking(
+                raw_thinking="\n".join(lines),
+                summary=f"Turn-bundle context brief {brief_id}",
+                source="tier_compaction",
+            )
+            brief.full_artifact_id = artifact.artifact_id
+            state.artifacts[artifact.artifact_id] = artifact
         return brief
 
     async def distill_thinking_async(

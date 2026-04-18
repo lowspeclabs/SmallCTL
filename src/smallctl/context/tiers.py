@@ -10,6 +10,7 @@ class MessageTierManager:
         self.policy = policy
         # Fallback defaults if no policy exists/passed
         self.warm_limit = getattr(policy, "warm_brief_limit", 3)
+        self.turn_bundle_limit = getattr(policy, "turn_bundle_limit", 6)
         self.compaction_interval = getattr(policy, "compaction_step_interval", 8)
 
     @property
@@ -51,7 +52,7 @@ class MessageTierManager:
         client: Any,
         artifact_store: Any = None
     ) -> ContextBrief | None:
-        """Compresses messages beyond the hot window into a new ContextBrief."""
+        """Demotes L0 transcript context to L1 turn bundles, then L1 to L2 briefs as needed."""
         # The messages to be compressed (everything older than the last N messages)
         to_compact = state.recent_messages[:-self.hot_window]
         if not to_compact:
@@ -59,24 +60,48 @@ class MessageTierManager:
             
         start_step = state.scratchpad.get("_last_tier_compaction_step", 0) + 1
         end_step = state.step_count
-        
-        # Produce a new structured brief. We assume summarizer has been updated to support this.
-        # If it hasn't yet, we'll need to update it in the next phase.
-        brief = await summarizer.compact_to_brief_async(
+        turn_bundle = summarizer.compact_to_turn_bundle(
             state=state,
-            client=client,
             messages=to_compact,
             step_range=(start_step, end_step),
-            artifact_store=artifact_store
         )
-        
-        if brief:
+        if turn_bundle is None:
+            return None
+        state.turn_bundles.append(turn_bundle)
+        state.recent_messages = state.recent_messages[-self.hot_window:]
+        state.scratchpad["_last_tier_compaction_step"] = state.step_count
+        state.scratchpad["_last_compaction_demotion"] = {
+            "from_level": "L0",
+            "to_level": "L1",
+            "bundle_id": turn_bundle.bundle_id,
+            "messages_compacted": len(to_compact),
+        }
+
+        if len(state.turn_bundles) <= self.turn_bundle_limit:
+            return None
+
+        promote_count = len(state.turn_bundles) - self.turn_bundle_limit
+        bundles_to_promote = list(state.turn_bundles[:promote_count])
+        if not bundles_to_promote:
+            return None
+        promote_step_start = bundles_to_promote[0].step_range[0]
+        promote_step_end = bundles_to_promote[-1].step_range[1]
+        brief = summarizer.compact_turn_bundles_to_brief(
+            state=state,
+            bundles=bundles_to_promote,
+            step_range=(promote_step_start, promote_step_end),
+            artifact_store=artifact_store,
+        )
+        if brief is not None:
             state.context_briefs.append(brief)
-            # Remove the now-summarized messages from the active transcript.
-            state.recent_messages = state.recent_messages[-self.hot_window:]
-            # Mark the high-water mark for the next interval calculation.
-            state.scratchpad["_last_tier_compaction_step"] = state.step_count
-            
+            state.turn_bundles = state.turn_bundles[promote_count:]
+            state.scratchpad["_last_compaction_demotion"] = {
+                "from_level": "L1",
+                "to_level": "L2",
+                "bundle_ids": [bundle.bundle_id for bundle in bundles_to_promote if bundle.bundle_id],
+                "brief_id": brief.brief_id,
+                "messages_compacted": len(to_compact),
+            }
         return brief
 
     def promote_to_cold(self, state: LoopState, artifact_store: Any = None) -> None:

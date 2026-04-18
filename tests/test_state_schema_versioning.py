@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from smallctl.graph.state import inflate_graph_state, serialize_graph_state
-from smallctl.state import LOOP_STATE_SCHEMA_VERSION, LoopState
+from smallctl.state import ExperienceMemory, LOOP_STATE_SCHEMA_VERSION, LoopState, PromptBudgetSnapshot, TurnBundle
 from smallctl.tools.memory import checkpoint
 
 
@@ -22,6 +22,51 @@ def test_loop_state_strategy_round_trip_preserves_staged_reasoning_toggle() -> N
     restored = LoopState.from_dict(payload)
 
     assert restored.strategy == {"thought_architecture": "staged_reasoning"}
+
+
+def test_loop_state_round_trip_preserves_task_mode() -> None:
+    state = LoopState(cwd="/tmp", task_mode="analysis")
+
+    restored = LoopState.from_dict(state.to_dict())
+
+    assert restored.task_mode == "analysis"
+
+
+def test_loop_state_round_trip_preserves_warm_experience_namespace() -> None:
+    state = LoopState(cwd="/tmp")
+    state.warm_experiences.append(
+        ExperienceMemory(
+            memory_id="mem-namespace",
+            intent="requested_ssh_exec",
+            namespace="ssh_remote",
+            tool_name="ssh_exec",
+            outcome="success",
+            notes="Run whoami on the remote host.",
+        )
+    )
+
+    restored = LoopState.from_dict(state.to_dict())
+
+    assert restored.warm_experiences[0].namespace == "ssh_remote"
+
+
+def test_loop_state_from_dict_infers_namespace_for_legacy_experience_payload() -> None:
+    state = LoopState.from_dict(
+        {
+            "cwd": "/tmp",
+            "warm_experiences": [
+                {
+                    "memory_id": "mem-legacy",
+                    "intent": "requested_ssh_exec",
+                    "tool_name": "ssh_exec",
+                    "outcome": "success",
+                    "notes": "Successfully called ssh_exec.",
+                }
+            ],
+        }
+    )
+
+    assert state.warm_experiences[0].namespace == "ssh_remote"
 
 
 def test_loop_state_from_dict_migrates_legacy_write_session_aliases() -> None:
@@ -91,3 +136,52 @@ def test_graph_state_round_trip_preserves_staged_reasoning_toggle() -> None:
     assert graph_state.loop_state.strategy == {"thought_architecture": "staged_reasoning"}
     serialized = serialize_graph_state(graph_state)
     assert serialized["loop_state"]["strategy"] == {"thought_architecture": "staged_reasoning"}
+
+
+def test_loop_state_round_trip_preserves_turn_bundles_and_compaction_levels() -> None:
+    state = LoopState(cwd="/tmp")
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB42",
+            created_at="2026-04-18T00:00:00+00:00",
+            step_range=(4, 8),
+            phase="author",
+            intent="requested_file_patch",
+            summary_lines=["Patched src/app.py", "Reran pytest"],
+            files_touched=["src/app.py"],
+            artifact_ids=["A42"],
+            evidence_refs=["E42"],
+            source_message_count=5,
+        )
+    ]
+    state.prompt_budget = PromptBudgetSnapshot(
+        estimated_prompt_tokens=1200,
+        included_compaction_levels=["L0", "L1", "L2"],
+        dropped_compaction_levels=["L4"],
+    )
+
+    restored = LoopState.from_dict(state.to_dict())
+
+    assert restored.turn_bundles
+    assert restored.turn_bundles[0].bundle_id == "TB42"
+    assert restored.turn_bundles[0].summary_lines == ["Patched src/app.py", "Reran pytest"]
+    assert restored.prompt_budget.included_compaction_levels == ["L0", "L1", "L2"]
+    assert restored.prompt_budget.dropped_compaction_levels == ["L4"]
+
+
+def test_loop_state_from_legacy_payload_defaults_new_rollout_fields() -> None:
+    restored = LoopState.from_dict(
+        {
+            "schema_version": 1,
+            "current_phase": "explore",
+            "thread_id": "legacy-thread",
+            "recent_messages": [],
+            "run_brief": {"original_task": "Read README"},
+            "working_memory": {"current_goal": "Read README"},
+            "prompt_budget": {"estimated_prompt_tokens": 100},
+        }
+    )
+
+    assert restored.turn_bundles == []
+    assert restored.prompt_budget.included_compaction_levels == []
+    assert restored.prompt_budget.dropped_compaction_levels == []

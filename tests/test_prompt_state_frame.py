@@ -142,6 +142,7 @@ class _Retriever:
             summaries=[],
             artifacts=[],
             experiences=[],
+            lane_routes={"artifact_packet": [], "experience_packet": [], "evidence_packet": []},
         )
 
 
@@ -199,6 +200,7 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     assert "prompt_state_frame_compiled" in events
     assert "context_lane_selected" in events
     assert "context_lane_dropped" in events
+    assert "retrieval_ranked_with_intent" in events
 
 
 def test_prompt_state_frame_captures_coding_anchors_and_ladder_levels() -> None:

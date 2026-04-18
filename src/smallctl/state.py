@@ -25,6 +25,7 @@ from .state_schema import (
     PromptBudgetSnapshot,
     ReasoningGraph,
     RunBrief,
+    TurnBundle,
     WorkingMemory,
     WriteSession,
 )
@@ -45,6 +46,7 @@ from .state_coercion import (
     _coerce_tool_execution_record,
     _coerce_pending_interrupt_payload,
     _coerce_experience_memory,
+    _coerce_turn_bundle,
     _coerce_memory_entry_list,
 )
 from .state_memory import align_memory_entries, memory_entry_is_stale, _trim_recent_messages
@@ -107,8 +109,10 @@ class LoopState(LoopStateFlowMixin):
     artifacts: dict[str, ArtifactRecord] = field(default_factory=dict)
     episodic_summaries: list[EpisodicSummary] = field(default_factory=list)
     context_briefs: list[ContextBrief] = field(default_factory=list)
+    turn_bundles: list[TurnBundle] = field(default_factory=list)
     prompt_budget: PromptBudgetSnapshot = field(default_factory=PromptBudgetSnapshot)
     retrieval_cache: list[str] = field(default_factory=list)
+    task_mode: str = ""
     active_intent: str = ""
     secondary_intents: list[str] = field(default_factory=list)
     intent_tags: list[str] = field(default_factory=list)
@@ -191,8 +195,10 @@ class LoopState(LoopStateFlowMixin):
             "artifacts": json_safe_value(self.artifacts),
             "episodic_summaries": json_safe_value(self.episodic_summaries),
             "context_briefs": json_safe_value(self.context_briefs),
+            "turn_bundles": json_safe_value(self.turn_bundles),
             "prompt_budget": json_safe_value(self.prompt_budget),
             "retrieval_cache": json_safe_value(self.retrieval_cache),
+            "task_mode": self.task_mode,
             "active_intent": self.active_intent,
             "secondary_intents": json_safe_value(self.secondary_intents),
             "intent_tags": json_safe_value(self.intent_tags),
@@ -282,8 +288,13 @@ class LoopState(LoopStateFlowMixin):
             _coerce_context_brief(item)
             for item in _coerce_list_payload(migrated.get("context_briefs"))
         ]
+        raw["turn_bundles"] = [
+            _coerce_turn_bundle(item)
+            for item in _coerce_list_payload(migrated.get("turn_bundles"))
+        ]
         raw["prompt_budget"] = _coerce_prompt_budget(migrated.get("prompt_budget"))
         raw["retrieval_cache"] = _coerce_string_list(migrated.get("retrieval_cache"))
+        raw["task_mode"] = str(migrated.get("task_mode", "") or "")
         raw["active_intent"] = str(migrated.get("active_intent", "") or "")
         raw["secondary_intents"] = _coerce_string_list(migrated.get("secondary_intents"))
         raw["intent_tags"] = _coerce_string_list(migrated.get("intent_tags"))

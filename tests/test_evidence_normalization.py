@@ -14,6 +14,7 @@ from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.risk_policy import evaluate_risk_policy
 from smallctl.state import ArtifactRecord, LoopState
+from smallctl.tools.artifact import artifact_read
 
 
 def _make_harness(tmp_path: Path) -> SimpleNamespace:
@@ -176,6 +177,8 @@ def test_shell_failure_records_negative_evidence(tmp_path: Path) -> None:
         assert evidence.negative is True
         assert evidence.evidence_type == "negative_evidence"
         assert "Permission denied" in evidence.statement
+        invalidations = harness.state.scratchpad.get("_context_invalidations", [])
+        assert any(str(item.get("reason") or "") == "verifier_failed" for item in invalidations if isinstance(item, dict))
 
     asyncio.run(_run())
 
@@ -282,5 +285,139 @@ def test_artifact_read_cache_hit_marks_replayed_evidence(tmp_path: Path) -> None
         assert evidence.replayed is True
         assert evidence.evidence_type == "replayed_or_cached"
         assert evidence.artifact_id == cached_artifact_id
+
+    asyncio.run(_run())
+
+
+def test_artifact_print_reuses_existing_artifact(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+
+        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        _prime_execution_record(
+            harness,
+            operation_id="op-5",
+            tool_name="file_read",
+            tool_call_id="call-5",
+            args={"path": "README.md"},
+            result=initial,
+        )
+        initial_message = await service.record_result(
+            tool_name="file_read",
+            tool_call_id="call-5",
+            operation_id="op-5",
+            result=initial,
+            arguments={"path": "README.md"},
+        )
+        cached_artifact_id = str(initial_message.metadata.get("artifact_id") or "")
+
+        print_result = ToolEnvelope(
+            success=True,
+            output="",
+            metadata={"artifact_id": cached_artifact_id, "tool_name": "artifact_print"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-6",
+            tool_name="artifact_print",
+            tool_call_id="call-6",
+            args={"artifact_id": cached_artifact_id},
+            result=print_result,
+        )
+        message = await service.record_result(
+            tool_name="artifact_print",
+            tool_call_id="call-6",
+            operation_id="op-6",
+            result=print_result,
+            arguments={"artifact_id": cached_artifact_id},
+        )
+
+        assert message.metadata["artifact_id"] == cached_artifact_id
+        assert message.metadata["cache_hit"] is True
+        evidence = harness.state.reasoning_graph.evidence_records[-1]
+        assert evidence.tool_name == "artifact_print"
+        assert evidence.replayed is True
+        assert evidence.evidence_type == "replayed_or_cached"
+
+    asyncio.run(_run())
+
+
+def test_failed_artifact_read_does_not_create_self_referential_artifact(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+
+        shell_result = ToolEnvelope(
+            success=True,
+            output={"stdout": "nmap output", "stderr": "", "exit_code": 0},
+            metadata={"command": "nmap -sn 192.168.1.0/24"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-shell",
+            tool_name="shell_exec",
+            tool_call_id="call-shell",
+            args={"command": "nmap -sn 192.168.1.0/24"},
+            result=shell_result,
+        )
+        await service.record_result(
+            tool_name="shell_exec",
+            tool_call_id="call-shell",
+            operation_id="op-shell",
+            result=shell_result,
+            arguments={"command": "nmap -sn 192.168.1.0/24"},
+        )
+
+        status_result = ToolEnvelope(
+            success=True,
+            output={"phase": "execute"},
+            metadata={},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-status",
+            tool_name="loop_status",
+            tool_call_id="call-status",
+            args={},
+            result=status_result,
+        )
+        await service.record_result(
+            tool_name="loop_status",
+            tool_call_id="call-status",
+            operation_id="op-status",
+            result=status_result,
+            arguments={},
+        )
+
+        missing_result = ToolEnvelope(
+            success=False,
+            output=None,
+            error="Artifact A0003 not found in state.",
+            metadata={"tool_name": "artifact_read"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-missing",
+            tool_name="artifact_read",
+            tool_call_id="call-missing",
+            args={"artifact_id": "A0003"},
+            result=missing_result,
+        )
+        message = await service.record_result(
+            tool_name="artifact_read",
+            tool_call_id="call-missing",
+            operation_id="op-missing",
+            result=missing_result,
+            arguments={"artifact_id": "A0003"},
+        )
+
+        assert message.content == "Artifact A0003 not found in state."
+        assert message.metadata == {}
+        assert sorted(harness.state.artifacts.keys()) == ["A0001", "A0002"]
+
+        reread = artifact_read(harness.state, artifact_id="A0003")
+        assert reread["success"] is False
+        assert reread["error"] == "Artifact A0003 not found in state."
 
     asyncio.run(_run())

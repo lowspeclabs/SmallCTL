@@ -23,6 +23,18 @@ from ..memory.taxonomy import (
     ZERO_ARG_TOOL_ARG_LEAK,
     normalize_failure_mode,
 )
+from ..memory_namespace import infer_memory_namespace
+from ..redaction import redact_sensitive_text
+from .task_intent import (
+    completion_next_action,
+    derive_task_contract,
+    extract_intent_state,
+    infer_entity_tags,
+    infer_environment_tags,
+    next_action_for_task,
+)
+from .task_classifier import classify_task_mode
+from .tool_message_compaction import trim_recent_messages_window
 
 if TYPE_CHECKING:
     from ..harness import Harness
@@ -38,6 +50,18 @@ _COMPLEX_WRITE_FEATURE_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
     ("edge_cases", 1, ("edge case", "edge cases")),
     ("bugfix_loop", 2, ("bug you encounter and fix", "bug you encounter", "encounter and fix during development")),
 )
+
+
+def _tool_pattern_keys(tool_name: str, arguments: dict[str, Any]) -> list[str]:
+    if tool_name == "ssh_exec":
+        ordered_pairs = (
+            ("host", "host"),
+            ("user", "user"),
+            ("password", "auth"),
+            ("command", "command"),
+        )
+        return [label for key, label in ordered_pairs if arguments.get(key) not in (None, "")]
+    return list(arguments.keys())
 
 
 def assess_write_task_complexity(
@@ -141,6 +165,49 @@ class MemoryService:
         if self.harness.state.active_plan is not None or self.harness.state.draft_plan is not None:
             self.harness.state.sync_plan_mirror()
         self._refresh_active_intent()
+        scratchpad = self.harness.state.scratchpad
+        previous_contract_phase = str(scratchpad.get("_last_contract_phase_seen", "") or "")
+        current_contract_phase = str(self.harness.state.contract_phase() or "")
+        if previous_contract_phase and current_contract_phase and previous_contract_phase != current_contract_phase:
+            self._emit_context_invalidation(
+                reason="phase_advanced",
+                details={
+                    "from_phase": previous_contract_phase,
+                    "to_phase": current_contract_phase,
+                    "state_change": f"Phase advanced: {previous_contract_phase} -> {current_contract_phase}",
+                },
+            )
+        scratchpad["_last_contract_phase_seen"] = current_contract_phase
+
+        previous_environment = str(scratchpad.get("_last_environment_fingerprint", "") or "")
+        current_environment = self._context_environment_fingerprint()
+        if previous_environment and current_environment and previous_environment != current_environment:
+            self._emit_context_invalidation(
+                reason="environment_changed",
+                details={
+                    "from_environment": previous_environment,
+                    "to_environment": current_environment,
+                    "state_change": "Execution environment changed",
+                },
+            )
+        scratchpad["_last_environment_fingerprint"] = current_environment
+
+        previous_write_target = str(scratchpad.get("_last_write_session_target", "") or "")
+        current_write_target = ""
+        if self.harness.state.write_session is not None:
+            current_write_target = str(self.harness.state.write_session.write_target_path or "").strip()
+        if previous_write_target and previous_write_target != current_write_target:
+            self._emit_context_invalidation(
+                reason="write_session_target_changed",
+                paths=[previous_write_target, current_write_target],
+                details={
+                    "from_target": previous_write_target,
+                    "to_target": current_write_target,
+                    "state_change": "Active write-session target changed",
+                },
+            )
+        scratchpad["_last_write_session_target"] = current_write_target
+
         self.harness.state.prune_stale_meta(limit=self.harness.context_policy.memory_staleness_step_limit)
         self.harness.state.align_meta_to_content()
         
@@ -173,10 +240,10 @@ class MemoryService:
         original_task = self.harness.state.run_brief.original_task or ""
         has_recent_tool_evidence = any(message.role == "tool" for message in self.harness.state.recent_messages[-4:])
         has_known_facts = bool(self.harness.state.working_memory.known_facts)
-        task_guidance = self._next_action_for_task(original_task)
+        task_guidance = next_action_for_task(self.harness, original_task)
 
         if self.harness.state.current_phase == "verify" or has_recent_tool_evidence or has_known_facts:
-            next_action = self._completion_next_action()
+            next_action = completion_next_action()
             if self.harness.state.working_memory.next_actions and self.harness.state.working_memory.next_actions[-1] == task_guidance:
                 self.harness.state.working_memory.next_actions.pop()
         else:
@@ -196,8 +263,7 @@ class MemoryService:
             confidence=0.7,
         )
 
-        from . import _trim_recent_messages_window
-        self.harness.state.recent_messages = _trim_recent_messages_window(
+        self.harness.state.recent_messages = trim_recent_messages_window(
             self.harness.state.recent_messages,
             limit=recent_messages_limit,
         )
@@ -214,160 +280,11 @@ class MemoryService:
     def _refresh_active_intent(self) -> None:
         task = self.harness.state.run_brief.original_task or self.harness._current_user_task()
         self.prime_write_policy(task)
-        primary, secondary, tags = self._extract_intent_state(task)
+        self.harness.state.task_mode = classify_task_mode(task)
+        primary, secondary, tags = extract_intent_state(self.harness, task)
         self.harness.state.active_intent = primary
         self.harness.state.secondary_intents = secondary
         self.harness.state.intent_tags = tags
-
-    def _extract_intent_state(self, task: str) -> tuple[str, list[str], list[str]]:
-        text = (task or "").lower()
-        secondary: list[str] = []
-        tags: list[str] = []
-        requested_tool = self._infer_requested_tool_name(task)
-        
-        primary = "general_task"
-        if requested_tool:
-            primary = f"requested_{requested_tool}"
-            secondary.append("complete_validation_task")
-            tags.append(requested_tool)
-            if requested_tool in {"scratch_list", "cwd_get", "loop_status"}:
-                secondary.append("call_zero_arg_tool")
-            if requested_tool in {"task_complete", "task_fail", "ask_human"}:
-                secondary.append("control_tool")
-        elif any(token in text for token in {"inspect", "read", "grep", "find", "search", "list"}):
-            primary = "inspect_repo"
-            secondary.append("read_artifacts")
-        elif any(token in text for token in {"write", "edit", "patch", "create", "update", "diff"}):
-            primary = "write_file"
-            secondary.append("mutate_repo")
-        elif "contract" in text or "plan" in text:
-            primary = "plan_execution"
-            secondary.append("complete_validation_task")
-        
-        if self.harness.state.working_memory.failures:
-            secondary.append("recover_from_validation_error")
-            
-        tags.extend(self._infer_environment_tags())
-        tags.extend(self._infer_entity_tags(task))
-        tags.extend([t for t in self.harness.state.working_memory.next_actions[-2:] if " " not in t][:2])
-        
-        return primary, clip_string_list(secondary, limit=3, item_char_limit=48)[0], clip_string_list(tags, limit=6, item_char_limit=64)[0]
-
-    def _infer_environment_tags(self) -> list[str]:
-        tags = [self.harness.provider_profile, self.harness.state.current_phase]
-        cwd = self.harness.state.cwd.lower()
-        if "localhost" in cwd:
-            tags.append("localhost")
-        if "scripts" in cwd:
-            tags.append("scripts")
-        return tags
-
-    def _infer_entity_tags(self, task: str) -> list[str]:
-        text = (task or "").lower()
-        tags = []
-        if "ansible" in text:
-            tags.append("ansible")
-        if "python" in text or ".py" in text:
-            tags.append("python")
-        if "bash" in text or ".sh" in text:
-            tags.append("bash")
-        return tags
-
-    def _infer_requested_tool_name(self, task: str) -> str:
-        text = (task or "").lower()
-        creation_markers = (
-            "build",
-            "create",
-            "make",
-            "write",
-            "generate",
-            "implement",
-            "save",
-            "produce",
-        )
-        if (
-            "script" in text
-            and any(marker in text for marker in creation_markers)
-        ) or any(ext in text for ext in (".py", ".sh", ".bash", ".ps1")):
-            return "write_file"
-        if "file_patch" in text or "patch file" in text:
-            return "file_patch"
-        memory_markers = (
-            "save this in memory",
-            "save memory",
-            "remember this",
-            "store this in memory",
-            "store this",
-            "note this",
-            "pin this",
-            "persist this",
-            "keep this in memory",
-            "write this down",
-        )
-        if any(marker in text for marker in memory_markers):
-            return "memory_update"
-        if "read_file" in text or "cat" in text:
-            return "read_file"
-        if "write_file" in text:
-            return "write_file"
-        if hasattr(self.harness, "_looks_like_shell_request") and self.harness._looks_like_shell_request(task):
-             return "shell_exec"
-        return ""
-
-    def _extract_memory_payload(self, task: str) -> str:
-        text = (task or "").strip()
-        if not text:
-            return ""
-
-        lowered = text.lower()
-        prefixes = (
-            "save this in memory",
-            "store this in memory",
-            "keep this in memory",
-            "remember this",
-            "note this",
-            "pin this",
-            "persist this",
-            "write this down",
-            "save memory",
-            "store this",
-            "remember",
-            "note",
-            "pin",
-            "persist",
-            "keep",
-            "write down",
-            "save",
-            "store",
-        )
-        for prefix in prefixes:
-            start = lowered.find(prefix)
-            if start == -1:
-                continue
-            remainder = text[start + len(prefix):].strip()
-            remainder = remainder.lstrip(":-— ")
-            if remainder:
-                return remainder
-        return ""
-
-    def _memory_fact_hint(self, task: str) -> str:
-        payload = self._extract_memory_payload(task)
-        if not payload:
-            return ""
-        clipped, _ = clip_text_value(payload, limit=180)
-        return clipped
-
-    def _completion_next_action(self) -> str:
-        return "Decide whether the current evidence is sufficient; call task_complete when it is."
-
-    def _next_action_for_task(self, task: str) -> str:
-        memory_fact_hint = self._memory_fact_hint(task)
-        if memory_fact_hint:
-            return (
-                "Call `memory_update(section='known_facts', content="
-                f"{json.dumps(memory_fact_hint, ensure_ascii=True)})` to persist the fact."
-            )
-        return f"{self.harness.state.current_phase}: gather the next missing fact for {clip_text_value(task, limit=40)[0]}"
 
     def record_experience(
         self,
@@ -383,7 +300,7 @@ class MemoryService:
         confidence = 0.85 if result.success else 0.60
         if tool_name == "task_complete" and result.success:
             confidence = 0.95
-        if tool_name in {"artifact_print", "show_artifact"} and result.success:
+        if tool_name == "artifact_print" and result.success:
             confidence = 0.55
         
         op_notes = notes
@@ -391,7 +308,7 @@ class MemoryService:
             if result.success:
                 if tool_name == "task_complete":
                     op_notes = "Task finished successfully. Call task_complete when objectives met."
-                elif tool_name in {"artifact_print", "show_artifact"}:
+                elif tool_name == "artifact_print":
                     op_notes = (
                         "Displayed artifact contents for inspection. "
                         "Treat this as already-shown evidence, not a reusable progress step."
@@ -401,7 +318,7 @@ class MemoryService:
                     if not args_meta:
                         op_notes = f"Successfully called {tool_name} with no arguments."
                     else:
-                        op_notes = f"Successfully called {tool_name}. Key pattern: {list(args_meta.keys())}."
+                        op_notes = f"Successfully called {tool_name}. Key pattern: {_tool_pattern_keys(tool_name, args_meta)}."
             else:
                 if failure_mode == ZERO_ARG_TOOL_ARG_LEAK:
                     op_notes = f"Do not send placeholder arguments to {tool_name}. Call it empty."
@@ -409,12 +326,29 @@ class MemoryService:
                     op_notes = f"Argument mismatch for {tool_name}: {result.error}"
                 else:
                     op_notes = str(result.error or result.output or "").strip()
+        op_notes = redact_sensitive_text(op_notes)
 
         correction_ids = [
             memory.memory_id
             for memory in self.harness.state.warm_experiences
             if memory.intent == self.harness.state.active_intent and memory.tool_name == tool_name and memory.outcome == "failure"
         ]
+        task_mode = str(getattr(self.harness.state, "task_mode", "") or "").strip().lower()
+        if not task_mode:
+            task_mode = classify_task_mode(self.harness.state.run_brief.original_task or "")
+        intent_tags = list(self.harness.state.intent_tags)
+        environment_tags = infer_environment_tags(self.harness)
+        entity_tags = infer_entity_tags(self.harness.state.run_brief.original_task)
+        namespace = infer_memory_namespace(
+            task_mode=task_mode,
+            tool_name=tool_name,
+            intent=self.harness.state.active_intent,
+            intent_tags=intent_tags,
+            environment_tags=environment_tags,
+            entity_tags=entity_tags,
+            notes=op_notes,
+            original_task=self.harness.state.run_brief.original_task,
+        )
         memory = ExperienceMemory(
             memory_id=f"mem-{uuid.uuid4().hex[:10]}",
             tier="warm",
@@ -422,9 +356,10 @@ class MemoryService:
             run_id=self.harness.state.thread_id,
             phase=self.harness.state.current_phase,
             intent=self.harness.state.active_intent,
-            intent_tags=list(self.harness.state.intent_tags),
-            environment_tags=self._infer_environment_tags(),
-            entity_tags=self._infer_entity_tags(self.harness.state.run_brief.original_task),
+            namespace=namespace,
+            intent_tags=intent_tags,
+            environment_tags=environment_tags,
+            entity_tags=entity_tags,
             action_type="tool_call",
             tool_name=tool_name,
             arguments_fingerprint=self._argument_fingerprint(result.metadata.get("arguments")),
@@ -452,7 +387,7 @@ class MemoryService:
             return
         for memory in self.harness.state.warm_experiences:
             if memory.memory_id in self.harness.state.retrieved_experience_ids and memory.tool_name == tool_name:
-                if memory.tool_name in {"artifact_print", "show_artifact"}:
+                if memory.tool_name == "artifact_print":
                     continue
                 self.harness.state.reinforce_experience(memory.memory_id, success=success)
                 self.harness.warm_memory_store.upsert(memory)
@@ -485,10 +420,38 @@ class MemoryService:
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
     def derive_task_contract(self, task: str) -> str:
-        lowered = (task or "").lower()
-        memory_fact_hint = self._memory_fact_hint(task)
-        if memory_fact_hint:
-            return f"memory_update known_facts: {memory_fact_hint}"
-        if "contract" in lowered or "plan" in lowered:
-            return "high_fidelity"
-        return "general"
+        return derive_task_contract(task)
+
+    def _emit_context_invalidation(
+        self,
+        *,
+        reason: str,
+        paths: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        event = self.harness.state.invalidate_context(
+            reason=reason,
+            paths=paths,
+            details=details,
+        )
+        runlog = getattr(self.harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "context_invalidated",
+                "context invalidation applied",
+                reason=event.get("reason", reason),
+                paths=event.get("paths", []),
+                invalidated_fact_count=event.get("invalidated_fact_count", 0),
+                invalidated_memory_count=event.get("invalidated_memory_count", 0),
+                details=event.get("details", {}),
+            )
+
+    def _context_environment_fingerprint(self) -> str:
+        phase = str(self.harness.state.current_phase or "").strip().lower()
+        cwd = str(self.harness.state.cwd or "").strip().lower()
+        task_mode = str(self.harness.state.task_mode or "").strip().lower()
+        ssh_targets = self.harness.state.scratchpad.get("_session_ssh_targets")
+        ssh_hosts: list[str] = []
+        if isinstance(ssh_targets, dict):
+            ssh_hosts = sorted(str(host).strip().lower() for host in ssh_targets.keys() if str(host).strip())
+        return "|".join([phase, task_mode, cwd, ",".join(ssh_hosts)])

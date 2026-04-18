@@ -9,7 +9,7 @@ from smallctl.harness.compaction import CompactionService
 from smallctl.harness.memory import MemoryService
 from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import LoopState
+from smallctl.state import LoopState, TurnBundle
 
 
 class _RunLogger:
@@ -270,6 +270,187 @@ def test_compact_oversized_tool_messages_replaces_large_tool_content_with_artifa
     assert changed is True
     assert state.recent_messages[0].content == "Artifact A1: concise reference"
     assert state.artifacts["A1"].artifact_id == "A1"
+
+
+def test_compact_oversized_tool_messages_preserves_artifact_read_content() -> None:
+    state = LoopState(cwd="/tmp")
+    original_content = "line\n" * 600
+    message = ConversationMessage(
+        role="tool",
+        name="artifact_read",
+        content=original_content,
+        metadata={"artifact_id": "A1"},
+    )
+    state.recent_messages = [message]
+    state.artifacts["A1"] = _Artifact("A1")
+
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=_ArtifactStore(),
+        context_policy=ContextPolicy(),
+        _current_user_task=lambda: "Inspect artifact contents",
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    changed = ToolResultService(harness).compact_oversized_tool_messages(soft_limit=1024)
+
+    assert changed is False
+    assert state.recent_messages[0].content == original_content
+
+
+def test_compact_oversized_shell_tool_messages_keep_artifact_id_when_shell_compactor_returns_ok() -> None:
+    state = LoopState(cwd="/tmp")
+    message = ConversationMessage(
+        role="tool",
+        name="shell_exec",
+        content="x" * 2000,
+        metadata={"artifact_id": "A1"},
+    )
+    state.recent_messages = [message]
+
+    artifact = _Artifact("A1")
+    artifact.metadata = {
+        "tool_name": "shell_exec",
+        "command": "nmap -sn 192.168.1.0/24 2>&1",
+        "arguments": {"command": "nmap -sn 192.168.1.0/24 2>&1"},
+        "exit_code": 0,
+    }
+    state.artifacts["A1"] = artifact
+
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=SimpleNamespace(
+            compact_tool_message=lambda *args, **kwargs: "ok",
+        ),
+        context_policy=ContextPolicy(),
+        _current_user_task=lambda: "Inspect logs",
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    changed = ToolResultService(harness).compact_oversized_tool_messages(soft_limit=1024)
+
+    assert changed is True
+    assert "Artifact A1: shell_exec SUCCESS: nmap -sn 192.168.1.0/24 2>&1" in state.recent_messages[0].content
+    assert "artifact_read(artifact_id='A1')" in state.recent_messages[0].content
+
+
+def test_compact_oversized_shell_tool_messages_preserve_failure_status_when_shell_compactor_returns_ok() -> None:
+    state = LoopState(cwd="/tmp")
+    message = ConversationMessage(
+        role="tool",
+        name="shell_exec",
+        content="x" * 2000,
+        metadata={"artifact_id": "A2"},
+    )
+    state.recent_messages = [message]
+
+    artifact = _Artifact("A2")
+    artifact.metadata = {
+        "tool_name": "shell_exec",
+        "command": "cd /repo && python3 ./temp/dead_letter_queue.py",
+        "arguments": {"command": "cd /repo && python3 ./temp/dead_letter_queue.py"},
+        "exit_code": 2,
+        "success": False,
+        "error": "python3: can't open file './temp/dead_letter_queue.py'",
+    }
+    state.artifacts["A2"] = artifact
+
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=SimpleNamespace(
+            compact_tool_message=lambda *args, **kwargs: "ok",
+        ),
+        context_policy=ContextPolicy(),
+        _current_user_task=lambda: "Inspect logs",
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    changed = ToolResultService(harness).compact_oversized_tool_messages(soft_limit=1024)
+
+    assert changed is True
+    assert "EXIT_CODE=2 (FAILED)" in state.recent_messages[0].content
+    assert "Artifact A2: shell_exec FAILED: cd /repo && python3 ./temp/dead_letter_queue.py" in state.recent_messages[0].content
+    assert "artifact_read(artifact_id='A2')" in state.recent_messages[0].content
+
+
+def test_structured_compaction_demotes_l0_to_l1_turn_bundle() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 12
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(6)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=6,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="demote context",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert len(state.turn_bundles) == 1
+    assert len(state.recent_messages) == 2
+    demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
+    assert demotion_entries
+    assert demotion_entries[-1]["data"]["from_level"] == "L0"
+    assert demotion_entries[-1]["data"]["to_level"] == "L1"
+
+
+def test_structured_compaction_promotes_l1_to_l2_when_bundle_limit_exceeded() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 20
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB0001",
+            created_at="2026-04-18T00:00:00+00:00",
+            step_range=(1, 3),
+            phase="author",
+            intent="requested_file_patch",
+            summary_lines=["Edited src/app.py"],
+            files_touched=["src/app.py"],
+        )
+    ]
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(5)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=1,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="promote turn bundles",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert state.context_briefs
+    assert len(state.turn_bundles) == 1
+    demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
+    assert demotion_entries
+    assert any(entry["data"]["to_level"] == "L2" for entry in demotion_entries)
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

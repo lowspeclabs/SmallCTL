@@ -38,6 +38,10 @@ class ContextPolicy:
     hot_message_limit: int = 8
     warm_brief_limit: int = 3
     warm_tier_token_budget: int = 400
+    observation_token_limit: int = 260
+    max_observation_items: int = 6
+    turn_bundle_limit: int = 6
+    coding_profile_enabled: bool = True
     cold_fact_limit: int = 12
     compaction_step_interval: int = 8
 

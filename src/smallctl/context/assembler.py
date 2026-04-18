@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ..models.conversation import ConversationMessage
+from ..redaction import redact_sensitive_text
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -11,11 +12,16 @@ from ..state import (
     ExperienceMemory,
     LoopState,
     PromptBudgetSnapshot,
+    TurnBundle,
     clip_string_list,
     clip_text_value,
     normalize_intent_label,
 )
+from .frame import PromptStateFrame
+from .frame_compiler import PromptStateFrameCompiler
+from .observations import ObservationPacket
 from .policy import ContextPolicy, estimate_text_tokens
+from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
 from .retrieval import LexicalRetriever
 
 
@@ -24,11 +30,13 @@ class PromptAssembly:
     messages: list[dict[str, Any]]
     section_tokens: dict[str, int]
     estimated_prompt_tokens: int
+    frame: PromptStateFrame | None = None
 
 
 class PromptAssembler:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
+        self.frame_compiler = PromptStateFrameCompiler()
 
     def build_messages(
         self,
@@ -42,26 +50,26 @@ class PromptAssembler:
         include_structured_sections: bool = True,
         token_budget: int | None = None,
     ) -> PromptAssembly:
-        # 1. Total available budget (Phase III)
+        frame = self.frame_compiler.compile(
+            state=state,
+            retrieved_summaries=retrieved_summaries,
+            retrieved_artifacts=retrieved_artifacts,
+            retrieved_experiences=retrieved_experiences,
+        )
         soft_limit = token_budget or self.policy.soft_prompt_token_limit or 4096
-        
-        # 2. Mandatory sections (System + Core State)
-        run_brief_text = self._render_run_brief(state)
-        working_memory_text = self._render_working_memory(state)
+
+        run_brief_text = frame.spine.run_brief_text
+        working_memory_text = frame.spine.working_memory_text
         system_sections = [system_prompt]
         if include_structured_sections and run_brief_text:
             system_sections.append(run_brief_text)
         if include_structured_sections and working_memory_text:
             system_sections.append(working_memory_text)
-        
         system_msg_text = "\n\n".join(system_sections)
         system_tokens = estimate_text_tokens(system_msg_text)
-        
-        # 3. Transcript allocation (Verbatim Hot Window)
+
         transcript_limit = recent_message_limit or self.policy.recent_message_limit
         transcript = state.recent_messages[-transcript_limit:]
-        
-        # Apply transcript token cap from policy (if any)
         max_transcript_tokens = getattr(self.policy, "transcript_token_limit", int(soft_limit * 0.45))
         transcript_tokens = 0
         final_transcript = []
@@ -81,102 +89,215 @@ class PromptAssembler:
                 break
             transcript_tokens += m_tokens
             final_transcript.insert(0, m)
-        
-        # 4. Calculate remaining budget for retrieval/bidding
-        # We reserve 200 tokens for the goal recap/inject framing
+
         remaining_budget = soft_limit - system_tokens - transcript_tokens - 200
-        
-        # 5. Greedy bidding for retrieval sections
-        # We process winners in order of relevance (Phase III)
-        # BUG FIX: system_tokens already includes run_brief and working_memory.
-        # We subtract them from the reported "system" tokens to avoid double-counting in the total sum.
         run_brief_tokens = estimate_text_tokens(run_brief_text)
         working_memory_tokens = estimate_text_tokens(working_memory_text)
-        
         section_tokens = {
             "system": system_tokens - run_brief_tokens - working_memory_tokens,
             "recent_messages": transcript_tokens,
             "run_brief": run_brief_tokens,
             "working_memory": working_memory_tokens,
+            "normalized_observations": 0,
+            "turn_bundles": 0,
             "warm_briefs": 0,
             "episodic_summaries": 0,
             "artifact_snippets": 0,
             "warm_memories": 0,
         }
 
-        # Sub-budgets derived from ratios if not specific
         warm_budget = getattr(self.policy, "warm_tier_token_budget", int(soft_limit * 0.10))
-        retrieval_budget = remaining_budget # Use all remaining space
-        
-        # Fill Warm Briefs (High priority)
-        warm_brief_items = state.context_briefs[-self.policy.warm_brief_limit:]
+        warm_brief_items = frame.evidence_packet.context_briefs[-self.policy.warm_brief_limit:]
         selected_briefs = []
         warm_tokens = 0
         for b in reversed(warm_brief_items):
             text = self._render_brief_item(b)
             t = estimate_text_tokens(text)
-            if warm_tokens + t > warm_budget: continue
+            if warm_tokens + t > warm_budget:
+                continue
             warm_tokens += t
             selected_briefs.insert(0, b)
-        
+        dropped_brief_ids = [
+            brief.brief_id
+            for brief in warm_brief_items
+            if brief.brief_id and brief not in selected_briefs
+        ]
+        if dropped_brief_ids:
+            frame.add_drop(
+                lane="context_briefs",
+                reason="token_budget",
+                dropped_count=len(dropped_brief_ids),
+                dropped_ids=dropped_brief_ids,
+            )
+        frame.evidence_packet.context_briefs = selected_briefs
+
         remaining_budget -= warm_tokens
         section_tokens["warm_briefs"] = warm_tokens
-        warm_brief_text = self._render_context_briefs(selected_briefs) if selected_briefs else ""
+        warm_brief_text = (
+            self._render_context_briefs(frame.evidence_packet.context_briefs)
+            if frame.evidence_packet.context_briefs
+            else ""
+        )
 
-        # Fill summaries/artifacts/experiences greedily from remaining space
-        summary_items = list(retrieved_summaries)
-        artifact_items = list(retrieved_artifacts)
-        experience_items = list(retrieved_experiences)
+        observation_items = list(frame.evidence_packet.observations[: self.policy.max_observation_items])
+        winners_observations: list[ObservationPacket] = []
+        observation_t = 0
+        for observation in observation_items:
+            text = self._render_observation_item(observation)
+            t = estimate_text_tokens(text)
+            if observation_t + t > min(self.policy.observation_token_limit, remaining_budget * 0.35) and winners_observations:
+                break
+            observation_t += t
+            winners_observations.append(observation)
+        dropped_observation_ids = [
+            observation.observation_id
+            for observation in observation_items
+            if observation.observation_id and observation not in winners_observations
+        ]
+        if dropped_observation_ids:
+            frame.add_drop(
+                lane="normalized_observations",
+                reason="token_budget",
+                dropped_count=len(dropped_observation_ids),
+                dropped_ids=dropped_observation_ids,
+            )
+        frame.evidence_packet.observations = winners_observations
+        remaining_budget -= observation_t
+        section_tokens["normalized_observations"] = observation_t
+        observation_text = (
+            self._render_observations(frame.evidence_packet.observations)
+            if frame.evidence_packet.observations
+            else ""
+        )
 
-        # Unified bidding pool
+        turn_bundle_items = list(frame.evidence_packet.turn_bundles)
+        winners_turn_bundles: list[TurnBundle] = []
+        turn_bundle_t = 0
+        for bundle in turn_bundle_items:
+            text = self._render_turn_bundle_item(bundle)
+            t = estimate_text_tokens(text)
+            if turn_bundle_t + t > (remaining_budget * 0.35) and winners_turn_bundles:
+                break
+            turn_bundle_t += t
+            winners_turn_bundles.append(bundle)
+        dropped_turn_bundle_ids = [
+            bundle.bundle_id
+            for bundle in turn_bundle_items
+            if bundle.bundle_id and bundle not in winners_turn_bundles
+        ]
+        if dropped_turn_bundle_ids:
+            frame.add_drop(
+                lane="turn_bundles",
+                reason="token_budget",
+                dropped_count=len(dropped_turn_bundle_ids),
+                dropped_ids=dropped_turn_bundle_ids,
+            )
+        frame.evidence_packet.turn_bundles = winners_turn_bundles
+        remaining_budget -= turn_bundle_t
+        section_tokens["turn_bundles"] = turn_bundle_t
+        turn_bundle_text = (
+            self._render_turn_bundles(frame.evidence_packet.turn_bundles)
+            if frame.evidence_packet.turn_bundles
+            else ""
+        )
+
+        summary_items = list(frame.evidence_packet.summaries)
+        artifact_items = list(frame.artifact_packet.snippets)
+        experience_items = list(frame.experience_packet.memories)
         winners_summaries = []
         winners_artifacts = []
         winners_experiences = []
-        
-        # Heuristic: artifacts are often large/noisy, summaries are dense. 
-        # We allocate ~60% of remainder to artifacts, 40% to others if possible.
-        # But for simplicity in Phase III, we just greedily fill in priority order.
-        
-        # Summaries (Dense knowledge)
+
         summary_t = 0
         for s in summary_items:
             text = self._render_summary_item(s)
             t = estimate_text_tokens(text)
-            if summary_t + t > (remaining_budget * 0.4) and winners_summaries: break
+            if summary_t + t > (remaining_budget * 0.4) and winners_summaries:
+                break
             summary_t += t
             winners_summaries.append(s)
-        
+        dropped_summary_ids = [
+            summary.summary_id
+            for summary in summary_items
+            if summary.summary_id and summary not in winners_summaries
+        ]
+        if dropped_summary_ids:
+            frame.add_drop(
+                lane="episodic_summaries",
+                reason="token_budget",
+                dropped_count=len(dropped_summary_ids),
+                dropped_ids=dropped_summary_ids,
+            )
+        frame.evidence_packet.summaries = winners_summaries
+
         remaining_budget -= summary_t
         section_tokens["episodic_summaries"] = summary_t
-        summary_text = self._render_summaries(winners_summaries) if winners_summaries else ""
+        summary_text = (
+            self._render_summaries(frame.evidence_packet.summaries)
+            if frame.evidence_packet.summaries
+            else ""
+        )
 
-        # Artifacts (Ground truth details)
         artifact_t = 0
         for a in artifact_items:
             text = f"{a.artifact_id}: {a.text}"
             t = estimate_text_tokens(text)
-            if artifact_t + t > remaining_budget and winners_artifacts: break
+            if artifact_t + t > remaining_budget and winners_artifacts:
+                break
             artifact_t += t
             winners_artifacts.append(a)
-            
+        dropped_artifact_ids = [
+            artifact.artifact_id
+            for artifact in artifact_items
+            if artifact.artifact_id and artifact not in winners_artifacts
+        ]
+        if dropped_artifact_ids:
+            frame.add_drop(
+                lane="artifact_snippets",
+                reason="token_budget",
+                dropped_count=len(dropped_artifact_ids),
+                dropped_ids=dropped_artifact_ids,
+            )
+        frame.artifact_packet.snippets = winners_artifacts
+
         remaining_budget -= artifact_t
         section_tokens["artifact_snippets"] = artifact_t
-        artifact_text = self._render_artifacts(winners_artifacts) if winners_artifacts else ""
-        
-        # Experiences (General wisdom)
+        artifact_text = (
+            self._render_artifacts(frame.artifact_packet.snippets)
+            if frame.artifact_packet.snippets
+            else ""
+        )
+
         exp_t = 0
         for e in experience_items:
             text = self._render_warm_item(e)
             t = estimate_text_tokens(text)
-            if exp_t + t > remaining_budget and winners_experiences: break
+            if exp_t + t > remaining_budget and winners_experiences:
+                break
             exp_t += t
             winners_experiences.append(e)
-        
+        dropped_memory_ids = [
+            memory.memory_id
+            for memory in experience_items
+            if memory.memory_id and memory not in winners_experiences
+        ]
+        if dropped_memory_ids:
+            frame.add_drop(
+                lane="experience_memories",
+                reason="token_budget",
+                dropped_count=len(dropped_memory_ids),
+                dropped_ids=dropped_memory_ids,
+            )
+        frame.experience_packet.memories = winners_experiences
+
         remaining_budget -= exp_t
         section_tokens["warm_memories"] = exp_t
-        experience_text = self._render_warm_memories(winners_experiences) if winners_experiences else ""
+        experience_text = (
+            self._render_warm_memories(frame.experience_packet.memories)
+            if frame.experience_packet.memories
+            else ""
+        )
 
-        # 6. Assembly (same as before but using winners)
         messages = [
             ConversationMessage(role="system", content=system_msg_text).to_dict()
         ]
@@ -187,19 +308,77 @@ class PromptAssembler:
             if normalized is not None:
                 messages.append(normalized.to_dict())
                 if normalized.role == "user":
-                    if normalized.content == state.run_brief.original_task:
+                    if normalized.content == frame.spine.task_goal:
                         has_user = True
         
         if not has_user:
-            task_text = state.run_brief.original_task
+            task_text = frame.spine.task_goal
             if task_text:
                 messages.insert(1, ConversationMessage(role="user", content=task_text).to_dict())
-        
+
+        if not include_structured_sections:
+            if frame.evidence_packet.observations:
+                frame.add_drop(
+                    lane="normalized_observations",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.evidence_packet.observations),
+                    dropped_ids=[
+                        packet.observation_id
+                        for packet in frame.evidence_packet.observations
+                        if packet.observation_id
+                    ],
+                )
+            if frame.evidence_packet.turn_bundles:
+                frame.add_drop(
+                    lane="turn_bundles",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.evidence_packet.turn_bundles),
+                    dropped_ids=[bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles if bundle.bundle_id],
+                )
+            if frame.evidence_packet.context_briefs:
+                frame.add_drop(
+                    lane="context_briefs",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.evidence_packet.context_briefs),
+                    dropped_ids=[brief.brief_id for brief in frame.evidence_packet.context_briefs if brief.brief_id],
+                )
+            if frame.evidence_packet.summaries:
+                frame.add_drop(
+                    lane="episodic_summaries",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.evidence_packet.summaries),
+                    dropped_ids=[summary.summary_id for summary in frame.evidence_packet.summaries if summary.summary_id],
+                )
+            if frame.artifact_packet.snippets:
+                frame.add_drop(
+                    lane="artifact_snippets",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.artifact_packet.snippets),
+                    dropped_ids=[artifact.artifact_id for artifact in frame.artifact_packet.snippets if artifact.artifact_id],
+                )
+            if frame.experience_packet.memories:
+                frame.add_drop(
+                    lane="experience_memories",
+                    reason="structured_sections_disabled",
+                    dropped_count=len(frame.experience_packet.memories),
+                    dropped_ids=[memory.memory_id for memory in frame.experience_packet.memories if memory.memory_id],
+                )
+            frame.evidence_packet.observations = []
+            frame.evidence_packet.turn_bundles = []
+            frame.evidence_packet.context_briefs = []
+            frame.evidence_packet.summaries = []
+            frame.artifact_packet.snippets = []
+            frame.experience_packet.memories = []
+
         ephemeral_sections = []
+        if include_structured_sections and observation_text:
+            ephemeral_sections.append(observation_text)
+        if include_structured_sections and turn_bundle_text:
+            ephemeral_sections.append(turn_bundle_text)
         if include_structured_sections and experience_text:
             ephemeral_sections.append(experience_text)
         if include_structured_sections and warm_brief_text:
-             ephemeral_sections.append(warm_brief_text)
+            ephemeral_sections.append(warm_brief_text)
         if include_structured_sections and summary_text:
             ephemeral_sections.append(summary_text)
         if include_structured_sections and artifact_text:
@@ -218,8 +397,8 @@ class PromptAssembler:
             
             objective_reminder = (
                 "<current-mission-recap>\n"
-                f"Your primary objective is STILL: {state.run_brief.original_task or 'Fulfill the user request'}\n"
-                f"Current focus: {state.run_brief.current_phase_objective or 'Progressing the task'}\n"
+                f"Your primary objective is STILL: {frame.spine.task_goal or 'Fulfill the user request'}\n"
+                f"Current focus: {frame.spine.phase_focus or 'Progressing the task'}\n"
                 "Based on the background above and the conversation history, proceed with your next step.\n"
                 "</current-mission-recap>"
             )
@@ -248,6 +427,8 @@ class PromptAssembler:
                 final_messages.append(msg)
 
         estimated_prompt_tokens = sum(section_tokens.values())
+        included_levels = self._included_compaction_levels(frame=frame, transcript_tokens=transcript_tokens)
+        dropped_levels = self._dropped_compaction_levels(frame=frame)
         state.prompt_budget = PromptBudgetSnapshot(
             estimated_prompt_tokens=estimated_prompt_tokens,
             sections=section_tokens,
@@ -255,11 +436,14 @@ class PromptAssembler:
             max_prompt_tokens=self.policy.max_prompt_tokens,
             reserve_completion_tokens=self.policy.reserve_completion_tokens,
             reserve_tool_tokens=self.policy.reserve_tool_tokens,
+            included_compaction_levels=included_levels,
+            dropped_compaction_levels=dropped_levels,
         )
         return PromptAssembly(
             messages=final_messages,
             section_tokens=section_tokens,
             estimated_prompt_tokens=estimated_prompt_tokens,
+            frame=frame,
         )
 
     @staticmethod
@@ -407,9 +591,9 @@ class PromptAssembler:
         if state.artifacts:
             art_lines = []
             for aid, art in state.artifacts.items():
-                if _is_superseded_artifact(art):
+                if is_superseded_artifact(art):
                     continue
-                if not _is_prompt_visible_artifact(art):
+                if not is_prompt_visible_artifact(art):
                     continue
                 summary_snippet = (art.summary or art.tool_name or "").strip()[:90]
                 art_lines.append(f"  - {aid}: {summary_snippet}")
@@ -607,7 +791,9 @@ class PromptAssembler:
 
     @staticmethod
     def _render_artifacts(artifacts: list[ArtifactSnippet]) -> str:
-        sections = ["Artifact summaries (compressed evidence; fetch full text only when needed):"]
+        sections = [
+            "Artifact summaries (compressed evidence only; these snippets are not full artifact reads):"
+        ]
         for artifact in artifacts:
             sections.append(f"{artifact.artifact_id}: {artifact.text}")
         return "\n".join(sections)
@@ -620,7 +806,22 @@ class PromptAssembler:
     @staticmethod
     def _render_brief_item(brief: ContextBrief) -> str:
         parts = [f"[WARM BRIEF {brief.brief_id} | Steps {brief.step_range[0]}-{brief.step_range[1]} | {brief.current_phase}]"]
-        if brief.key_discoveries:
+        has_delta = bool(
+            brief.new_facts
+            or brief.invalidated_facts
+            or brief.state_changes
+            or brief.decision_deltas
+        )
+        if has_delta:
+            if brief.new_facts:
+                parts.append("New facts: " + "; ".join(brief.new_facts))
+            if brief.invalidated_facts:
+                parts.append("Invalidated: " + "; ".join(brief.invalidated_facts))
+            if brief.state_changes:
+                parts.append("State changes: " + "; ".join(brief.state_changes))
+            if brief.decision_deltas:
+                parts.append("Decision deltas: " + "; ".join(brief.decision_deltas))
+        elif brief.key_discoveries:
             parts.append("Learned: " + "; ".join(brief.key_discoveries))
         if brief.blockers:
             parts.append("Blockers: " + "; ".join(brief.blockers))
@@ -633,6 +834,79 @@ class PromptAssembler:
         return "Relevant prior outcomes:\nRELEVANT CONTEXT (RETRIEVED)\n" + "\n".join(
             self._render_warm_item(m) for m in experiences
         )
+
+    def _render_observations(self, observations: list[ObservationPacket]) -> str:
+        return "Normalized observations:\n" + "\n".join(
+            self._render_observation_item(packet) for packet in observations
+        )
+
+    @staticmethod
+    def _render_observation_item(packet: ObservationPacket) -> str:
+        bits: list[str] = []
+        if packet.observation_id:
+            bits.append(packet.observation_id)
+        bits.append(packet.kind)
+        if packet.phase:
+            bits.append(f"phase={packet.phase}")
+        if packet.tool_name:
+            bits.append(f"tool={packet.tool_name}")
+        if packet.path:
+            bits.append(f"path={packet.path}")
+        if packet.command:
+            bits.append(f"command={packet.command}")
+        if packet.failure_mode:
+            bits.append(f"failure={packet.failure_mode}")
+        if packet.stale:
+            bits.append("stale=yes")
+        head = " | ".join(bits)
+        return f"{head}: {packet.summary}".strip()
+
+    def _render_turn_bundles(self, bundles: list[TurnBundle]) -> str:
+        return "Recent turn bundles:\n" + "\n".join(
+            self._render_turn_bundle_item(bundle) for bundle in bundles
+        )
+
+    @staticmethod
+    def _render_turn_bundle_item(bundle: TurnBundle) -> str:
+        bits = [bundle.bundle_id or "bundle", f"{bundle.step_range[0]}-{bundle.step_range[1]}"]
+        if bundle.phase:
+            bits.append(f"phase={bundle.phase}")
+        if bundle.intent:
+            bits.append(f"intent={bundle.intent}")
+        if bundle.files_touched:
+            bits.append("files=" + ", ".join(bundle.files_touched[:3]))
+        if bundle.summary_lines:
+            bits.append("summary=" + " | ".join(bundle.summary_lines[:3]))
+        return " | ".join(bits)
+
+    @staticmethod
+    def _included_compaction_levels(*, frame: PromptStateFrame, transcript_tokens: int) -> list[str]:
+        included: list[str] = []
+        if transcript_tokens > 0:
+            included.append("L0")
+        if frame.evidence_packet.turn_bundles:
+            included.append("L1")
+        if frame.evidence_packet.context_briefs:
+            included.append("L2")
+        if frame.evidence_packet.summaries:
+            included.append("L3")
+        if frame.artifact_packet.snippets:
+            included.append("L4")
+        return included
+
+    @staticmethod
+    def _dropped_compaction_levels(frame: PromptStateFrame) -> list[str]:
+        dropped_lanes = {drop.lane for drop in frame.drop_log}
+        levels: list[str] = []
+        if "turn_bundles" in dropped_lanes:
+            levels.append("L1")
+        if "context_briefs" in dropped_lanes:
+            levels.append("L2")
+        if "episodic_summaries" in dropped_lanes:
+            levels.append("L3")
+        if "artifact_snippets" in dropped_lanes:
+            levels.append("L4")
+        return levels
 
     def _compact_message_for_prompt(
         self,
@@ -725,7 +999,7 @@ class PromptAssembler:
         else:
             outcome_label = "Successful pattern"
         
-        notes = (m.notes or "").strip() or "Verified behavior."
+        notes = redact_sensitive_text((m.notes or "").strip()) or "Verified behavior."
         # Meta-cognitive reasoning summaries should be kept very brief
         if m.tool_name == "reasoning" and len(notes) > 400:
             notes = notes[:400] + "..."
@@ -766,18 +1040,3 @@ class PromptAssembler:
                       retrieval_safe_text=message.retrieval_safe_text,
                   )
         return message
-
-
-def _is_superseded_artifact(artifact: Any) -> bool:
-    metadata = getattr(artifact, "metadata", None)
-    if not isinstance(metadata, dict):
-        return False
-    superseded_by = metadata.get("superseded_by")
-    return isinstance(superseded_by, str) and bool(superseded_by.strip())
-
-
-def _is_prompt_visible_artifact(artifact: Any) -> bool:
-    metadata = getattr(artifact, "metadata", None)
-    if not isinstance(metadata, dict):
-        return True
-    return metadata.get("model_visible", True) is not False

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable, Any
 
 from ..state import (
@@ -58,9 +59,20 @@ class PromptStateFrameCompiler:
             if item.get("satisfied") is False and str(item.get("criterion") or "").strip()
         ]
 
-        latest_brief = state.context_briefs[-1] if state.context_briefs else None
+        context_briefs, dropped_brief_ids = self._filter_invalidated_context_briefs(
+            state=state,
+            briefs=list(state.context_briefs),
+        )
+        latest_brief = context_briefs[-1] if context_briefs else None
         observations = build_observation_packets(state, limit=8)
-        turn_bundles: list[TurnBundle] = list(state.turn_bundles[-4:])
+        turn_bundles, dropped_turn_bundle_ids = self._filter_invalidated_turn_bundles(
+            state=state,
+            bundles=list(state.turn_bundles[-4:]),
+        )
+        summaries, dropped_summary_ids = self._filter_invalidated_summaries(
+            state=state,
+            summaries=list(retrieved_summaries),
+        )
         invalidated_hints = self._invalidated_fact_hints(state)
         known_good_facts = self._dedupe(
             list(state.working_memory.known_facts)
@@ -106,18 +118,40 @@ class PromptStateFrameCompiler:
             run_brief_text=run_brief_text,
             working_memory_text=working_memory_text,
         )
-        return PromptStateFrame(
+        frame = PromptStateFrame(
             spine=spine,
             phase_packet=PromptPhasePacket(lines=phase_lines),
             evidence_packet=PromptEvidencePacket(
                 observations=observations,
                 turn_bundles=turn_bundles,
-                context_briefs=list(state.context_briefs),
-                summaries=list(retrieved_summaries),
+                context_briefs=context_briefs,
+                summaries=summaries,
             ),
             experience_packet=PromptExperiencePacket(memories=list(retrieved_experiences)),
             artifact_packet=PromptArtifactPacket(snippets=list(retrieved_artifacts)),
         )
+        if dropped_turn_bundle_ids:
+            frame.add_drop(
+                lane="turn_bundles",
+                reason="context_invalidated",
+                dropped_count=len(dropped_turn_bundle_ids),
+                dropped_ids=dropped_turn_bundle_ids,
+            )
+        if dropped_brief_ids:
+            frame.add_drop(
+                lane="context_briefs",
+                reason="context_invalidated",
+                dropped_count=len(dropped_brief_ids),
+                dropped_ids=dropped_brief_ids,
+            )
+        if dropped_summary_ids:
+            frame.add_drop(
+                lane="episodic_summaries",
+                reason="context_invalidated",
+                dropped_count=len(dropped_summary_ids),
+                dropped_ids=dropped_summary_ids,
+            )
+        return frame
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
@@ -160,6 +194,169 @@ class PromptStateFrameCompiler:
         if not isinstance(queued, list):
             return []
         return PromptStateFrameCompiler._dedupe([str(item).strip() for item in queued if str(item).strip()])
+
+    @classmethod
+    def _filter_invalidated_turn_bundles(
+        cls,
+        *,
+        state: LoopState,
+        bundles: list[TurnBundle],
+    ) -> tuple[list[TurnBundle], list[str]]:
+        invalidations = cls._recent_invalidation_events(state)
+        if not invalidations or not bundles:
+            return bundles, []
+        kept: list[TurnBundle] = []
+        dropped_ids: list[str] = []
+        for bundle in bundles:
+            if cls._bundle_invalidated(state=state, bundle=bundle, invalidations=invalidations):
+                if bundle.bundle_id:
+                    dropped_ids.append(bundle.bundle_id)
+                continue
+            kept.append(bundle)
+        return kept, dropped_ids
+
+    @classmethod
+    def _filter_invalidated_context_briefs(
+        cls,
+        *,
+        state: LoopState,
+        briefs: list[ContextBrief],
+    ) -> tuple[list[ContextBrief], list[str]]:
+        invalidations = cls._recent_invalidation_events(state)
+        if not invalidations or not briefs:
+            return briefs, []
+        kept: list[ContextBrief] = []
+        dropped_ids: list[str] = []
+        for brief in briefs:
+            if cls._brief_invalidated(state=state, brief=brief, invalidations=invalidations):
+                if brief.brief_id:
+                    dropped_ids.append(brief.brief_id)
+                continue
+            kept.append(brief)
+        return kept, dropped_ids
+
+    @classmethod
+    def _filter_invalidated_summaries(
+        cls,
+        *,
+        state: LoopState,
+        summaries: list[EpisodicSummary],
+    ) -> tuple[list[EpisodicSummary], list[str]]:
+        invalidations = cls._recent_invalidation_events(state)
+        if not invalidations or not summaries:
+            return summaries, []
+        kept: list[EpisodicSummary] = []
+        dropped_ids: list[str] = []
+        for summary in summaries:
+            if cls._summary_invalidated(state=state, summary=summary, invalidations=invalidations):
+                if summary.summary_id:
+                    dropped_ids.append(summary.summary_id)
+                continue
+            kept.append(summary)
+        return kept, dropped_ids
+
+    @staticmethod
+    def _recent_invalidation_events(state: LoopState) -> list[dict[str, Any]]:
+        payload = state.scratchpad.get("_context_invalidations")
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload[-24:] if isinstance(item, dict)]
+
+    @staticmethod
+    def _path_matches_any(target: str, changed_paths: list[str]) -> bool:
+        normalized_target = Path(str(target or "").strip()).as_posix().lower()
+        if not normalized_target:
+            return False
+        for changed in changed_paths:
+            normalized_changed = Path(str(changed or "").strip()).as_posix().lower()
+            if not normalized_changed:
+                continue
+            if (
+                normalized_target == normalized_changed
+                or normalized_target.endswith(normalized_changed)
+                or normalized_changed.endswith(normalized_target)
+            ):
+                return True
+            changed_name = Path(normalized_changed).name
+            if changed_name and changed_name in normalized_target:
+                return True
+        return False
+
+    @classmethod
+    def _bundle_invalidated(
+        cls,
+        *,
+        state: LoopState,
+        bundle: TurnBundle,
+        invalidations: list[dict[str, Any]],
+    ) -> bool:
+        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        for event in invalidations:
+            reason = str(event.get("reason") or "").strip().lower()
+            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+            if reason in {"file_changed", "write_session_target_changed"} and paths:
+                if any(cls._path_matches_any(path, paths) for path in bundle.files_touched):
+                    return True
+            if reason in {"phase_advanced", "environment_changed"}:
+                if bundle.phase and str(bundle.phase).strip().lower() != current_phase:
+                    return True
+            if reason == "verifier_failed" and any(cls._is_optimistic_statement(line) for line in bundle.summary_lines):
+                return True
+        return False
+
+    @classmethod
+    def _brief_invalidated(
+        cls,
+        *,
+        state: LoopState,
+        brief: ContextBrief,
+        invalidations: list[dict[str, Any]],
+    ) -> bool:
+        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        for event in invalidations:
+            reason = str(event.get("reason") or "").strip().lower()
+            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+            if reason in {"file_changed", "write_session_target_changed"} and paths:
+                if any(cls._path_matches_any(path, paths) for path in brief.files_touched):
+                    return True
+            if reason in {"phase_advanced", "environment_changed"}:
+                if brief.current_phase and str(brief.current_phase).strip().lower() != current_phase:
+                    return True
+            if reason == "verifier_failed":
+                if any(cls._is_optimistic_statement(line) for line in brief.key_discoveries):
+                    return True
+                if any(cls._is_optimistic_statement(line) for line in brief.new_facts):
+                    return True
+        return False
+
+    @classmethod
+    def _summary_invalidated(
+        cls,
+        *,
+        state: LoopState,
+        summary: EpisodicSummary,
+        invalidations: list[dict[str, Any]],
+    ) -> bool:
+        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        for event in invalidations:
+            reason = str(event.get("reason") or "").strip().lower()
+            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+            if reason in {"file_changed", "write_session_target_changed"} and paths:
+                if any(cls._path_matches_any(path, paths) for path in summary.files_touched):
+                    return True
+            if reason == "verifier_failed":
+                if any(cls._is_optimistic_statement(line) for line in summary.notes):
+                    return True
+                if failure_mode and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches):
+                    return True
+        return False
+
+    @staticmethod
+    def _is_optimistic_statement(value: str) -> bool:
+        lowered = str(value or "").strip().lower()
+        if not lowered:
+            return False
+        return any(token in lowered for token in ("pass", "verified", "success", "fixed", "resolved"))
 
     @staticmethod
     def _coding_anchor_lines(state: LoopState) -> list[str]:

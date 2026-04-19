@@ -446,3 +446,61 @@ def test_retrieval_skips_durably_stale_experiences() -> None:
 
     assert bundle.experiences
     assert [memory.memory_id for memory in bundle.experiences] == ["mem-fresh"]
+
+
+def test_retrieval_skips_durably_stale_summaries_and_artifacts() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "author"
+    state.active_intent = "requested_file_patch"
+    state.intent_tags = ["file_patch", "phase_author"]
+    state.run_brief.original_task = "patch src/app.py"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.episodic_summaries = [
+        EpisodicSummary(
+            summary_id="S-stale",
+            created_at="2026-04-18T00:00:00+00:00",
+            decisions=["Patch src/app.py"],
+            files_touched=["src/app.py"],
+            notes=["stale summary"],
+        ),
+        EpisodicSummary(
+            summary_id="S-fresh",
+            created_at="2026-04-18T00:00:00+00:00",
+            decisions=["Patch docs/readme.md"],
+            files_touched=["docs/readme.md"],
+            notes=["fresh summary"],
+        ),
+    ]
+    state.artifacts["A-stale"] = ArtifactRecord(
+        artifact_id="A-stale",
+        kind="file_read",
+        source="src/app.py",
+        created_at="2026-04-18T00:00:00+00:00",
+        size_bytes=120,
+        summary="stale artifact",
+        tool_name="file_read",
+    )
+    state.artifacts["A-fresh"] = ArtifactRecord(
+        artifact_id="A-fresh",
+        kind="file_read",
+        source="docs/readme.md",
+        created_at="2026-04-18T00:00:00+00:00",
+        size_bytes=120,
+        summary="fresh artifact",
+        tool_name="file_read",
+    )
+    state.scratchpad["_summary_staleness"] = {"S-stale": {"stale": True}}
+    state.scratchpad["_artifact_staleness"] = {"A-stale": {"stale": True}}
+
+    summaries = LexicalRetriever().retrieve_summaries(
+        state=state,
+        query="patch",
+    )
+    artifacts = LexicalRetriever().retrieve_artifacts(
+        state=state,
+        query="patch docs/readme.md",
+    )
+
+    assert [summary.summary_id for summary in summaries] == ["S-fresh"]
+    assert artifacts
+    assert [artifact.artifact_id for artifact in artifacts] == ["A-fresh"]

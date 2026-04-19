@@ -445,6 +445,16 @@ class MemoryService:
                 invalidated_memory_count=event.get("invalidated_memory_count", 0),
                 invalidated_facts=event.get("invalidated_facts", []),
                 invalidated_memory_ids=event.get("invalidated_memory_ids", []),
+                invalidated_turn_bundle_count=event.get("invalidated_turn_bundle_count", 0),
+                invalidated_turn_bundle_ids=event.get("invalidated_turn_bundle_ids", []),
+                invalidated_brief_count=event.get("invalidated_brief_count", 0),
+                invalidated_brief_ids=event.get("invalidated_brief_ids", []),
+                invalidated_summary_count=event.get("invalidated_summary_count", 0),
+                invalidated_summary_ids=event.get("invalidated_summary_ids", []),
+                invalidated_artifact_count=event.get("invalidated_artifact_count", 0),
+                invalidated_artifact_ids=event.get("invalidated_artifact_ids", []),
+                invalidated_observation_count=event.get("invalidated_observation_count", 0),
+                invalidated_observation_ids=event.get("invalidated_observation_ids", []),
                 details=event.get("details", {}),
             )
 

@@ -120,6 +120,11 @@ def test_memory_service_emits_phase_environment_and_write_target_invalidations()
     assert phase_event["invalidated_fact_count"] >= 1
     assert phase_event["invalidated_facts"]
     assert "invalidated_memory_ids" in phase_event
+    assert "invalidated_turn_bundle_ids" in phase_event
+    assert "invalidated_brief_ids" in phase_event
+    assert "invalidated_summary_ids" in phase_event
+    assert "invalidated_artifact_ids" in phase_event
+    assert "invalidated_observation_ids" in phase_event
 
 
 def test_invalidate_context_persists_experience_staleness_metadata() -> None:
@@ -152,6 +157,83 @@ def test_invalidate_context_persists_experience_staleness_metadata() -> None:
     assert marker["reason"] == "file_changed"
     assert "file_changed" in marker["reasons"]
     assert "src/app.py" in marker["paths"]
+
+
+def test_invalidate_context_persists_lane_staleness_metadata() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="execute",
+            summary_lines=["Updated src/app.py"],
+            files_touched=["src/app.py"],
+        )
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Patch src/app.py",
+            current_phase="execute",
+            key_discoveries=["src/app.py patched"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A-src"],
+            next_action_hint="Run verifier",
+            staleness_step=2,
+        )
+    ]
+    state.episodic_summaries = [
+        EpisodicSummary(
+            summary_id="S-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            files_touched=["src/app.py"],
+            notes=["Patched src/app.py"],
+        )
+    ]
+    state.artifacts = {
+        "A-src": ArtifactRecord(
+            artifact_id="A-src",
+            kind="file_read",
+            source="src/app.py",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=100,
+            summary="src/app.py snapshot",
+            metadata={"path": "src/app.py"},
+        )
+    }
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-src",
+            statement="Read src/app.py",
+            phase="execute",
+            tool_name="file_read",
+            metadata={"path": "src/app.py"},
+        )
+    ]
+
+    event = state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    assert event["invalidated_turn_bundle_ids"] == ["TB-src"]
+    assert event["invalidated_brief_ids"] == ["B-src"]
+    assert event["invalidated_summary_ids"] == ["S-src"]
+    assert event["invalidated_artifact_ids"] == ["A-src"]
+    assert event["invalidated_observation_ids"] == ["E-src"]
+    assert "TB-src" in state.scratchpad["_turn_bundle_staleness"]
+    assert "B-src" in state.scratchpad["_context_brief_staleness"]
+    assert "S-src" in state.scratchpad["_summary_staleness"]
+    assert "A-src" in state.scratchpad["_artifact_staleness"]
+    assert "E-src" in state.scratchpad["_observation_staleness"]
 
 
 def test_reinforce_experience_success_clears_staleness_marker() -> None:
@@ -458,6 +540,133 @@ def test_frame_compiler_prunes_durably_stale_experiences_without_recent_events()
         if item.lane == "experience_memories" and item.reason == "context_invalidated"
     )
     assert set(drop.dropped_ids) == {"mem-stale"}
+
+
+def test_frame_compiler_prunes_durably_stale_non_experience_lanes_without_recent_events() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-stale",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="execute",
+            summary_lines=["Patched src/app.py"],
+            files_touched=["src/app.py"],
+        ),
+        TurnBundle(
+            bundle_id="TB-fresh",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(3, 4),
+            phase="execute",
+            summary_lines=["Patched docs/readme.md"],
+            files_touched=["docs/readme.md"],
+        ),
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-stale",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Patch src/app.py",
+            current_phase="execute",
+            key_discoveries=["src/app.py patched"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A-stale"],
+            next_action_hint="Run verifier",
+            staleness_step=2,
+        ),
+        ContextBrief(
+            brief_id="B-fresh",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(3, 4),
+            task_goal="Patch docs/readme.md",
+            current_phase="execute",
+            key_discoveries=["docs/readme.md patched"],
+            tools_tried=["file_write"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A-fresh"],
+            next_action_hint="Finalize docs",
+            staleness_step=4,
+        ),
+    ]
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-stale",
+            statement="Read src/app.py",
+            phase="execute",
+            tool_name="file_read",
+            metadata={"path": "src/app.py"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-fresh",
+            statement="Read docs/readme.md",
+            phase="execute",
+            tool_name="file_read",
+            metadata={"path": "docs/readme.md"},
+        ),
+    ]
+    state.artifacts = {
+        "A-stale": ArtifactRecord(
+            artifact_id="A-stale",
+            kind="file_read",
+            source="src/app.py",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=100,
+            summary="src/app.py snapshot",
+            metadata={"path": "src/app.py"},
+        ),
+        "A-fresh": ArtifactRecord(
+            artifact_id="A-fresh",
+            kind="file_read",
+            source="docs/readme.md",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=80,
+            summary="docs/readme.md snapshot",
+            metadata={"path": "docs/readme.md"},
+        ),
+    }
+    summaries = [
+        EpisodicSummary(
+            summary_id="S-stale",
+            created_at="2026-04-19T00:00:00+00:00",
+            files_touched=["src/app.py"],
+            notes=["Patched src/app.py"],
+        ),
+        EpisodicSummary(
+            summary_id="S-fresh",
+            created_at="2026-04-19T00:00:00+00:00",
+            files_touched=["docs/readme.md"],
+            notes=["Patched docs/readme.md"],
+        ),
+    ]
+    retrieved = [
+        ArtifactSnippet(artifact_id="A-stale", text="src artifact"),
+        ArtifactSnippet(artifact_id="A-fresh", text="docs artifact"),
+    ]
+    state.scratchpad["_turn_bundle_staleness"] = {"TB-stale": {"stale": True}}
+    state.scratchpad["_context_brief_staleness"] = {"B-stale": {"stale": True}}
+    state.scratchpad["_summary_staleness"] = {"S-stale": {"stale": True}}
+    state.scratchpad["_artifact_staleness"] = {"A-stale": {"stale": True}}
+    state.scratchpad["_observation_staleness"] = {"E-stale": {"stale": True}}
+    state.scratchpad["_context_invalidations"] = []
+
+    frame = PromptStateFrameCompiler().compile(
+        state=state,
+        retrieved_summaries=summaries,
+        retrieved_artifacts=retrieved,
+    )
+
+    assert [bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles] == ["TB-fresh"]
+    assert [brief.brief_id for brief in frame.evidence_packet.context_briefs] == ["B-fresh"]
+    assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-fresh"]
+    assert [snippet.artifact_id for snippet in frame.artifact_packet.snippets] == ["A-fresh"]
+    assert [packet.observation_id for packet in frame.evidence_packet.observations] == ["E-fresh"]
 
 
 def test_frame_compiler_prunes_file_invalidated_artifact_snippets() -> None:

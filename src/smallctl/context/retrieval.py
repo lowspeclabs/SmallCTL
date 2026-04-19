@@ -253,6 +253,7 @@ class LexicalRetriever:
             if isinstance(message.metadata, dict) and message.metadata.get("artifact_id")
         }
         recently_retrieved_ids = set(state.retrieval_cache)
+        stale_artifact_ids = self._durably_stale_ids(state, key="_artifact_staleness")
         suppressed_raw = state.scratchpad.get("suppressed_truncated_artifact_ids", [])
         if isinstance(suppressed_raw, (list, tuple, set)):
             suppressed_truncated_ids = {
@@ -269,6 +270,7 @@ class LexicalRetriever:
                 artifact_id in recent_artifact_ids
                 or artifact_id in recently_retrieved_ids
                 or artifact_id in suppressed_truncated_ids
+                or artifact_id in stale_artifact_ids
             ):
                 continue
             artifact = state.artifacts[artifact_id]
@@ -303,8 +305,11 @@ class LexicalRetriever:
         query: str,
     ) -> list[tuple[float, EpisodicSummary]]:
         query_tokens = _tokens(query)
+        stale_summary_ids = self._durably_stale_ids(state, key="_summary_staleness")
         scored: list[tuple[float, EpisodicSummary]] = []
         for index, summary in enumerate(state.episodic_summaries):
+            if summary.summary_id and summary.summary_id in stale_summary_ids:
+                continue
             score = self._score_summary(
                 summary=summary,
                 query_tokens=query_tokens,
@@ -601,17 +606,25 @@ class LexicalRetriever:
         return score
 
     @staticmethod
-    def _is_durably_stale_experience(state: LoopState, memory: ExperienceMemory) -> bool:
+    def _durably_stale_ids(state: LoopState, *, key: str) -> set[str]:
+        payload = state.scratchpad.get(key)
+        if not isinstance(payload, dict):
+            return set()
+        ids: set[str] = set()
+        for raw_id, marker in payload.items():
+            item_id = str(raw_id or "").strip()
+            if not item_id or not isinstance(marker, dict):
+                continue
+            if bool(marker.get("stale", False)):
+                ids.add(item_id)
+        return ids
+
+    @classmethod
+    def _is_durably_stale_experience(cls, state: LoopState, memory: ExperienceMemory) -> bool:
         memory_id = str(getattr(memory, "memory_id", "") or "").strip()
         if not memory_id:
             return False
-        payload = state.scratchpad.get("_experience_staleness")
-        if not isinstance(payload, dict):
-            return False
-        marker = payload.get(memory_id)
-        if not isinstance(marker, dict):
-            return False
-        return bool(marker.get("stale", False))
+        return memory_id in cls._durably_stale_ids(state, key="_experience_staleness")
 
     @staticmethod
     def _resolved_memory_namespace(memory: ExperienceMemory, *, state: LoopState) -> str:

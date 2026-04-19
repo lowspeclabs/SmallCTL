@@ -69,7 +69,8 @@ class PromptStateFrameCompiler:
         )
         latest_brief = context_briefs[-1] if context_briefs else None
         observations, dropped_observation_ids, dropped_observation_count = self._filter_invalidated_observations(
-            build_observation_packets(state, limit=8)
+            state=state,
+            observations=build_observation_packets(state, limit=8),
         )
         turn_bundles, dropped_turn_bundle_ids = self._filter_invalidated_turn_bundles(
             state=state,
@@ -238,11 +239,17 @@ class PromptStateFrameCompiler:
         bundles: list[TurnBundle],
     ) -> tuple[list[TurnBundle], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
-        if not invalidations or not bundles:
+        stale_ids = cls._durably_stale_turn_bundle_ids(state)
+        if not bundles:
+            return bundles, []
+        if not invalidations and not stale_ids:
             return bundles, []
         kept: list[TurnBundle] = []
         dropped_ids: list[str] = []
         for bundle in bundles:
+            if bundle.bundle_id and bundle.bundle_id in stale_ids:
+                dropped_ids.append(bundle.bundle_id)
+                continue
             if cls._bundle_invalidated(state=state, bundle=bundle, invalidations=invalidations):
                 if bundle.bundle_id:
                     dropped_ids.append(bundle.bundle_id)
@@ -250,17 +257,25 @@ class PromptStateFrameCompiler:
             kept.append(bundle)
         return kept, dropped_ids
 
-    @staticmethod
+    @classmethod
     def _filter_invalidated_observations(
+        cls,
+        *,
+        state: LoopState,
         observations: list[Any],
     ) -> tuple[list[Any], list[str], int]:
+        stale_ids = cls._durably_stale_observation_ids(state)
         kept: list[Any] = []
         dropped_ids: list[str] = []
         dropped_count = 0
         for packet in observations:
+            observation_id = str(getattr(packet, "observation_id", "") or "").strip()
+            if observation_id and observation_id in stale_ids:
+                dropped_count += 1
+                dropped_ids.append(observation_id)
+                continue
             if bool(getattr(packet, "stale", False)):
                 dropped_count += 1
-                observation_id = str(getattr(packet, "observation_id", "") or "").strip()
                 if observation_id:
                     dropped_ids.append(observation_id)
                 continue
@@ -275,11 +290,17 @@ class PromptStateFrameCompiler:
         briefs: list[ContextBrief],
     ) -> tuple[list[ContextBrief], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
-        if not invalidations or not briefs:
+        stale_ids = cls._durably_stale_brief_ids(state)
+        if not briefs:
+            return briefs, []
+        if not invalidations and not stale_ids:
             return briefs, []
         kept: list[ContextBrief] = []
         dropped_ids: list[str] = []
         for brief in briefs:
+            if brief.brief_id and brief.brief_id in stale_ids:
+                dropped_ids.append(brief.brief_id)
+                continue
             if cls._brief_invalidated(state=state, brief=brief, invalidations=invalidations):
                 if brief.brief_id:
                     dropped_ids.append(brief.brief_id)
@@ -295,11 +316,17 @@ class PromptStateFrameCompiler:
         summaries: list[EpisodicSummary],
     ) -> tuple[list[EpisodicSummary], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
-        if not invalidations or not summaries:
+        stale_ids = cls._durably_stale_summary_ids(state)
+        if not summaries:
+            return summaries, []
+        if not invalidations and not stale_ids:
             return summaries, []
         kept: list[EpisodicSummary] = []
         dropped_ids: list[str] = []
         for summary in summaries:
+            if summary.summary_id and summary.summary_id in stale_ids:
+                dropped_ids.append(summary.summary_id)
+                continue
             if cls._summary_invalidated(state=state, summary=summary, invalidations=invalidations):
                 if summary.summary_id:
                     dropped_ids.append(summary.summary_id)
@@ -338,12 +365,18 @@ class PromptStateFrameCompiler:
         snippets: list[ArtifactSnippet],
     ) -> tuple[list[ArtifactSnippet], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
-        if not invalidations or not snippets:
+        stale_ids = cls._durably_stale_artifact_ids(state)
+        if not snippets:
+            return snippets, []
+        if not invalidations and not stale_ids:
             return snippets, []
         artifacts = getattr(state, "artifacts", {}) if isinstance(getattr(state, "artifacts", {}), dict) else {}
         kept: list[ArtifactSnippet] = []
         dropped_ids: list[str] = []
         for snippet in snippets:
+            if snippet.artifact_id and snippet.artifact_id in stale_ids:
+                dropped_ids.append(snippet.artifact_id)
+                continue
             artifact = artifacts.get(snippet.artifact_id)
             if cls._artifact_invalidated(state=state, artifact=artifact, invalidations=invalidations):
                 if snippet.artifact_id:
@@ -360,18 +393,42 @@ class PromptStateFrameCompiler:
         return [item for item in payload[-24:] if isinstance(item, dict)]
 
     @staticmethod
-    def _durably_stale_experience_ids(state: LoopState) -> set[str]:
-        payload = state.scratchpad.get("_experience_staleness")
+    def _durably_stale_ids(state: LoopState, key: str) -> set[str]:
+        payload = state.scratchpad.get(key)
         if not isinstance(payload, dict):
             return set()
         ids: set[str] = set()
-        for memory_id, marker in payload.items():
-            normalized_id = str(memory_id or "").strip()
+        for item_id, marker in payload.items():
+            normalized_id = str(item_id or "").strip()
             if not normalized_id or not isinstance(marker, dict):
                 continue
             if bool(marker.get("stale", False)):
                 ids.add(normalized_id)
         return ids
+
+    @classmethod
+    def _durably_stale_experience_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_experience_staleness")
+
+    @classmethod
+    def _durably_stale_turn_bundle_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_turn_bundle_staleness")
+
+    @classmethod
+    def _durably_stale_brief_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_context_brief_staleness")
+
+    @classmethod
+    def _durably_stale_summary_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_summary_staleness")
+
+    @classmethod
+    def _durably_stale_artifact_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_artifact_staleness")
+
+    @classmethod
+    def _durably_stale_observation_ids(cls, state: LoopState) -> set[str]:
+        return cls._durably_stale_ids(state, "_observation_staleness")
 
     @staticmethod
     def _path_matches_any(target: str, changed_paths: list[str]) -> bool:

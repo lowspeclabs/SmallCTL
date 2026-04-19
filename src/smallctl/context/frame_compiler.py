@@ -311,7 +311,10 @@ class PromptStateFrameCompiler:
         experiences: list[ExperienceMemory],
     ) -> tuple[list[ExperienceMemory], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
-        if not invalidations or not experiences:
+        stale_ids = cls._durably_stale_experience_ids(state)
+        if not experiences:
+            return experiences, []
+        if not invalidations and not stale_ids:
             return experiences, []
         kept: list[ExperienceMemory] = []
         dropped_ids: list[str] = []
@@ -351,6 +354,20 @@ class PromptStateFrameCompiler:
         if not isinstance(payload, list):
             return []
         return [item for item in payload[-24:] if isinstance(item, dict)]
+
+    @staticmethod
+    def _durably_stale_experience_ids(state: LoopState) -> set[str]:
+        payload = state.scratchpad.get("_experience_staleness")
+        if not isinstance(payload, dict):
+            return set()
+        ids: set[str] = set()
+        for memory_id, marker in payload.items():
+            normalized_id = str(memory_id or "").strip()
+            if not normalized_id or not isinstance(marker, dict):
+                continue
+            if bool(marker.get("stale", False)):
+                ids.add(normalized_id)
+        return ids
 
     @staticmethod
     def _path_matches_any(target: str, changed_paths: list[str]) -> bool:
@@ -449,6 +466,9 @@ class PromptStateFrameCompiler:
         memory: ExperienceMemory,
         invalidations: list[dict[str, Any]],
     ) -> bool:
+        stale_ids = cls._durably_stale_experience_ids(state)
+        if memory.memory_id and memory.memory_id in stale_ids:
+            return True
         current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
         failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
         notes = str(memory.notes or "").strip()

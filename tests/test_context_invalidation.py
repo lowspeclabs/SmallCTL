@@ -122,6 +122,38 @@ def test_memory_service_emits_phase_environment_and_write_target_invalidations()
     assert "invalidated_memory_ids" in phase_event
 
 
+def test_invalidate_context_persists_experience_staleness_metadata() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-src",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            confidence=0.85,
+            notes="Successfully patched src/app.py",
+        )
+    ]
+
+    event = state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    assert event["invalidated_memory_count"] == 1
+    stale_index = state.scratchpad.get("_experience_staleness")
+    assert isinstance(stale_index, dict)
+    assert "mem-src" in stale_index
+    marker = stale_index["mem-src"]
+    assert marker["stale"] is True
+    assert marker["reason"] == "file_changed"
+    assert "file_changed" in marker["reasons"]
+    assert "src/app.py" in marker["paths"]
+
+
 def test_frame_compiler_prunes_file_invalidated_bundles_briefs_and_summaries() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "execute"
@@ -323,6 +355,50 @@ def test_frame_compiler_prunes_invalidated_experience_memories() -> None:
         if item.lane == "experience_memories" and item.reason == "context_invalidated"
     )
     assert set(drop.dropped_ids) == {"mem-src"}
+
+
+def test_frame_compiler_prunes_durably_stale_experiences_without_recent_events() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    experiences = [
+        ExperienceMemory(
+            memory_id="mem-stale",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            notes="Successfully patched src/app.py",
+        ),
+        ExperienceMemory(
+            memory_id="mem-fresh",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            notes="Patched docs/readme.md",
+        ),
+    ]
+    state.scratchpad["_experience_staleness"] = {
+        "mem-stale": {
+            "stale": True,
+            "reason": "file_changed",
+            "reasons": ["file_changed"],
+            "paths": ["src/app.py"],
+            "updated_at": "2026-04-19T00:00:00+00:00",
+            "phase": "repair",
+        }
+    }
+    state.scratchpad["_context_invalidations"] = []
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_experiences=experiences)
+
+    assert [memory.memory_id for memory in frame.experience_packet.memories] == ["mem-fresh"]
+    drop = next(
+        item
+        for item in frame.drop_log
+        if item.lane == "experience_memories" and item.reason == "context_invalidated"
+    )
+    assert set(drop.dropped_ids) == {"mem-stale"}
 
 
 def test_frame_compiler_prunes_file_invalidated_artifact_snippets() -> None:

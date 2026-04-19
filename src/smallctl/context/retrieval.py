@@ -500,6 +500,8 @@ class LexicalRetriever:
         task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
         if task_mode == "chat" and str(m.tool_name or "").strip().lower() in _CHAT_SUPPRESSED_TOOL_NAMES:
             return 0.0
+        if self._is_durably_stale_experience(state, m):
+            return 0.0
         memory_namespace = self._resolved_memory_namespace(m, state=state)
         if routing is None:
             available_namespaces = {memory_namespace} if memory_namespace else set()
@@ -597,6 +599,19 @@ class LexicalRetriever:
                 score *= 0.35
 
         return score
+
+    @staticmethod
+    def _is_durably_stale_experience(state: LoopState, memory: ExperienceMemory) -> bool:
+        memory_id = str(getattr(memory, "memory_id", "") or "").strip()
+        if not memory_id:
+            return False
+        payload = state.scratchpad.get("_experience_staleness")
+        if not isinstance(payload, dict):
+            return False
+        marker = payload.get(memory_id)
+        if not isinstance(marker, dict):
+            return False
+        return bool(marker.get("stale", False))
 
     @staticmethod
     def _resolved_memory_namespace(memory: ExperienceMemory, *, state: LoopState) -> str:

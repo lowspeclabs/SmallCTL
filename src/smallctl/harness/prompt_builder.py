@@ -97,6 +97,9 @@ class PromptBuilderService:
             lane_routes=retrieval_bundle.lane_routes,
             score_gaps=retrieval_bundle.score_gaps,
             best_scores=retrieval_bundle.best_scores,
+            selected_artifact_ids=[artifact.artifact_id for artifact in artifacts],
+            selected_summary_ids=[summary.summary_id for summary in summaries],
+            selected_experience_ids=[memory.memory_id for memory in experiences],
         )
         
         recent_limit = self.harness.context_policy.recent_message_limit
@@ -158,6 +161,8 @@ class PromptBuilderService:
                     "context lane selected for prompt frame",
                     lane=lane,
                     count=count,
+                    active_phase=frame.spine.current_phase,
+                    active_intent=frame.spine.active_intent,
                 )
             for drop in frame.drop_log:
                 self.harness._runlog(
@@ -167,6 +172,8 @@ class PromptBuilderService:
                     reason=drop.reason,
                     dropped_count=drop.dropped_count,
                     dropped_ids=list(drop.dropped_ids),
+                    active_phase=frame.spine.current_phase,
+                    active_intent=frame.spine.active_intent,
                 )
 
         limit = self.harness.context_policy.max_prompt_tokens

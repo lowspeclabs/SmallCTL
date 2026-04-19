@@ -140,9 +140,21 @@ class _Retriever:
             query="frame query",
             initial_query="frame query",
             summaries=[],
-            artifacts=[],
-            experiences=[],
-            lane_routes={"artifact_packet": [], "experience_packet": [], "evidence_packet": []},
+            artifacts=[ArtifactSnippet(artifact_id="A-lane", text="artifact context")],
+            experiences=[
+                ExperienceMemory(
+                    memory_id="mem-lane",
+                    intent="requested_shell_exec",
+                    tool_name="shell_exec",
+                    outcome="success",
+                    notes="Use cached artifact first.",
+                )
+            ],
+            lane_routes={
+                "artifact_packet": ["A-lane"],
+                "experience_packet": ["mem-lane"],
+                "evidence_packet": [],
+            },
         )
 
 
@@ -196,11 +208,27 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     messages = asyncio.run(service.build_messages("SYSTEM PROMPT"))
 
     events = [entry["event"] for entry in harness.run_logger.entries]
+    retrieval_entry = next(
+        entry for entry in harness.run_logger.entries if entry["event"] == "retrieval_ranked_with_intent"
+    )
+    lane_selected = [
+        entry for entry in harness.run_logger.entries if entry["event"] == "context_lane_selected"
+    ]
+    lane_dropped = [
+        entry for entry in harness.run_logger.entries if entry["event"] == "context_lane_dropped"
+    ]
     assert messages[0]["role"] == "system"
     assert "prompt_state_frame_compiled" in events
     assert "context_lane_selected" in events
     assert "context_lane_dropped" in events
     assert "retrieval_ranked_with_intent" in events
+    assert retrieval_entry["data"]["lane_routes"]["artifact_packet"] == ["A-lane"]
+    assert retrieval_entry["data"]["selected_artifact_ids"] == ["A-lane"]
+    assert retrieval_entry["data"]["selected_experience_ids"] == ["mem-lane"]
+    assert all("active_phase" in entry["data"] for entry in lane_selected)
+    assert all("active_intent" in entry["data"] for entry in lane_selected)
+    assert lane_dropped and "active_phase" in lane_dropped[0]["data"]
+    assert lane_dropped and "active_intent" in lane_dropped[0]["data"]
 
 
 def test_prompt_state_frame_captures_coding_anchors_and_ladder_levels() -> None:

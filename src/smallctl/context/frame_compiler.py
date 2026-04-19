@@ -64,7 +64,9 @@ class PromptStateFrameCompiler:
             briefs=list(state.context_briefs),
         )
         latest_brief = context_briefs[-1] if context_briefs else None
-        observations = build_observation_packets(state, limit=8)
+        observations, dropped_observation_ids, dropped_observation_count = self._filter_invalidated_observations(
+            build_observation_packets(state, limit=8)
+        )
         turn_bundles, dropped_turn_bundle_ids = self._filter_invalidated_turn_bundles(
             state=state,
             bundles=list(state.turn_bundles[-4:]),
@@ -144,6 +146,13 @@ class PromptStateFrameCompiler:
                 reason="context_invalidated",
                 dropped_count=len(dropped_turn_bundle_ids),
                 dropped_ids=dropped_turn_bundle_ids,
+            )
+        if dropped_observation_count > 0:
+            frame.add_drop(
+                lane="normalized_observations",
+                reason="context_invalidated",
+                dropped_count=dropped_observation_count,
+                dropped_ids=dropped_observation_ids,
             )
         if dropped_brief_ids:
             frame.add_drop(
@@ -236,6 +245,23 @@ class PromptStateFrameCompiler:
                 continue
             kept.append(bundle)
         return kept, dropped_ids
+
+    @staticmethod
+    def _filter_invalidated_observations(
+        observations: list[Any],
+    ) -> tuple[list[Any], list[str], int]:
+        kept: list[Any] = []
+        dropped_ids: list[str] = []
+        dropped_count = 0
+        for packet in observations:
+            if bool(getattr(packet, "stale", False)):
+                dropped_count += 1
+                observation_id = str(getattr(packet, "observation_id", "") or "").strip()
+                if observation_id:
+                    dropped_ids.append(observation_id)
+                continue
+            kept.append(packet)
+        return kept, dropped_ids, dropped_count
 
     @classmethod
     def _filter_invalidated_context_briefs(

@@ -28,6 +28,22 @@ class MessageTierManager:
         queue.append(dict(payload))
         state.scratchpad["_compaction_demotion_events"] = queue[-24:]
 
+    @staticmethod
+    def _clear_stale_marker(state: "LoopState", *, key: str, item_id: str) -> None:
+        normalized_id = str(item_id or "").strip()
+        if not normalized_id:
+            return
+        payload = state.scratchpad.get(key)
+        if not isinstance(payload, dict):
+            return
+        if normalized_id not in payload:
+            return
+        payload.pop(normalized_id, None)
+        if payload:
+            state.scratchpad[key] = payload
+        else:
+            state.scratchpad.pop(key, None)
+
     def should_compact(self, state: LoopState) -> bool:
         """Determines if the current message transcript should be folded into a warm brief."""
         if not state.recent_messages:
@@ -79,6 +95,7 @@ class MessageTierManager:
         if turn_bundle is None:
             return None
         state.turn_bundles.append(turn_bundle)
+        self._clear_stale_marker(state, key="_turn_bundle_staleness", item_id=turn_bundle.bundle_id)
         state.recent_messages = state.recent_messages[-self.hot_window:]
         state.scratchpad["_last_tier_compaction_step"] = state.step_count
         self._record_demotion(state, {
@@ -105,6 +122,7 @@ class MessageTierManager:
         )
         if brief is not None:
             state.context_briefs.append(brief)
+            self._clear_stale_marker(state, key="_context_brief_staleness", item_id=brief.brief_id)
             state.turn_bundles = state.turn_bundles[promote_count:]
             self._record_demotion(state, {
                 "from_level": "L1",
@@ -141,6 +159,7 @@ class MessageTierManager:
                 full_summary_artifact_id=oldest.full_artifact_id,
             )
             state.episodic_summaries.append(summary)
+            self._clear_stale_marker(state, key="_summary_staleness", item_id=summary.summary_id)
             self._record_demotion(state, {
                 "from_level": "L2",
                 "to_level": "L3",

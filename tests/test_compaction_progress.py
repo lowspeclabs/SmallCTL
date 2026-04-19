@@ -408,6 +408,40 @@ def test_structured_compaction_demotes_l0_to_l1_turn_bundle() -> None:
     assert demotion_entries[-1]["data"]["to_level"] == "L1"
 
 
+def test_structured_compaction_clears_stale_marker_for_new_turn_bundle_id() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 12
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(6)
+    ]
+    state.scratchpad["_turn_bundle_staleness"] = {"TB0001": {"stale": True}}
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=6,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="demote context",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert len(state.turn_bundles) == 1
+    assert state.turn_bundles[0].bundle_id == "TB0001"
+    marker = state.scratchpad.get("_turn_bundle_staleness", {})
+    assert "TB0001" not in marker
+
+
 def test_structured_compaction_promotes_l1_to_l2_when_bundle_limit_exceeded() -> None:
     state = LoopState(cwd="/tmp")
     state.step_count = 20
@@ -523,6 +557,73 @@ def test_structured_compaction_promotes_l2_to_l3_when_warm_brief_limit_exceeded(
     assert l3_entries[-1]["data"]["brief_id"] == "B0001"
     assert l3_entries[-1]["data"]["summary_id"]
     assert l3_entries[-1]["data"]["full_artifact_id"] == "A100-FULL"
+
+
+def test_structured_compaction_clears_stale_marker_for_new_summary_id() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 30
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B0001",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 3),
+            task_goal="Patch src/app.py",
+            current_phase="author",
+            key_discoveries=["Edited src/app.py"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A100"],
+            next_action_hint="Run verifier",
+            staleness_step=3,
+        ),
+        ContextBrief(
+            brief_id="B0002",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(4, 6),
+            task_goal="Patch docs/readme.md",
+            current_phase="author",
+            key_discoveries=["Edited docs/readme.md"],
+            tools_tried=["file_write"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A101"],
+            next_action_hint="Verify docs",
+            staleness_step=6,
+        ),
+    ]
+    state.scratchpad["_summary_staleness"] = {"S0001": {"stale": True}}
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(5)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=10,
+            warm_brief_limit=1,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="promote warm briefs",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert state.episodic_summaries
+    assert state.episodic_summaries[-1].summary_id == "S0001"
+    marker = state.scratchpad.get("_summary_staleness", {})
+    assert "S0001" not in marker
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

@@ -29,6 +29,12 @@ class ContextSummarizer:
             role = "commentary"
         return f"{role}: {message.content or ''}"
 
+    @staticmethod
+    def _clear_stale_marker(state: LoopState, *, key: str, item_id: str) -> None:
+        clear_fn = getattr(state, "_clear_lane_staleness", None)
+        if callable(clear_fn):
+            clear_fn(key, item_id)
+
     def compact_recent_messages_with_status(
         self,
         *,
@@ -70,10 +76,12 @@ class ContextSummarizer:
             art = artifact_store.persist_thinking(raw_thinking=full_text, summary=f"Heuristic context summary {summary_id}", source="harness")
             summary.full_summary_artifact_id = art.artifact_id
             state.artifacts[art.artifact_id] = art
+            self._clear_stale_marker(state, key="_artifact_staleness", item_id=art.artifact_id)
             # Mark the decision list with the link
             summary.decisions = [f"Heuristic Summary (full in {art.artifact_id})"] + decisions[:2]
 
         state.episodic_summaries.append(summary)
+        self._clear_stale_marker(state, key="_summary_staleness", item_id=summary.summary_id)
         state.recent_messages = state.recent_messages[-keep_recent:]
         if summary.artifact_ids:
             state.working_memory.decisions = _dedupe(
@@ -155,10 +163,12 @@ class ContextSummarizer:
             art = artifact_store.persist_thinking(raw_thinking=summary_text, summary=f"AI context summary {summary_id}", source="assistant_summarizer")
             summary.full_summary_artifact_id = art.artifact_id
             state.artifacts[art.artifact_id] = art
+            self._clear_stale_marker(state, key="_artifact_staleness", item_id=art.artifact_id)
             # Update decisions to note link
             summary.decisions = [f"AI Summary (full in {art.artifact_id}): {summary_text[:200]}..."]
 
         state.episodic_summaries.append(summary)
+        self._clear_stale_marker(state, key="_summary_staleness", item_id=summary.summary_id)
         state.recent_messages = state.recent_messages[-keep_recent:]
         
         return CompactionAttemptResult(summary=summary, messages_compacted=len(old_messages))
@@ -309,6 +319,9 @@ class ContextSummarizer:
             )
             brief.full_artifact_id = art.artifact_id
             state.artifacts[art.artifact_id] = art
+            self._clear_stale_marker(state, key="_artifact_staleness", item_id=art.artifact_id)
+
+        self._clear_stale_marker(state, key="_context_brief_staleness", item_id=brief.brief_id)
 
         return brief
 
@@ -416,6 +429,8 @@ class ContextSummarizer:
             )
             brief.full_artifact_id = artifact.artifact_id
             state.artifacts[artifact.artifact_id] = artifact
+            self._clear_stale_marker(state, key="_artifact_staleness", item_id=artifact.artifact_id)
+        self._clear_stale_marker(state, key="_context_brief_staleness", item_id=brief.brief_id)
         return brief
 
     async def distill_thinking_async(

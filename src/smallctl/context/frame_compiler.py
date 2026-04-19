@@ -73,6 +73,10 @@ class PromptStateFrameCompiler:
             state=state,
             summaries=list(retrieved_summaries),
         )
+        experiences, dropped_experience_ids = self._filter_invalidated_experiences(
+            state=state,
+            experiences=list(retrieved_experiences),
+        )
         invalidated_hints = self._invalidated_fact_hints(state)
         known_good_facts = self._dedupe(
             list(state.working_memory.known_facts)
@@ -127,7 +131,7 @@ class PromptStateFrameCompiler:
                 context_briefs=context_briefs,
                 summaries=summaries,
             ),
-            experience_packet=PromptExperiencePacket(memories=list(retrieved_experiences)),
+            experience_packet=PromptExperiencePacket(memories=experiences),
             artifact_packet=PromptArtifactPacket(snippets=list(retrieved_artifacts)),
         )
         if dropped_turn_bundle_ids:
@@ -150,6 +154,13 @@ class PromptStateFrameCompiler:
                 reason="context_invalidated",
                 dropped_count=len(dropped_summary_ids),
                 dropped_ids=dropped_summary_ids,
+            )
+        if dropped_experience_ids:
+            frame.add_drop(
+                lane="experience_memories",
+                reason="context_invalidated",
+                dropped_count=len(dropped_experience_ids),
+                dropped_ids=dropped_experience_ids,
             )
         return frame
 
@@ -255,6 +266,26 @@ class PromptStateFrameCompiler:
             kept.append(summary)
         return kept, dropped_ids
 
+    @classmethod
+    def _filter_invalidated_experiences(
+        cls,
+        *,
+        state: LoopState,
+        experiences: list[ExperienceMemory],
+    ) -> tuple[list[ExperienceMemory], list[str]]:
+        invalidations = cls._recent_invalidation_events(state)
+        if not invalidations or not experiences:
+            return experiences, []
+        kept: list[ExperienceMemory] = []
+        dropped_ids: list[str] = []
+        for memory in experiences:
+            if cls._experience_invalidated(state=state, memory=memory, invalidations=invalidations):
+                if memory.memory_id:
+                    dropped_ids.append(memory.memory_id)
+                continue
+            kept.append(memory)
+        return kept, dropped_ids
+
     @staticmethod
     def _recent_invalidation_events(state: LoopState) -> list[dict[str, Any]]:
         payload = state.scratchpad.get("_context_invalidations")
@@ -348,6 +379,33 @@ class PromptStateFrameCompiler:
                 if any(cls._is_optimistic_statement(line) for line in summary.notes):
                     return True
                 if failure_mode and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches):
+                    return True
+        return False
+
+    @classmethod
+    def _experience_invalidated(
+        cls,
+        *,
+        state: LoopState,
+        memory: ExperienceMemory,
+        invalidations: list[dict[str, Any]],
+    ) -> bool:
+        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        notes = str(memory.notes or "").strip()
+        for event in invalidations:
+            reason = str(event.get("reason") or "").strip().lower()
+            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+            if reason in {"file_changed", "write_session_target_changed"} and paths:
+                if any(cls._path_matches_any(notes, [path]) for path in paths):
+                    return True
+            if reason in {"phase_advanced", "environment_changed"}:
+                if memory.phase and str(memory.phase).strip().lower() != current_phase:
+                    return True
+            if reason == "verifier_failed":
+                if str(memory.outcome or "").strip().lower() == "success" and cls._is_optimistic_statement(notes):
+                    return True
+                if failure_mode and str(memory.failure_mode or "").strip().lower() == failure_mode:
                     return True
         return False
 

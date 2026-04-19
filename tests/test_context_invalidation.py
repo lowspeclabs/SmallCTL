@@ -8,6 +8,7 @@ from smallctl.harness.memory import MemoryService
 from smallctl.state import (
     ContextBrief,
     EpisodicSummary,
+    ExperienceMemory,
     LoopState,
     MemoryEntry,
     TurnBundle,
@@ -281,3 +282,41 @@ def test_frame_compiler_prunes_verifier_invalidated_optimistic_items() -> None:
     assert [bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles] == ["TB-neutral"]
     assert [brief.brief_id for brief in frame.evidence_packet.context_briefs] == ["B-neutral"]
     assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-neutral"]
+
+
+def test_frame_compiler_prunes_invalidated_experience_memories() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    experiences = [
+        ExperienceMemory(
+            memory_id="mem-src",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            notes="Successfully patched src/app.py",
+        ),
+        ExperienceMemory(
+            memory_id="mem-docs",
+            phase="repair",
+            intent="requested_file_write",
+            tool_name="file_write",
+            outcome="success",
+            notes="Updated docs/readme.md",
+        ),
+    ]
+    state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_experiences=experiences)
+
+    assert [memory.memory_id for memory in frame.experience_packet.memories] == ["mem-docs"]
+    drop = next(
+        item
+        for item in frame.drop_log
+        if item.lane == "experience_memories" and item.reason == "context_invalidated"
+    )
+    assert set(drop.dropped_ids) == {"mem-src"}

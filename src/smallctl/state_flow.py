@@ -391,6 +391,51 @@ class LoopStateFlowMixin:
         ]
         self.align_meta_to_content()
 
+    def prune_context_staleness_indexes(self) -> None:
+        def _prune(key: str, active_ids: set[str]) -> None:
+            index = self._lane_staleness_index(key)
+            if not index:
+                self.scratchpad.pop(key, None)
+                return
+            filtered = {
+                item_id: payload
+                for item_id, payload in index.items()
+                if item_id in active_ids
+            }
+            if filtered:
+                self.scratchpad[key] = filtered
+            else:
+                self.scratchpad.pop(key, None)
+
+        _prune(
+            "_experience_staleness",
+            {str(memory.memory_id).strip() for memory in self.warm_experiences if str(memory.memory_id).strip()},
+        )
+        _prune(
+            "_turn_bundle_staleness",
+            {str(bundle.bundle_id).strip() for bundle in self.turn_bundles if str(bundle.bundle_id).strip()},
+        )
+        _prune(
+            "_context_brief_staleness",
+            {str(brief.brief_id).strip() for brief in self.context_briefs if str(brief.brief_id).strip()},
+        )
+        _prune(
+            "_summary_staleness",
+            {str(summary.summary_id).strip() for summary in self.episodic_summaries if str(summary.summary_id).strip()},
+        )
+        _prune(
+            "_artifact_staleness",
+            {str(artifact_id).strip() for artifact_id in self.artifacts if str(artifact_id).strip()},
+        )
+        _prune(
+            "_observation_staleness",
+            {
+                str(record.evidence_id).strip()
+                for record in self.reasoning_graph.evidence_records
+                if str(record.evidence_id).strip()
+            },
+        )
+
     def align_meta_to_content(self) -> None:
         self.working_memory.known_fact_meta = align_memory_entries(
             self.working_memory.known_facts,
@@ -675,49 +720,7 @@ class LoopStateFlowMixin:
                     now=now,
                 )
 
-        def _prune_lane_staleness(key: str, active_ids: set[str]) -> None:
-            index = self._lane_staleness_index(key)
-            if not index:
-                self.scratchpad.pop(key, None)
-                return
-            filtered = {
-                item_id: payload
-                for item_id, payload in index.items()
-                if item_id in active_ids
-            }
-            if filtered:
-                self.scratchpad[key] = filtered
-            else:
-                self.scratchpad.pop(key, None)
-
-        _prune_lane_staleness(
-            "_experience_staleness",
-            {str(memory.memory_id).strip() for memory in self.warm_experiences if str(memory.memory_id).strip()},
-        )
-        _prune_lane_staleness(
-            "_turn_bundle_staleness",
-            {str(bundle.bundle_id).strip() for bundle in self.turn_bundles if str(bundle.bundle_id).strip()},
-        )
-        _prune_lane_staleness(
-            "_context_brief_staleness",
-            {str(brief.brief_id).strip() for brief in self.context_briefs if str(brief.brief_id).strip()},
-        )
-        _prune_lane_staleness(
-            "_summary_staleness",
-            {str(summary.summary_id).strip() for summary in self.episodic_summaries if str(summary.summary_id).strip()},
-        )
-        _prune_lane_staleness(
-            "_artifact_staleness",
-            {str(artifact_id).strip() for artifact_id in self.artifacts if str(artifact_id).strip()},
-        )
-        _prune_lane_staleness(
-            "_observation_staleness",
-            {
-                str(record.evidence_id).strip()
-                for record in self.reasoning_graph.evidence_records
-                if str(record.evidence_id).strip()
-            },
-        )
+        self.prune_context_staleness_indexes()
 
         invalidation_event: dict[str, Any] = {
             "reason": reason_label,

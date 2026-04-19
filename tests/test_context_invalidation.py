@@ -236,6 +236,105 @@ def test_invalidate_context_persists_lane_staleness_metadata() -> None:
     assert "E-src" in state.scratchpad["_observation_staleness"]
 
 
+def test_prune_context_staleness_indexes_removes_orphaned_entries() -> None:
+    state = LoopState(cwd="/tmp")
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-live",
+            phase="execute",
+            intent="requested_file_read",
+            tool_name="file_read",
+            outcome="success",
+            notes="Read docs/readme.md",
+        )
+    ]
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-live",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="execute",
+            summary_lines=["Read docs/readme.md"],
+            files_touched=["docs/readme.md"],
+        )
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-live",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Read docs/readme.md",
+            current_phase="execute",
+            key_discoveries=["docs/readme.md read"],
+            tools_tried=["file_read"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A-live"],
+            next_action_hint="Summarize",
+            staleness_step=2,
+        )
+    ]
+    state.episodic_summaries = [
+        EpisodicSummary(
+            summary_id="S-live",
+            created_at="2026-04-19T00:00:00+00:00",
+            notes=["read docs"],
+        )
+    ]
+    state.artifacts = {
+        "A-live": ArtifactRecord(
+            artifact_id="A-live",
+            kind="file_read",
+            source="docs/readme.md",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=10,
+            summary="docs",
+        )
+    }
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-live",
+            statement="Read docs/readme.md",
+            phase="execute",
+            tool_name="file_read",
+        )
+    ]
+    state.scratchpad["_experience_staleness"] = {
+        "mem-live": {"stale": True},
+        "mem-orphan": {"stale": True},
+    }
+    state.scratchpad["_turn_bundle_staleness"] = {
+        "TB-live": {"stale": True},
+        "TB-orphan": {"stale": True},
+    }
+    state.scratchpad["_context_brief_staleness"] = {
+        "B-live": {"stale": True},
+        "B-orphan": {"stale": True},
+    }
+    state.scratchpad["_summary_staleness"] = {
+        "S-live": {"stale": True},
+        "S-orphan": {"stale": True},
+    }
+    state.scratchpad["_artifact_staleness"] = {
+        "A-live": {"stale": True},
+        "A-orphan": {"stale": True},
+    }
+    state.scratchpad["_observation_staleness"] = {
+        "E-live": {"stale": True},
+        "E-orphan": {"stale": True},
+    }
+
+    state.prune_context_staleness_indexes()
+
+    assert set(state.scratchpad["_experience_staleness"].keys()) == {"mem-live"}
+    assert set(state.scratchpad["_turn_bundle_staleness"].keys()) == {"TB-live"}
+    assert set(state.scratchpad["_context_brief_staleness"].keys()) == {"B-live"}
+    assert set(state.scratchpad["_summary_staleness"].keys()) == {"S-live"}
+    assert set(state.scratchpad["_artifact_staleness"].keys()) == {"A-live"}
+    assert set(state.scratchpad["_observation_staleness"].keys()) == {"E-live"}
+
+
 def test_reinforce_experience_success_clears_staleness_marker() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"

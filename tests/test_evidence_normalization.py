@@ -289,6 +289,129 @@ def test_artifact_read_cache_hit_marks_replayed_evidence(tmp_path: Path) -> None
     asyncio.run(_run())
 
 
+def test_fresh_artifact_read_with_reused_ids_clears_stale_markers(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+
+        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        _prime_execution_record(
+            harness,
+            operation_id="op-seed",
+            tool_name="file_read",
+            tool_call_id="call-seed",
+            args={"path": "README.md"},
+            result=initial,
+        )
+        initial_message = await service.record_result(
+            tool_name="file_read",
+            tool_call_id="call-seed",
+            operation_id="op-seed",
+            result=initial,
+            arguments={"path": "README.md"},
+        )
+        reused_artifact_id = str(initial_message.metadata.get("artifact_id") or "")
+        reused_evidence_id = harness.state.reasoning_graph.evidence_records[-1].evidence_id
+        assert reused_artifact_id
+        assert reused_evidence_id
+
+        harness.state.scratchpad["_artifact_staleness"] = {reused_artifact_id: {"stale": True}}
+        harness.state.scratchpad["_observation_staleness"] = {reused_evidence_id: {"stale": True}}
+
+        fresh = ToolEnvelope(
+            success=True,
+            output="cached content",
+            metadata={"artifact_id": reused_artifact_id, "tool_name": "artifact_read"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-fresh",
+            tool_name="artifact_read",
+            tool_call_id="call-fresh",
+            args={"artifact_id": reused_artifact_id},
+            result=fresh,
+        )
+        await service.record_result(
+            tool_name="artifact_read",
+            tool_call_id="call-fresh",
+            operation_id="op-fresh",
+            result=fresh,
+            arguments={"artifact_id": reused_artifact_id},
+        )
+
+        assert reused_artifact_id not in harness.state.scratchpad.get("_artifact_staleness", {})
+        assert reused_evidence_id not in harness.state.scratchpad.get("_observation_staleness", {})
+        evidence = harness.state.reasoning_graph.evidence_records[-1]
+        assert evidence.replayed is False
+        assert evidence.evidence_type == "direct_observation"
+        assert evidence.evidence_id == reused_evidence_id
+
+    asyncio.run(_run())
+
+
+def test_artifact_read_cache_hit_with_reused_ids_keeps_stale_markers(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+
+        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        _prime_execution_record(
+            harness,
+            operation_id="op-seed-cache",
+            tool_name="file_read",
+            tool_call_id="call-seed-cache",
+            args={"path": "README.md"},
+            result=initial,
+        )
+        initial_message = await service.record_result(
+            tool_name="file_read",
+            tool_call_id="call-seed-cache",
+            operation_id="op-seed-cache",
+            result=initial,
+            arguments={"path": "README.md"},
+        )
+        reused_artifact_id = str(initial_message.metadata.get("artifact_id") or "")
+        reused_evidence_id = harness.state.reasoning_graph.evidence_records[-1].evidence_id
+        assert reused_artifact_id
+        assert reused_evidence_id
+
+        harness.state.scratchpad["_artifact_staleness"] = {
+            reused_artifact_id: {"stale": True, "reason": "file_changed"}
+        }
+        harness.state.scratchpad["_observation_staleness"] = {
+            reused_evidence_id: {"stale": True, "reason": "file_changed"}
+        }
+
+        cached = ToolEnvelope(
+            success=True,
+            output={"status": "cached", "artifact_id": reused_artifact_id},
+            metadata={"cache_hit": True, "artifact_id": reused_artifact_id, "tool_name": "artifact_read"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-cache-hit",
+            tool_name="artifact_read",
+            tool_call_id="call-cache-hit",
+            args={"artifact_id": reused_artifact_id},
+            result=cached,
+        )
+        await service.record_result(
+            tool_name="artifact_read",
+            tool_call_id="call-cache-hit",
+            operation_id="op-cache-hit",
+            result=cached,
+            arguments={"artifact_id": reused_artifact_id},
+        )
+
+        assert reused_artifact_id in harness.state.scratchpad.get("_artifact_staleness", {})
+        assert reused_evidence_id in harness.state.scratchpad.get("_observation_staleness", {})
+        evidence = harness.state.reasoning_graph.evidence_records[-1]
+        assert evidence.replayed is True
+        assert evidence.evidence_type == "replayed_or_cached"
+
+    asyncio.run(_run())
+
+
 def test_artifact_print_reuses_existing_artifact(tmp_path: Path) -> None:
     async def _run() -> None:
         harness = _make_harness(tmp_path)

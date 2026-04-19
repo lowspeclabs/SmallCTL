@@ -147,6 +147,8 @@ class PromptBuilderService:
                 "compiled deterministic prompt-state frame",
                 active_phase=frame.spine.current_phase,
                 active_intent=frame.spine.active_intent,
+                coding_profile_enabled=bool(getattr(self.harness.context_policy, "coding_profile_enabled", True)),
+                coding_anchor_count=len(frame.spine.coding_anchor_lines),
                 included_lane_counts=included_lane_counts,
                 dropped_lane_counts=dropped_lane_counts,
                 selected_artifact_ids=[item.artifact_id for item in frame.artifact_packet.snippets],

@@ -24,10 +24,14 @@ from .frame import (
     PromptStateSpine,
 )
 from .observations import build_observation_packets
+from .policy import ContextPolicy
 from .retrieval import LexicalRetriever
 
 
 class PromptStateFrameCompiler:
+    def __init__(self, policy: ContextPolicy | None = None) -> None:
+        self.policy = policy or ContextPolicy()
+
     def compile(
         self,
         *,
@@ -37,7 +41,7 @@ class PromptStateFrameCompiler:
         retrieved_experiences: Iterable[ExperienceMemory] = (),
     ) -> PromptStateFrame:
         phase_lines = self._render_phase_context(state)
-        coding_anchor_lines = self._coding_anchor_lines(state)
+        coding_anchor_lines = self._coding_anchor_lines(state) if self.policy.coding_profile_enabled else []
         run_brief_text = self._render_run_brief(state)
         working_memory_text = self._render_working_memory(
             state=state,

@@ -211,6 +211,9 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     retrieval_entry = next(
         entry for entry in harness.run_logger.entries if entry["event"] == "retrieval_ranked_with_intent"
     )
+    frame_entry = next(
+        entry for entry in harness.run_logger.entries if entry["event"] == "prompt_state_frame_compiled"
+    )
     lane_selected = [
         entry for entry in harness.run_logger.entries if entry["event"] == "context_lane_selected"
     ]
@@ -225,6 +228,8 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     assert retrieval_entry["data"]["lane_routes"]["artifact_packet"] == ["A-lane"]
     assert retrieval_entry["data"]["selected_artifact_ids"] == ["A-lane"]
     assert retrieval_entry["data"]["selected_experience_ids"] == ["mem-lane"]
+    assert "coding_profile_enabled" in frame_entry["data"]
+    assert "coding_anchor_count" in frame_entry["data"]
     assert all("active_phase" in entry["data"] for entry in lane_selected)
     assert all("active_intent" in entry["data"] for entry in lane_selected)
     assert lane_dropped and "active_phase" in lane_dropped[0]["data"]
@@ -268,3 +273,34 @@ def test_prompt_state_frame_captures_coding_anchors_and_ladder_levels() -> None:
     assert any("verifier_status=fail" in line for line in assembly.frame.spine.coding_anchor_lines)
     assert "L1" in state.prompt_budget.included_compaction_levels
     assert "L2" in state.prompt_budget.included_compaction_levels
+
+
+def test_prompt_state_frame_respects_disabled_coding_profile() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.task_mode = "local_execute"
+    state.run_brief.original_task = "Fix src/app.py and rerun verifier"
+    state.files_changed_this_cycle = ["src/app.py"]
+    state.last_verifier_verdict = {"verdict": "fail", "command": "pytest -q"}
+    state.write_session = WriteSession(
+        write_session_id="ws-1",
+        write_target_path="src/app.py",
+        write_session_mode="chunked_author",
+        write_session_intent="patch_existing",
+        status="open",
+    )
+
+    assembly = PromptAssembler(
+        ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=4,
+            coding_profile_enabled=False,
+        )
+    ).build_messages(
+        state=state,
+        system_prompt="SYSTEM",
+    )
+
+    assert assembly.frame is not None
+    assert assembly.frame.spine.coding_anchor_lines == []
+    assert "Coding anchors:" not in assembly.messages[0]["content"]

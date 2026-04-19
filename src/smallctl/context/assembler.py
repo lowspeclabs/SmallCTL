@@ -36,7 +36,7 @@ class PromptAssembly:
 class PromptAssembler:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
-        self.frame_compiler = PromptStateFrameCompiler()
+        self.frame_compiler = PromptStateFrameCompiler(policy=self.policy)
 
     def build_messages(
         self,

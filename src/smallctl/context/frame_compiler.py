@@ -77,6 +77,10 @@ class PromptStateFrameCompiler:
             state=state,
             experiences=list(retrieved_experiences),
         )
+        artifacts, dropped_artifact_ids = self._filter_invalidated_artifact_snippets(
+            state=state,
+            snippets=list(retrieved_artifacts),
+        )
         invalidated_hints = self._invalidated_fact_hints(state)
         known_good_facts = self._dedupe(
             list(state.working_memory.known_facts)
@@ -132,7 +136,7 @@ class PromptStateFrameCompiler:
                 summaries=summaries,
             ),
             experience_packet=PromptExperiencePacket(memories=experiences),
-            artifact_packet=PromptArtifactPacket(snippets=list(retrieved_artifacts)),
+            artifact_packet=PromptArtifactPacket(snippets=artifacts),
         )
         if dropped_turn_bundle_ids:
             frame.add_drop(
@@ -161,6 +165,13 @@ class PromptStateFrameCompiler:
                 reason="context_invalidated",
                 dropped_count=len(dropped_experience_ids),
                 dropped_ids=dropped_experience_ids,
+            )
+        if dropped_artifact_ids:
+            frame.add_drop(
+                lane="artifact_snippets",
+                reason="context_invalidated",
+                dropped_count=len(dropped_artifact_ids),
+                dropped_ids=dropped_artifact_ids,
             )
         return frame
 
@@ -286,6 +297,28 @@ class PromptStateFrameCompiler:
             kept.append(memory)
         return kept, dropped_ids
 
+    @classmethod
+    def _filter_invalidated_artifact_snippets(
+        cls,
+        *,
+        state: LoopState,
+        snippets: list[ArtifactSnippet],
+    ) -> tuple[list[ArtifactSnippet], list[str]]:
+        invalidations = cls._recent_invalidation_events(state)
+        if not invalidations or not snippets:
+            return snippets, []
+        artifacts = getattr(state, "artifacts", {}) if isinstance(getattr(state, "artifacts", {}), dict) else {}
+        kept: list[ArtifactSnippet] = []
+        dropped_ids: list[str] = []
+        for snippet in snippets:
+            artifact = artifacts.get(snippet.artifact_id)
+            if cls._artifact_invalidated(state=state, artifact=artifact, invalidations=invalidations):
+                if snippet.artifact_id:
+                    dropped_ids.append(snippet.artifact_id)
+                continue
+            kept.append(snippet)
+        return kept, dropped_ids
+
     @staticmethod
     def _recent_invalidation_events(state: LoopState) -> list[dict[str, Any]]:
         payload = state.scratchpad.get("_context_invalidations")
@@ -408,6 +441,51 @@ class PromptStateFrameCompiler:
                 if failure_mode and str(memory.failure_mode or "").strip().lower() == failure_mode:
                     return True
         return False
+
+    @classmethod
+    def _artifact_invalidated(
+        cls,
+        *,
+        state: LoopState,
+        artifact: Any,
+        invalidations: list[dict[str, Any]],
+    ) -> bool:
+        if artifact is None:
+            return False
+        metadata = getattr(artifact, "metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        artifact_paths = cls._artifact_path_candidates(artifact, metadata)
+        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip().lower()
+        verifier_verdict = str(metadata.get("verifier_verdict") or "").strip().lower()
+        for event in invalidations:
+            reason = str(event.get("reason") or "").strip().lower()
+            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+            if reason in {"file_changed", "write_session_target_changed"} and paths:
+                if any(cls._path_matches_any(candidate, paths) for candidate in artifact_paths):
+                    return True
+            if reason in {"phase_advanced", "environment_changed"} and metadata_phase:
+                if metadata_phase != current_phase:
+                    return True
+            if reason == "verifier_failed" and verifier_verdict == "pass":
+                return True
+        return False
+
+    @staticmethod
+    def _artifact_path_candidates(artifact: Any, metadata: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        source = str(getattr(artifact, "source", "") or "").strip()
+        if source:
+            candidates.append(source)
+        for key in ("path", "target_path", "write_target_path"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+        path_tags = getattr(artifact, "path_tags", [])
+        if isinstance(path_tags, list):
+            candidates.extend(str(item).strip() for item in path_tags if str(item).strip())
+        return candidates
 
     @staticmethod
     def _is_optimistic_statement(value: str) -> bool:

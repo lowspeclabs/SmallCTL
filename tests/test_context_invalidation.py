@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from smallctl.context.frame_compiler import PromptStateFrameCompiler
 from smallctl.harness.memory import MemoryService
 from smallctl.state import (
+    ArtifactRecord,
+    ArtifactSnippet,
     ContextBrief,
     EpisodicSummary,
     ExperienceMemory,
@@ -320,3 +322,47 @@ def test_frame_compiler_prunes_invalidated_experience_memories() -> None:
         if item.lane == "experience_memories" and item.reason == "context_invalidated"
     )
     assert set(drop.dropped_ids) == {"mem-src"}
+
+
+def test_frame_compiler_prunes_file_invalidated_artifact_snippets() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.artifacts = {
+        "A-src": ArtifactRecord(
+            artifact_id="A-src",
+            kind="file_read",
+            source="src/app.py",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=100,
+            summary="src/app.py snapshot",
+            metadata={"path": "src/app.py"},
+        ),
+        "A-docs": ArtifactRecord(
+            artifact_id="A-docs",
+            kind="file_read",
+            source="docs/readme.md",
+            created_at="2026-04-19T00:00:00+00:00",
+            size_bytes=80,
+            summary="docs/readme.md snapshot",
+            metadata={"path": "docs/readme.md"},
+        ),
+    }
+    retrieved = [
+        ArtifactSnippet(artifact_id="A-src", text="src artifact"),
+        ArtifactSnippet(artifact_id="A-docs", text="docs artifact"),
+    ]
+    state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_artifacts=retrieved)
+
+    assert [snippet.artifact_id for snippet in frame.artifact_packet.snippets] == ["A-docs"]
+    drop = next(
+        item
+        for item in frame.drop_log
+        if item.lane == "artifact_snippets" and item.reason == "context_invalidated"
+    )
+    assert set(drop.dropped_ids) == {"A-src"}

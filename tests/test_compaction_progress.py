@@ -9,7 +9,7 @@ from smallctl.harness.compaction import CompactionService
 from smallctl.harness.memory import MemoryService
 from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import LoopState, TurnBundle
+from smallctl.state import ContextBrief, LoopState, TurnBundle
 
 
 class _RunLogger:
@@ -451,6 +451,76 @@ def test_structured_compaction_promotes_l1_to_l2_when_bundle_limit_exceeded() ->
     demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
     assert demotion_entries
     assert any(entry["data"]["to_level"] == "L2" for entry in demotion_entries)
+
+
+def test_structured_compaction_promotes_l2_to_l3_when_warm_brief_limit_exceeded() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 30
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B0001",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 3),
+            task_goal="Patch src/app.py",
+            current_phase="author",
+            key_discoveries=["Edited src/app.py"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A100"],
+            next_action_hint="Run verifier",
+            staleness_step=3,
+        ),
+        ContextBrief(
+            brief_id="B0002",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(4, 6),
+            task_goal="Patch docs/readme.md",
+            current_phase="author",
+            key_discoveries=["Edited docs/readme.md"],
+            tools_tried=["file_write"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A101"],
+            next_action_hint="Verify docs",
+            staleness_step=6,
+        ),
+    ]
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(5)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=10,
+            warm_brief_limit=1,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="promote warm briefs",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert len(state.context_briefs) == 1
+    assert state.episodic_summaries
+    demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
+    assert demotion_entries
+    l3_entries = [entry for entry in demotion_entries if entry["data"]["to_level"] == "L3"]
+    assert l3_entries
+    assert l3_entries[-1]["data"]["brief_id"] == "B0001"
+    assert l3_entries[-1]["data"]["summary_id"]
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

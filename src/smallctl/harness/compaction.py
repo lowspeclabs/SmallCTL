@@ -82,16 +82,32 @@ class CompactionService:
         if event_handler:
              asyncio.create_task(event_handler(UIEvent(event_type=UIEventType.ALERT, content=msg)))
 
+        def _consume_structured_demotion_events() -> list[dict[str, Any]]:
+            scratchpad = self.harness.state.scratchpad
+            queue = scratchpad.pop("_compaction_demotion_events", None)
+            events: list[dict[str, Any]] = []
+            if isinstance(queue, list):
+                for item in queue:
+                    if isinstance(item, dict):
+                        events.append(dict(item))
+            last = scratchpad.get("_last_compaction_demotion")
+            if isinstance(last, dict):
+                if not events or events[-1] != last:
+                    events.append(dict(last))
+            return events
+
         if should_compact:
             try:
+                self.harness.state.scratchpad.pop("_compaction_demotion_events", None)
                 brief = await tier_manager.compact_to_warm(
                     state=self.harness.state,
                     summarizer=self.harness.summarizer,
                     client=self.harness.summarizer_client,
                     artifact_store=self.harness.artifact_store
                 )
-                demotion = self.harness.state.scratchpad.get("_last_compaction_demotion")
-                if isinstance(demotion, dict):
+                tier_manager.promote_to_cold(self.harness.state, artifact_store=self.harness.artifact_store)
+                demotion_events = _consume_structured_demotion_events()
+                for demotion in demotion_events:
                     self.harness._runlog(
                         "compaction_level_demoted",
                         "context demoted to lower compaction level",
@@ -100,9 +116,11 @@ class CompactionService:
                         bundle_id=demotion.get("bundle_id", ""),
                         bundle_ids=demotion.get("bundle_ids", []),
                         brief_id=demotion.get("brief_id", ""),
+                        summary_id=demotion.get("summary_id", ""),
                         messages_compacted=demotion.get("messages_compacted", 0),
                     )
-                if brief or (isinstance(demotion, dict) and int(demotion.get("messages_compacted", 0) or 0) > 0):
+                primary_demotion = demotion_events[0] if demotion_events else {}
+                if brief or demotion_events:
                     after_count = len(self.harness.state.recent_messages)
                     self._record_compaction_snapshot(
                         estimated_prompt_tokens_before=0,
@@ -124,9 +142,8 @@ class CompactionService:
                         self.harness._runlog(
                             "compaction_complete",
                             "Demoted messages into turn bundle",
-                            demotion=demotion,
+                            demotion=primary_demotion,
                         )
-                    tier_manager.promote_to_cold(self.harness.state, artifact_store=self.harness.artifact_store)
                     return # Successfully compacted
             except Exception as e:
                 self.harness._runlog("compaction_error", "Structured tier compaction failed", error=str(e))

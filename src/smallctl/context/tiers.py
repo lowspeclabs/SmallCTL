@@ -1,5 +1,7 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+from ..state import EpisodicSummary
 if TYPE_CHECKING:
     from ..state import LoopState, ContextBrief
     from .summarizer import ContextSummarizer
@@ -16,6 +18,15 @@ class MessageTierManager:
     @property
     def hot_window(self) -> int:
         return getattr(self.policy, "hot_message_limit", 8)
+
+    @staticmethod
+    def _record_demotion(state: "LoopState", payload: dict[str, Any]) -> None:
+        state.scratchpad["_last_compaction_demotion"] = payload
+        queue = state.scratchpad.get("_compaction_demotion_events")
+        if not isinstance(queue, list):
+            queue = []
+        queue.append(dict(payload))
+        state.scratchpad["_compaction_demotion_events"] = queue[-24:]
 
     def should_compact(self, state: LoopState) -> bool:
         """Determines if the current message transcript should be folded into a warm brief."""
@@ -70,12 +81,12 @@ class MessageTierManager:
         state.turn_bundles.append(turn_bundle)
         state.recent_messages = state.recent_messages[-self.hot_window:]
         state.scratchpad["_last_tier_compaction_step"] = state.step_count
-        state.scratchpad["_last_compaction_demotion"] = {
+        self._record_demotion(state, {
             "from_level": "L0",
             "to_level": "L1",
             "bundle_id": turn_bundle.bundle_id,
             "messages_compacted": len(to_compact),
-        }
+        })
 
         if len(state.turn_bundles) <= self.turn_bundle_limit:
             return None
@@ -95,13 +106,13 @@ class MessageTierManager:
         if brief is not None:
             state.context_briefs.append(brief)
             state.turn_bundles = state.turn_bundles[promote_count:]
-            state.scratchpad["_last_compaction_demotion"] = {
+            self._record_demotion(state, {
                 "from_level": "L1",
                 "to_level": "L2",
                 "bundle_ids": [bundle.bundle_id for bundle in bundles_to_promote if bundle.bundle_id],
                 "brief_id": brief.brief_id,
                 "messages_compacted": len(to_compact),
-            }
+            })
         return brief
 
     def promote_to_cold(self, state: LoopState, artifact_store: Any = None) -> None:
@@ -110,6 +121,33 @@ class MessageTierManager:
         limit = getattr(self.policy, "cold_fact_limit", 12)
         while len(state.context_brief_ids if hasattr(state, 'context_brief_ids') else state.context_briefs) > self.warm_limit:
             oldest = state.context_briefs.pop(0)
+            summary_id = f"S{len(state.episodic_summaries) + 1:04d}"
+            summary_notes = []
+            if oldest.new_facts:
+                summary_notes.extend(oldest.new_facts[:3])
+            if oldest.state_changes:
+                summary_notes.extend(oldest.state_changes[:3])
+            if not summary_notes:
+                summary_notes.extend(oldest.key_discoveries[:3])
+            summary: EpisodicSummary = EpisodicSummary(
+                summary_id=summary_id,
+                created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                decisions=(oldest.decision_deltas[:3] or oldest.key_discoveries[:3]),
+                files_touched=list(oldest.files_touched[:8]),
+                failed_approaches=list(oldest.blockers[:4]),
+                remaining_plan=([oldest.next_action_hint] if oldest.next_action_hint else []),
+                artifact_ids=list(oldest.artifact_ids[:10]),
+                notes=summary_notes[:6],
+                full_summary_artifact_id=oldest.full_artifact_id,
+            )
+            state.episodic_summaries.append(summary)
+            self._record_demotion(state, {
+                "from_level": "L2",
+                "to_level": "L3",
+                "brief_id": oldest.brief_id,
+                "summary_id": summary.summary_id,
+                "messages_compacted": 0,
+            })
             source_id = oldest.brief_id or f"steps-{oldest.step_range[0]}-{oldest.step_range[1]}"
             new_facts = [f"Fact (from {source_id}): {i}" for i in oldest.key_discoveries]
             new_facts += [f"Blocker (from {source_id}): {i}" for i in oldest.blockers]

@@ -187,6 +187,69 @@ def test_fallback_compaction_backoffs_until_under_budget() -> None:
     assert len(harness.prompt_assembler.calls) >= 3
 
 
+def test_compact_recent_messages_clears_stale_markers_for_reused_summary_and_artifact_ids() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.step_count = 10
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content="message 0"),
+        ConversationMessage(role="assistant", content="message 1"),
+        ConversationMessage(role="assistant", content="message 2"),
+    ]
+    state.scratchpad["_summary_staleness"] = {"S0001": {"stale": True}}
+    state.scratchpad["_artifact_staleness"] = {"A-FULL-1": {"stale": True}}
+    summarizer = ContextSummarizer(ContextPolicy())
+    store = _ThinkingArtifactStore()
+
+    result = summarizer.compact_recent_messages_with_status(
+        state=state,
+        keep_recent=1,
+        artifact_store=store,
+    )
+
+    assert result.summary is not None
+    assert result.summary.summary_id == "S0001"
+    assert result.summary.full_summary_artifact_id == "A-FULL-1"
+    assert "S0001" not in state.scratchpad.get("_summary_staleness", {})
+    assert "A-FULL-1" not in state.scratchpad.get("_artifact_staleness", {})
+
+
+def test_compact_turn_bundles_to_brief_clears_stale_markers_for_reused_brief_and_artifact_ids() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "author"
+    state.step_count = 12
+    bundles = [
+        TurnBundle(
+            bundle_id="TB0001",
+            created_at="2026-04-18T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="author",
+            intent="requested_file_patch",
+            summary_lines=["Edited src/app.py"],
+            files_touched=["src/app.py"],
+            artifact_ids=["A100"],
+            evidence_refs=["E100"],
+        )
+    ]
+    state.scratchpad["_context_brief_staleness"] = {"B0001": {"stale": True}}
+    state.scratchpad["_artifact_staleness"] = {"A-FULL-1": {"stale": True}}
+    summarizer = ContextSummarizer(ContextPolicy())
+    store = _ThinkingArtifactStore()
+
+    brief = summarizer.compact_turn_bundles_to_brief(
+        state=state,
+        bundles=bundles,
+        step_range=(1, 2),
+        artifact_store=store,
+    )
+
+    assert brief is not None
+    assert brief.brief_id == "B0001"
+    assert brief.full_artifact_id == "A-FULL-1"
+    assert "B0001" not in state.scratchpad.get("_context_brief_staleness", {})
+    assert "A-FULL-1" not in state.scratchpad.get("_artifact_staleness", {})
+
+
 def test_fallback_compaction_records_no_compactable_messages_stop_reason() -> None:
     state = LoopState(cwd="/tmp")
     state.step_count = 4

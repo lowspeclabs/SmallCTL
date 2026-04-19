@@ -82,6 +82,8 @@ def _emit_context_invalidation(
             paths=event.get("paths", []),
             invalidated_fact_count=event.get("invalidated_fact_count", 0),
             invalidated_memory_count=event.get("invalidated_memory_count", 0),
+            invalidated_facts=event.get("invalidated_facts", []),
+            invalidated_memory_ids=event.get("invalidated_memory_ids", []),
             details=event.get("details", {}),
         )
 

@@ -72,6 +72,16 @@ def test_memory_service_emits_phase_environment_and_write_target_invalidations()
     state.current_phase = "execute"
     state.run_brief.original_task = "update src/new.py"
     state.working_memory.current_goal = "update src/new.py"
+    state.working_memory.known_facts = ["execute phase still relies on explore assumptions"]
+    state.working_memory.known_fact_meta = [
+        MemoryEntry(
+            content="execute phase still relies on explore assumptions",
+            created_at_step=1,
+            created_phase="explore",
+            freshness="current",
+            confidence=0.8,
+        )
+    ]
     state.scratchpad["_last_contract_phase_seen"] = "explore"
     state.scratchpad["_last_environment_fingerprint"] = "explore|analysis|/old|"
     state.scratchpad["_last_write_session_target"] = "src/old.py"
@@ -88,7 +98,12 @@ def test_memory_service_emits_phase_environment_and_write_target_invalidations()
 
     events = [event for event, _ in harness._events if event == "context_invalidated"]
     assert events
-    reasons = [str(data.get("reason") or "") for event, data in harness._events if event == "context_invalidated"]
+    context_events = [data for event, data in harness._events if event == "context_invalidated"]
+    reasons = [str(data.get("reason") or "") for data in context_events]
     assert "phase_advanced" in reasons
     assert "environment_changed" in reasons
     assert "write_session_target_changed" in reasons
+    phase_event = next(data for data in context_events if str(data.get("reason") or "") == "phase_advanced")
+    assert phase_event["invalidated_fact_count"] >= 1
+    assert phase_event["invalidated_facts"]
+    assert "invalidated_memory_ids" in phase_event

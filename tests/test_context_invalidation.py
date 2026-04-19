@@ -3,8 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from smallctl.context.frame_compiler import PromptStateFrameCompiler
 from smallctl.harness.memory import MemoryService
-from smallctl.state import LoopState, MemoryEntry, WriteSession, memory_entry_is_stale
+from smallctl.state import (
+    ContextBrief,
+    EpisodicSummary,
+    LoopState,
+    MemoryEntry,
+    TurnBundle,
+    WriteSession,
+    memory_entry_is_stale,
+)
 from smallctl.tools.fs_sessions import _record_file_change
 
 
@@ -107,3 +116,168 @@ def test_memory_service_emits_phase_environment_and_write_target_invalidations()
     assert phase_event["invalidated_fact_count"] >= 1
     assert phase_event["invalidated_facts"]
     assert "invalidated_memory_ids" in phase_event
+
+
+def test_frame_compiler_prunes_file_invalidated_bundles_briefs_and_summaries() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="execute",
+            summary_lines=["Updated src/app.py"],
+            files_touched=["src/app.py"],
+        ),
+        TurnBundle(
+            bundle_id="TB-docs",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(3, 4),
+            phase="execute",
+            summary_lines=["Updated docs/readme.md"],
+            files_touched=["docs/readme.md"],
+        ),
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Patch src/app.py",
+            current_phase="execute",
+            key_discoveries=["src/app.py patched"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A-src"],
+            next_action_hint="Run verifier",
+            staleness_step=2,
+        ),
+        ContextBrief(
+            brief_id="B-docs",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(3, 4),
+            task_goal="Update docs",
+            current_phase="execute",
+            key_discoveries=["docs/readme.md updated"],
+            tools_tried=["file_write"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A-docs"],
+            next_action_hint="Finalize docs",
+            staleness_step=4,
+        ),
+    ]
+    summaries = [
+        EpisodicSummary(
+            summary_id="S-src",
+            created_at="2026-04-19T00:00:00+00:00",
+            files_touched=["src/app.py"],
+            notes=["Patched src/app.py"],
+        ),
+        EpisodicSummary(
+            summary_id="S-docs",
+            created_at="2026-04-19T00:00:00+00:00",
+            files_touched=["docs/readme.md"],
+            notes=["Patched docs/readme.md"],
+        ),
+    ]
+    state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_summaries=summaries)
+
+    assert [bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles] == ["TB-docs"]
+    assert [brief.brief_id for brief in frame.evidence_packet.context_briefs] == ["B-docs"]
+    assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-docs"]
+    dropped = {(drop.lane, drop.reason): set(drop.dropped_ids) for drop in frame.drop_log}
+    assert dropped[("turn_bundles", "context_invalidated")] == {"TB-src"}
+    assert dropped[("context_briefs", "context_invalidated")] == {"B-src"}
+    assert dropped[("episodic_summaries", "context_invalidated")] == {"S-src"}
+
+
+def test_frame_compiler_prunes_verifier_invalidated_optimistic_items() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.last_failure_class = "test"
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="repair",
+            summary_lines=["Verified fix and all tests pass"],
+            files_touched=["src/app.py"],
+        ),
+        TurnBundle(
+            bundle_id="TB-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(3, 4),
+            phase="repair",
+            summary_lines=["Collect failure traces from verifier"],
+            files_touched=["src/app.py"],
+        ),
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Repair tests",
+            current_phase="repair",
+            key_discoveries=["All tests pass after patch"],
+            tools_tried=["shell_exec"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A1"],
+            next_action_hint="Complete task",
+            staleness_step=2,
+            new_facts=["verified success on pytest"],
+        ),
+        ContextBrief(
+            brief_id="B-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(3, 4),
+            task_goal="Repair tests",
+            current_phase="repair",
+            key_discoveries=["Verifier still failing on assertions"],
+            tools_tried=["shell_exec"],
+            blockers=["failing tests"],
+            files_touched=["src/app.py"],
+            artifact_ids=["A2"],
+            next_action_hint="Collect failing test names",
+            staleness_step=4,
+        ),
+    ]
+    summaries = [
+        EpisodicSummary(
+            summary_id="S-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            notes=["Successfully fixed all tests"],
+            failed_approaches=["test"],
+        ),
+        EpisodicSummary(
+            summary_id="S-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            notes=["Still investigating failure output"],
+            failed_approaches=["timeout"],
+        ),
+    ]
+    state.invalidate_context(
+        reason="verifier_failed",
+        details={"state_change": "Verifier failure invalidated optimistic context"},
+    )
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_summaries=summaries)
+
+    assert [bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles] == ["TB-neutral"]
+    assert [brief.brief_id for brief in frame.evidence_packet.context_briefs] == ["B-neutral"]
+    assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-neutral"]

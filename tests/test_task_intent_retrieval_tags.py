@@ -354,3 +354,49 @@ def test_retrieval_prefers_experience_matching_last_failure_mode() -> None:
 
     assert bundle.experiences
     assert bundle.experiences[0].memory_id == "mem-syntax"
+
+
+def test_retrieval_prefers_summary_matching_write_target_and_failure_mode() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.active_intent = "requested_file_patch"
+    state.secondary_intents = ["requested_shell_exec"]
+    state.intent_tags = ["file_patch", "phase_repair"]
+    state.last_failure_class = "syntax"
+    state.run_brief.original_task = "repair failing app module patch"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.write_session = WriteSession(
+        write_session_id="ws-summary",
+        write_target_path="repo/src/app.py",
+        write_session_intent="patch_existing",
+        write_session_mode="chunked_author",
+        status="open",
+    )
+    state.episodic_summaries = [
+        EpisodicSummary(
+            summary_id="S-app",
+            created_at="2026-04-18T00:00:00+00:00",
+            decisions=["Continue repair loop for requested_file_patch"],
+            files_touched=["src/app.py"],
+            failed_approaches=["syntax mismatch from previous patch"],
+            remaining_plan=["apply focused patch and rerun verifier"],
+            notes=["module patch hot path for app.py"],
+        ),
+        EpisodicSummary(
+            summary_id="S-other",
+            created_at="2026-04-18T00:00:00+00:00",
+            decisions=["Continue repair loop for requested_file_patch"],
+            files_touched=["src/other.py"],
+            failed_approaches=["network timeout during unrelated operation"],
+            remaining_plan=["patch another module"],
+            notes=["secondary file was changed while exploring"],
+        ),
+    ]
+
+    summaries = LexicalRetriever().retrieve_summaries(
+        state=state,
+        query=state.run_brief.original_task,
+    )
+
+    assert summaries
+    assert summaries[0].summary_id == "S-app"

@@ -9,6 +9,7 @@ from smallctl.state import (
     ArtifactRecord,
     ArtifactSnippet,
     ContextBrief,
+    EvidenceRecord,
     EpisodicSummary,
     ExperienceMemory,
     LoopState,
@@ -366,3 +367,40 @@ def test_frame_compiler_prunes_file_invalidated_artifact_snippets() -> None:
         if item.lane == "artifact_snippets" and item.reason == "context_invalidated"
     )
     assert set(drop.dropped_ids) == {"A-src"}
+
+
+def test_frame_compiler_prunes_stale_observations_after_invalidation() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-src",
+            statement="Read src/app.py",
+            phase="execute",
+            tool_name="file_read",
+            metadata={"path": "src/app.py"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-docs",
+            statement="Read docs/readme.md",
+            phase="execute",
+            tool_name="file_read",
+            metadata={"path": "docs/readme.md"},
+        ),
+    ]
+    state.invalidate_context(
+        reason="file_changed",
+        paths=["src/app.py"],
+        details={"state_change": "File changed: src/app.py"},
+    )
+
+    frame = PromptStateFrameCompiler().compile(state=state)
+
+    assert [packet.observation_id for packet in frame.evidence_packet.observations] == ["E-docs"]
+    drop = next(
+        item
+        for item in frame.drop_log
+        if item.lane == "normalized_observations" and item.reason == "context_invalidated"
+    )
+    assert drop.dropped_count == 1
+    assert set(drop.dropped_ids) == {"E-src"}

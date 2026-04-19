@@ -632,15 +632,26 @@ class LexicalRetriever:
             + summary.notes
             + summary.artifact_ids
         )
-        overlap = len(query_tokens & _tokens(haystack))
+        haystack_tokens = _tokens(haystack)
+        overlap = len(query_tokens & haystack_tokens)
         if overlap <= 0:
             return 0.0
         score = float(overlap)
         target_paths = self._state_target_paths(state)
+        touched_paths = {
+            Path(path).as_posix().lower()
+            for path in summary.files_touched
+            if str(path).strip()
+        }
         if summary.files_touched:
-            touched_paths = {Path(path).as_posix().lower() for path in summary.files_touched if str(path).strip()}
             if touched_paths & target_paths:
                 score += 3.0
+            elif target_paths and any(
+                self._path_match(touched, target)
+                for touched in touched_paths
+                for target in target_paths
+            ):
+                score += 2.2
         if summary.decisions:
             score += 0.5
         if summary.files_touched:
@@ -650,6 +661,8 @@ class LexicalRetriever:
             failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
             if failure_mode and any(failure_mode in str(item).lower() for item in summary.failed_approaches):
                 score += 2.0
+            elif failure_mode and any(failure_mode in str(item).lower() for item in summary.notes):
+                score += 1.2
         if summary.artifact_ids:
             score += 0.5
         if summary.remaining_plan:
@@ -664,6 +677,17 @@ class LexicalRetriever:
         }
         if secondary_intents and secondary_intents & _tokens(" ".join(summary.notes)):
             score += 0.8
+        write_target = str(getattr(getattr(state, "write_session", None), "write_target_path", "") or "").strip()
+        if write_target:
+            write_target_path = Path(write_target).as_posix().lower()
+            if touched_paths and any(self._path_match(path, write_target_path) for path in touched_paths):
+                score += 2.6
+            write_target_tokens = _tokens(write_target_path)
+            if write_target_tokens and write_target_tokens & haystack_tokens:
+                score += 0.9
+        entity_overlap = len(self._state_entity_tags(state) & haystack_tokens)
+        if entity_overlap:
+            score += min(1.5, entity_overlap * 0.4)
         score += max(0.0, 0.05 * recency)
         return score
 

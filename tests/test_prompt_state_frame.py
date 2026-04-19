@@ -8,7 +8,15 @@ from smallctl.context import ContextPolicy, PromptAssembler
 from smallctl.context.frame import PromptStateFrame
 from smallctl.context.retrieval import RetrievalBundle
 from smallctl.harness.prompt_builder import PromptBuilderService
-from smallctl.state import ArtifactSnippet, ContextBrief, ExperienceMemory, LoopState, TurnBundle, WriteSession
+from smallctl.state import (
+    ArtifactSnippet,
+    ContextBrief,
+    EpisodicSummary,
+    ExperienceMemory,
+    LoopState,
+    TurnBundle,
+    WriteSession,
+)
 
 
 def _make_brief(*, brief_id: str) -> ContextBrief:
@@ -275,6 +283,80 @@ def test_prompt_state_frame_captures_coding_anchors_and_ladder_levels() -> None:
     assert any("verifier_status=fail" in line for line in assembly.frame.spine.coding_anchor_lines)
     assert "L1" in state.prompt_budget.included_compaction_levels
     assert "L2" in state.prompt_budget.included_compaction_levels
+
+
+def test_prompt_state_frame_coding_profile_preserves_l1_l2_before_l3_l4_under_pressure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.task_mode = "local_execute"
+    state.run_brief.original_task = "Fix src/app.py and rerun verifier"
+    state.run_brief.current_phase_objective = "Apply patch and re-verify"
+    state.files_changed_this_cycle = ["src/app.py"]
+    state.write_session = WriteSession(
+        write_session_id="ws-pressured",
+        write_target_path="src/app.py",
+        write_session_mode="chunked_author",
+        write_session_intent="patch_existing",
+        status="open",
+    )
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB1000",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="author",
+            intent="requested_file_patch",
+            summary_lines=["Patched src/app.py and staged verification"],
+            files_touched=["src/app.py"],
+        )
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B1000",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Fix src/app.py",
+            current_phase="author",
+            key_discoveries=["Patch landed and parser state updated for deterministic retries"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A1000"],
+            next_action_hint="Run verifier",
+            staleness_step=2,
+        )
+    ]
+
+    assembly = PromptAssembler(
+        ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=4,
+            warm_tier_token_budget=1,
+        )
+    ).build_messages(
+        state=state,
+        system_prompt="SYSTEM",
+        token_budget=180,
+        retrieved_summaries=[
+            EpisodicSummary(
+                summary_id="S1000",
+                created_at="2026-04-19T00:00:00+00:00",
+                notes=["summary note " * 20],
+            )
+        ],
+        retrieved_artifacts=[
+            ArtifactSnippet(
+                artifact_id="A2000",
+                text="artifact text " * 20,
+            )
+        ],
+    )
+
+    assert assembly.frame is not None
+    assert assembly.frame.evidence_packet.turn_bundles
+    has_cold_l3_or_l4 = bool(assembly.frame.evidence_packet.summaries) or bool(assembly.frame.artifact_packet.snippets)
+    assert not has_cold_l3_or_l4 or bool(assembly.frame.evidence_packet.context_briefs)
 
 
 def test_prompt_state_frame_respects_disabled_coding_profile() -> None:

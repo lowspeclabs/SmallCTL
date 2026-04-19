@@ -91,6 +91,12 @@ class PromptAssembler:
             final_transcript.insert(0, m)
 
         remaining_budget = soft_limit - system_tokens - transcript_tokens - 200
+        coding_anchor_priority = bool(
+            include_structured_sections
+            and self.policy.coding_profile_enabled
+            and frame.spine.coding_anchor_lines
+        )
+        coding_prompt_pressure = bool(coding_anchor_priority and remaining_budget <= 0)
         run_brief_tokens = estimate_text_tokens(run_brief_text)
         working_memory_tokens = estimate_text_tokens(working_memory_text)
         section_tokens = {
@@ -122,6 +128,26 @@ class PromptAssembler:
             for brief in warm_brief_items
             if brief.brief_id and brief not in selected_briefs
         ]
+        if dropped_brief_ids:
+            coding_prompt_pressure = True
+        if (
+            coding_anchor_priority
+            and dropped_brief_ids
+            and not selected_briefs
+            and warm_brief_items
+        ):
+            # On coding-pressure turns, preserve at least one L2 anchor when it still fits the global budget.
+            anchor_brief = warm_brief_items[-1]
+            anchor_text = self._render_brief_item(anchor_brief)
+            anchor_tokens = estimate_text_tokens(anchor_text)
+            if anchor_tokens <= max(0, remaining_budget):
+                selected_briefs = [anchor_brief]
+                warm_tokens = anchor_tokens
+                dropped_brief_ids = [
+                    brief.brief_id
+                    for brief in warm_brief_items
+                    if brief.brief_id and brief not in selected_briefs
+                ]
         if dropped_brief_ids:
             frame.add_drop(
                 lane="context_briefs",
@@ -155,6 +181,8 @@ class PromptAssembler:
             if observation.observation_id and observation not in winners_observations
         ]
         if dropped_observation_ids:
+            coding_prompt_pressure = True
+        if dropped_observation_ids:
             frame.add_drop(
                 lane="normalized_observations",
                 reason="token_budget",
@@ -186,6 +214,8 @@ class PromptAssembler:
             if bundle.bundle_id and bundle not in winners_turn_bundles
         ]
         if dropped_turn_bundle_ids:
+            coding_prompt_pressure = True
+        if dropped_turn_bundle_ids:
             frame.add_drop(
                 lane="turn_bundles",
                 reason="token_budget",
@@ -207,12 +237,17 @@ class PromptAssembler:
         winners_summaries = []
         winners_artifacts = []
         winners_experiences = []
+        strict_coding_ladder_budget = bool(
+            coding_prompt_pressure
+            and coding_anchor_priority
+            and (turn_bundle_items or warm_brief_items)
+        )
 
         summary_t = 0
         for s in summary_items:
             text = self._render_summary_item(s)
             t = estimate_text_tokens(text)
-            if summary_t + t > (remaining_budget * 0.4) and winners_summaries:
+            if summary_t + t > (remaining_budget * 0.4) and (winners_summaries or strict_coding_ladder_budget):
                 break
             summary_t += t
             winners_summaries.append(s)
@@ -242,7 +277,7 @@ class PromptAssembler:
         for a in artifact_items:
             text = f"{a.artifact_id}: {a.text}"
             t = estimate_text_tokens(text)
-            if artifact_t + t > remaining_budget and winners_artifacts:
+            if artifact_t + t > remaining_budget and (winners_artifacts or strict_coding_ladder_budget):
                 break
             artifact_t += t
             winners_artifacts.append(a)

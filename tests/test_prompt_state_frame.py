@@ -228,6 +228,8 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     assert retrieval_entry["data"]["lane_routes"]["artifact_packet"] == ["A-lane"]
     assert retrieval_entry["data"]["selected_artifact_ids"] == ["A-lane"]
     assert retrieval_entry["data"]["selected_experience_ids"] == ["mem-lane"]
+    assert "stale_lane_counts" in retrieval_entry["data"]
+    assert "artifact_snippets" in retrieval_entry["data"]["stale_lane_counts"]
     assert "coding_profile_enabled" in frame_entry["data"]
     assert "coding_anchor_count" in frame_entry["data"]
     assert all("active_phase" in entry["data"] for entry in lane_selected)

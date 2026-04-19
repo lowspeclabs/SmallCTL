@@ -41,6 +41,23 @@ class PromptBuilderService:
             cold_store=cold_store,
             include_experiences=not fresh_run_active,
         )
+        def _stale_count(key: str) -> int:
+            payload = self.harness.state.scratchpad.get(key)
+            if not isinstance(payload, dict):
+                return 0
+            return sum(
+                1
+                for marker in payload.values()
+                if isinstance(marker, dict) and bool(marker.get("stale", False))
+            )
+        stale_lane_counts = {
+            "turn_bundles": _stale_count("_turn_bundle_staleness"),
+            "context_briefs": _stale_count("_context_brief_staleness"),
+            "episodic_summaries": _stale_count("_summary_staleness"),
+            "artifact_snippets": _stale_count("_artifact_staleness"),
+            "experience_memories": _stale_count("_experience_staleness"),
+            "normalized_observations": _stale_count("_observation_staleness"),
+        }
         
         summaries = retrieval_bundle.summaries
         artifacts = retrieval_bundle.artifacts
@@ -81,6 +98,7 @@ class PromptBuilderService:
                 for exp in experiences
             ],
             lane_routes=retrieval_bundle.lane_routes,
+            stale_lane_counts=stale_lane_counts,
         )
         self.harness._runlog(
             "retrieval_ranked_with_intent",
@@ -97,6 +115,7 @@ class PromptBuilderService:
             lane_routes=retrieval_bundle.lane_routes,
             score_gaps=retrieval_bundle.score_gaps,
             best_scores=retrieval_bundle.best_scores,
+            stale_lane_counts=stale_lane_counts,
             selected_artifact_ids=[artifact.artifact_id for artifact in artifacts],
             selected_summary_ids=[summary.summary_id for summary in summaries],
             selected_experience_ids=[memory.memory_id for memory in experiences],

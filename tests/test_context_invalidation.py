@@ -154,6 +154,65 @@ def test_invalidate_context_persists_experience_staleness_metadata() -> None:
     assert "src/app.py" in marker["paths"]
 
 
+def test_reinforce_experience_success_clears_staleness_marker() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-src",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            confidence=0.7,
+            notes="Successfully patched src/app.py",
+        )
+    ]
+    state.scratchpad["_experience_staleness"] = {
+        "mem-src": {
+            "stale": True,
+            "reason": "file_changed",
+            "reasons": ["file_changed"],
+            "paths": ["src/app.py"],
+            "updated_at": "2026-04-19T00:00:00+00:00",
+            "phase": "repair",
+        }
+    }
+
+    state.reinforce_experience("mem-src", success=True)
+
+    assert "_experience_staleness" not in state.scratchpad
+
+
+def test_upsert_success_experience_clears_staleness_marker() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.scratchpad["_experience_staleness"] = {
+        "mem-src": {
+            "stale": True,
+            "reason": "file_changed",
+            "reasons": ["file_changed"],
+            "paths": ["src/app.py"],
+            "updated_at": "2026-04-19T00:00:00+00:00",
+            "phase": "repair",
+        }
+    }
+
+    state.upsert_experience(
+        ExperienceMemory(
+            memory_id="mem-src",
+            phase="repair",
+            intent="requested_file_patch",
+            tool_name="file_patch",
+            outcome="success",
+            confidence=0.8,
+            notes="Successfully patched src/app.py after rerun",
+        )
+    )
+
+    assert "_experience_staleness" not in state.scratchpad
+
+
 def test_frame_compiler_prunes_file_invalidated_bundles_briefs_and_summaries() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "execute"

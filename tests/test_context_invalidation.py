@@ -335,6 +335,29 @@ def test_prune_context_staleness_indexes_removes_orphaned_entries() -> None:
     assert set(state.scratchpad["_observation_staleness"].keys()) == {"E-live"}
 
 
+def test_update_working_memory_prunes_orphaned_staleness_indexes() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.run_brief.original_task = "inspect docs"
+    state.working_memory.current_goal = "inspect docs"
+    state.scratchpad["_experience_staleness"] = {"mem-orphan": {"stale": True}}
+    state.scratchpad["_turn_bundle_staleness"] = {"TB-orphan": {"stale": True}}
+    state.scratchpad["_context_brief_staleness"] = {"B-orphan": {"stale": True}}
+    state.scratchpad["_summary_staleness"] = {"S-orphan": {"stale": True}}
+    state.scratchpad["_artifact_staleness"] = {"A-orphan": {"stale": True}}
+    state.scratchpad["_observation_staleness"] = {"E-orphan": {"stale": True}}
+
+    harness = _RunLogHarness(state=state)
+    MemoryService(harness).update_working_memory(recent_messages_limit=8)
+
+    assert "_experience_staleness" not in state.scratchpad
+    assert "_turn_bundle_staleness" not in state.scratchpad
+    assert "_context_brief_staleness" not in state.scratchpad
+    assert "_summary_staleness" not in state.scratchpad
+    assert "_artifact_staleness" not in state.scratchpad
+    assert "_observation_staleness" not in state.scratchpad
+
+
 def test_reinforce_experience_success_clears_staleness_marker() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"

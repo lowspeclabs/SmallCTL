@@ -68,6 +68,31 @@ class LoopStateFlowMixin:
             entry.confidence = 0.6
         entry.confidence = max(0.0, min(1.0, float(entry.confidence) - 0.3))
 
+    def _experience_staleness_index(self) -> dict[str, dict[str, Any]]:
+        payload = self.scratchpad.get("_experience_staleness")
+        if not isinstance(payload, dict):
+            return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, value in payload.items():
+            memory_id = str(key or "").strip()
+            if not memory_id or not isinstance(value, dict):
+                continue
+            normalized[memory_id] = dict(value)
+        return normalized
+
+    def _clear_experience_staleness(self, memory_id: str) -> None:
+        normalized_id = str(memory_id or "").strip()
+        if not normalized_id:
+            return
+        index = self._experience_staleness_index()
+        if normalized_id not in index:
+            return
+        index.pop(normalized_id, None)
+        if index:
+            self.scratchpad["_experience_staleness"] = index
+        else:
+            self.scratchpad.pop("_experience_staleness", None)
+
     def sync_plan_mirror(self) -> None:
         plan = self.active_plan or self.draft_plan
         if plan is None:
@@ -231,9 +256,13 @@ class LoopStateFlowMixin:
         for i, existing in enumerate(self.warm_experiences):
             if existing.memory_id == memory.memory_id:
                 self.warm_experiences[i] = memory
+                if memory.outcome == "success":
+                    self._clear_experience_staleness(memory.memory_id)
                 self.touch()
                 return memory
         self.warm_experiences.append(memory)
+        if memory.outcome == "success":
+            self._clear_experience_staleness(memory.memory_id)
         self.touch()
         return memory
 
@@ -244,6 +273,8 @@ class LoopStateFlowMixin:
                 modifier = 0.05 if success else -0.15
                 memory.confidence = max(0.0, min(1.0, memory.confidence + modifier))
                 memory.last_reinforced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                if success:
+                    self._clear_experience_staleness(memory_id)
                 self.touch()
                 break
 
@@ -400,6 +431,7 @@ class LoopStateFlowMixin:
         self.set_memory_entries("known_facts", known_entries)
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        staleness_index = self._experience_staleness_index()
         for memory in self.warm_experiences:
             should_downgrade = False
             if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
@@ -418,6 +450,43 @@ class LoopStateFlowMixin:
             memory.last_reinforced_at = now
             if memory.memory_id:
                 invalidated_memory_ids.append(memory.memory_id)
+                existing_meta = staleness_index.get(memory.memory_id)
+                if not isinstance(existing_meta, dict):
+                    existing_meta = {}
+                reasons = [
+                    str(item).strip().lower()
+                    for item in (existing_meta.get("reasons") or [])
+                    if str(item).strip()
+                ]
+                if reason_label not in reasons:
+                    reasons.append(reason_label)
+                merged_paths = [
+                    str(item).strip().lower()
+                    for item in (existing_meta.get("paths") or [])
+                    if str(item).strip()
+                ]
+                for path in path_hints:
+                    if path not in merged_paths:
+                        merged_paths.append(path)
+                staleness_index[memory.memory_id] = {
+                    "stale": True,
+                    "reason": reason_label,
+                    "reasons": reasons[-6:],
+                    "paths": merged_paths[-12:],
+                    "updated_at": now,
+                    "phase": str(self.current_phase or ""),
+                }
+        if staleness_index:
+            warm_ids = {str(memory.memory_id).strip() for memory in self.warm_experiences if str(memory.memory_id).strip()}
+            staleness_index = {
+                memory_id: payload
+                for memory_id, payload in staleness_index.items()
+                if memory_id in warm_ids
+            }
+            if staleness_index:
+                self.scratchpad["_experience_staleness"] = staleness_index
+            else:
+                self.scratchpad.pop("_experience_staleness", None)
 
         invalidation_event: dict[str, Any] = {
             "reason": reason_label,

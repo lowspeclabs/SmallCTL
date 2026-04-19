@@ -400,3 +400,49 @@ def test_retrieval_prefers_summary_matching_write_target_and_failure_mode() -> N
 
     assert summaries
     assert summaries[0].summary_id == "S-app"
+
+
+def test_retrieval_skips_durably_stale_experiences() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.active_intent = "requested_file_patch"
+    state.intent_tags = ["file_patch", "phase_repair"]
+    state.run_brief.original_task = "patch src/app.py"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-stale",
+            tool_name="file_patch",
+            intent="requested_file_patch",
+            outcome="success",
+            confidence=0.8,
+            notes="Successfully patched src/app.py",
+        ),
+        ExperienceMemory(
+            memory_id="mem-fresh",
+            tool_name="file_patch",
+            intent="requested_file_patch",
+            outcome="success",
+            confidence=0.8,
+            notes="Successfully patched docs/readme.md",
+        ),
+    ]
+    state.scratchpad["_experience_staleness"] = {
+        "mem-stale": {
+            "stale": True,
+            "reason": "file_changed",
+            "reasons": ["file_changed"],
+            "paths": ["src/app.py"],
+            "updated_at": "2026-04-19T00:00:00+00:00",
+            "phase": "repair",
+        }
+    }
+
+    bundle = LexicalRetriever().retrieve_bundle(
+        state=state,
+        query=state.run_brief.original_task,
+        include_experiences=True,
+    )
+
+    assert bundle.experiences
+    assert [memory.memory_id for memory in bundle.experiences] == ["mem-fresh"]

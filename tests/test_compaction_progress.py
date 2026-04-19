@@ -78,6 +78,27 @@ class _ArtifactStore:
         return f"Artifact {getattr(artifact, 'artifact_id', 'unknown')}: concise reference"
 
 
+class _ThinkingArtifactStore:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+        self._next = 1
+
+    def persist_thinking(self, *, raw_thinking: str, summary: str, source: str = "assistant") -> object:
+        self.calls.append({"raw_thinking": raw_thinking, "summary": summary, "source": source})
+        artifact_id = f"A-FULL-{self._next}"
+        self._next += 1
+        return SimpleNamespace(
+            artifact_id=artifact_id,
+            kind="thought",
+            tool_name="",
+            source=source,
+            metadata={},
+            summary=summary,
+            size_bytes=len(raw_thinking.encode("utf-8")),
+            preview_text=raw_thinking[:120],
+        )
+
+
 class _NoOpSummarizer:
     async def compact_recent_messages_async_with_status(self, **_: object) -> CompactionAttemptResult:
         return CompactionAttemptResult(noop_reason="no_compactable_messages")
@@ -624,6 +645,79 @@ def test_structured_compaction_clears_stale_marker_for_new_summary_id() -> None:
     assert state.episodic_summaries[-1].summary_id == "S0001"
     marker = state.scratchpad.get("_summary_staleness", {})
     assert "S0001" not in marker
+
+
+def test_structured_compaction_promotes_l2_to_l3_persists_l4_artifact_when_missing() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 30
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B0001",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 3),
+            task_goal="Patch src/app.py",
+            current_phase="author",
+            key_discoveries=["Edited src/app.py"],
+            tools_tried=["file_patch"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A100"],
+            next_action_hint="Run verifier",
+            staleness_step=3,
+        ),
+        ContextBrief(
+            brief_id="B0002",
+            created_at="2026-04-18T00:00:00+00:00",
+            tier="warm",
+            step_range=(4, 6),
+            task_goal="Patch docs/readme.md",
+            current_phase="author",
+            key_discoveries=["Edited docs/readme.md"],
+            tools_tried=["file_write"],
+            blockers=[],
+            files_touched=["docs/readme.md"],
+            artifact_ids=["A101"],
+            next_action_hint="Verify docs",
+            staleness_step=6,
+        ),
+    ]
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(5)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=2,
+            compaction_step_interval=1,
+            turn_bundle_limit=10,
+            warm_brief_limit=1,
+        ),
+        token_fn=lambda count: 900 if count > 2 else 500,
+    )
+    store = _ThinkingArtifactStore()
+    harness.artifact_store = store
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="promote warm briefs",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert store.calls
+    assert state.episodic_summaries
+    summary = state.episodic_summaries[-1]
+    assert summary.full_summary_artifact_id == "A-FULL-1"
+    assert "A-FULL-1" in state.artifacts
+    demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
+    l3_entries = [entry for entry in demotion_entries if entry["data"]["to_level"] == "L3"]
+    assert l3_entries
+    assert l3_entries[-1]["data"]["full_artifact_id"] == "A-FULL-1"
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

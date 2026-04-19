@@ -158,6 +158,39 @@ class MessageTierManager:
                 notes=summary_notes[:6],
                 full_summary_artifact_id=oldest.full_artifact_id,
             )
+            if artifact_store is not None and not summary.full_summary_artifact_id:
+                source_id = oldest.brief_id or f"steps-{oldest.step_range[0]}-{oldest.step_range[1]}"
+                lines = [
+                    f"Context brief {source_id}",
+                    f"Task goal: {oldest.task_goal}",
+                    f"Phase: {oldest.current_phase}",
+                    f"Step range: {oldest.step_range[0]}-{oldest.step_range[1]}",
+                ]
+                if oldest.key_discoveries:
+                    lines.append("Key discoveries:")
+                    lines.extend(f"- {item}" for item in oldest.key_discoveries[:12])
+                if oldest.new_facts:
+                    lines.append("New facts:")
+                    lines.extend(f"- {item}" for item in oldest.new_facts[:12])
+                if oldest.state_changes:
+                    lines.append("State changes:")
+                    lines.extend(f"- {item}" for item in oldest.state_changes[:12])
+                if oldest.blockers:
+                    lines.append("Blockers:")
+                    lines.extend(f"- {item}" for item in oldest.blockers[:8])
+                if oldest.next_action_hint:
+                    lines.append(f"Next action hint: {oldest.next_action_hint}")
+                try:
+                    artifact = artifact_store.persist_thinking(
+                        raw_thinking="\n".join(lines),
+                        summary=f"L3 audit summary {summary.summary_id}",
+                        source="tier_promote",
+                    )
+                    summary.full_summary_artifact_id = artifact.artifact_id
+                    state.artifacts[artifact.artifact_id] = artifact
+                except Exception:
+                    # Keep legacy behavior if artifact persistence is unavailable.
+                    pass
             state.episodic_summaries.append(summary)
             self._clear_stale_marker(state, key="_summary_staleness", item_id=summary.summary_id)
             self._record_demotion(state, {

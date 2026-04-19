@@ -68,30 +68,84 @@ class LoopStateFlowMixin:
             entry.confidence = 0.6
         entry.confidence = max(0.0, min(1.0, float(entry.confidence) - 0.3))
 
-    def _experience_staleness_index(self) -> dict[str, dict[str, Any]]:
-        payload = self.scratchpad.get("_experience_staleness")
+    @staticmethod
+    def _is_optimistic_statement(value: str) -> bool:
+        lowered = str(value or "").strip().lower()
+        if not lowered:
+            return False
+        return any(token in lowered for token in ("pass", "verified", "success", "fixed", "resolved"))
+
+    def _lane_staleness_index(self, key: str) -> dict[str, dict[str, Any]]:
+        payload = self.scratchpad.get(key)
         if not isinstance(payload, dict):
             return {}
         normalized: dict[str, dict[str, Any]] = {}
-        for key, value in payload.items():
-            memory_id = str(key or "").strip()
-            if not memory_id or not isinstance(value, dict):
+        for raw_id, marker in payload.items():
+            item_id = str(raw_id or "").strip()
+            if not item_id or not isinstance(marker, dict):
                 continue
-            normalized[memory_id] = dict(value)
+            normalized[item_id] = dict(marker)
         return normalized
 
-    def _clear_experience_staleness(self, memory_id: str) -> None:
-        normalized_id = str(memory_id or "").strip()
+    def _clear_lane_staleness(self, key: str, item_id: str) -> None:
+        normalized_id = str(item_id or "").strip()
         if not normalized_id:
             return
-        index = self._experience_staleness_index()
+        index = self._lane_staleness_index(key)
         if normalized_id not in index:
             return
         index.pop(normalized_id, None)
         if index:
-            self.scratchpad["_experience_staleness"] = index
+            self.scratchpad[key] = index
         else:
-            self.scratchpad.pop("_experience_staleness", None)
+            self.scratchpad.pop(key, None)
+
+    def _mark_lane_stale(
+        self,
+        *,
+        key: str,
+        item_id: str,
+        reason: str,
+        paths: list[str],
+        now: str,
+    ) -> None:
+        normalized_id = str(item_id or "").strip()
+        if not normalized_id:
+            return
+        index = self._lane_staleness_index(key)
+        existing_meta = index.get(normalized_id)
+        if not isinstance(existing_meta, dict):
+            existing_meta = {}
+        reasons = [
+            str(item).strip().lower()
+            for item in (existing_meta.get("reasons") or [])
+            if str(item).strip()
+        ]
+        if reason not in reasons:
+            reasons.append(reason)
+        merged_paths = [
+            str(item).strip().lower()
+            for item in (existing_meta.get("paths") or [])
+            if str(item).strip()
+        ]
+        for path in paths:
+            if path not in merged_paths:
+                merged_paths.append(path)
+        index[normalized_id] = {
+            "stale": True,
+            "reason": reason,
+            "reasons": reasons[-6:],
+            "paths": merged_paths[-12:],
+            "updated_at": now,
+            "phase": str(self.current_phase or ""),
+        }
+        self.scratchpad[key] = index
+
+    def _experience_staleness_index(self) -> dict[str, dict[str, Any]]:
+        return self._lane_staleness_index("_experience_staleness")
+
+    def _clear_experience_staleness(self, memory_id: str) -> None:
+        self._clear_lane_staleness("_experience_staleness", memory_id)
 
     def sync_plan_mirror(self) -> None:
         plan = self.active_plan or self.draft_plan
@@ -431,7 +485,12 @@ class LoopStateFlowMixin:
         self.set_memory_entries("known_facts", known_entries)
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        staleness_index = self._experience_staleness_index()
+        invalidated_turn_bundle_ids: list[str] = []
+        invalidated_brief_ids: list[str] = []
+        invalidated_summary_ids: list[str] = []
+        invalidated_artifact_ids: list[str] = []
+        invalidated_observation_ids: list[str] = []
+
         for memory in self.warm_experiences:
             should_downgrade = False
             if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
@@ -450,43 +509,215 @@ class LoopStateFlowMixin:
             memory.last_reinforced_at = now
             if memory.memory_id:
                 invalidated_memory_ids.append(memory.memory_id)
-                existing_meta = staleness_index.get(memory.memory_id)
-                if not isinstance(existing_meta, dict):
-                    existing_meta = {}
-                reasons = [
-                    str(item).strip().lower()
-                    for item in (existing_meta.get("reasons") or [])
-                    if str(item).strip()
+                self._mark_lane_stale(
+                    key="_experience_staleness",
+                    item_id=memory.memory_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        for bundle in self.turn_bundles:
+            bundle_id = str(getattr(bundle, "bundle_id", "") or "").strip()
+            if not bundle_id:
+                continue
+            should_mark_stale = False
+            if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
+                should_mark_stale = any(
+                    self._text_matches_any_path(str(path), path_hints)
+                    for path in (getattr(bundle, "files_touched", []) or [])
+                )
+            elif reason_label in {"phase_advanced", "environment_changed"}:
+                should_mark_stale = bool(
+                    str(getattr(bundle, "phase", "") or "").strip()
+                    and str(getattr(bundle, "phase", "") or "").strip() != str(self.current_phase or "").strip()
+                )
+            elif reason_label == "verifier_failed":
+                should_mark_stale = any(
+                    self._is_optimistic_statement(str(line))
+                    for line in (getattr(bundle, "summary_lines", []) or [])
+                )
+            if should_mark_stale:
+                invalidated_turn_bundle_ids.append(bundle_id)
+                self._mark_lane_stale(
+                    key="_turn_bundle_staleness",
+                    item_id=bundle_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        for brief in self.context_briefs:
+            brief_id = str(getattr(brief, "brief_id", "") or "").strip()
+            if not brief_id:
+                continue
+            should_mark_stale = False
+            if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
+                should_mark_stale = any(
+                    self._text_matches_any_path(str(path), path_hints)
+                    for path in (getattr(brief, "files_touched", []) or [])
+                )
+            elif reason_label in {"phase_advanced", "environment_changed"}:
+                should_mark_stale = bool(
+                    str(getattr(brief, "current_phase", "") or "").strip()
+                    and str(getattr(brief, "current_phase", "") or "").strip() != str(self.current_phase or "").strip()
+                )
+            elif reason_label == "verifier_failed":
+                should_mark_stale = any(
+                    self._is_optimistic_statement(str(line))
+                    for line in ((getattr(brief, "key_discoveries", []) or []) + (getattr(brief, "new_facts", []) or []))
+                )
+            if should_mark_stale:
+                invalidated_brief_ids.append(brief_id)
+                self._mark_lane_stale(
+                    key="_context_brief_staleness",
+                    item_id=brief_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        failure_mode = str(getattr(self, "last_failure_class", "") or "").strip().lower()
+        for summary in self.episodic_summaries:
+            summary_id = str(getattr(summary, "summary_id", "") or "").strip()
+            if not summary_id:
+                continue
+            should_mark_stale = False
+            if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
+                should_mark_stale = any(
+                    self._text_matches_any_path(str(path), path_hints)
+                    for path in (getattr(summary, "files_touched", []) or [])
+                )
+            elif reason_label == "verifier_failed":
+                notes = [str(line) for line in (getattr(summary, "notes", []) or [])]
+                failed_lines = [str(line).strip().lower() for line in (getattr(summary, "failed_approaches", []) or [])]
+                should_mark_stale = any(self._is_optimistic_statement(line) for line in notes)
+                if failure_mode and any(failure_mode in line for line in failed_lines):
+                    should_mark_stale = True
+            if should_mark_stale:
+                invalidated_summary_ids.append(summary_id)
+                self._mark_lane_stale(
+                    key="_summary_staleness",
+                    item_id=summary_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        for artifact_id, artifact in self.artifacts.items():
+            normalized_artifact_id = str(artifact_id or "").strip()
+            if not normalized_artifact_id:
+                continue
+            metadata = getattr(artifact, "metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            should_mark_stale = False
+            if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
+                artifact_paths: list[str] = []
+                source = str(getattr(artifact, "source", "") or "").strip()
+                if source:
+                    artifact_paths.append(source)
+                for key in ("path", "target_path", "write_target_path"):
+                    value = str(metadata.get(key) or "").strip()
+                    if value:
+                        artifact_paths.append(value)
+                for path_tag in (getattr(artifact, "path_tags", []) or []):
+                    value = str(path_tag or "").strip()
+                    if value:
+                        artifact_paths.append(value)
+                should_mark_stale = any(self._text_matches_any_path(candidate, path_hints) for candidate in artifact_paths)
+            elif reason_label in {"phase_advanced", "environment_changed"}:
+                metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip()
+                should_mark_stale = bool(metadata_phase and metadata_phase != str(self.current_phase or "").strip())
+            elif reason_label == "verifier_failed":
+                should_mark_stale = str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+            if should_mark_stale:
+                invalidated_artifact_ids.append(normalized_artifact_id)
+                self._mark_lane_stale(
+                    key="_artifact_staleness",
+                    item_id=normalized_artifact_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        for evidence in self.reasoning_graph.evidence_records:
+            evidence_id = str(getattr(evidence, "evidence_id", "") or "").strip()
+            if not evidence_id:
+                continue
+            metadata = getattr(evidence, "metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            should_mark_stale = False
+            if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
+                path_candidates = [
+                    str(getattr(evidence, "statement", "") or ""),
+                    str(getattr(evidence, "source", "") or ""),
+                    str(metadata.get("path") or ""),
+                    str(metadata.get("target_path") or ""),
                 ]
-                if reason_label not in reasons:
-                    reasons.append(reason_label)
-                merged_paths = [
-                    str(item).strip().lower()
-                    for item in (existing_meta.get("paths") or [])
-                    if str(item).strip()
-                ]
-                for path in path_hints:
-                    if path not in merged_paths:
-                        merged_paths.append(path)
-                staleness_index[memory.memory_id] = {
-                    "stale": True,
-                    "reason": reason_label,
-                    "reasons": reasons[-6:],
-                    "paths": merged_paths[-12:],
-                    "updated_at": now,
-                    "phase": str(self.current_phase or ""),
-                }
-        if staleness_index:
-            warm_ids = {str(memory.memory_id).strip() for memory in self.warm_experiences if str(memory.memory_id).strip()}
-            staleness_index = {
-                memory_id: payload
-                for memory_id, payload in staleness_index.items()
-                if memory_id in warm_ids
+                should_mark_stale = any(self._text_matches_any_path(candidate, path_hints) for candidate in path_candidates)
+            elif reason_label in {"phase_advanced", "environment_changed"}:
+                evidence_phase = str(getattr(evidence, "phase", "") or "").strip()
+                should_mark_stale = bool(evidence_phase and evidence_phase != str(self.current_phase or "").strip())
+            elif reason_label == "verifier_failed":
+                should_mark_stale = (
+                    str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                    or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
+                )
+            if should_mark_stale:
+                invalidated_observation_ids.append(evidence_id)
+                self._mark_lane_stale(
+                    key="_observation_staleness",
+                    item_id=evidence_id,
+                    reason=reason_label,
+                    paths=path_hints,
+                    now=now,
+                )
+
+        def _prune_lane_staleness(key: str, active_ids: set[str]) -> None:
+            index = self._lane_staleness_index(key)
+            if not index:
+                self.scratchpad.pop(key, None)
+                return
+            filtered = {
+                item_id: payload
+                for item_id, payload in index.items()
+                if item_id in active_ids
             }
-            if staleness_index:
-                self.scratchpad["_experience_staleness"] = staleness_index
+            if filtered:
+                self.scratchpad[key] = filtered
             else:
-                self.scratchpad.pop("_experience_staleness", None)
+                self.scratchpad.pop(key, None)
+
+        _prune_lane_staleness(
+            "_experience_staleness",
+            {str(memory.memory_id).strip() for memory in self.warm_experiences if str(memory.memory_id).strip()},
+        )
+        _prune_lane_staleness(
+            "_turn_bundle_staleness",
+            {str(bundle.bundle_id).strip() for bundle in self.turn_bundles if str(bundle.bundle_id).strip()},
+        )
+        _prune_lane_staleness(
+            "_context_brief_staleness",
+            {str(brief.brief_id).strip() for brief in self.context_briefs if str(brief.brief_id).strip()},
+        )
+        _prune_lane_staleness(
+            "_summary_staleness",
+            {str(summary.summary_id).strip() for summary in self.episodic_summaries if str(summary.summary_id).strip()},
+        )
+        _prune_lane_staleness(
+            "_artifact_staleness",
+            {str(artifact_id).strip() for artifact_id in self.artifacts if str(artifact_id).strip()},
+        )
+        _prune_lane_staleness(
+            "_observation_staleness",
+            {
+                str(record.evidence_id).strip()
+                for record in self.reasoning_graph.evidence_records
+                if str(record.evidence_id).strip()
+            },
+        )
 
         invalidation_event: dict[str, Any] = {
             "reason": reason_label,
@@ -497,6 +728,16 @@ class LoopStateFlowMixin:
             "invalidated_fact_count": len(invalidated_facts),
             "invalidated_memory_ids": invalidated_memory_ids[:8],
             "invalidated_memory_count": len(invalidated_memory_ids),
+            "invalidated_turn_bundle_ids": invalidated_turn_bundle_ids[:8],
+            "invalidated_turn_bundle_count": len(invalidated_turn_bundle_ids),
+            "invalidated_brief_ids": invalidated_brief_ids[:8],
+            "invalidated_brief_count": len(invalidated_brief_ids),
+            "invalidated_summary_ids": invalidated_summary_ids[:8],
+            "invalidated_summary_count": len(invalidated_summary_ids),
+            "invalidated_artifact_ids": invalidated_artifact_ids[:8],
+            "invalidated_artifact_count": len(invalidated_artifact_ids),
+            "invalidated_observation_ids": invalidated_observation_ids[:8],
+            "invalidated_observation_count": len(invalidated_observation_ids),
             "details": detail_payload,
             "created_at": now,
         }

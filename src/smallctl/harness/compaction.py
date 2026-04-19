@@ -117,6 +117,7 @@ class CompactionService:
                         bundle_ids=demotion.get("bundle_ids", []),
                         brief_id=demotion.get("brief_id", ""),
                         summary_id=demotion.get("summary_id", ""),
+                        full_artifact_id=demotion.get("full_artifact_id", ""),
                         messages_compacted=demotion.get("messages_compacted", 0),
                     )
                 primary_demotion = demotion_events[0] if demotion_events else {}

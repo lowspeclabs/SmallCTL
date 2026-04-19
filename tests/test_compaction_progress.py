@@ -471,6 +471,7 @@ def test_structured_compaction_promotes_l2_to_l3_when_warm_brief_limit_exceeded(
             artifact_ids=["A100"],
             next_action_hint="Run verifier",
             staleness_step=3,
+            full_artifact_id="A100-FULL",
         ),
         ContextBrief(
             brief_id="B0002",
@@ -521,6 +522,7 @@ def test_structured_compaction_promotes_l2_to_l3_when_warm_brief_limit_exceeded(
     assert l3_entries
     assert l3_entries[-1]["data"]["brief_id"] == "B0001"
     assert l3_entries[-1]["data"]["summary_id"]
+    assert l3_entries[-1]["data"]["full_artifact_id"] == "A100-FULL"
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

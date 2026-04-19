@@ -146,6 +146,7 @@ class MessageTierManager:
                 "to_level": "L3",
                 "brief_id": oldest.brief_id,
                 "summary_id": summary.summary_id,
+                "full_artifact_id": summary.full_summary_artifact_id or oldest.full_artifact_id or "",
                 "messages_compacted": 0,
             })
             source_id = oldest.brief_id or f"steps-{oldest.step_range[0]}-{oldest.step_range[1]}"

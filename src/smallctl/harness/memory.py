@@ -209,6 +209,7 @@ class MemoryService:
         scratchpad["_last_write_session_target"] = current_write_target
 
         self.harness.state.prune_stale_meta(limit=self.harness.context_policy.memory_staleness_step_limit)
+        self.harness.state.prune_context_staleness_indexes()
         self.harness.state.align_meta_to_content()
         
         self.harness.state.working_memory.open_questions = clip_string_list(

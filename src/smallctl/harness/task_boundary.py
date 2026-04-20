@@ -16,9 +16,35 @@ from ..state import (
 )
 from ..task_targets import extract_task_target_paths
 from ..normalization import dedupe_keep_tail
+from .task_classifier import classify_task_mode
 from .task_intent import derive_task_contract, next_action_for_task
 
 _SYSTEM_FOLLOW_UP_SPLIT_RE = re.compile(r"\nFollow-up:\s*", re.IGNORECASE)
+_FOLLOWUP_FILLERS = {"please", "pls", "now", "again", "just", "then", "more", "further"}
+_AFFIRMATIVE_FOLLOWUPS = {
+    "yes",
+    "y",
+    "yeah",
+    "yep",
+    "sure",
+    "ok",
+    "okay",
+    "do it",
+    "please do",
+    "go ahead",
+    "run it",
+    "execute",
+    "approve",
+    "approved",
+}
+_ACTION_CONFIRMATION_PROMPTS = (
+    "would you like me to",
+    "do you want me to",
+    "should i",
+    "shall i",
+    "want me to",
+    "ready for me to",
+)
 
 
 def _normalize_task_text(value: Any) -> str:
@@ -277,6 +303,7 @@ class TaskBoundaryService:
             "_max_steps",
             "strategy",
             "_session_notepad",
+            "_session_ssh_targets",
             "_last_task_text",
             "_last_task_handoff",
             "_task_boundary_previous_task",
@@ -319,12 +346,21 @@ class TaskBoundaryService:
         self.harness.state.planner_interrupt = None
         self.harness.state.artifacts = {}
         if self.harness.state.write_session and self.harness.state.write_session.status != "complete":
+            self.harness._runlog(
+                "write_session_abandoned",
+                "incomplete write session abandoned on task switch",
+                session_id=self.harness.state.write_session.write_session_id,
+                stage_target=self.harness.state.write_session.write_target_path,
+                status=self.harness.state.write_session.status,
+            )
             from ..graph.tool_outcomes import _register_write_session_stage_artifact
             _register_write_session_stage_artifact(self.harness, self.harness.state.write_session)
+            self.harness.state.write_session = None
         self.harness.state.episodic_summaries = []
         self.harness.state.context_briefs = []
         self.harness.state.prompt_budget = PromptBudgetSnapshot()
         self.harness.state.retrieval_cache = []
+        self.harness.state.task_mode = ""
         self.harness.state.active_intent = ""
         self.harness.state.secondary_intents = []
         self.harness.state.intent_tags = []
@@ -400,8 +436,7 @@ class TaskBoundaryService:
         normalized = re.sub(r"[^a-z0-9]+", " ", str(task or "").strip().lower()).strip()
         if not normalized:
             return False
-        fillers = {"please", "pls", "now", "again", "just", "then", "more", "further"}
-        tokens = [token for token in normalized.split() if token not in fillers]
+        tokens = [token for token in normalized.split() if token not in _FOLLOWUP_FILLERS]
         collapsed = " ".join(tokens)
         return collapsed in {
             "continue",
@@ -416,9 +451,37 @@ class TaskBoundaryService:
             "carry on",
         }
 
+    def _is_affirmative_followup(self, task: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(task or "").strip().lower()).strip()
+        if not normalized:
+            return False
+        tokens = [token for token in normalized.split() if token not in _FOLLOWUP_FILLERS]
+        collapsed = " ".join(tokens)
+        return collapsed in _AFFIRMATIVE_FOLLOWUPS
+
+    def _recent_assistant_requested_action_confirmation(self) -> bool:
+        for message in reversed(self.harness.state.recent_messages[-8:]):
+            if getattr(message, "role", "") != "assistant":
+                continue
+            text = str(getattr(message, "content", "") or "").strip().lower()
+            if not text:
+                continue
+            if any(prompt in text for prompt in _ACTION_CONFIRMATION_PROMPTS):
+                return True
+        return False
+
+    def _is_contextual_followup(self, task: str) -> bool:
+        if self._is_continue_like_followup(task):
+            return True
+        if not self._is_affirmative_followup(task):
+            return False
+        if not (self.has_task_local_context() or self.last_task_handoff()):
+            return False
+        return self._recent_assistant_requested_action_confirmation()
+
     def resolve_followup_task(self, task: str) -> str:
         raw_task = str(task or "").strip()
-        if not raw_task or not self._is_continue_like_followup(raw_task):
+        if not raw_task or not self._is_contextual_followup(raw_task):
             return raw_task
 
         handoff = self.last_task_handoff()
@@ -453,7 +516,7 @@ class TaskBoundaryService:
     def initialize_run_brief(self, task: str, *, raw_task: str | None = None) -> None:
         effective_task = _collapse_task_chain(task)
         source_task = str(raw_task or effective_task).strip()
-        continue_like = self._is_continue_like_followup(source_task)
+        continue_like = self._is_contextual_followup(source_task)
         previous_task = _collapse_task_chain(
             self.harness.state.scratchpad.pop("_task_boundary_previous_task", "") or ""
         )
@@ -462,6 +525,7 @@ class TaskBoundaryService:
 
         self.harness.state.run_brief.original_task = canonical_task
         self.harness.state.run_brief.task_contract = derive_task_contract(canonical_task)
+        self.harness.state.task_mode = classify_task_mode(canonical_task)
 
         existing_phase_objective = str(self.harness.state.run_brief.current_phase_objective or "").strip()
         if continue_like and existing_phase_objective:

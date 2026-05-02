@@ -4,7 +4,14 @@ import json
 import re
 from typing import Any
 
+from ..experience_tags import PHASE_TAG_PREFIX
 from ..state import clip_string_list, clip_text_value
+from .task_classifier import (
+    is_smalltalk,
+    looks_like_author_write_request,
+    looks_like_write_file_request,
+    looks_like_write_patch_request,
+)
 
 _MEMORY_MARKERS = (
     "save this in memory",
@@ -43,16 +50,19 @@ _MEMORY_PREFIXES = (
 _REMOTE_TASK_HINT_RE = re.compile(r"\b(?:remote|ssh|server|host|username|password)\b", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _USER_AT_HOST_RE = re.compile(r"\b[A-Za-z0-9._-]+@[A-Za-z0-9._-]+\b")
-
-
 def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[str]]:
     text = (task or "").lower()
     secondary: list[str] = []
     tags: list[str] = []
     requested_tool = infer_requested_tool_name(harness, task)
+    author_write_request = looks_like_author_write_request(task)
 
     primary = "general_task"
-    if requested_tool:
+    if author_write_request:
+        primary = "author_write"
+        secondary.extend(["mutate_repo", "complete_validation_task"])
+        tags.append("write_file")
+    elif requested_tool:
         primary = f"requested_{requested_tool}"
         secondary.append("complete_validation_task")
         tags.append(requested_tool)
@@ -85,12 +95,10 @@ def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[
 
 
 def infer_environment_tags(harness: Any) -> list[str]:
-    tags = [harness.provider_profile, harness.state.current_phase]
-    cwd = harness.state.cwd.lower()
-    if "localhost" in cwd:
-        tags.append("localhost")
-    if "scripts" in cwd:
-        tags.append("scripts")
+    phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
+    tags: list[str] = []
+    if phase:
+        tags.append(f"{PHASE_TAG_PREFIX}{phase}")
     return tags
 
 
@@ -106,35 +114,35 @@ def infer_entity_tags(task: str) -> list[str]:
 
 def infer_requested_tool_name(harness: Any, task: str) -> str:
     text = (task or "").lower()
-    creation_markers = (
-        "build",
-        "create",
-        "make",
-        "write",
-        "generate",
-        "implement",
-        "save",
-        "produce",
+    remote_task = bool(
+        _REMOTE_TASK_HINT_RE.search(task or "")
+        or _IPV4_RE.search(task or "")
+        or _USER_AT_HOST_RE.search(task or "")
     )
-    if (
-        "script" in text
-        and any(marker in text for marker in creation_markers)
-    ) or re.search(r"\b(?:\.py|\.sh|\.bash|\.ps1)\b", text):
+    if remote_task:
+        if any(marker in text for marker in ("style block", "<style>", "</style>", "between ", "bounded block", "inline style")):
+            return "ssh_file_replace_between"
+        if any(marker in text for marker in ("read file", "read the file", "cat ", "inspect file", "inspect the file")):
+            return "ssh_file_read"
+        if any(marker in text for marker in ("write file", "create file", "overwrite", "save file")):
+            return "ssh_file_write"
+        if any(marker in text for marker in ("patch", "replace exact", "edit file", "edit the file", "replace ")):
+            return "ssh_file_patch"
+        return "ssh_exec"
+    if looks_like_write_patch_request(task):
+        return "file_patch"
+    if looks_like_write_file_request(task) or looks_like_author_write_request(task):
         return "write_file"
     if "file_patch" in text or "patch file" in text:
         return "file_patch"
+    if "ast_patch" in text or "structural patch" in text:
+        return "ast_patch"
     if any(marker in text for marker in _MEMORY_MARKERS):
         return "memory_update"
     if "read_file" in text or "cat" in text:
         return "read_file"
     if "write_file" in text:
         return "write_file"
-    if (
-        _REMOTE_TASK_HINT_RE.search(task or "")
-        or _IPV4_RE.search(task or "")
-        or _USER_AT_HOST_RE.search(task or "")
-    ):
-        return "ssh_exec"
     if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
         return "shell_exec"
     return ""
@@ -176,6 +184,8 @@ def next_action_for_task(harness: Any, task: str) -> str:
             "Call `memory_update(section='known_facts', content="
             f"{json.dumps(memory_hint, ensure_ascii=True)})` to persist the fact."
         )
+    if is_smalltalk(task):
+        return completion_next_action()
     return f"{harness.state.current_phase}: gather the next missing fact for {clip_text_value(task, limit=40)[0]}"
 
 

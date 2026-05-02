@@ -5,6 +5,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .experience_tags import normalize_experience_tags
+from .memory_namespace import infer_memory_namespace, normalize_memory_namespace
+from .redaction import redact_sensitive_text
 from .state import ExperienceMemory, _coerce_experience_memory, json_safe_value
 
 log = logging.getLogger("smallctl.memory")
@@ -66,9 +69,37 @@ class ExperienceStore:
         try:
             with open(self.path, "w", encoding="utf-8") as f:
                 for record in records:
+                    record.namespace = normalize_memory_namespace(record.namespace) or infer_memory_namespace(
+                        tool_name=record.tool_name,
+                        intent=record.intent,
+                        intent_tags=record.intent_tags,
+                        environment_tags=record.environment_tags,
+                        entity_tags=record.entity_tags,
+                        notes=record.notes,
+                    )
+                    record.intent_tags = normalize_experience_tags(record.intent_tags)
+                    record.environment_tags = normalize_experience_tags(record.environment_tags)
+                    record.entity_tags = normalize_experience_tags(record.entity_tags)
                     f.write(json.dumps(json_safe_value(record)) + "\n")
         except Exception as exc:
             log.error("Failed to write experience memory to %s: %s", self.path, exc)
+
+    def scrub_sensitive_notes(self, *, write: bool = False) -> dict[str, int]:
+        records = self.list()
+        changed = 0
+        for record in records:
+            original = str(record.notes or "")
+            redacted = redact_sensitive_text(original)
+            if redacted != original:
+                record.notes = redacted
+                changed += 1
+        if write and changed:
+            self.write_all(records)
+        return {
+            "records": len(records),
+            "changed": changed,
+            "written": int(bool(write and changed)),
+        }
 
 
 def search_memories(
@@ -79,6 +110,7 @@ def search_memories(
     tool_name: str = "",
     outcome: str = "",
     failure_mode: str = "",
+    namespace: str = "",
 ) -> list[ExperienceMemory]:
     matches = []
     q = query.lower()
@@ -86,6 +118,7 @@ def search_memories(
     t = tool_name.lower()
     o = outcome.lower()
     f = failure_mode.lower()
+    n = normalize_memory_namespace(namespace)
     
     for m in memories:
         if q and q not in m.notes.lower() and q not in m.intent.lower():
@@ -97,6 +130,8 @@ def search_memories(
         if o and o != m.outcome.lower():
             continue
         if f and f not in m.failure_mode.lower():
+            continue
+        if n and normalize_memory_namespace(getattr(m, "namespace", "")) != n:
             continue
         matches.append(m)
     return matches

@@ -13,6 +13,7 @@ dependencies = [
   "httpx",
   "jmespath",
   "langgraph>=0.2,<1.0",
+  "libcst",
   "openai",
   "pydantic",
   "pyyaml",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,12 +11,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from smallctl.graph.deps import GraphRuntimeDeps
+from smallctl.graph.lifecycle_nodes import resume_loop_run
 from smallctl.graph.nodes import (
     LoopRoute,
     _apply_small_model_authoring_budget,
     _matching_write_session_for_pending,
     dispatch_tools,
     interpret_chat_output,
+    interpret_model_output,
+    interpret_planning_output,
 )
 from smallctl.graph.tool_call_parser import (
     _detect_repeated_tool_loop,
@@ -23,6 +27,7 @@ from smallctl.graph.tool_call_parser import (
     allow_repeated_tool_call_once,
 )
 from smallctl.graph.tool_call_parser import _build_schema_repair_message
+from smallctl.graph.tool_loop_guards import _repeat_loop_limits
 from smallctl.graph.runtime import LoopGraphRuntime, ChatGraphRuntime
 from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.harness.tool_results import _store_verifier_verdict
@@ -75,6 +80,19 @@ def _make_open_write_session(
         write_target_existed_at_start=False,
         write_first_chunk_at=0.0,
     )
+
+
+def test_recovery_nudge_metadata_literals_include_recovery_kind() -> None:
+    missing: list[str] = []
+    for path in Path("src/smallctl").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"metadata\s*=\s*\{(.*?)\}", text, re.DOTALL):
+            body = match.group(1)
+            if '"is_recovery_nudge": True' in body and '"recovery_kind"' not in body:
+                line = text.count("\n", 0, match.start()) + 1
+                missing.append(f"{path}:{line}")
+
+    assert missing == []
 
 
 def test_plan_set_creates_a_playbook_artifact(tmp_path: Path) -> None:
@@ -141,19 +159,68 @@ def test_system_prompt_surfaces_playbook_guidance() -> None:
     assert "C1" in prompt
 
 
+def test_system_prompt_web_research_prefers_result_id_and_real_answer() -> None:
+    state = _make_state()
+    state.active_tool_profiles = ["core", "network_read"]
+    state.run_brief.original_task = "what is the weather in jacksonville today?"
+
+    prompt = build_system_prompt(
+        state,
+        "execute",
+        available_tool_names=["web_search", "web_fetch", "task_complete"],
+    )
+
+    assert "prefer the exact `web_fetch(result_id='...')` form shown in the result list" in prompt
+    assert "do not finish with only 'found N results'" in prompt
+
+
 def test_task_complete_is_blocked_until_acceptance_is_met() -> None:
     state = _make_state()
     state.run_brief.acceptance_criteria = ["The script runs", "The test passes"]
     state.acceptance_ledger = {"The script runs": "done", "The test passes": "pending"}
 
-    blocked = asyncio.run(control.task_complete("done", state=state))
+    blocked = asyncio.run(control.task_complete("done", state=state, harness=None))
 
     assert blocked["success"] is False
     assert blocked["error"]
     assert "pending_acceptance_criteria" in blocked["metadata"]
 
     state.acceptance_ledger["The test passes"] = "passed"
-    allowed = asyncio.run(control.task_complete("done", state=state))
+    allowed = asyncio.run(control.task_complete("done", state=state, harness=None))
+
+    assert allowed["success"] is True
+    assert allowed["output"]["status"] == "complete"
+
+
+def test_task_complete_blocks_weather_lookup_meta_summary_without_actual_answer() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "do a web search, what is the weather in jax fl 4/26/26?"
+
+    blocked = asyncio.run(
+        control.task_complete(
+            "Web search completed. Found 5 results for weather in Jacksonville FL on 4/26/26, including weather.com and timeanddate.com.",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert blocked["success"] is False
+    assert "user asked for the weather" in blocked["error"]
+    assert blocked["metadata"]["reason"] == "lookup_answer_missing"
+    assert blocked["metadata"]["lookup_kind"] == "weather"
+
+
+def test_task_complete_allows_weather_lookup_with_explicit_unverified_answer() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "what is the weather in jacksonville today?"
+
+    allowed = asyncio.run(
+        control.task_complete(
+            "I could not verify the exact current weather from the fetched evidence, but the top returned sources were weather.com and weather.gov.",
+            state=state,
+            harness=None,
+        )
+    )
 
     assert allowed["success"] is True
     assert allowed["output"]["status"] == "complete"
@@ -293,6 +360,29 @@ def test_file_patch_exact_match_updates_target_file(tmp_path: Path) -> None:
     assert result["metadata"]["occurrence_count"] == 1
     assert result["metadata"]["expected_occurrences"] == 1
     assert target.read_text(encoding="utf-8") == "keep\nnew value\nkeep\n"
+
+
+def test_file_patch_empty_target_text_suggests_anchor_or_ast_patch(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.py"
+    target.write_text("def run():\n    return False\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="",
+            replacement_text="return True",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert "non-empty exact anchor" in result["error"]
+    assert "`ast_patch`" in result["error"]
+    assert result["metadata"]["error_kind"] == "patch_target_empty"
+    assert result["metadata"]["suggested_tools"] == ["ast_patch"]
+    assert "function" in result["metadata"]["recovery_hint"]
 
 
 def test_file_patch_zero_occurrences_fails_without_mutating_file(tmp_path: Path) -> None:
@@ -590,6 +680,7 @@ def test_file_write_patch_existing_auto_strategy_requires_explicit_choice(tmp_pa
     assert "replace_strategy='overwrite'" in result["error"]
     assert "replace_strategy='append'" in result["error"]
     assert "file_read(path='" in result["error"]
+    assert "target path is still the canonical destination" in result["error"]
     assert "Do not assume earlier chunks were lost" in result["error"]
     assert result["metadata"]["error_kind"] == "patch_existing_requires_explicit_replace_strategy"
     assert result["metadata"]["staged_only"] is True
@@ -659,6 +750,214 @@ def test_repair_active_write_session_args_rebinds_mismatched_session_id_for_acti
     assert pending.args["section_name"] == "imports"
 
 
+def test_repair_active_write_session_args_backfills_missing_session_id_for_active_target() -> None:
+    state = _make_state()
+    target = Path("temp/task_queue.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    session.write_next_section = "helpers"
+    state.write_session = session
+    harness = SimpleNamespace(state=state)
+    pending = PendingToolCall(
+        tool_name="file_write",
+        args={
+            "path": str(target),
+            "content": "def helper():\n    return 1\n",
+        },
+    )
+
+    repaired = _repair_active_write_session_args(harness, pending)
+
+    assert repaired is True
+    assert pending.args["write_session_id"] == "ws-active"
+    assert pending.args["section_name"] == "helpers"
+
+
+def test_interpret_model_output_backfills_missing_write_session_metadata_for_active_target() -> None:
+    state = _make_state()
+    target = Path("temp/task_queue.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    session.write_next_section = "helpers"
+    state.write_session = session
+
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-write-session-repair",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="file_write",
+                args={
+                    "path": str(target),
+                    "content": "def helper():\n    return 1\n",
+                },
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.args["write_session_id"] == "ws-active"
+    assert pending.args["section_name"] == "helpers"
+
+
+def test_interpret_model_output_marks_action_stall_nudge_as_recovery_message() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "find the vikunja docker compose on the remote host"
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-action-stall",
+        run_mode="loop",
+    )
+    graph_state.last_assistant_text = "I'll search the remote host for the docker compose file next."
+    graph_state.last_thinking_text = "I should use ssh_exec to find the compose file."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "action_stall"
+
+
+def test_interpret_model_output_tags_phase_contract_block_nudges_as_recovery_messages() -> None:
+    state = _make_state()
+    state.strategy = {"thought_architecture": "staged_reasoning"}
+    state.current_phase = "explore"
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-phase-contract-block",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="ssh_exec",
+                args={"command": "find / -name docker-compose.yml"},
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert graph_state.pending_tool_calls == []
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "phase_contract_all_tools_blocked"
+
+
+def test_interpret_model_output_tags_min_exploration_nudge_as_recovery_message() -> None:
+    state = _make_state()
+    state.strategy = {"thought_architecture": "staged_reasoning"}
+    state.current_phase = "explore"
+    state.step_count = 1
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=3),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-min-exploration",
+        run_mode="loop",
+        pending_tool_calls=[PendingToolCall(tool_name="task_complete", args={"message": "done"})],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "phase_contract_min_exploration_steps"
+
+
+def test_interpret_model_output_tags_missing_task_complete_nudge_as_recovery_message() -> None:
+    state = _make_state()
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-missing-task-complete",
+        run_mode="loop",
+    )
+    graph_state.last_assistant_text = "The investigation is complete and the compose file has been identified."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "missing_task_complete"
+
+
 def test_file_read_marks_cap_limited_reads_as_partial(tmp_path: Path) -> None:
     state = _make_state()
     target = tmp_path / "large.txt"
@@ -694,6 +993,99 @@ def test_file_read_rehydrates_missing_staging_path_for_active_write_session(tmp_
     assert result["metadata"]["read_from_staging"] is True
     assert result["metadata"]["source_path"] == str(stage_path)
     assert state.write_session.write_staging_path == str(stage_path)
+
+
+def test_file_read_does_not_shadow_existing_target_with_fresh_empty_write_session(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "file_deduper.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('target')\n", encoding="utf-8")
+
+    state.write_session = WriteSession(
+        write_session_id="ws-fresh",
+        write_target_path=str(target),
+        write_session_intent="replace_file",
+        status="open",
+    )
+
+    result = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+
+    assert result["success"] is True
+    assert result["output"] == "print('target')"
+    assert result["metadata"]["read_from_staging"] is False
+    assert state.write_session.write_staging_path == ""
+
+
+def test_file_read_allows_empty_stage_after_write_session_progress(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "file_deduper.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('target')\n", encoding="utf-8")
+
+    session = _make_open_write_session(target, intent="replace_file")
+    stage_path = fs._session_stage_path(session.write_session_id, target, str(tmp_path))
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_path.write_text("", encoding="utf-8")
+    session.write_staging_path = str(stage_path)
+    session.write_sections_completed = ["body"]
+    state.write_session = session
+
+    result = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+
+    assert result["success"] is True
+    assert result["output"] == ""
+    assert result["metadata"]["read_from_staging"] is True
+    assert result["metadata"]["source_path"] == str(stage_path)
+
+
+def test_chunk_mode_prearm_does_not_abandon_existing_target_from_path_symbols(tmp_path: Path) -> None:
+    from smallctl.graph.tool_write_session_policy import _ensure_chunk_write_session
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "file_deduper.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("def real_func():\n    return 1\n", encoding="utf-8")
+    state.scratchpad["_force_chunk_mode_targets"] = [str(target)]
+    state.run_brief = SimpleNamespace(original_task=f'fix "{target}"')
+
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="qwen3.5-4b"),
+        config=SimpleNamespace(),
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    session = _ensure_chunk_write_session(harness, str(target))
+
+    assert session is not None
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "def real_func():\n    return 1\n"
+    assert not target.with_suffix(target.suffix + ".abandoned").exists()
+
+    result = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+    assert result["success"] is True
+    assert result["output"] == "def real_func():\n    return 1"
+    assert result["metadata"]["read_from_staging"] is False
+
+
+def test_extract_symbols_from_task_ignores_quoted_paths() -> None:
+    from smallctl.graph.write_session_health import extract_symbols_from_task
+
+    symbols = extract_symbols_from_task(
+        'fix "/home/stephen/Scripts/Harness-Redo/temp/file_deduper.py" '
+        "and update `extract_symbols_from_task` for WriteSession safety"
+    )
+
+    assert "extract_symbols_from_task" in symbols
+    assert "WriteSession" in symbols
+    assert "Harness" not in symbols
+    assert "Redo" not in symbols
+    assert "Scripts" not in symbols
+    assert "file_deduper" not in symbols
+    assert "stephen" not in symbols
 
 
 def test_repeated_file_read_triggers_a_recovery_nudge(tmp_path: Path) -> None:
@@ -1091,6 +1483,73 @@ def test_dispatch_tools_blocks_local_shell_exec_for_remote_task_and_nudges() -> 
     assert state.recent_messages[-1].metadata["recovery_mode"] == "remote_task_guard"
 
 
+def test_dispatch_tools_blocks_local_file_read_for_remote_absolute_path_and_nudges() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "fix the remote page on root@192.168.1.63 over SSH"
+    state.task_mode = "remote_execute"
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.63": {"host": "192.168.1.63", "user": "root", "confirmed": True}
+    }
+
+    dispatched: list[tuple[str, dict[str, object]]] = []
+
+    async def _dispatch_tool_call(tool_name: str, args: dict[str, object]) -> ToolEnvelope:
+        dispatched.append((tool_name, args))
+        return ToolEnvelope(success=True, output="ok")
+
+    async def _emit(*args, **kwargs) -> None:
+        del args, kwargs
+
+    class _Registry:
+        @staticmethod
+        def names() -> set[str]:
+            return {"file_read", "ssh_exec", "ssh_file_read"}
+
+        @staticmethod
+        def get(tool_name: str):
+            if tool_name == "file_read":
+                return SimpleNamespace(schema={"required": ["path"]})
+            if tool_name == "ssh_exec":
+                return SimpleNamespace(schema={"required": ["host", "command"]}, phase_allowed=lambda phase: True)
+            return None
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        dispatcher=SimpleNamespace(phase="explore"),
+        log=logging.getLogger("test.plan.remote_file_guard"),
+        _runlog=lambda *args, **kwargs: None,
+        _emit=_emit,
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+        _dispatch_tool_call=_dispatch_tool_call,
+        _active_dispatch_task=None,
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-remote-file-guard",
+        run_mode="execute",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="file_read",
+                args={"path": "/var/www/html/llm-explainer.html"},
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    asyncio.run(dispatch_tools(graph_state, deps))
+
+    assert dispatched == []
+    assert graph_state.last_tool_results == []
+    assert state.recent_messages
+    assert (
+        state.recent_messages[-1].content
+        == "This path appears to be on the remote host. Use `ssh_file_read`, not local `file_read`."
+    )
+    assert state.recent_messages[-1].metadata["recovery_mode"] == "remote_task_guard"
+
+
 def test_repeated_dir_list_loop_pauses_for_resume_instead_of_failing() -> None:
     state = _make_state()
     state.run_brief.original_task = "Inspect the repository structure."
@@ -1137,6 +1596,60 @@ def test_repeated_dir_list_loop_pauses_for_resume_instead_of_failing() -> None:
     assert "50" in state.pending_interrupt["guidance"]
     assert "targeted next step" in state.pending_interrupt["guidance"]
     assert graph_state.pending_tool_calls == []
+
+
+def test_resume_continue_after_repeated_tool_loop_reseeds_guard_and_adds_nudge() -> None:
+    state = _make_state()
+    state.pending_interrupt = {
+        "kind": "repeated_tool_loop_resume",
+        "tool_name": "dir_list",
+        "arguments": {},
+        "guidance": (
+            "Repeated dir_list loop detected. The chat preview shows up to 50 directory items, "
+            "so trust the visible listing if the target is present."
+        ),
+    }
+    state.tool_history = [{"tool_name": "dir_list"}]
+    emitted: list[object] = []
+
+    async def _emit(_handler, event) -> None:
+        emitted.append(event)
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+        _log_conversation_state=lambda *args, **kwargs: None,
+        _is_continue_like_followup=lambda value: str(value or "").strip().lower() == "continue",
+        _emit=_emit,
+    )
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-1", run_mode="execute")
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    asyncio.run(resume_loop_run(graph_state, deps, human_input="continue"))
+
+    assert state.pending_interrupt is None
+    assert graph_state.pending_interrupt is None
+    assert graph_state.interrupt_payload is None
+    assert state.recent_messages[-2].role == "user"
+    assert state.recent_messages[-2].content == "continue"
+    assert state.recent_messages[-1].role == "system"
+    assert "Do not call `dir_list` again with the same arguments" in state.recent_messages[-1].content
+    assert "trust the visible listing" in state.recent_messages[-1].content
+    assert _detect_repeated_tool_loop(harness, PendingToolCall(tool_name="dir_list", args={})) == (
+        "Guard tripped: repeated dir_list loop (same path repeated without progress)"
+    )
+    assert getattr(emitted[0], "content", "") == "continue"
+
+
+def test_dir_list_repeat_loop_limits_are_50_percent_tighter_than_default_strict_tools() -> None:
+    state = _make_state()
+    harness = SimpleNamespace(state=state)
+
+    dir_list_limits = _repeat_loop_limits(harness, PendingToolCall(tool_name="dir_list", args={"path": "."}))
+    file_read_limits = _repeat_loop_limits(harness, PendingToolCall(tool_name="file_read", args={"path": "src/app.py"}))
+
+    assert dir_list_limits == (2, 4, 2)
+    assert file_read_limits == (3, 6, 3)
 
 
 def test_repeated_artifact_read_for_table_task_gets_summary_exit_nudge() -> None:
@@ -1277,6 +1790,95 @@ def test_shell_exec_missing_root_temp_path_gets_workspace_relative_hint(tmp_path
 
     assert result["success"] is False
     assert "./temp/test-calc.py" in result["error"]
+
+
+def test_shell_exec_blocks_unpromoted_write_session_target_with_resume_hint(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "circuit_breaker.py"
+    state.write_session = WriteSession(
+        write_session_id="ws-shell-guard",
+        write_target_path=str(target),
+        write_session_mode="chunked_author",
+        write_sections_completed=["imports"],
+        write_current_section="imports",
+        write_next_section="tests_entrypoint",
+        status="open",
+    )
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"python3 {target}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "write_session_unpromoted_target_path"
+    assert result["metadata"]["next_required_tool"]["tool_name"] == "file_write"
+    assert (
+        result["metadata"]["next_required_tool"]["required_arguments"]["write_session_id"]
+        == "ws-shell-guard"
+    )
+
+
+def test_shell_exec_blocks_unpromoted_write_session_target_with_finalize_hint(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "circuit_breaker.py"
+    state.write_session = WriteSession(
+        write_session_id="ws-shell-finalize",
+        write_target_path=str(target),
+        write_session_mode="local_repair",
+        write_sections_completed=["full_script"],
+        write_current_section="full_script",
+        write_next_section="",
+        status="open",
+    )
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"python3 {target}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "write_session_unpromoted_target_path"
+    assert result["metadata"]["next_required_tool"]["tool_name"] == "finalize_write_session"
+
+
+def test_shell_exec_blocks_active_write_session_artifact_delete(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "circuit_breaker.py"
+    stage = tmp_path / ".smallctl" / "write_sessions" / "ws_8148b8__circuit_breaker__stage.py"
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.write_text("print('staged')\n", encoding="utf-8")
+    state.write_session = WriteSession(
+        write_session_id="ws_8148b8",
+        write_target_path=str(target),
+        write_session_mode="chunked_author",
+        write_staging_path=str(stage),
+        write_sections_completed=["full_script"],
+        status="open",
+    )
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"rm -rf {tmp_path}/.smallctl/write_sessions/ws_8148b8*",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "write_session_artifact_delete_blocked"
+    assert result["metadata"]["error_kind"] == "write_session_artifact_delete_blocked"
+    assert result["metadata"]["write_session_id"] == "ws_8148b8"
+    assert stage.exists()
 
 
 def test_shell_workspace_relative_retry_hint_targets_root_temp_paths() -> None:
@@ -1618,10 +2220,12 @@ def test_system_prompt_surfaces_file_patch_guidance() -> None:
     state = _make_state()
     prompt = build_system_prompt(state, "execute")
 
-    assert "Use `file_patch` for small exact edits inside an existing file or active staged session." in prompt
-    assert "Use `file_write` or `file_append` for new files, large sections, or chunked authoring." in prompt
+    assert "Use `file_patch` for small exact edits when you know the exact target text." in prompt
+    assert "Use `ast_patch` when the edit is easier to describe by function, class, import, call, argument, or dataclass-field structure." in prompt
+    assert "Use `file_write` for new files, large sections, or chunked authoring." in prompt
     assert "When resuming an active session, prefer `file_write` for chunk continuation" in prompt
-    assert "If you need a narrow exact repair inside the staged copy, prefer `file_patch` instead." in prompt
+    assert "If you need a narrow repair inside the staged copy, prefer `file_patch` for exact text or `ast_patch` for structural edits." in prompt
+    assert "The target path is the canonical destination; the staged copy is for read/verify context while the session is active." in prompt
     assert "If prior chunks are no longer visible because tool previews were compacted or truncated" in prompt
     assert "Do not assume earlier chunks were lost" in prompt
 
@@ -1635,7 +2239,12 @@ def test_system_prompt_surfaces_small_model_tool_routing_card() -> None:
     assert "never invent aliases like `use_shell_exec`" in prompt
     assert "Remote host/IP/user/password mentioned means `ssh_exec`." in prompt
     assert "`shell_exec` is local-only." in prompt
+    assert "Use exactly this SSH shape" in prompt
+    assert "Never send both `host` and `target`." in prompt
+    assert 'SSH_EXEC EXAMPLE: `{"host":"192.168.1.63","user":"root","password":"...","command":"whoami"}`.' in prompt
+    assert 'INVALID SSH_EXAMPLE: do not send `{"host":"192.168.1.63","target":"root@192.168.1.63",...}`.' in prompt
     assert "do not rely on retrieved historical notes alone" in prompt
+    assert "do not try to satisfy a shell/SSH/file guard by storing the intended command in memory" in prompt
 
 
 def test_system_prompt_write_recovery_surfaces_stage_read_before_overwrite() -> None:
@@ -1645,7 +2254,10 @@ def test_system_prompt_write_recovery_surfaces_stage_read_before_overwrite() -> 
 
     prompt = build_system_prompt(state, "execute")
 
+    assert "Retrieved Artifact Snippets, previews, and compact summaries do NOT count as a full artifact read." in prompt
+    assert "first read 100% of the current content" in prompt
     assert "artifact_read(artifact_id='ws-1__stage')" in prompt
+    assert "covered 100% of the current staged content" in prompt
     assert "file_read(path='" in prompt
     assert "temp/logwatch.py" in prompt
     assert "Do not assume the chunks were lost or rewrite the whole file from memory" in prompt
@@ -1686,7 +2298,7 @@ def test_task_complete_error_surfaces_latest_verifier_summary() -> None:
         "acceptance_delta": {"status": "blocked", "notes": ["bash: line 1: docker: command not found"]},
     }
 
-    blocked = asyncio.run(control.task_complete("done", state=state))
+    blocked = asyncio.run(control.task_complete("done", state=state, harness=None))
 
     assert blocked["success"] is False
     assert "Latest verifier:" in blocked["error"]
@@ -1766,6 +2378,7 @@ def test_repair_recovery_nudge_triggers_on_repeated_file_patch_failures() -> Non
     assert "Repair loop stalled" in harness.state.recent_messages[-1].content
     assert "src/example.py" in harness.state.recent_messages[-1].content
     assert "matched 3 times" in harness.state.recent_messages[-1].content
+    assert "ast_patch" in harness.state.recent_messages[-1].content
     assert "Do not broad-rewrite the file" in harness.state.recent_messages[-1].content
 
 
@@ -1918,6 +2531,7 @@ def test_patch_existing_first_choice_failure_injects_stage_read_nudge(tmp_path: 
     assert message.metadata["recovery_kind"] == "patch_existing_first_choice"
     assert "file_read(path='" in message.content
     assert "artifact_read(artifact_id='ws-1__stage')" in message.content
+    assert "file_patch" in message.content
     assert "Do not assume earlier chunks were lost" in message.content
 
 
@@ -2050,6 +2664,62 @@ def test_patch_existing_first_choice_failure_stops_autocontinue_after_repeat(tmp
         for message in state.recent_messages
     )
     assert any(event == "patch_existing_stage_read_circuit_breaker" for event, _message, _data in runlog_events)
+
+
+def test_patch_existing_stage_read_count_clears_after_successful_target_patch(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "logwatch.txt"
+    stage = tmp_path / ".smallctl" / "write_sessions" / "ws-1-stage.txt"
+    target.write_text("original\n", encoding="utf-8")
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.write_text("patched\n", encoding="utf-8")
+    state.scratchpad["_patch_existing_stage_read_autocontinue_counts"] = {f"ws-1|{target}": 1}
+
+    session = _make_open_write_session(target, intent="patch_existing")
+    session.write_staging_path = str(stage)
+    state.write_session = session
+
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=None,
+        _runlog=lambda *args, **kwargs: None,
+        log=logging.getLogger("test.plan.patch_existing_count_clear"),
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-success",
+            tool_name="file_patch",
+            args={
+                "path": str(target),
+                "target_text": "original",
+                "replacement_text": "patched",
+                "write_session_id": "ws-1",
+            },
+            tool_call_id="tool-success",
+            result=ToolEnvelope(
+                success=True,
+                output="Patched 1 occurrence.",
+                metadata={
+                    "path": str(target),
+                    "requested_path": str(target),
+                    "write_session_id": "ws-1",
+                    "staged_only": True,
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert "_patch_existing_stage_read_autocontinue_counts" not in state.scratchpad
 
 
 def test_dispatch_tools_blocks_ambiguous_write_after_patch_existing_stage_read(tmp_path: Path) -> None:
@@ -2532,6 +3202,66 @@ def test_file_patch_mismatch_autocontinues_with_file_read(tmp_path: Path) -> Non
     assert any(event == "file_patch_read_autocontinue" for event, _message, _data in runlog_events)
 
 
+def test_repeated_structural_file_patch_misses_nudge_toward_ast_patch(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "example.py"
+    target.write_text("def run():\n    return False\n", encoding="utf-8")
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    def _make_graph_state() -> GraphRunState:
+        graph_state = GraphRunState(
+            loop_state=state,
+            thread_id="thread-ast-patch-recovery",
+            run_mode="execute",
+        )
+        graph_state.last_tool_results = [
+            ToolExecutionRecord(
+                operation_id="op-ast-patch-recovery",
+                tool_name="file_patch",
+                args={
+                    "path": str(target),
+                    "target_text": "def run():\n    return False\n",
+                    "replacement_text": "def run():\n    return True\n",
+                },
+                tool_call_id="tool-ast-patch-recovery",
+                result=ToolEnvelope(
+                    success=False,
+                    error="Patch target text was not found.",
+                    metadata={
+                        "path": str(target),
+                        "requested_path": str(target),
+                        "error_kind": "patch_target_not_found",
+                    },
+                ),
+            )
+        ]
+        return graph_state
+
+    first_graph_state = _make_graph_state()
+    first_route = asyncio.run(apply_tool_outcomes(first_graph_state, deps))
+    second_graph_state = _make_graph_state()
+    second_route = asyncio.run(apply_tool_outcomes(second_graph_state, deps))
+
+    assert first_route == "next_step"
+    assert second_route == "next_step"
+    assert len(second_graph_state.pending_tool_calls) == 1
+    assert second_graph_state.pending_tool_calls[0].tool_name == "file_read"
+    assert any(
+        getattr(message, "metadata", {}).get("recovery_kind") == "file_patch_ast_patch_nudge"
+        for message in state.recent_messages
+    )
+    assert any(event == "file_patch_ast_patch_nudge" for event, _message, _data in runlog_events)
+
+
 def test_task_complete_verifier_failure_autocontinues_with_loop_status() -> None:
     state = _make_state()
     state.last_verifier_verdict = {
@@ -2630,6 +3360,53 @@ def test_task_complete_repair_phase_block_autocontinues_with_loop_status() -> No
     assert any(event == "task_complete_repair_loop_status_autocontinue" for event, _message, _data in runlog_events)
 
 
+def test_repair_stall_shell_failure_autocontinues_with_loop_status() -> None:
+    state = _make_state()
+    state.stagnation_counters["repeat_patch"] = 2
+    state.last_failure_class = "test"
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-shell",
+            tool_name="shell_exec",
+            args={"command": "python3 ./temp/circuit_breaker.py -v"},
+            tool_call_id="tool-shell",
+            result=ToolEnvelope(
+                success=False,
+                error="FAILED (failures=1, errors=4)",
+                metadata={},
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "loop_status"
+    assert pending.args == {}
+    assert pending.source == "system"
+    assert any(
+        getattr(message, "metadata", {}).get("recovery_kind") == "repair_stall_loop_status_autocontinue"
+        for message in state.recent_messages
+    )
+    assert any(event == "repair_stall_loop_status_autocontinue" for event, _message, _data in runlog_events)
+
+
 def test_interpret_chat_output_blocks_plain_completion_while_verifier_fails() -> None:
     state = _make_state()
     state.last_verifier_verdict = {
@@ -2684,6 +3461,117 @@ def test_interpret_chat_output_blocks_plain_completion_with_open_write_session()
     assert "write session `ws-1`" in state.recent_messages[-1].content.lower()
 
 
+def test_interpret_chat_output_nudges_on_action_like_prose_without_tool_call() -> None:
+    state = _make_state()
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+    )
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-chat-action", run_mode="chat")
+    graph_state.last_assistant_text = "I'll gather this information with a shell command next."
+    graph_state.last_thinking_text = "I will execute a shell command to inspect the remote host."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_chat_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert graph_state.final_result is None
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "chat_action_stall"
+    assert "do not repeat the analysis" in state.recent_messages[-1].content.lower()
+
+
+def test_interpret_model_output_tags_hello_completion_mission_check_as_recovery_message() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "Run docker ps on the remote host and list running containers."
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-hello-mission-check", run_mode="loop")
+    graph_state.last_assistant_text = "Hello complete, the greeting task is finished."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "mission_check_hello_completion"
+
+
+def test_interpret_planning_output_tags_plan_set_nudge_as_recovery_message() -> None:
+    state = _make_state()
+    state.planning_mode_enabled = True
+    harness = SimpleNamespace(
+        state=state,
+        _emit=AsyncMock(),
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-planning-nudge",
+        run_mode="planning",
+    )
+    graph_state.last_assistant_text = "I need a bit more structure before execution."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_planning_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "planning_mode_requires_plan_set"
+    assert state.recent_messages[-1].metadata["planner_nudge"] is True
+
+
+def test_interpret_chat_output_backfills_missing_write_session_metadata_for_active_target() -> None:
+    state = _make_state()
+    target = Path("temp/lease_scheduler.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    session.write_next_section = "imports"
+    state.write_session = session
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-chat-write-session-repair",
+        run_mode="chat",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="file_write",
+                args={
+                    "path": str(target),
+                    "content": "print('saved')\n",
+                    "section_name": "imports",
+                    "next_section_name": "tests",
+                },
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_chat_output(graph_state, deps))
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.args["write_session_id"] == "ws-active"
+    assert pending.args["section_name"] == "imports"
+    assert pending.args["next_section_name"] == "tests"
+
+
 def test_route_after_apply_dispatches_pending_recovery_tool_calls() -> None:
     payload = {
         "final_result": None,
@@ -2701,6 +3589,13 @@ def test_runtime_graph_specs_include_dispatch_edge_after_apply() -> None:
 
     assert loop_targets["dispatch_tools"] == "dispatch_tools"
     assert chat_targets["dispatch_tools"] == "dispatch_tools"
+
+
+def test_chat_runtime_interpret_edge_can_continue_after_no_tool_nudge() -> None:
+    router_name, targets = ChatGraphRuntime.GRAPH_SPEC.edge_map["interpret_chat_output"]
+
+    assert router_name == "_route_after_interpret"
+    assert targets["prepare_step"] == "prepare_step"
 
 
 def test_contract_flow_ui_flag_parses_from_cli_and_env(monkeypatch: pytest.MonkeyPatch) -> None:

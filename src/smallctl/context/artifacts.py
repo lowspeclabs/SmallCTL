@@ -9,8 +9,14 @@ from typing import Any
 
 from ..models.tool_result import ToolEnvelope
 from ..state import ArtifactRecord, json_safe_value
+from ..tool_output_formatting import structured_plain_text, summarize_structured_output
 from .rendering import render_shell_failure, render_shell_output
-from .messages import _LISTING_PREVIEW_ENTRY_LIMIT, format_compact_tool_message, render_dir_list_tree
+from .messages import (
+    _LISTING_PREVIEW_ENTRY_LIMIT,
+    format_compact_tool_message,
+    render_dir_list_result,
+    render_dir_list_tree,
+)
 from .policy import estimate_text_tokens
 
 
@@ -30,6 +36,7 @@ class ArtifactPolicy:
         "grep",
         "http_get",
         "http_post",
+        "web_fetch",
         "yaml_read",
         "shell_exec",
         "find_files",
@@ -113,6 +120,13 @@ class ArtifactStore:
         elif isinstance(result.output, dict) and self._is_shell_output(result.output):
             # Shell-like output should stay readable instead of being wrapped in JSON.
             txt_content = render_shell_output(result.output, preview_limit=None, strip_whitespace=False)
+        elif tool_name == "dir_list" and isinstance(result.output, list):
+            txt_content = render_dir_list_result(
+                result.output,
+                metadata=metadata,
+                max_depth=2,
+                max_children=max(8, len(result.output)),
+            )
         elif isinstance(result.output, dict):
             plain_text = self._structured_plain_text(result.output)
             if plain_text is not None:
@@ -163,6 +177,7 @@ class ArtifactStore:
         source: str,
         content: str,
         summary: str,
+        preview_text: str | None = None,
         metadata: dict[str, Any] | None = None,
         tool_name: str | None = None,
         session_id: str = "",
@@ -182,6 +197,7 @@ class ArtifactStore:
         metadata_payload.setdefault("kind", kind)
 
         txt_path.write_text(content, encoding="utf-8")
+        preview_payload = (preview_text if preview_text is not None else content[: self.policy.preview_char_limit])[: self.policy.preview_char_limit]
         record_payload = {
             "artifact_id": artifact_id,
             "kind": kind,
@@ -194,14 +210,13 @@ class ArtifactStore:
             "tool_name": tool_name or kind,
             "content_path": str(txt_path),
             "inline_content": None,
-            "preview_text": content[: self.policy.preview_char_limit],
+            "preview_text": preview_payload,
             "metadata": metadata_payload,
         }
         json_path.write_text(
             json.dumps(record_payload, ensure_ascii=True, default=str, indent=2),
             encoding="utf-8",
         )
-        preview_text = content[: self.policy.preview_char_limit]
         if not self.policy.should_externalize(tool_name=tool_name or kind, serialized_output=content):
             inline_content = content
         else:
@@ -218,7 +233,7 @@ class ArtifactStore:
             tool_name=tool_name or kind,
             content_path=str(txt_path),
             inline_content=inline_content,
-            preview_text=preview_text,
+            preview_text=preview_payload,
             metadata=metadata_payload,
             session_id=session_id,
             tool_call_id=tool_call_id,
@@ -315,6 +330,9 @@ class ArtifactStore:
                 exit_code = output.get("exit_code")
                 if exit_code is not None:
                     return f"{tool_name} exit {exit_code}"
+            structured_summary = summarize_structured_output(tool_name=tool_name, output=output)
+            if structured_summary:
+                return structured_summary
             keys = ", ".join(sorted(output.keys())[:5])
             return f"{tool_name} keys: {keys}" if keys else tool_name
         if isinstance(output, list):
@@ -325,7 +343,16 @@ class ArtifactStore:
 
     @staticmethod
     def _filesystem_mutation_summary(*, tool_name: str, metadata: dict[str, Any]) -> str | None:
-        if tool_name not in {"file_write", "file_append", "file_patch", "file_delete"}:
+        if tool_name not in {
+            "file_write",
+            "file_append",
+            "file_patch",
+            "ast_patch",
+            "file_delete",
+            "ssh_file_write",
+            "ssh_file_patch",
+            "ssh_file_replace_between",
+        }:
             return None
 
         path = str(metadata.get("path") or "").strip()
@@ -333,12 +360,25 @@ class ArtifactStore:
             return None
 
         label = Path(path).name or path
-        if tool_name == "file_patch":
+        if tool_name in {"file_patch", "ssh_file_patch"}:
             occurrence_count = metadata.get("occurrence_count")
+            if occurrence_count is None:
+                occurrence_count = metadata.get("actual_occurrences")
             base = f"{label} patched"
             if isinstance(occurrence_count, int) and occurrence_count > 0:
                 suffix = "" if occurrence_count == 1 else "s"
                 base = f"{base} ({occurrence_count} occurrence{suffix})"
+        elif tool_name == "ssh_file_replace_between":
+            occurrence_count = metadata.get("actual_occurrences")
+            base = f"{label} region replaced"
+            if isinstance(occurrence_count, int) and occurrence_count > 0:
+                suffix = "" if occurrence_count == 1 else "s"
+                base = f"{base} ({occurrence_count} occurrence{suffix})"
+        elif tool_name == "ast_patch":
+            if bool(metadata.get("dry_run")):
+                base = f"{label} structural patch preview"
+            else:
+                base = f"{label} structurally patched"
         elif tool_name == "file_append":
             base = f"{label} appended"
         elif tool_name == "file_delete":
@@ -420,6 +460,16 @@ class ArtifactStore:
         if isinstance(output, str):
             preview = output[:limit].strip()
             return preview or None
+        if tool_name == "dir_list" and isinstance(output, list):
+            preview = render_dir_list_result(
+                output,
+                metadata=metadata,
+                max_depth=2,
+                max_children=_LISTING_PREVIEW_ENTRY_LIMIT,
+                max_items=_LISTING_PREVIEW_ENTRY_LIMIT,
+            )
+            preview = preview[:limit].strip()
+            return preview or None
         if isinstance(output, dict):
             plain_preview = ArtifactStore._structured_plain_text(output)
             if plain_preview is not None:
@@ -483,16 +533,7 @@ class ArtifactStore:
 
     @staticmethod
     def _structured_plain_text(output: dict[str, Any]) -> str | None:
-        keys = set(output.keys())
-        if keys <= {"status", "message"}:
-            value = output.get("message")
-        elif keys <= {"status", "question"}:
-            value = output.get("question")
-        else:
-            return None
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return None
+        return structured_plain_text(output)
 
 
 def artifact_storage_id(*, run_id: str, session_id: str = "") -> str:

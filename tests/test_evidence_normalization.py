@@ -78,6 +78,106 @@ def test_normalize_tool_result_builds_direct_observation() -> None:
     assert evidence.statement.startswith("file_read:")
 
 
+def test_normalize_tool_result_summarizes_web_search_results_not_keys() -> None:
+    evidence = normalize_tool_result(
+        tool_name="web_search",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "query": "weather jacksonville fl current forecast",
+                "provider": "duckduckgo",
+                "results": [
+                    {
+                        "result_id": "webres-1",
+                        "title": "Jacksonville, FL Weather Forecast | National Weather Service",
+                        "url": "https://www.weather.gov/jax/",
+                        "domain": "weather.gov",
+                        "snippet": "Current conditions and local forecast for Jacksonville, Florida.",
+                    }
+                ],
+                "recency_enforced": False,
+                "recency_support": "none",
+            },
+        ),
+        artifact=None,
+        operation_id="op-web-1",
+        phase="explore",
+        evidence_context={"args": {"query": "weather jacksonville fl current forecast"}},
+    )
+
+    assert "web_search keys:" not in evidence.statement
+    assert "National Weather Service" in evidence.statement
+    assert '1 result for "weather jacksonville fl current forecast"' in evidence.statement
+
+
+def test_normalize_tool_result_sets_observation_adapter_for_web_search() -> None:
+    evidence = normalize_tool_result(
+        tool_name="web_search",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "query": "best self hosted blog docker",
+                "provider": "duckduckgo",
+                "results": [
+                    {
+                        "result_id": "webres-1",
+                        "title": "Ghost Docker Install",
+                        "url": "https://example.com/ghost",
+                        "domain": "example.com",
+                        "snippet": "Official Docker-based install guide for Ghost.",
+                    },
+                    {
+                        "result_id": "webres-2",
+                        "title": "WriteFreely Compose Setup",
+                        "url": "https://example.com/writefreely",
+                        "domain": "example.com",
+                        "snippet": "Compose-based self-hosted blogging setup.",
+                    },
+                ],
+            },
+        ),
+        artifact=None,
+        operation_id="op-web-2",
+        phase="explore",
+        evidence_context={"args": {"query": "best self hosted blog docker"}},
+    )
+
+    assert evidence.metadata["observation_adapter"] == "search_observation_list"
+    assert evidence.metadata["observation_kind"] == "observation_list"
+    assert evidence.metadata["query"] == "best self hosted blog docker"
+    assert evidence.metadata["observation_items"][0].startswith("Ghost Docker Install")
+    assert "webres-1" in evidence.metadata["observation_items"][0]
+    assert "Official Docker-based install guide for Ghost." in evidence.metadata["observation_items"][0]
+
+
+def test_normalize_tool_result_sets_observation_adapter_for_web_fetch() -> None:
+    evidence = normalize_tool_result(
+        tool_name="web_fetch",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "source_id": "webres-1",
+                "title": "Ghost Docker Install",
+                "url": "https://example.com/ghost",
+                "canonical_url": "https://example.com/ghost",
+                "domain": "example.com",
+                "text_excerpt": "Official Docker-based install guide for Ghost.",
+                "untrusted_text": "Official Docker-based install guide for Ghost.",
+            },
+        ),
+        artifact=None,
+        operation_id="op-web-3",
+        phase="explore",
+        evidence_context={"args": {"result_id": "webres-1"}},
+    )
+
+    assert evidence.metadata["observation_adapter"] == "web_fetch_observation"
+    assert evidence.metadata["observation_kind"] == "web_observation"
+    assert evidence.metadata["observation_items"][0].startswith("Ghost Docker Install")
+    assert "webres-1" in evidence.metadata["observation_items"][0]
+    assert "Official Docker-based install guide for Ghost." in evidence.metadata["observation_items"][0]
+
+
 def test_tool_execution_record_carries_provisional_evidence_context() -> None:
     state = LoopState(cwd="/tmp")
     harness = SimpleNamespace(state=state)
@@ -179,6 +279,133 @@ def test_shell_failure_records_negative_evidence(tmp_path: Path) -> None:
         assert "Permission denied" in evidence.statement
         invalidations = harness.state.scratchpad.get("_context_invalidations", [])
         assert any(str(item.get("reason") or "") == "verifier_failed" for item in invalidations if isinstance(item, dict))
+
+    asyncio.run(_run())
+
+
+def test_file_patch_captures_touched_symbols_for_coding_anchors(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+        result = ToolEnvelope(
+            success=True,
+            output="patched",
+            metadata={"path": "src/app.py"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-symbols",
+            tool_name="file_patch",
+            tool_call_id="call-symbols",
+            args={
+                "path": "src/app.py",
+                "target_text": "def old_handler(data):\n    return data\n",
+                "replacement_text": "class ParserState:\n    pass\n\ndef parse_config(data):\n    return data\n",
+            },
+            result=result,
+        )
+
+        await service.record_result(
+            tool_name="file_patch",
+            tool_call_id="call-symbols",
+            operation_id="op-symbols",
+            result=result,
+            arguments={
+                "path": "src/app.py",
+                "target_text": "def old_handler(data):\n    return data\n",
+                "replacement_text": "class ParserState:\n    pass\n\ndef parse_config(data):\n    return data\n",
+            },
+        )
+
+        touched_symbols = harness.state.scratchpad.get("_touched_symbols")
+        assert isinstance(touched_symbols, list)
+        assert "ParserState" in touched_symbols
+        assert "parse_config" in touched_symbols
+        assert "app" in touched_symbols
+
+    asyncio.run(_run())
+
+
+def test_file_patch_captures_touched_symbols_from_mutated_file_content(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        target = tmp_path / "src" / "service.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "class ServiceManager:\n"
+            "    pass\n\n"
+            "def build_config(data):\n"
+            "    return data\n",
+            encoding="utf-8",
+        )
+
+        service = ToolResultService(harness)
+        result = ToolEnvelope(
+            success=True,
+            output="patched",
+            metadata={"path": "src/service.py"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-symbols-file",
+            tool_name="file_patch",
+            tool_call_id="call-symbols-file",
+            args={"path": "src/service.py"},
+            result=result,
+        )
+
+        await service.record_result(
+            tool_name="file_patch",
+            tool_call_id="call-symbols-file",
+            operation_id="op-symbols-file",
+            result=result,
+            arguments={"path": "src/service.py"},
+        )
+
+        touched_symbols = harness.state.scratchpad.get("_touched_symbols")
+        assert isinstance(touched_symbols, list)
+        assert "ServiceManager" in touched_symbols
+        assert "build_config" in touched_symbols
+        assert "service" in touched_symbols
+
+    asyncio.run(_run())
+
+
+def test_ast_patch_uses_metadata_touched_symbols_for_coding_anchors(tmp_path: Path) -> None:
+    async def _run() -> None:
+        harness = _make_harness(tmp_path)
+        service = ToolResultService(harness)
+        result = ToolEnvelope(
+            success=True,
+            output="structurally patched",
+            metadata={
+                "path": "src/service.py",
+                "touched_symbols": ["ServiceConfig", "build_service"],
+                "changed": True,
+            },
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-ast-symbols",
+            tool_name="ast_patch",
+            tool_call_id="call-ast-symbols",
+            args={"path": "src/service.py"},
+            result=result,
+        )
+
+        await service.record_result(
+            tool_name="ast_patch",
+            tool_call_id="call-ast-symbols",
+            operation_id="op-ast-symbols",
+            result=result,
+            arguments={"path": "src/service.py"},
+        )
+
+        touched_symbols = harness.state.scratchpad.get("_touched_symbols")
+        assert isinstance(touched_symbols, list)
+        assert "ServiceConfig" in touched_symbols
+        assert "build_service" in touched_symbols
+        assert "service" in touched_symbols
 
     asyncio.run(_run())
 

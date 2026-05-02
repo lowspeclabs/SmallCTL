@@ -53,6 +53,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
     runtime_context_probe = params.get("runtime_context_probe", True)
     context_limit = params.get("context_limit")
     max_prompt_tokens = params.get("max_prompt_tokens")
+    max_prompt_tokens_explicit = params.get("max_prompt_tokens_explicit", max_prompt_tokens is not None)
     reserve_completion_tokens = params.get("reserve_completion_tokens", 1024)
     reserve_tool_tokens = params.get("reserve_tool_tokens", 512)
     first_token_timeout_sec = params.get("first_token_timeout_sec")
@@ -70,6 +71,10 @@ def initialize_harness(self: Any, **params: Any) -> None:
     max_summary_items = params.get("max_summary_items", 3)
     max_artifact_snippets = params.get("max_artifact_snippets", 4)
     artifact_snippet_token_limit = params.get("artifact_snippet_token_limit", 400)
+    multi_file_artifact_snippet_limit = params.get("multi_file_artifact_snippet_limit", 8)
+    multi_file_primary_file_limit = params.get("multi_file_primary_file_limit", 3)
+    remote_task_artifact_snippet_limit = params.get("remote_task_artifact_snippet_limit", 8)
+    remote_task_primary_file_limit = params.get("remote_task_primary_file_limit", 2)
     checkpoint_on_exit = params.get("checkpoint_on_exit", False)
     checkpoint_path = params.get("checkpoint_path")
     graph_checkpointer = params.get("graph_checkpointer", "memory")
@@ -158,6 +163,8 @@ def initialize_harness(self: Any, **params: Any) -> None:
     self._backend_recovery_service = BackendRecoveryService(self)
     self._task_boundary_service = TaskBoundaryService(self)
     self._active_processes: set[asyncio.subprocess.Process] = set()
+    self._background_persistence_tasks: set[asyncio.Task[Any]] = set()
+    self._teardown_task: asyncio.Task[None] | None = None
     self.strategy_prompt = strategy_prompt
     self.event_handler = None
     self.allow_interactive_shell_approval = bool(allow_interactive_shell_approval)
@@ -187,6 +194,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
         contract_flow_ui=contract_flow_ui,
         context_limit=context_limit,
         max_prompt_tokens=max_prompt_tokens,
+        max_prompt_tokens_explicit=bool(max_prompt_tokens_explicit),
         reserve_completion_tokens=reserve_completion_tokens,
         reserve_tool_tokens=reserve_tool_tokens,
         first_token_timeout_sec=first_token_timeout_sec,
@@ -204,6 +212,10 @@ def initialize_harness(self: Any, **params: Any) -> None:
         max_summary_items=max_summary_items,
         max_artifact_snippets=max_artifact_snippets,
         artifact_snippet_token_limit=artifact_snippet_token_limit,
+        multi_file_artifact_snippet_limit=multi_file_artifact_snippet_limit,
+        multi_file_primary_file_limit=multi_file_primary_file_limit,
+        remote_task_artifact_snippet_limit=remote_task_artifact_snippet_limit,
+        remote_task_primary_file_limit=remote_task_primary_file_limit,
         run_logger=run_logger,
         artifact_start_index=artifact_start_index,
         tool_result_inline_token_limit=tool_result_inline_token_limit,
@@ -253,6 +265,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
         run_logger=run_logger,
     )
     self.configured_max_prompt_tokens: int | None = max_prompt_tokens
+    self.configured_max_prompt_tokens_explicit = bool(max_prompt_tokens_explicit)
 
     known_server_context_limit = context_limit
     if (
@@ -274,6 +287,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
     else:
         effective_max_prompt_tokens = self._resolve_effective_prompt_budget(
             configured_max_prompt_tokens=self.configured_max_prompt_tokens,
+            configured_max_prompt_tokens_explicit=self.configured_max_prompt_tokens_explicit,
             server_context_limit=known_server_context_limit,
         )
 
@@ -291,6 +305,10 @@ def initialize_harness(self: Any, **params: Any) -> None:
         max_summary_items=max_summary_items,
         max_artifact_snippets=max_artifact_snippets,
         artifact_snippet_token_limit=artifact_snippet_token_limit,
+        multi_file_artifact_snippet_limit=multi_file_artifact_snippet_limit,
+        multi_file_primary_file_limit=multi_file_primary_file_limit,
+        remote_task_artifact_snippet_limit=remote_task_artifact_snippet_limit,
+        remote_task_primary_file_limit=remote_task_primary_file_limit,
         tool_result_inline_token_limit=tool_result_inline_token_limit,
         artifact_read_inline_token_limit=artifact_read_inline_token_limit,
     )
@@ -309,3 +327,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
         context_policy=self.context_policy,
         scaling_context=scaling_context,
     )
+    self.context_policy.apply_model_profile(model)
+    if scaling_context is not None:
+        self.context_policy.recalculate_quotas(scaling_context)
+        self.state.recent_message_limit = self.context_policy.recent_message_limit

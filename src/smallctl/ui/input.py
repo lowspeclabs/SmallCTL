@@ -13,6 +13,8 @@ class InputPane(TextArea):
 
     BINDINGS = [
         ("enter", "submit", "Submit"),
+        ("ctrl+shift+v", "paste", "Paste"),
+        ("shift+insert", "paste", "Paste"),
         ("pageup", "scroll_page_up", "Scroll Up"),
         ("pagedown", "scroll_page_down", "Scroll Down"),
         ("ctrl+up", "scroll_up", "Scroll Up"),

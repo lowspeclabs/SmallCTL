@@ -1,3 +1,4 @@
+import re
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -301,13 +302,20 @@ class ToolCallsContainerWidget(Collapsible):
 class AssistantTurnWidget(Vertical):
     def __init__(self, *, id: str | None = None, speaker: str = "assistant") -> None:
         super().__init__(id=id, classes="assistant-turn bubble bubble-assistant")
+        self.styles.height = "auto"
         self._speaker = _coerce_speaker(speaker)
         self._label_widget = Static(self._build_label_text(), classes="assistant-turn-label")
+        self._body_widget = Vertical(classes="assistant-turn-body")
+        self._body_widget.styles.height = "auto"
+        self._meta_widget = Vertical(classes="assistant-turn-meta")
+        self._meta_widget.styles.height = "auto"
+        self._main_widget = Vertical(classes="assistant-turn-main")
+        self._main_widget.styles.height = "auto"
         self._last_assistant_block: TextBlockWidget | None = None
         self._last_thinking_detail: AssistantDetailWidget | None = None
         self._last_shell_stream: ArtifactBubbleWidget | None = None
         self._tool_call_details: list[ToolCallDetailWidget] = []
-        self._tool_calls_container: ToolCallsContainerWidget | None = None
+        self._current_tool_calls_container: ToolCallsContainerWidget | None = None
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -315,17 +323,24 @@ class AssistantTurnWidget(Vertical):
     def get_assistant_text(self) -> str:
         parts: list[str] = []
         try:
-            body = self._body()
-            for child in body.children:
+            for child in self._main_body().children:
                 if isinstance(child, TextBlockWidget):
                     parts.append(child.text)
         except Exception:
             pass
         return "\n".join(parts)
 
+    def has_meta_content(self) -> bool:
+        try:
+            return bool(list(self._meta_body().children))
+        except Exception:
+            return False
+
     def compose(self) -> ComposeResult:
         yield self._label_widget
-        yield Vertical(classes="assistant-turn-body")
+        with self._body_widget:
+            yield self._meta_widget
+            yield self._main_widget
 
     @property
     def speaker(self) -> str:
@@ -345,8 +360,11 @@ class AssistantTurnWidget(Vertical):
         if not text:
             return
         if self._last_assistant_block is None:
+            text = _trim_leading_blank_lines(text)
+            if not text:
+                return
             self._last_assistant_block = TextBlockWidget(classes="assistant-turn-text")
-            await self._body().mount(self._last_assistant_block)
+            await self._main_body().mount(self._last_assistant_block)
         self._last_assistant_block.append_text(text)
         self._last_thinking_detail = None
 
@@ -354,7 +372,7 @@ class AssistantTurnWidget(Vertical):
         """Overwrite the current assistant text block with cleaned content.
         Called after the stream finishes to remove any inline tool call JSON."""
         if self._last_assistant_block is not None:
-            self._last_assistant_block.set_text(text)
+            self._last_assistant_block.set_text(_trim_leading_blank_lines(text))
 
     async def add_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         target_detail = None
@@ -368,7 +386,7 @@ class AssistantTurnWidget(Vertical):
         else:
             bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
             bubble.add_class("assistant-detail-nested")
-            await self._body().mount(bubble)
+            await self._meta_body().mount(bubble)
         self._last_assistant_block = None
         self._last_thinking_detail = None
         self._last_shell_stream = None
@@ -378,8 +396,20 @@ class AssistantTurnWidget(Vertical):
             return
         if self._last_thinking_detail is None:
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
-            await self._body().mount(self._last_thinking_detail)
+            await self._meta_body().mount(self._last_thinking_detail)
         self._last_thinking_detail.append_text(text)
+        self._current_tool_calls_container = None
+        self._last_assistant_block = None
+        self._last_shell_stream = None
+
+    async def replace_thinking_text(self, text: str) -> None:
+        if self._last_thinking_detail is None:
+            if not text:
+                return
+            self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
+            await self._meta_body().mount(self._last_thinking_detail)
+        self._last_thinking_detail.set_text(text)
+        self._current_tool_calls_container = None
         self._last_assistant_block = None
         self._last_shell_stream = None
 
@@ -405,7 +435,7 @@ class AssistantTurnWidget(Vertical):
                     text=""
                 )
                 self._last_shell_stream.add_class("assistant-detail-nested")
-                await self._body().mount(self._last_shell_stream)
+                await self._meta_body().mount(self._last_shell_stream)
             self._last_shell_stream.append_text(text)
             
         self._last_assistant_block = None
@@ -419,11 +449,11 @@ class AssistantTurnWidget(Vertical):
         tool_call_id: str | None = None,
     ) -> ToolCallDetailWidget:
         detail = ToolCallDetailWidget(text=text, tool_name=tool_name, tool_call_id=tool_call_id)
-        container = self._tool_calls_container
+        container = self._current_tool_calls_container
         if container is None:
             container = ToolCallsContainerWidget()
-            self._tool_calls_container = container
-            await self._body().mount(container)
+            self._current_tool_calls_container = container
+            await self._meta_body().mount(container)
         await container.add_tool_call(detail)
         self._tool_call_details.append(detail)
         self._last_assistant_block = None
@@ -469,9 +499,19 @@ class AssistantTurnWidget(Vertical):
         return self._tool_call_details[-1] if self._tool_call_details else None
 
     def _body(self) -> Vertical:
-        return self.query_one(".assistant-turn-body", Vertical)
+        return self._body_widget
+
+    def _main_body(self) -> Vertical:
+        return self._main_widget
+
+    def _meta_body(self) -> Vertical:
+        return self._meta_widget
 
 
 def _coerce_speaker(value: str | None) -> str:
     speaker = str(value or "assistant").strip().lower()
     return speaker or "assistant"
+
+
+def _trim_leading_blank_lines(text: str) -> str:
+    return re.sub(r"^(?:[ \t]*\r?\n)+", "", text)

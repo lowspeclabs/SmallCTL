@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from ..state import EpisodicSummary
+from .observations import build_observation_packets
 if TYPE_CHECKING:
     from ..state import LoopState, ContextBrief
     from .summarizer import ContextSummarizer
@@ -87,10 +88,15 @@ class MessageTierManager:
             
         start_step = state.scratchpad.get("_last_tier_compaction_step", 0) + 1
         end_step = state.step_count
+        observation_packets = build_observation_packets(
+            state,
+            limit=max(8, min(16, len(to_compact) * 3)),
+        )
         turn_bundle = summarizer.compact_to_turn_bundle(
             state=state,
             messages=to_compact,
             step_range=(start_step, end_step),
+            observation_packets=observation_packets,
         )
         if turn_bundle is None:
             return None
@@ -103,6 +109,10 @@ class MessageTierManager:
             "to_level": "L1",
             "bundle_id": turn_bundle.bundle_id,
             "messages_compacted": len(to_compact),
+            "compaction_strategy": turn_bundle.compaction_strategy,
+            "transcript_fallback_used": bool(turn_bundle.transcript_fallback_used),
+            "observation_ref_count": len(turn_bundle.observation_refs),
+            "observation_refs": list(turn_bundle.observation_refs[:6]),
         })
 
         if len(state.turn_bundles) <= self.turn_bundle_limit:
@@ -147,6 +157,10 @@ class MessageTierManager:
                 summary_notes.extend(oldest.state_changes[:3])
             if not summary_notes:
                 summary_notes.extend(oldest.key_discoveries[:3])
+            if oldest.observation_refs:
+                summary_notes.append("Observation refs: " + ", ".join(oldest.observation_refs[:6]))
+            elif oldest.evidence_refs:
+                summary_notes.append("Evidence refs: " + ", ".join(oldest.evidence_refs[:6]))
             summary: EpisodicSummary = EpisodicSummary(
                 summary_id=summary_id,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -201,6 +215,14 @@ class MessageTierManager:
                 "full_artifact_id": summary.full_summary_artifact_id or oldest.full_artifact_id or "",
                 "messages_compacted": 0,
             })
+            if summary.full_summary_artifact_id:
+                self._record_demotion(state, {
+                    "from_level": "L3",
+                    "to_level": "L4",
+                    "summary_id": summary.summary_id,
+                    "full_artifact_id": summary.full_summary_artifact_id,
+                    "messages_compacted": 0,
+                })
             source_id = oldest.brief_id or f"steps-{oldest.step_range[0]}-{oldest.step_range[1]}"
             new_facts = [f"Fact (from {source_id}): {i}" for i in oldest.key_discoveries]
             new_facts += [f"Blocker (from {source_id}): {i}" for i in oldest.blockers]

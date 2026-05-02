@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from .client import detect_provider_profile
 from .config_support import (
     LOCAL_CONFIG,
     _env_config,
@@ -17,6 +16,7 @@ from .config_support import (
 )
 from .phases import normalize_phase
 from .presets import get_preset_defaults
+from .provider_profiles import resolve_provider_profile
 
 
 PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
@@ -78,6 +78,8 @@ class SmallctlConfig:
     planning_mode: bool = False
     contract_flow_ui: bool = False
     staged_reasoning: bool = False
+    staged_execution_enabled: bool = False
+    staged_step_prompt_tokens: int = 4096
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -88,6 +90,7 @@ class SmallctlConfig:
     api_key: str | None = "local-dev-key"
     context_limit: int | None = None
     max_prompt_tokens: int | None = None
+    max_prompt_tokens_explicit: bool = False
     reserve_completion_tokens: int = 1024
     reserve_tool_tokens: int = 512
     first_token_timeout_sec: int | None = None
@@ -105,6 +108,10 @@ class SmallctlConfig:
     max_summary_items: int = 3
     max_artifact_snippets: int = 4
     artifact_snippet_token_limit: int = 400
+    multi_file_artifact_snippet_limit: int = 8
+    multi_file_primary_file_limit: int = 3
+    remote_task_artifact_snippet_limit: int = 8
+    remote_task_primary_file_limit: int = 2
     compatibility_warnings: list[str] = field(default_factory=list)
     runtime_context_probe: bool = True
     summarizer_endpoint: str | None = None
@@ -178,6 +185,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["contract_flow_ui"] = _to_bool(cli_clean["contract_flow_ui"])
     if "staged_reasoning" in cli_clean:
         cli_clean["staged_reasoning"] = _to_bool(cli_clean["staged_reasoning"])
+    if "staged_execution_enabled" in cli_clean:
+        cli_clean["staged_execution_enabled"] = _to_bool(cli_clean["staged_execution_enabled"])
     if "indexer" in cli_clean:
         cli_clean["indexer"] = _to_bool(cli_clean["indexer"])
     if "enable_write_intent_recovery" in cli_clean:
@@ -219,10 +228,15 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "max_summary_items",
         "max_artifact_snippets",
         "artifact_snippet_token_limit",
+        "multi_file_artifact_snippet_limit",
+        "multi_file_primary_file_limit",
+        "remote_task_artifact_snippet_limit",
+        "remote_task_primary_file_limit",
         "loop_guard_stagnation_threshold",
         "loop_guard_level2_threshold",
         "loop_guard_recent_writes_limit",
         "loop_guard_tail_lines",
+        "staged_step_prompt_tokens",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -265,8 +279,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     merged.update(cli_clean)
     if preset_name:
         merged["preset"] = preset_name
+    if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
+        merged["staged_execution_enabled"] = True
 
-    explicit_prompt_budget = "max_prompt_tokens" in merged
+    explicit_prompt_budget = "max_prompt_tokens" in explicit_merged
+    merged["max_prompt_tokens_explicit"] = explicit_prompt_budget
     if not explicit_prompt_budget and "context_limit" in merged:
         merged["max_prompt_tokens"] = merged["context_limit"]
     compatibility_warnings: list[str] = []
@@ -286,7 +303,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["graph_checkpointer"] = "file"
     if merged.get("fresh_run"):
         merged["restore_graph_state"] = False
-    _apply_provider_profile(merged, cli_clean)
+    _apply_provider_profile(merged, cli_clean, compatibility_warnings)
     profile = str(merged.get("provider_profile", "auto")).strip().lower()
     if profile == "lmstudio":
         if not str(merged.get("backend_unload_command") or "").strip() and not str(
@@ -315,13 +332,22 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     return SmallctlConfig(**filtered)
 
 
-def _apply_provider_profile(merged: dict[str, Any], cli_clean: dict[str, Any]) -> None:
-    profile = str(merged.get("provider_profile", "auto")).strip().lower()
-    if profile == "auto":
-        profile = detect_provider_profile(merged.get("endpoint"), merged.get("model"))
+def _apply_provider_profile(
+    merged: dict[str, Any],
+    cli_clean: dict[str, Any],
+    compatibility_warnings: list[str],
+) -> None:
+    profile, profile_warnings = resolve_provider_profile(
+        merged.get("endpoint"),
+        merged.get("model"),
+        merged.get("provider_profile", "auto"),
+    )
+    if profile_warnings:
+        compatibility_warnings.extend(profile_warnings)
     merged["provider_profile"] = profile
     defaults = PROVIDER_PROFILES.get(profile, PROVIDER_PROFILES["generic"])
     for key, value in defaults.items():
         if key not in merged:
             merged[key] = value
-    merged.update({k: v for k, v in cli_clean.items() if k in defaults or k == "provider_profile"})
+    merged.update({k: v for k, v in cli_clean.items() if k in defaults})
+    merged["provider_profile"] = profile

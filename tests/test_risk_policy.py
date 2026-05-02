@@ -33,6 +33,8 @@ def test_diagnosis_task_blocks_mutating_high_risk_shell_without_supported_claim(
     assert decision.proof_bundle["phase"] == "execute"
     assert decision.proof_bundle["tool_risk"] == "high"
     assert decision.proof_bundle["task_classification"] == "diagnosis_remediation"
+    assert "`memory_update`" in decision.reason
+    assert "actual tool evidence" in decision.reason
 
 
 def test_implementation_task_allows_high_risk_shell_with_approval() -> None:
@@ -215,3 +217,58 @@ def test_diagnosis_task_still_blocks_high_risk_file_patch_without_supported_clai
 
     assert decision.allowed is False
     assert "supported claim" in decision.reason.lower()
+
+
+def test_diagnosis_task_still_blocks_high_risk_ast_patch_without_supported_claim() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.scratchpad["_task_classification"] = "diagnosis_remediation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="ast_patch",
+        tool_risk="high",
+        phase="execute",
+        action="Structurally patch file temp/fix.py",
+        expected_effect="Apply a local structural code change.",
+        rollback="Revert file contents.",
+        verification="Run the verifier.",
+        approval_available=False,
+    )
+
+    assert decision.allowed is False
+    assert "supported claim" in decision.reason.lower()
+
+
+def test_repair_phase_does_not_reclassify_implementation_task() -> None:
+    """Regression test for session 54337e79.
+
+    When an implementation task enters repair phase because a verifier failed,
+    the 'repair' tag injected by infer_environment_tags() must NOT flip the
+    task classification to diagnosis_remediation. Doing so traps the model:
+    task_complete is blocked until exit_code 0, but shell_exec is gated by
+    the missing-supported-claim check.
+    """
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.intent_tags = ["write_file", "lmstudio", "repair", "scripts", "python"]
+
+    # No explicit classification in scratchpad, so classification falls back
+    # to intent_tags.  The "repair" tag must be ignored.
+    assert classify_task(state) == "implementation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="shell_exec",
+        tool_risk="high",
+        phase="repair",
+        action="python3 temp/lease_scheduler.py",
+        expected_effect="Run the verifier.",
+        rollback="No rollback needed.",
+        verification="Check exit code.",
+        approval_available=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_approval is True
+    assert decision.proof_bundle["task_classification"] == "implementation"

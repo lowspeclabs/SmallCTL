@@ -56,3 +56,59 @@ def test_shell_approval_request_emits_payload_and_resolves() -> None:
         return await approval_task
 
     assert asyncio.run(_run()) is True
+
+
+def test_shell_approval_resolution_is_loop_safe_from_other_thread() -> None:
+    events: list[object] = []
+
+    class _FakeHarness:
+        allow_interactive_shell_approval = True
+        shell_approval_session_default = False
+        event_handler = object()
+
+        async def _emit(self, handler: object, event: object) -> None:
+            del handler
+            events.append(event)
+
+    async def _run() -> bool:
+        harness = _FakeHarness()
+        service = ApprovalService(harness)
+        approval_task = asyncio.create_task(
+            service.request_shell_approval(command="pwd", cwd="/tmp", timeout_sec=12)
+        )
+        await asyncio.sleep(0)
+        assert events
+        approval_event = events[0]
+        approval_id = str(getattr(approval_event, "data", {}).get("approval_id") or "")
+        await asyncio.to_thread(service.resolve_shell_approval, approval_id, True)
+        return await approval_task
+
+    assert asyncio.run(_run()) is True
+
+
+def test_sudo_password_resolution_is_loop_safe_from_other_thread() -> None:
+    events: list[object] = []
+
+    class _FakeHarness:
+        allow_interactive_shell_approval = True
+        shell_approval_session_default = False
+        event_handler = object()
+
+        async def _emit(self, handler: object, event: object) -> None:
+            del handler
+            events.append(event)
+
+    async def _run() -> str | None:
+        harness = _FakeHarness()
+        service = ApprovalService(harness)
+        password_task = asyncio.create_task(
+            service.request_sudo_password(command="sudo ls", prompt_text="Password please")
+        )
+        await asyncio.sleep(0)
+        assert events
+        prompt_event = events[0]
+        prompt_id = str(getattr(prompt_event, "data", {}).get("prompt_id") or "")
+        await asyncio.to_thread(service.resolve_sudo_password, prompt_id, "secret")
+        return await password_task
+
+    assert asyncio.run(_run()) == "secret"

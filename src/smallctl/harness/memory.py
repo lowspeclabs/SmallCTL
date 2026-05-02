@@ -4,6 +4,7 @@ import uuid
 import json
 import logging
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -43,13 +44,42 @@ logger = logging.getLogger("smallctl.harness.memory")
 
 _CODE_TARGET_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml", ".sh", ".md"}
 _COMPLEX_WRITE_FEATURE_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
-    ("tests", 2, ("unittest", "unit test", "test suite", "tests covering", "tests.", "with tests")),
+    ("tests", 2, ("unittest", "unit test", "test suite", "test cases", "cases for", "tests covering", "tests.", "with tests")),
     ("debug_trace", 1, ("--debug", "debug mode", "trace output", "step-by-step trace", "trace mode")),
     ("validation", 2, ("validate", "validation", "malformed", "invalid input", "malformed input")),
     ("dependency_logic", 2, ("dependency", "dependencies", "topological", "cycle", "cycles")),
     ("edge_cases", 1, ("edge case", "edge cases")),
     ("bugfix_loop", 2, ("bug you encounter and fix", "bug you encounter", "encounter and fix during development")),
 )
+_SCRIPT_BUILD_RE = re.compile(
+    r"\b(?:build|create|make|write|generate|implement|produce)\b[\s\S]{0,120}"
+    r"\b(?:self-contained\s+)?(?:python\s+)?script\b",
+    re.IGNORECASE,
+)
+_SCRIPT_REQUIREMENT_VERB_RE = re.compile(
+    r"\b(?:recursively\s+scans?|groups?|reports?|processes?|implements?|supports?|"
+    r"resolves?|detects?|prints?|creates?|gets?|updates?|deletes?|expires?|"
+    r"appends?|filters?|tails?|tracks?|handles?|includes?)\b",
+    re.IGNORECASE,
+)
+_TEST_CASES_FOR_RE = re.compile(r"\bcases?\s+for\s+(.+?)(?:\.|\n|$)", re.IGNORECASE | re.DOTALL)
+
+
+def _count_script_requirement_signals(text: str) -> int:
+    return len({match.group(0).lower() for match in _SCRIPT_REQUIREMENT_VERB_RE.finditer(text)})
+
+
+def _count_test_case_items(text: str) -> int:
+    count = 0
+    for match in _TEST_CASES_FOR_RE.finditer(text):
+        case_text = match.group(1)
+        items = [
+            item.strip(" `\"'.")
+            for item in re.split(r",|\band\b", case_text)
+            if item.strip(" `\"'.")
+        ]
+        count = max(count, len(items))
+    return count
 
 
 def _tool_pattern_keys(tool_name: str, arguments: dict[str, Any]) -> list[str]:
@@ -80,6 +110,7 @@ def assess_write_task_complexity(
     ]
     score = 0
     reasons: list[str] = []
+    explicit_script_build = bool(_SCRIPT_BUILD_RE.search(text))
 
     creation_markers = ("build", "create", "make", "write", "generate", "implement", "produce")
     if any(marker in lowered for marker in creation_markers):
@@ -91,6 +122,12 @@ def assess_write_task_complexity(
     if "script" in lowered or any(Path(path).suffix.lower() == ".py" for path in code_targets):
         score += 1
         reasons.append("task describes a script-shaped implementation")
+    if explicit_script_build:
+        score += 2
+        reasons.append("task explicitly asks to build a script")
+    if len(code_targets) >= 2:
+        score += 2
+        reasons.append("task requests multiple code targets")
 
     if cwd and code_targets:
         missing_targets: list[str] = []
@@ -111,11 +148,28 @@ def assess_write_task_complexity(
             feature_hits += 1
             reasons.append(f"task requires {label.replace('_', ' ')}")
 
+    requirement_signals = _count_script_requirement_signals(text)
+    if explicit_script_build and requirement_signals >= 3:
+        score += 2
+        reasons.append("script task combines multiple behavior requirements")
+    elif explicit_script_build and requirement_signals >= 2:
+        score += 1
+        reasons.append("script task combines behavior requirements")
+
+    test_case_items = _count_test_case_items(text)
+    if explicit_script_build and test_case_items >= 3:
+        score += 2
+        reasons.append("script task includes multiple test cases")
+
     if feature_hits >= 3:
         score += 2
         reasons.append("task combines multiple independent requirements")
+    elif explicit_script_build and feature_hits >= 2:
+        score += 1
+        reasons.append("script task combines independent requirement groups")
 
-    force_chunk_targets = list(code_targets if code_targets else target_paths) if score >= threshold else []
+    force_chunk_mode = score >= threshold and bool(code_targets or target_paths or explicit_script_build)
+    force_chunk_targets = list(code_targets if code_targets else target_paths) if force_chunk_mode else []
     return {
         "task": text,
         "target_paths": target_paths,
@@ -123,6 +177,7 @@ def assess_write_task_complexity(
         "risk_score": score,
         "threshold": threshold,
         "reasons": reasons,
+        "force_chunk_mode": force_chunk_mode,
         "force_chunk_mode_targets": force_chunk_targets,
     }
 
@@ -264,6 +319,8 @@ class MemoryService:
             confidence=0.7,
         )
 
+        self._preserve_fresh_tool_outputs()
+
         self.harness.state.recent_messages = trim_recent_messages_window(
             self.harness.state.recent_messages,
             limit=recent_messages_limit,
@@ -277,6 +334,46 @@ class MemoryService:
                 or 0
             )
             compact_oversized(soft_limit=soft_limit)
+
+    def _preserve_fresh_tool_outputs(self) -> None:
+        """Keep a small, bounded copy of latest tool outputs before hot-history trimming."""
+        scratchpad = self.harness.state.scratchpad
+        prior = scratchpad.get("_fresh_tool_outputs")
+        preserved: list[dict[str, object]] = []
+        if isinstance(prior, list):
+            preserved.extend(item for item in prior if isinstance(item, dict))
+
+        for message in self.harness.state.recent_messages:
+            if message.role != "tool":
+                continue
+            content = str(message.content or "").strip()
+            if not content:
+                continue
+            clipped, _ = clip_text_value(content, limit=1200)
+            metadata = message.metadata if isinstance(message.metadata, dict) else {}
+            preserved.append(
+                {
+                    "tool_name": str(message.name or "").strip() or "tool",
+                    "artifact_id": str(metadata.get("artifact_id") or "").strip(),
+                    "content": clipped,
+                }
+            )
+
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in reversed(preserved):
+            key = (
+                str(item.get("tool_name") or ""),
+                str(item.get("artifact_id") or ""),
+                str(item.get("content") or "")[:200],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.insert(0, item)
+
+        limit = int(getattr(self.harness.context_policy, "fresh_tool_output_items", 4) or 4)
+        scratchpad["_fresh_tool_outputs"] = deduped[-max(1, limit) :]
 
     def _refresh_active_intent(self) -> None:
         task = self.harness.state.run_brief.original_task or self.harness._current_user_task()
@@ -403,6 +500,7 @@ class MemoryService:
             return
         success = status in {"completed", "chat_completed"}
         reason = str(result.get("reason", "") or result.get("message", "") or status)
+        source = "model_terminal_claim" if success else "terminal_outcome"
         from ..models.tool_result import ToolEnvelope
         payload = ToolEnvelope(
             success=success,
@@ -414,6 +512,7 @@ class MemoryService:
             tool_name="task_complete" if success else "task_fail",
             result=payload,
             notes=reason,
+            source=source,
         )
 
     def _argument_fingerprint(self, arguments: Any) -> str:

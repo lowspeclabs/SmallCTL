@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from ..client import OpenAICompatClient
-from ..client.usage import detect_provider_profile
 from ..context import ContextPolicy
 from ..guards import is_small_model_name
 from ..context import ArtifactStore
+from ..provider_profiles import resolve_provider_profile as resolve_provider_profile_config
 from ..tools import ToolDispatcher
 from ..state import LoopState, json_safe_value
 from ..phases import normalize_phase
@@ -36,9 +36,11 @@ def build_initial_state(*, phase: str, planning_mode: bool, strategy: dict[str, 
 
 
 def resolve_provider_profile(endpoint: str, model: str, provider_profile: str) -> str:
-    resolved = str(provider_profile or "auto").strip().lower()
-    if resolved == "auto":
-        resolved = detect_provider_profile(endpoint, model)
+    resolved, _ = resolve_provider_profile_config(
+        endpoint,
+        model,
+        provider_profile,
+    )
     return resolved
 
 
@@ -78,6 +80,10 @@ def build_context_policy(
     max_summary_items: int,
     max_artifact_snippets: int,
     artifact_snippet_token_limit: int,
+    multi_file_artifact_snippet_limit: int,
+    multi_file_primary_file_limit: int,
+    remote_task_artifact_snippet_limit: int,
+    remote_task_primary_file_limit: int,
     tool_result_inline_token_limit: int,
     artifact_read_inline_token_limit: int,
 ) -> ContextPolicy:
@@ -91,6 +97,10 @@ def build_context_policy(
             max_summary_items=max_summary_items,
             max_artifact_snippets=max_artifact_snippets,
             artifact_snippet_token_limit=artifact_snippet_token_limit,
+            multi_file_artifact_snippet_limit=multi_file_artifact_snippet_limit,
+            multi_file_primary_file_limit=multi_file_primary_file_limit,
+            remote_task_artifact_snippet_limit=remote_task_artifact_snippet_limit,
+            remote_task_primary_file_limit=remote_task_primary_file_limit,
             tool_result_inline_token_limit=tool_result_inline_token_limit,
             artifact_read_inline_token_limit=artifact_read_inline_token_limit,
         )
@@ -121,6 +131,7 @@ def build_harness_kwargs(
     contract_flow_ui: bool,
     context_limit: int | None,
     max_prompt_tokens: int | None,
+    max_prompt_tokens_explicit: bool,
     reserve_completion_tokens: int,
     reserve_tool_tokens: int,
     first_token_timeout_sec: int | None,
@@ -138,6 +149,10 @@ def build_harness_kwargs(
     max_summary_items: int,
     max_artifact_snippets: int,
     artifact_snippet_token_limit: int,
+    multi_file_artifact_snippet_limit: int,
+    multi_file_primary_file_limit: int,
+    remote_task_artifact_snippet_limit: int,
+    remote_task_primary_file_limit: int,
     run_logger: Any,
     artifact_start_index: int | None,
     tool_result_inline_token_limit: int,
@@ -169,6 +184,7 @@ def build_harness_kwargs(
         "contract_flow_ui": contract_flow_ui,
         "context_limit": context_limit,
         "max_prompt_tokens": max_prompt_tokens,
+        "max_prompt_tokens_explicit": max_prompt_tokens_explicit,
         "reserve_completion_tokens": reserve_completion_tokens,
         "reserve_tool_tokens": reserve_tool_tokens,
         "first_token_timeout_sec": first_token_timeout_sec,
@@ -186,6 +202,10 @@ def build_harness_kwargs(
         "max_summary_items": max_summary_items,
         "max_artifact_snippets": max_artifact_snippets,
         "artifact_snippet_token_limit": artifact_snippet_token_limit,
+        "multi_file_artifact_snippet_limit": multi_file_artifact_snippet_limit,
+        "multi_file_primary_file_limit": multi_file_primary_file_limit,
+        "remote_task_artifact_snippet_limit": remote_task_artifact_snippet_limit,
+        "remote_task_primary_file_limit": remote_task_primary_file_limit,
         "run_logger": run_logger,
         "artifact_start_index": artifact_start_index,
         "tool_result_inline_token_limit": tool_result_inline_token_limit,

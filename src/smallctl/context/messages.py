@@ -140,15 +140,24 @@ def format_compact_tool_message(
     full_file_preview_chars: int | None = None,
 ) -> str:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    mutation_message = _format_ssh_file_mutation_message(artifact, result, metadata=metadata)
+    if mutation_message:
+        return mutation_message
     if artifact.kind in {"shell_exec", "ssh_exec"} and not metadata.get("source_artifact_id"):
         return _format_shell_exec_message(artifact, result, request_text=request_text)
 
     msg = f"Tool output captured as Artifact {artifact.artifact_id} ({artifact.size_bytes} bytes)."
     complete_file = bool(metadata.get("complete_file"))
     total_lines = metadata.get("total_lines")
-    if artifact.kind == "file_read" and complete_file and isinstance(result.output, str):
+    file_text = ""
+    if artifact.kind in {"file_read", "ssh_file_read"} and complete_file:
+        if artifact.kind == "ssh_file_read" and isinstance(result.output, dict):
+            file_text = str(result.output.get("content") or "").rstrip()
+        elif isinstance(result.output, str):
+            file_text = result.output.rstrip()
+
+    if file_text:
         line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "the full file"
-        file_text = result.output.rstrip()
         if inline_full_file:
             msg = (
                 f"{msg}\n\nFull file captured ({line_label}).\n\nfull_file_content:\n"
@@ -174,6 +183,76 @@ def format_compact_tool_message(
     if hint:
         msg = f"{msg}\n\n{hint}"
     return msg
+
+
+def _format_ssh_file_mutation_message(
+    artifact: ArtifactRecord,
+    result: ToolEnvelope,
+    *,
+    metadata: dict[str, object],
+) -> str:
+    tool_name = str(artifact.kind or artifact.tool_name or "").strip()
+    if not result.success or tool_name not in {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
+        return ""
+
+    path = str(metadata.get("path") or artifact.source or "").strip()
+    host = str(metadata.get("host") or "").strip()
+    user = str(metadata.get("user") or "").strip()
+    target = path
+    if host:
+        prefix = f"{user}@{host}" if user else host
+        target = f"{prefix}:{path}" if path else prefix
+
+    if tool_name == "ssh_file_write":
+        lines = [f"Remote file written: {target or 'remote file'}"]
+    elif tool_name == "ssh_file_patch":
+        lines = [f"Remote file patched: {target or 'remote file'}"]
+    else:
+        lines = [f"Remote file region replaced: {target or 'remote file'}"]
+
+    changed = metadata.get("changed")
+    if isinstance(changed, bool):
+        lines.append(f"changed: {'yes' if changed else 'no'}")
+    bytes_written = metadata.get("bytes_written")
+    if bytes_written not in (None, ""):
+        lines.append(f"bytes_written: {bytes_written}")
+
+    for key in ("actual_occurrences", "expected_occurrences"):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            lines.append(f"{key}: {value}")
+
+    old_sha = str(metadata.get("old_sha256") or "").strip()
+    new_sha = str(metadata.get("new_sha256") or "").strip()
+    if old_sha:
+        lines.append(f"old_sha256: {old_sha}")
+    if new_sha:
+        lines.append(f"new_sha256: {new_sha}")
+
+    readback_sha = str(metadata.get("readback_sha256") or "").strip()
+    verification = metadata.get("verification") if isinstance(metadata.get("verification"), dict) else {}
+    readback_verified = (
+        bool(verification.get("readback_sha256_matches"))
+        or bool(new_sha and readback_sha and new_sha == readback_sha)
+    )
+    if readback_sha or verification:
+        lines.append(f"readback verified: {'yes' if readback_verified else 'no'}")
+
+    backup_path = str(metadata.get("backup_path") or "").strip()
+    if backup_path and backup_path.lower() != "none":
+        lines.append(f"backup_path: {backup_path}")
+
+    for preview_key in ("target_text_preview", "start_text_preview", "end_text_preview", "replacement_text_preview"):
+        preview_payload = metadata.get(preview_key)
+        if not isinstance(preview_payload, dict):
+            continue
+        preview = str(preview_payload.get("preview") or "").strip()
+        if preview:
+            if len(preview) > 160:
+                preview = f"{preview[:160].rstrip()}..."
+            lines.append(f"{preview_key}: {preview}")
+
+    return "\n".join(lines)
 
 
 def _format_shell_exec_message(
@@ -231,7 +310,7 @@ def _format_shell_exec_message(
 def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str | None = None) -> str:
     summary = artifact.summary or artifact.source or artifact.kind or "cached artifact"
     normalized_tool = str(tool_name or "").strip().lower()
-    if normalized_tool in {"artifact_print", "show_artifact"}:
+    if normalized_tool == "artifact_print":
         return (
             f"Reused Artifact {artifact.artifact_id}: {summary}. "
             "This evidence is already visible in context, so do not print it again. "
@@ -383,6 +462,48 @@ def render_dir_list_tree(
         max_children=max_children,
     )
     return "\n".join(lines).strip()
+
+
+def render_dir_list_result(
+    items: list[object],
+    *,
+    metadata: dict[str, object] | None = None,
+    max_depth: int = 2,
+    max_children: int = 8,
+    max_items: int | None = None,
+) -> str:
+    lines: list[str] = []
+    listing_metadata = metadata if isinstance(metadata, dict) else {}
+
+    path = listing_metadata.get("path")
+    total_items = listing_metadata.get("total_items")
+    count = total_items if isinstance(total_items, int) and total_items >= 0 else listing_metadata.get("count")
+    if not isinstance(count, int):
+        count = len(items)
+
+    if isinstance(path, str) and path.strip():
+        if count >= 0:
+            lines.append(f"{path.strip()} ({count} items)")
+        else:
+            lines.append(path.strip())
+    elif count >= 0:
+        lines.append(f"{count} items")
+
+    rendered_items = items if max_items is None else items[:max_items]
+    tree_preview = render_dir_list_tree(
+        rendered_items,
+        max_depth=max_depth,
+        max_children=max_children,
+    )
+    if tree_preview:
+        lines.append(tree_preview)
+
+    if max_items is not None:
+        remaining = len(items) - len(rendered_items)
+        if remaining > 0:
+            lines.append(f"... {remaining} more items")
+
+    return "\n".join(lines).strip() or "directory listed"
 
 
 def _dir_tree_followup_hint(

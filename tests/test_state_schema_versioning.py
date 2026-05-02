@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 
 from smallctl.graph.state import inflate_graph_state, serialize_graph_state
-from smallctl.state import ExperienceMemory, LOOP_STATE_SCHEMA_VERSION, LoopState, PromptBudgetSnapshot, TurnBundle
+from smallctl.state import (
+    ContextBrief,
+    ExperienceMemory,
+    LOOP_STATE_SCHEMA_VERSION,
+    LoopState,
+    PromptBudgetSnapshot,
+    TurnBundle,
+)
 from smallctl.tools.memory import checkpoint
 
 
@@ -151,7 +158,31 @@ def test_loop_state_round_trip_preserves_turn_bundles_and_compaction_levels() ->
             files_touched=["src/app.py"],
             artifact_ids=["A42"],
             evidence_refs=["E42"],
+            observation_refs=["E42"],
+            observation_summaries=["E42 File fact (src/app.py): parser guard added"],
+            observation_kinds=["file_fact"],
+            compaction_strategy="observation_first",
+            transcript_fallback_used=False,
             source_message_count=5,
+        )
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B42",
+            created_at="2026-04-18T00:01:00+00:00",
+            tier="warm",
+            step_range=(4, 8),
+            task_goal="Stabilize parser tests",
+            current_phase="execute",
+            key_discoveries=["Parser guard added and verified"],
+            tools_tried=["file_patch", "shell_exec"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A42"],
+            next_action_hint="Run full suite",
+            staleness_step=8,
+            evidence_refs=["E42"],
+            observation_refs=["E42"],
         )
     ]
     state.prompt_budget = PromptBudgetSnapshot(
@@ -165,6 +196,11 @@ def test_loop_state_round_trip_preserves_turn_bundles_and_compaction_levels() ->
     assert restored.turn_bundles
     assert restored.turn_bundles[0].bundle_id == "TB42"
     assert restored.turn_bundles[0].summary_lines == ["Patched src/app.py", "Reran pytest"]
+    assert restored.turn_bundles[0].observation_refs == ["E42"]
+    assert restored.turn_bundles[0].observation_kinds == ["file_fact"]
+    assert restored.turn_bundles[0].compaction_strategy == "observation_first"
+    assert restored.turn_bundles[0].transcript_fallback_used is False
+    assert restored.context_briefs[0].observation_refs == ["E42"]
     assert restored.prompt_budget.included_compaction_levels == ["L0", "L1", "L2"]
     assert restored.prompt_budget.dropped_compaction_levels == ["L4"]
 
@@ -185,3 +221,24 @@ def test_loop_state_from_legacy_payload_defaults_new_rollout_fields() -> None:
     assert restored.turn_bundles == []
     assert restored.prompt_budget.included_compaction_levels == []
     assert restored.prompt_budget.dropped_compaction_levels == []
+
+
+def test_loop_state_from_dict_preserves_legacy_history_when_recent_limit_missing() -> None:
+    payload = {
+        "cwd": "/tmp",
+        "conversation_history": [
+            {"role": "user", "content": "message 1"},
+            {"role": "assistant", "content": "message 2"},
+            {"role": "user", "content": "message 3"},
+            {"role": "assistant", "content": "message 4"},
+            {"role": "user", "content": "message 5"},
+            {"role": "assistant", "content": "message 6"},
+            {"role": "user", "content": "message 7"},
+            {"role": "assistant", "content": "message 8"},
+        ],
+    }
+
+    restored = LoopState.from_dict(payload)
+
+    assert len(restored.recent_messages) == 8
+    assert restored.recent_message_limit == 8

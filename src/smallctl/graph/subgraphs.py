@@ -137,6 +137,7 @@ class ChildSubgraphRunner:
         child.artifact_store = ArtifactStore(
             base_dir=artifact_base_dir, 
             run_id=child.conversation_id,
+            session_id=child.state.thread_id,
             artifact_start_index=artifact_start_index,
         )
         parent._runlog(

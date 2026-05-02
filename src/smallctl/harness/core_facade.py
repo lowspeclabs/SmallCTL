@@ -10,7 +10,13 @@ from typing import Any, Awaitable, Callable
 
 from ..guards import is_small_model_name
 from ..logging_utils import log_kv
-from ..models.events import UIEvent
+from ..models.events import UIEvent, UIEventType, UIStatusSnapshot, compute_activity_for_event
+from ..remote_scope import (
+    has_any_session_ssh_target,
+    handoff_supports_remote_continuation,
+    recent_remote_target_paths,
+    task_matches_remote_continuation,
+)
 from ..models.tool_result import ToolEnvelope
 from ..state import (
     LOOP_STATE_SCHEMA_VERSION,
@@ -22,21 +28,73 @@ from ..state import (
 )
 from ..normalization import dedupe_keep_tail
 from ..tools import build_registry
-from ..tools.profiles import classify_tool_profiles
+from ..tools.profiles import NETWORK_PROFILE, NETWORK_READ_PROFILE, classify_tool_profiles
 from .task_intent import completion_next_action, extract_intent_state, next_action_for_task
 from .tool_message_compaction import trim_recent_messages_window
+
+
+def _write_json_file(path: Path, payload: dict[str, Any], *, trailing_newline: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2)
+    if trailing_newline:
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_checkpoint_file(path: Path, result: dict[str, Any], state: Any) -> None:
+    payload = {
+        "checkpoint_schema_version": 1,
+        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "result": json_safe_value(result),
+        "state": state.to_dict(),
+    }
+    _write_json_file(path, payload)
 
 
 async def _emit(
     self: Any,
     handler: Callable[[UIEvent], Awaitable[None] | None] | None,
     event: UIEvent,
+    *,
+    emit_status: bool = True,
 ) -> None:
     if handler is None:
         return
+    if event.data.get("is_api_error"):
+        scratchpad = getattr(self.state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            scratchpad["_ui_api_error_count"] = int(scratchpad.get("_ui_api_error_count", 0) or 0) + 1
     maybe = handler(event)
     if maybe is not None and hasattr(maybe, "__await__"):
         await maybe
+    if not emit_status or event.event_type == UIEventType.STATUS:
+        return
+    snapshot_event = UIEvent(
+        event_type=UIEventType.STATUS,
+        data={
+            "snapshot": self.build_status_snapshot(
+                activity=compute_activity_for_event(event, active_task_done=False) or ""
+            )
+        },
+    )
+    maybe = handler(snapshot_event)
+    if maybe is not None and hasattr(maybe, "__await__"):
+        await maybe
+
+
+def build_status_snapshot(
+    self: Any,
+    *,
+    activity: str = "",
+    api_errors: int | None = None,
+) -> dict[str, Any]:
+    return UIStatusSnapshot.from_harness(
+        self,
+        getattr(self, "_harness_kwargs", {}),
+        activity=activity,
+        api_errors=api_errors,
+    ).to_dict()
 
 
 def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -79,7 +137,11 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "postmortem_summary": result.get("reason") or "No reason provided",
             }
             summary_path = self.run_logger.run_dir / "task_summary.json"
-            summary_path.write_text(json.dumps(summary_payload, indent=2) + "\n", encoding="utf-8")
+            schedule = getattr(self, "_schedule_background_persistence", None)
+            if callable(schedule):
+                schedule(_write_json_file, summary_path, summary_payload, trailing_newline=True)
+            else:
+                _write_json_file(summary_path, summary_payload, trailing_newline=True)
         except Exception:
             pass
 
@@ -130,16 +192,13 @@ def _persist_checkpoint(self: Any, result: dict[str, Any]) -> None:
         if self.checkpoint_path
         else Path(self.state.cwd).resolve() / ".smallctl-checkpoint.json"
     )
-    payload = {
-        "checkpoint_schema_version": 1,
-        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "result": json_safe_value(result),
-        "state": self.state.to_dict(),
-    }
+    result_snapshot = dict(result)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        schedule = getattr(self, "_schedule_background_persistence", None)
+        if callable(schedule):
+            schedule(_write_checkpoint_file, path, result_snapshot, self.state)
+        else:
+            _write_checkpoint_file(path, result_snapshot, self.state)
         log_kv(self.log, logging.INFO, "harness_checkpoint_saved", path=str(path))
     except Exception:
         self.log.exception("failed to persist checkpoint")
@@ -243,6 +302,49 @@ def _is_small_model_name(self: Any, model_name: str | None) -> bool:
     return is_small_model_name(model_name)
 
 
+def switch_model(self: Any, model: str) -> None:
+    model_name = str(model or "").strip()
+    if not model_name:
+        raise ValueError("model name cannot be empty")
+
+    from .bootstrap_support import build_client, resolve_provider_profile
+
+    kwargs = getattr(self, "_harness_kwargs", {})
+    endpoint = str(kwargs.get("endpoint") or getattr(self.client, "base_url", "")).rstrip("/")
+    api_key = kwargs.get("api_key")
+    if api_key is None:
+        api_key = getattr(self.client, "api_key", None)
+    provider_profile = str(
+        kwargs.get("provider_profile") or getattr(self, "provider_profile", "generic")
+    )
+    resolved_provider_profile = resolve_provider_profile(endpoint, model_name, provider_profile)
+
+    self.client = build_client(
+        endpoint=endpoint,
+        model=model_name,
+        api_key=api_key,
+        chat_endpoint=str(kwargs.get("chat_endpoint") or getattr(self.client, "chat_endpoint", "/chat/completions")),
+        provider_profile=resolved_provider_profile,
+        first_token_timeout_sec=kwargs.get("first_token_timeout_sec"),
+        runtime_context_probe=bool(kwargs.get("runtime_context_probe", True)),
+        run_logger=getattr(self, "run_logger", None),
+        backend_recovery_handler=self.recover_backend_wedge,
+    )
+    self.provider_profile = self.client.provider_profile
+    self._harness_kwargs["model"] = model_name
+    self._harness_kwargs["provider_profile"] = self.provider_profile
+    self._harness_kwargs["context_limit"] = None
+    if hasattr(self, "config"):
+        self.config.model = model_name
+        self.config.provider_profile = self.provider_profile
+        self.config.context_limit = None
+    self.state.scratchpad["_model_name"] = model_name
+    self.state.scratchpad["_model_is_small"] = self._is_small_model_name(model_name)
+    self.discovered_server_context_limit = None
+    self.server_context_limit = None
+    self._runtime_context_probe_attempted = False
+
+
 def _record_experience(
     self: Any,
     *,
@@ -277,11 +379,88 @@ def _argument_fingerprint(self: Any, arguments: Any) -> str:
     return self.memory._argument_fingerprint(arguments)
 
 
+def _task_mentions_remote_web_continuation(state: Any, task: str) -> bool:
+    text = " ".join(str(task or "").strip().lower().split())
+    if not text:
+        return False
+    if any(marker in text for marker in ("/home/", " local repo", " in this repo", " locally")):
+        return False
+    if any(marker in text for marker in ("/var/www/", "/etc/nginx", "/srv/", "/opt/")):
+        return True
+
+    remote_paths = recent_remote_target_paths(state)
+    has_remote_web_path = any(
+        str(path).startswith("/var/www/")
+        or str(path).endswith(".html")
+        or str(path).endswith(".htm")
+        or str(path).endswith(".css")
+        for path in remote_paths
+    )
+    if not has_remote_web_path:
+        return False
+    web_hints = (
+        "background",
+        "button",
+        "buttons",
+        "color",
+        "colors",
+        "css",
+        "design",
+        "font",
+        "fonts",
+        "html",
+        "layout",
+        "page",
+        "pages",
+        "site",
+        "style",
+        "styling",
+        "theme",
+        "website",
+    )
+    return any(hint in text for hint in web_hints)
+
+
 def _activate_tool_profiles(self: Any, task: str) -> None:
     if self._configured_tool_profiles:
         profiles = set(self._configured_tool_profiles)
     else:
         profiles = classify_tool_profiles(task)
+        handoff = self.state.scratchpad.get("_last_task_handoff")
+        prior_profiles = handoff.get("active_tool_profiles") if isinstance(handoff, dict) else None
+        if str(getattr(self.state, "task_mode", "") or "").strip().lower() == "remote_execute":
+            profiles.add(NETWORK_PROFILE)
+        resolved_remote = self.state.scratchpad.get("_resolved_remote_followup")
+        if isinstance(resolved_remote, dict) and resolved_remote:
+            profiles.add(NETWORK_PROFILE)
+        elif handoff_supports_remote_continuation(self.state) and task_matches_remote_continuation(
+            self.state, task
+        ):
+            profiles.add(NETWORK_PROFILE)
+            if isinstance(prior_profiles, list) and NETWORK_PROFILE in prior_profiles:
+                profiles.add(NETWORK_PROFILE)
+        elif has_any_session_ssh_target(self.state) and _task_mentions_remote_web_continuation(
+            self.state, task
+        ):
+            profiles.add(NETWORK_PROFILE)
+
+        from ..remote_scope import remote_scope_is_active
+        state_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
+        active_intent = str(getattr(self.state, "active_intent", "") or "").strip().lower()
+        if remote_scope_is_active(self.state) and (
+            state_mode == "remote_execute"
+            or active_intent == "requested_ssh_exec"
+            or isinstance(resolved_remote, dict) and resolved_remote
+        ):
+            profiles.add(NETWORK_PROFILE)
+        if isinstance(prior_profiles, list) and NETWORK_READ_PROFILE in prior_profiles:
+            if (
+                self.state.scratchpad.get("_task_boundary_previous_task")
+                or isinstance(resolved_remote, dict) and resolved_remote
+                or task_matches_remote_continuation(self.state, task)
+            ):
+                profiles.add(NETWORK_READ_PROFILE)
+
     self.state.active_tool_profiles = sorted(profiles)
     self.state.scratchpad["_last_task_text"] = task
     self._runlog(
@@ -295,6 +474,7 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
 
 def bind_core_facade(cls: type[Any]) -> None:
     cls._emit = _emit
+    cls.build_status_snapshot = build_status_snapshot
     cls._finalize = _finalize
     cls._rewrite_active_plan_export = _rewrite_active_plan_export
     cls._create_child_harness = _create_child_harness
@@ -310,6 +490,7 @@ def bind_core_facade(cls: type[Any]) -> None:
     cls._refresh_active_intent = _refresh_active_intent
     cls._completion_next_action = _completion_next_action
     cls._is_small_model_name = _is_small_model_name
+    cls.switch_model = switch_model
     cls._record_experience = _record_experience
     cls._normalize_failure_mode = _normalize_failure_mode
     cls._reinforce_retrieved_experiences = _reinforce_retrieved_experiences

@@ -14,6 +14,63 @@ class PromptBuilderService:
     def __init__(self, harness: Harness):
         self.harness = harness
 
+    def _prompt_pressure_threshold(self) -> int:
+        soft_limit = self.harness.context_policy.soft_prompt_token_limit
+        if soft_limit is None:
+            return 12000
+        return max(256, int(soft_limit * 0.8))
+
+    def _dynamic_recent_message_limit(self) -> int:
+        base_limit = max(1, int(getattr(self.harness.context_policy, "recent_message_limit", 1) or 1))
+        state = self.harness.state
+        if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
+            return base_limit
+
+        pressure_reasons: list[str] = []
+        recent_count = len(getattr(state, "recent_messages", []) or [])
+        if recent_count >= max(8, base_limit):
+            pressure_reasons.append("recent_messages_growth")
+        prompt_budget = getattr(state, "prompt_budget", None)
+        estimated_prompt_tokens = int(getattr(prompt_budget, "estimated_prompt_tokens", 0) or 0)
+        prompt_pressure_threshold = self._prompt_pressure_threshold()
+        high_prompt_pressure = estimated_prompt_tokens >= prompt_pressure_threshold
+        if high_prompt_pressure:
+            pressure_reasons.append("high_prompt_budget")
+        observation_staleness = state.scratchpad.get("_observation_staleness")
+        stale_observation_count = 0
+        if isinstance(observation_staleness, dict):
+            stale_observation_count = sum(
+                1 for marker in observation_staleness.values() if isinstance(marker, dict) and marker.get("stale")
+            )
+        if stale_observation_count >= 6:
+            pressure_reasons.append("observation_invalidation_churn")
+        if (
+            pressure_reasons
+            and str(getattr(state, "current_phase", "") or "").strip().lower() in {"repair", "verify"}
+        ):
+            pressure_reasons.append("remote_repair_cycle")
+        if not pressure_reasons:
+            return base_limit
+
+        adjusted_limit = min(base_limit, 6)
+        if high_prompt_pressure or "observation_invalidation_churn" in pressure_reasons:
+            adjusted_limit = min(adjusted_limit, 4)
+        adjusted_limit = max(2, adjusted_limit)
+        self.harness._runlog(
+            "recent_message_limit_tuned",
+            "reduced recent message window for remote prompt pressure",
+            task_mode=state.task_mode,
+            active_phase=state.current_phase,
+            base_limit=base_limit,
+            adjusted_limit=adjusted_limit,
+            reasons=pressure_reasons,
+            recent_messages=recent_count,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            prompt_pressure_threshold=prompt_pressure_threshold,
+            stale_observation_count=stale_observation_count,
+        )
+        return adjusted_limit
+
     async def build_messages(
         self,
         system_prompt: str,
@@ -21,7 +78,8 @@ class PromptBuilderService:
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> list[dict[str, Any]]:
         self.harness.state.scratchpad["_last_system_prompt"] = system_prompt
-        self.harness.memory.update_working_memory(self.harness.context_policy.recent_message_limit)
+        recent_limit = self._dynamic_recent_message_limit()
+        self.harness.memory.update_working_memory(recent_limit)
         query = self.harness._select_retrieval_query()
         self.harness._runlog("retrieval_query", "selected retrieval query", query=query)
         
@@ -121,7 +179,6 @@ class PromptBuilderService:
             selected_experience_ids=[memory.memory_id for memory in experiences],
         )
         
-        recent_limit = self.harness.context_policy.recent_message_limit
         include_structured_sections = bool(
             summaries
             or artifacts
@@ -205,6 +262,8 @@ class PromptBuilderService:
 
     async def ensure_context_limit(self) -> None:
         if not hasattr(self.harness.client, "fetch_model_context_limit"):
+            return
+        if not bool(getattr(self.harness.client, "runtime_context_probe", True)):
             return
 
         probe_attempted = bool(getattr(self.harness, "_runtime_context_probe_attempted", False))

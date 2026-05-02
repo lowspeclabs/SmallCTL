@@ -6,6 +6,8 @@ from typing import Any
 
 from ..plans import render_plan_playbook, resolve_plan_export_target, write_plan_file
 from ..state import ExecutionPlan, PlanInterrupt, PlanStep, LoopState
+from ..state_records import _coerce_step_output_spec, _coerce_step_verifier_spec
+from ..state_support import _coerce_int
 from .common import needs_human, ok
 
 
@@ -46,6 +48,23 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
         ],
         evidence_refs=[str(item) for item in (value.get("evidence_refs") or []) if str(item).strip()],
         claim_refs=[str(item) for item in (value.get("claim_refs") or []) if str(item).strip()],
+        task=str(value.get("task", "") or ""),
+        tool_allowlist=_coerce_string_list(value.get("tool_allowlist")),
+        prompt_token_budget=max(0, _coerce_int(value.get("prompt_token_budget"), default=0)),
+        acceptance=_coerce_string_list(value.get("acceptance")),
+        verifiers=[
+            spec
+            for item in (value.get("verifiers") or [])
+            if (spec := _coerce_step_verifier_spec(item)) is not None
+        ],
+        outputs_expected=[
+            spec
+            for item in (value.get("outputs_expected") or [])
+            if (spec := _coerce_step_output_spec(item)) is not None
+        ],
+        max_retries=max(0, _coerce_int(value.get("max_retries"), default=3)),
+        retry_count=max(0, _coerce_int(value.get("retry_count"), default=0)),
+        failure_reasons=_coerce_string_list(value.get("failure_reasons"))[-10:],
     )
 
 

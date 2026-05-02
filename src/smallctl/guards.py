@@ -61,6 +61,67 @@ def is_four_b_or_under_model_name(model_name: str | None) -> bool:
     return False
 
 
+def is_seven_b_or_under_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+
+    for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
+        try:
+            size = float(match.group("size"))
+        except ValueError:
+            continue
+        if size <= 7.0:
+            return True
+
+    return False
+
+
+def is_over_twenty_b_model_name(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+
+    for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
+        try:
+            size = float(match.group("size"))
+        except ValueError:
+            continue
+        if size > 20.0:
+            return True
+
+    return False
+
+
+def _state_model_name(state: LoopState) -> str:
+    scratchpad = getattr(state, "scratchpad", {})
+    if isinstance(scratchpad, dict):
+        return str(scratchpad.get("_model_name") or "").strip()
+    return ""
+
+
+def _repeated_action_directive_hint(state: LoopState, tool_name: str) -> str:
+    if not is_four_b_or_under_model_name(_state_model_name(state)):
+        return ""
+    if tool_name in {"file_read", "artifact_read", "artifact_print", "artifact_grep", "dir_list"}:
+        return (
+            "Directive Hint: use the evidence already in Working Memory instead of repeating the same read/list action. "
+            "Move to `file_patch`, `ast_patch`, `shell_exec`, or `task_complete` as appropriate."
+        )
+    if tool_name in {"file_patch", "ast_patch"}:
+        return (
+            "Directive Hint: change the patch arguments based on the last failure, read the target once for exact context, "
+            "or run `shell_exec` to verify the current state."
+        )
+    if tool_name == "shell_exec":
+        return (
+            "Directive Hint: use the existing command output or artifact; only run a different focused command if it will produce new evidence."
+        )
+    return (
+        f"Directive Hint: stop repeating `{tool_name}` with identical outcome; choose a different concrete next action or complete the task."
+    )
+
+
 def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
     if state.step_count >= cfg.max_steps:
         return f"Guard tripped: max_steps ({cfg.max_steps})"
@@ -80,10 +141,12 @@ def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
         for fingerprint, count in counts.items():
             if count >= cfg.max_repeated_actions:
                 tool_name = fingerprint.split("|")[0]
-                return (
+                message = (
                     "Guard tripped: repeated tool call loop "
                     f"({tool_name} repeated {count} times with identical args and outcome)"
                 )
+                directive = _repeated_action_directive_hint(state, tool_name)
+                return f"{message}. {directive}" if directive else message
 
     return None
 

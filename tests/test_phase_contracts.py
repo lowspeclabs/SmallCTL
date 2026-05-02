@@ -236,8 +236,23 @@ def test_registry_exposes_file_patch_tool() -> None:
 
     assert spec is not None
     assert spec.risk == "high"
-    assert spec.allowed_modes == {"loop"}
+    assert spec.allowed_modes == {"chat", "loop"}
     assert spec.schema["required"] == ["path", "target_text", "replacement_text"]
+
+
+def test_registry_exposes_ast_patch_tool() -> None:
+    class _FakeStateProvider:
+        def __init__(self) -> None:
+            self.state = LoopState(cwd="/tmp")
+            self.log = SimpleNamespace(info=lambda *args, **kwargs: None)
+
+    registry = build_registry(_FakeStateProvider(), registry_profiles={"core"})
+    spec = registry.get("ast_patch")
+
+    assert spec is not None
+    assert spec.risk == "high"
+    assert spec.allowed_modes == {"chat", "loop"}
+    assert spec.schema["required"] == ["path", "language", "operation", "target"]
 
 
 def test_registry_excludes_removed_general_surface_tools() -> None:
@@ -286,3 +301,57 @@ def test_verify_phase_blocks_file_patch_like_other_read_only_phases() -> None:
     assert allowed == []
     assert blocked == ["file_patch"]
     assert phase_contract("verify").blocks("file_patch") is True
+
+
+def test_verify_phase_blocks_ast_patch_like_other_read_only_phases() -> None:
+    blocked_tool_calls = [
+        PendingToolCall(
+            tool_name="ast_patch",
+            args={
+                "path": "src/example.py",
+                "language": "python",
+                "operation": "replace_function",
+                "target": {"function": "run"},
+            },
+        )
+    ]
+
+    allowed, blocked = filter_phase_blocked_tools(blocked_tool_calls, phase="verify")
+
+    assert allowed == []
+    assert blocked == ["ast_patch"]
+    assert phase_contract("verify").blocks("ast_patch") is True
+
+
+def test_explore_phase_blocks_ssh_file_mutation_tools() -> None:
+    for tool_name in ("ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"):
+        allowed, blocked = filter_phase_blocked_tools([PendingToolCall(tool_name=tool_name, args={})], phase="explore")
+        assert allowed == [], f"{tool_name} should be blocked in explore"
+        assert blocked == [tool_name], f"{tool_name} should be blocked in explore"
+        assert phase_contract("explore").blocks(tool_name) is True
+
+
+def test_plan_phase_blocks_ssh_file_mutation_tools() -> None:
+    for tool_name in ("ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"):
+        allowed, blocked = filter_phase_blocked_tools([PendingToolCall(tool_name=tool_name, args={})], phase="plan")
+        assert allowed == [], f"{tool_name} should be blocked in plan"
+        assert blocked == [tool_name], f"{tool_name} should be blocked in plan"
+        assert phase_contract("plan").blocks(tool_name) is True
+
+
+def test_setup_triggers_contract_flow_active() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "setup a new webpage"
+    assert state.contract_flow_active() is True
+
+
+def test_deploy_triggers_contract_flow_active() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "deploy the app to staging"
+    assert state.contract_flow_active() is True
+
+
+def test_configure_triggers_contract_flow_active() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "configure nginx for the new site"
+    assert state.contract_flow_active() is True

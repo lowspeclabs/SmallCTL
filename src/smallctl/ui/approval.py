@@ -55,7 +55,7 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
         with Container(id="approve-prompt-shell"):
             with Vertical(id="approve-prompt"):
                 yield Static("Approve shell command?", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body")
+                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
                 with Horizontal(id="approve-prompt-buttons"):
                     yield Button("Yes", id="approve-yes", variant="success")
                     yield Button("Yes for Session", id="approve-yes-session", variant="success")
@@ -191,7 +191,7 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalDecision]):
         with Container(id="approve-prompt-plan"):
             with Vertical(id="approve-prompt"):
                 yield Static("Approve plan?", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body")
+                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
                 with Horizontal(id="approve-prompt-buttons"):
                     yield Button("Yes", id="approve-plan-yes", variant="success")
                     yield Button("No", id="approve-plan-no", variant="error")
@@ -273,7 +273,7 @@ class SudoPasswordPromptScreen(ModalScreen[str | None]):
         with Container(id="approve-prompt-shell"):
             with Vertical(id="approve-prompt"):
                 yield Static("Sudo password required", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body")
+                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
                 yield Input(placeholder="Password", password=True, id="sudo-password-input")
                 with Horizontal(id="approve-prompt-buttons"):
                     yield Button("Submit", id="sudo-password-submit", variant="success")

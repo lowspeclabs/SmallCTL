@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .phases import PHASES
 from .state import ClaimRecord, LoopState
 
-_RISKY_TOOL_NAMES = {"shell_exec", "ssh_exec", "file_write", "file_append", "file_patch", "file_delete"}
+_RISKY_TOOL_NAMES = {"shell_exec", "ssh_exec", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 _TASK_CLASSIFICATION_ALIASES = {
     "diagnosis": "diagnosis_remediation",
     "incident_response": "diagnosis_remediation",
@@ -16,6 +17,7 @@ _TASK_CLASSIFICATION_ALIASES = {
     "authoring": "implementation",
     "coding": "implementation",
 }
+_PHASE_NAMES = set(PHASES)
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ def classify_task(state: LoopState) -> str:
     explicit_values.extend(
         str(tag).strip()
         for tag in getattr(state, "intent_tags", []) or []
-        if str(tag).strip()
+        if str(tag).strip() and str(tag).strip().lower() not in _PHASE_NAMES
     )
 
     for value in explicit_values:
@@ -79,6 +81,15 @@ def supported_claim_records(state: LoopState) -> list[ClaimRecord]:
 
 def has_supported_claim(state: LoopState) -> bool:
     return bool(supported_claim_records(state))
+
+
+def missing_supported_claim_message(tool_name: str) -> str:
+    return (
+        f"{tool_name} is blocked for diagnosis/remediation work until a supported claim exists. "
+        "A supported claim must be a confirmed claim backed by actual tool evidence. "
+        "`memory_update`, session notes, plans, or restating the intended command do not count. "
+        "Capture real read-only evidence first."
+    )
 
 
 def build_claim_proof_bundle(
@@ -141,9 +152,6 @@ def claim_gate_for_risky_action(
     )
     return ClaimGateResult(
         allowed=False,
-        reason=(
-            f"{tool_name} is blocked for diagnosis/remediation work until a supported claim exists. "
-            "Record a confirmed claim with supporting evidence first."
-        ),
+        reason=missing_supported_claim_message(tool_name),
         proof_bundle=proof_bundle,
     )

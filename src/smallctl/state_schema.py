@@ -33,6 +33,48 @@ class WorkingMemory:
 
 
 @dataclass
+class StepVerifierSpec:
+    kind: str
+    args: dict[str, Any] = field(default_factory=dict)
+    required: bool = True
+    timeout_sec: int = 30
+
+
+@dataclass
+class StepOutputSpec:
+    kind: str = "artifact"
+    ref: str = ""
+    description: str = ""
+    required: bool = True
+
+
+@dataclass
+class StepVerificationResult:
+    step_id: str
+    step_run_id: str = ""
+    passed: bool = False
+    failed_criteria: list[str] = field(default_factory=list)
+    verifier_results: list[dict[str, Any]] = field(default_factory=list)
+    evidence_artifact_id: str = ""
+
+
+@dataclass
+class StepEvidenceArtifact:
+    step_id: str
+    step_run_id: str = ""
+    attempt: int = 1
+    summary: str = ""
+    artifact_ids: list[str] = field(default_factory=list)
+    files_touched: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    verifier_results: list[dict[str, Any]] = field(default_factory=list)
+    tool_operation_ids: list[str] = field(default_factory=list)
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+
+
+@dataclass
 class PlanStep:
     step_id: str
     title: str
@@ -43,6 +85,15 @@ class PlanStep:
     substeps: list["PlanStep"] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     claim_refs: list[str] = field(default_factory=list)
+    task: str = ""
+    tool_allowlist: list[str] = field(default_factory=list)
+    prompt_token_budget: int = 0
+    acceptance: list[str] = field(default_factory=list)
+    verifiers: list[StepVerifierSpec] = field(default_factory=list)
+    outputs_expected: list[StepOutputSpec] = field(default_factory=list)
+    max_retries: int = 3
+    retry_count: int = 0
+    failure_reasons: list[str] = field(default_factory=list)
 
     def iter_steps(self) -> list["PlanStep"]:
         steps = [self]
@@ -326,6 +377,11 @@ class TurnBundle:
     files_touched: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    observation_refs: list[str] = field(default_factory=list)
+    observation_summaries: list[str] = field(default_factory=list)
+    observation_kinds: list[str] = field(default_factory=list)
+    compaction_strategy: str = ""
+    transcript_fallback_used: bool = False
     source_message_count: int = 0
 
 
@@ -351,6 +407,7 @@ class ContextBrief:
     disproven_causes: list[str] = field(default_factory=list)
     next_observations_needed: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    observation_refs: list[str] = field(default_factory=list)
     claim_refs: list[str] = field(default_factory=list)
     new_facts: list[str] = field(default_factory=list)
     invalidated_facts: list[str] = field(default_factory=list)

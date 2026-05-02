@@ -28,14 +28,14 @@ _PHASE_CONTRACTS: dict[str, PhaseContract] = {
         phase="explore",
         focus="gather observations, verify facts, and collect open questions",
         prompt_priority="verified observations and unanswered questions",
-        blocked_tools=("file_write", "file_append", "file_patch", "shell_exec", "ssh_exec", "task_complete", "task_fail"),
+        blocked_tools=("file_write", "file_append", "file_patch", "ast_patch", "shell_exec", "ssh_exec", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between", "task_complete", "task_fail"),
         required_handoffs=("ContextBrief",),
     ),
     "plan": PhaseContract(
         phase="plan",
         focus="turn evidence into hypotheses and an executable plan",
         prompt_priority="compressed evidence and candidate causes",
-        blocked_tools=("file_write", "file_append", "file_patch", "shell_exec", "ssh_exec", "task_complete", "task_fail"),
+        blocked_tools=("file_write", "file_append", "file_patch", "ast_patch", "shell_exec", "ssh_exec", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between", "task_complete", "task_fail"),
         required_handoffs=("ContextBrief",),
     ),
     "author": PhaseContract(
@@ -56,7 +56,7 @@ _PHASE_CONTRACTS: dict[str, PhaseContract] = {
         phase="verify",
         focus="compare observed state against expected outcomes",
         prompt_priority="acceptance criteria and recent verification evidence",
-        blocked_tools=("file_write", "file_append", "file_patch", "task_complete", "task_fail"),
+        blocked_tools=("file_write", "file_append", "file_patch", "ast_patch", "task_complete", "task_fail"),
         required_handoffs=("ExecutionPlan",),
     ),
     "repair": PhaseContract(

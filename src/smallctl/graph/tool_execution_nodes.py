@@ -6,7 +6,13 @@ import logging
 import time
 from typing import Any
 
-from ..harness.tool_visibility import hidden_tool_reason, resolve_turn_tool_exposure
+from ..harness.tool_visibility import (
+    consume_retry_tool_exposure,
+    hidden_tool_reason,
+    recent_hidden_tool_recovery_artifact_id,
+    resolve_turn_tool_exposure,
+    schedule_retry_tool_exposure,
+)
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -22,6 +28,7 @@ from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_op
 from . import nodes as _nodes
 from .tool_call_parser import (
     _artifact_read_synthesis_hint,
+    _detect_timeout_recovered_incomplete_tool_call,
     _detect_hallucinated_tool_call,
     _detect_patch_existing_stage_read_contract_violation,
     _detect_repeated_tool_loop,
@@ -55,6 +62,7 @@ _TOOL_NOT_EXPOSED_REASON_LABELS = {
 
 async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
     harness = deps.harness
+    graph_state.recorded_tool_call_ids = []
     graph_state.last_tool_results = []
     dispatch_start = time.perf_counter()
     dispatch_assistant_text = str(
@@ -84,8 +92,15 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             )
         if intercepted_result is not None:
             intercepted_metadata = intercepted_result.metadata if isinstance(intercepted_result.metadata, dict) else {}
-            if intercepted_metadata.get("reason") == "remote_task_requires_ssh_exec":
-                message = str(intercepted_result.error or "This is a remote task. Use `ssh_exec`, not local `shell_exec`.")
+            if intercepted_metadata.get("reason") in {
+                "remote_task_requires_ssh_exec",
+                "remote_path_requires_ssh_exec",
+                "remote_path_requires_typed_ssh_file_tool",
+            }:
+                message = str(
+                    intercepted_result.error
+                    or "This task should continue over SSH. Use `ssh_exec`, not a local tool."
+                )
                 harness.state.append_message(
                     ConversationMessage(
                         role="system",
@@ -101,8 +116,8 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     )
                 )
                 harness._runlog(
-                    "remote_shell_exec_guard_nudge",
-                    "blocked local shell_exec for remote SSH task",
+                    "remote_tool_guard_nudge",
+                    "blocked local tool for remote SSH task",
                     step=harness.state.step_count,
                     tool_name=pending.tool_name,
                     arguments=json_safe_value(pending.args),
@@ -222,6 +237,52 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 return
             pending = maybe_pending
 
+        timeout_recovery = _detect_timeout_recovered_incomplete_tool_call(harness, pending)
+        if timeout_recovery is not None:
+            recovery_message, recovery_details = timeout_recovery
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=recovery_message,
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "incomplete_tool_call_timeout",
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                        "required_fields": recovery_details.get("required_fields", []),
+                        "present_fields": recovery_details.get("present_fields", []),
+                        "missing_required_fields": recovery_details.get("missing_required_fields", []),
+                    },
+                )
+            )
+            harness._runlog(
+                "tool_call_timeout_recovery",
+                "suppressed fake tool failure after timeout-truncated tool call",
+                tool_name=pending.tool_name,
+                tool_call_id=pending.tool_call_id,
+                provider_profile=recovery_details.get("provider_profile"),
+                present_fields=recovery_details.get("present_fields", []),
+                missing_required_fields=recovery_details.get("missing_required_fields", []),
+                arguments=recovery_details.get("arguments", {}),
+                raw_arguments_preview=recovery_details.get("raw_arguments_preview", ""),
+            )
+            await harness._emit(
+                deps.event_handler,
+                UIEvent(
+                    event_type=UIEventType.ALERT,
+                    content=recovery_message,
+                    data={
+                        "repair_kind": "incomplete_tool_call_timeout",
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                        "provider_profile": recovery_details.get("provider_profile"),
+                        "present_fields": recovery_details.get("present_fields", []),
+                        "missing_required_fields": recovery_details.get("missing_required_fields", []),
+                    },
+                ),
+            )
+            continue
+
         hallucination_hint = _detect_hallucinated_tool_call(harness, pending)
         if hallucination_hint:
             log_kv(harness.log, logging.WARNING, "harness_hallucinated_tool_call", tool_name=pending.tool_name)
@@ -229,7 +290,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             fake_result = ToolEnvelope(
                 success=False,
                 error=hallucination_hint,
-                metadata={"hallucinated_tool": pending.tool_name}
+                metadata={"hallucinated_tool": pending.tool_name, "hallucination": True, "suppress_failure_persistence": True}
             )
             graph_state.last_tool_results.append(
                 ToolExecutionRecord(
@@ -257,12 +318,69 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     state=harness.state,
                     mode=graph_state.run_mode,
                 )
+                retry_scheduled = False
+                if hidden_reason is None:
+                    retry_scheduled = schedule_retry_tool_exposure(
+                        harness.state,
+                        mode=graph_state.run_mode,
+                        tool_name=pending.tool_name,
+                        arguments=pending.args,
+                    )
+                    if retry_scheduled:
+                        path = str(pending.args.get("path") or pending.args.get("target_path") or "").strip()
+                        retry_message = (
+                            f"Registered but unavailable on this turn: `{pending.tool_name}`. "
+                            f"Retry on the next turn with `{pending.tool_name}` immediately. "
+                            "Do not restart the analysis or re-read the same evidence unless the tool arguments truly need new context."
+                        )
+                        if path:
+                            retry_message = f"{retry_message} Target path: `{path}`."
+                        recovery_artifact_id = recent_hidden_tool_recovery_artifact_id(
+                            harness.state,
+                            tool_name=pending.tool_name,
+                        )
+                        if recovery_artifact_id:
+                            retry_message = (
+                                f"{retry_message} Use `artifact_read(artifact_id='{recovery_artifact_id}')` "
+                                "for the full fetched body."
+                            )
+                        harness.state.append_message(
+                            ConversationMessage(
+                                role="user",
+                                content=retry_message,
+                                metadata={
+                                    "is_recovery_nudge": True,
+                                    "recovery_kind": "tool_not_exposed_this_turn",
+                                    "retry_tool_name": pending.tool_name,
+                                    "tool_name": pending.tool_name,
+                                    "tool_call_id": pending.tool_call_id,
+                                    "run_mode": graph_state.run_mode,
+                                },
+                            )
+                        )
                 hidden_reason_text = _TOOL_NOT_EXPOSED_REASON_LABELS.get(
                     str(hidden_reason or "").strip(),
                 )
-                error_message = f"Tool `{pending.tool_name}` is registered but unavailable on this turn."
+                names_fn = getattr(registry, "names", None) if registry is not None else None
+                try:
+                    is_registered = callable(names_fn) and pending.tool_name in names_fn()
+                except Exception:
+                    is_registered = False
+                if is_registered:
+                    error_message = f"Tool `{pending.tool_name}` is registered but unavailable on this turn."
+                else:
+                    error_message = f"Tool `{pending.tool_name}` is not available."
                 if hidden_reason_text:
                     error_message = f"{error_message} Reason: {hidden_reason_text}."
+                recovery_artifact_id = recent_hidden_tool_recovery_artifact_id(
+                    harness.state,
+                    tool_name=pending.tool_name,
+                )
+                if recovery_artifact_id:
+                    error_message = (
+                        f"{error_message} Use artifact_read(artifact_id='{recovery_artifact_id}') "
+                        "for the full fetched body."
+                    )
                 result = ToolEnvelope(
                     success=False,
                     error=error_message,
@@ -272,6 +390,8 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         "run_mode": graph_state.run_mode,
                         "allowed_tools": allowed_tools,
                         "hidden_reason": hidden_reason,
+                        "retry_scheduled": retry_scheduled,
+                        "recovery_artifact_id": recovery_artifact_id,
                     },
                 )
                 harness._runlog(
@@ -282,6 +402,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     run_mode=graph_state.run_mode,
                     allowed_tools=allowed_tools,
                     hidden_reason=hidden_reason,
+                    retry_scheduled=retry_scheduled,
                 )
                 operation_id = build_operation_id(
                     thread_id=graph_state.thread_id,
@@ -307,6 +428,11 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     )
                 )
                 continue
+            consume_retry_tool_exposure(
+                harness.state,
+                mode=graph_state.run_mode,
+                tool_name=pending.tool_name,
+            )
 
         await harness._emit(
             deps.event_handler,

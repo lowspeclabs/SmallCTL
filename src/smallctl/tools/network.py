@@ -7,10 +7,13 @@ import shutil
 import time
 from typing import Any, TYPE_CHECKING
 
+from ..models.events import UIEvent, UIEventType
 from .common import fail, ok
 from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .shell import create_process
+from .process_streams import read_stream_chunks
+from .ui_streaming import BufferedUIEventEmitter
 
 if TYPE_CHECKING:
     from ..state import LoopState
@@ -342,6 +345,8 @@ def _build_ssh_command(
     ssh_args = [
         "-p", str(port),
         "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=3",
         "-o", f"StrictHostKeyChecking={strict_host_key_checking}",
     ]
     env_overrides: dict[str, str] | None = None
@@ -386,6 +391,38 @@ def _ssh_failure_kind(*, exit_code: int, stderr: str) -> str:
     if exit_code == 255 and not lowered:
         return "transport"
     return "remote_command"
+
+
+def _ssh_error_class(*, exit_code: int, stderr: str) -> str:
+    lowered = str(stderr or "").strip().lower()
+    if "permission denied" in lowered:
+        return "auth_permission_denied"
+    if "host key verification failed" in lowered or "remote host identification has changed" in lowered:
+        return "host_key_verification"
+    if "could not resolve hostname" in lowered or "name or service not known" in lowered or "temporary failure in name resolution" in lowered:
+        return "dns_resolution"
+    if "connection refused" in lowered:
+        return "connection_refused"
+    if "connection timed out" in lowered or "operation timed out" in lowered or "timed out" in lowered:
+        return "connection_timeout"
+    return "transport_failure" if _ssh_failure_kind(exit_code=exit_code, stderr=stderr) == "transport" else "remote_exit_nonzero"
+
+
+def _ssh_execution_debug_metadata(
+    *,
+    password: str | None,
+    identity_file: str | None,
+    strict_host_key_checking: str,
+) -> dict[str, Any]:
+    password_text = str(password or "").strip()
+    identity_file_text = str(identity_file or "").strip()
+    return {
+        "ssh_auth_mode": "password" if password_text else "key",
+        "ssh_auth_transport": "sshpass_env" if password_text else "ssh",
+        "ssh_password_provided": bool(password_text),
+        "ssh_identity_file_supplied": bool(identity_file_text),
+        "ssh_strict_host_key_checking": strict_host_key_checking,
+    }
 
 
 async def ssh_exec(
@@ -449,6 +486,65 @@ async def ssh_exec(
                 "proof_bundle": risk_decision.proof_bundle,
             },
         )
+    if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+        approved = await approval_fn(
+            command=command,
+            cwd=str(getattr(policy_state, "cwd", ".") or "."),
+            timeout_sec=timeout_sec,
+            proof_bundle=risk_decision.proof_bundle,
+        )
+        if not approved:
+            denied = fail(
+                "SSH execution denied by user.",
+                metadata={
+                    "approval_denied": True,
+                    "command": command,
+                    "cwd": str(getattr(policy_state, "cwd", ".") or "."),
+                    "timeout_sec": timeout_sec,
+                    "host": host,
+                },
+            )
+            denied["status"] = "denied"
+            return denied
+
+    return await run_ssh_command(
+        host=host,
+        command=command,
+        user=user,
+        port=port,
+        identity_file=identity_file,
+        password=password,
+        timeout_sec=timeout_sec,
+        state=state,
+        harness=harness,
+    )
+
+
+async def run_ssh_command(
+    *,
+    host: str,
+    command: str,
+    user: str | None = None,
+    port: int = 22,
+    identity_file: str | None = None,
+    password: str | None = None,
+    timeout_sec: int = 60,
+    state: LoopState | None = None,
+    harness: Any = None,
+    stdin_data: str | None = None,
+) -> dict[str, Any]:
+    """Run a generated SSH command and return the same result shape as ssh_exec."""
+    if password and str(password).startswith("[REDACTED"):
+        return fail(
+            "The SSH password provided was literally redacted. This means you have lost access to the real password due to security scrubbing. "
+            "You MUST ask the human user to provide the actual password in plain text. Do NOT retry this command blindly.",
+            metadata={
+                "host": host,
+                "command": command,
+                "reason": "redacted_password_provided",
+            },
+        )
+    strict_host_key_mode = "accept-new"
     try:
         host, user = normalize_ssh_target(host=host, user=user)
         full_cmd, env_overrides = _build_ssh_command(
@@ -478,77 +574,59 @@ async def ssh_exec(
                     "command": command,
                     "user": user,
                     "reason": "sshpass_missing",
+                    **_ssh_execution_debug_metadata(
+                        password=password,
+                        identity_file=identity_file,
+                        strict_host_key_checking="accept-new",
+                    ),
                 },
             )
         raise
-    if risk_decision.requires_approval and callable(approval_fn) and approval_available:
-        approved = await approval_fn(
-            command=command,
-            cwd=str(getattr(policy_state, "cwd", ".") or "."),
-            timeout_sec=timeout_sec,
-            proof_bundle=risk_decision.proof_bundle,
-        )
-        if not approved:
-            denied = fail(
-                "SSH execution denied by user.",
-                metadata={
-                    "approval_denied": True,
-                    "command": command,
-                    "cwd": str(getattr(policy_state, "cwd", ".") or "."),
-                    "timeout_sec": timeout_sec,
-                    "host": host,
-                },
-            )
-            denied["status"] = "denied"
-            return denied
 
-    async def _run_ssh_process(command_text: str) -> tuple[dict[str, Any], asyncio.subprocess.Process | None]:
+    execution_debug_metadata = _ssh_execution_debug_metadata(
+        password=password,
+        identity_file=identity_file,
+        strict_host_key_checking=strict_host_key_mode,
+    )
+
+    async def _run_ssh_process(command_text: str, stdin_payload: str | None = None) -> tuple[dict[str, Any], asyncio.subprocess.Process | None]:
         start_time = time.time()
         proc = await create_process(
             command=command_text,
             cwd=state.cwd if state else ".",
             env_overrides=env_overrides,
             harness=harness,
+            stdin=asyncio.subprocess.PIPE if stdin_payload is not None else asyncio.subprocess.DEVNULL,
         )
+        if stdin_payload is not None and proc.stdin is not None:
+            proc.stdin.write(stdin_payload.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
 
         stdout_data: list[str] = []
         stderr_data: list[str] = []
+        stream_emitter = BufferedUIEventEmitter(
+            harness=harness,
+            event_type=UIEventType.SHELL_STREAM,
+        )
 
         async def read_stream(stream: Any, out_list: list[str]) -> None:
-            if not stream:
-                return
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
-                    break
-                chunk_str = chunk.decode("utf-8", errors="replace")
-                out_list.append(chunk_str)
+            async def handle_chunk(chunk_str: str) -> None:
+                await stream_emitter.emit_text(chunk_str)
 
-                if harness and hasattr(harness, "_emit") and getattr(harness, "event_handler", None):
-                    from ..models.events import UIEvent, UIEventType
-                    emittable = chunk_str
-                    if len(emittable) > 16384:
-                        emittable = emittable[:16384] + "\n[UI TRUNCATED - LARGE OUTPUT]"
+            await read_stream_chunks(stream, out_list, chunk_size=4096, on_chunk=handle_chunk, idle_timeout_sec=30)
 
-                    evt = UIEvent(
-                        event_type=UIEventType.SHELL_STREAM,
-                        content=emittable,
-                    )
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            await harness._emit(harness.event_handler, evt)
-                    except RuntimeError:
-                        pass
-
-        await asyncio.wait_for(
-            asyncio.gather(
-                read_stream(proc.stdout, stdout_data),
-                read_stream(proc.stderr, stderr_data),
-                proc.wait(),
-            ),
-            timeout=timeout_sec,
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_stream(proc.stdout, stdout_data),
+                    read_stream(proc.stderr, stderr_data),
+                    proc.wait(),
+                ),
+                timeout=timeout_sec,
+            )
+        finally:
+            await stream_emitter.flush()
 
         elapsed = time.time() - start_time
         final_stdout = "".join(stdout_data)
@@ -572,9 +650,8 @@ async def ssh_exec(
         }, proc
 
     proc = None
-    strict_host_key_mode = "accept-new"
     try:
-        output, proc = await _run_ssh_process(full_cmd)
+        output, proc = await _run_ssh_process(full_cmd, stdin_data)
         retry_metadata: dict[str, Any] = {}
         if int(output.get("exit_code") or 0) != 0 and _ssh_accept_new_is_incompatible(str(output.get("stderr") or "")):
             strict_host_key_mode = "no"
@@ -587,7 +664,12 @@ async def ssh_exec(
                 password=password,
                 strict_host_key_checking=strict_host_key_mode,
             )
-            output, proc = await _run_ssh_process(full_cmd)
+            execution_debug_metadata = _ssh_execution_debug_metadata(
+                password=password,
+                identity_file=identity_file,
+                strict_host_key_checking=strict_host_key_mode,
+            )
+            output, proc = await _run_ssh_process(full_cmd, stdin_data)
             retry_metadata = {
                 "ssh_option_retry": "strict_host_key_checking_no",
                 "ssh_option_retry_reason": "accept_new_incompatible",
@@ -598,6 +680,10 @@ async def ssh_exec(
             if not isinstance(err_output, str):
                 err_output = str(err_output or "")
             failure_kind = _ssh_failure_kind(
+                exit_code=int(proc.returncode),
+                stderr=err_output,
+            )
+            ssh_error_class = _ssh_error_class(
                 exit_code=int(proc.returncode),
                 stderr=err_output,
             )
@@ -616,26 +702,55 @@ async def ssh_exec(
                     hints.append("Check if SSH keys are correctly configured on the remote host.")
             if "Connection timed out" in error_msg:
                 hints.append("Verify the host is reachable and the port is open.")
-            
+
             return fail(
                 error_msg,
                 metadata={
                     "output": output,
                     "hints": hints,
                     "failure_kind": failure_kind,
+                    "ssh_error_class": ssh_error_class,
                     "ssh_transport_succeeded": failure_kind == "remote_command",
+                    **execution_debug_metadata,
                     **retry_metadata,
                 },
             )
 
-        return ok(output, metadata=retry_metadata or None)
+        return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
 
     except asyncio.TimeoutError:
         if proc and proc.returncode is None:
-            proc.kill()
-        return fail(f"SSH command timed out after {timeout_sec}s")
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+        return fail(
+            f"SSH command timed out after {timeout_sec}s",
+            metadata=execution_debug_metadata,
+        )
     except Exception as exc:
-        return fail(f"SSH execution error: {str(exc)}")
+        return fail(
+            f"SSH execution error: {str(exc)}",
+            metadata=execution_debug_metadata,
+        )
     finally:
+        if proc is not None:
+            for pipe in (getattr(proc, "stdout", None), getattr(proc, "stderr", None), getattr(proc, "stdin", None)):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
         if harness and proc and hasattr(harness, "_active_processes"):
             harness._active_processes.discard(proc)

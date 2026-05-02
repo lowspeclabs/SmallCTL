@@ -56,9 +56,34 @@ def extract_task_target_paths(text: str) -> list[str]:
 def task_target_paths_from_harness(harness: Any) -> list[str]:
     state = getattr(harness, "state", None)
     scratchpad = getattr(state, "scratchpad", {}) or {}
+    resolved_followup = scratchpad.get("_resolved_followup")
+    blocked_paths: set[str] = set()
+    blocked_basenames: set[str] = set()
+    if isinstance(resolved_followup, dict) and str(
+        resolved_followup.get("target_inheritance") or ""
+    ).strip() == "blocked_by_user_constraint":
+        for path in resolved_followup.get("blocked_target_paths") or []:
+            text = str(path or "").strip().lower()
+            if not text:
+                continue
+            blocked_paths.add(text)
+            blocked_basenames.add(PurePosixPath(text).name.lower())
+
+    def _filter_blocked(paths: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for path in paths:
+            text = str(path or "").strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in blocked_paths or PurePosixPath(text).name.lower() in blocked_basenames:
+                continue
+            cleaned.append(text)
+        return cleaned
+
     scratch_paths = scratchpad.get("_task_target_paths")
     if isinstance(scratch_paths, list):
-        cleaned = [str(path).strip() for path in scratch_paths if str(path).strip()]
+        cleaned = _filter_blocked([str(path).strip() for path in scratch_paths if str(path).strip()])
         if cleaned:
             return cleaned
 
@@ -78,8 +103,33 @@ def task_target_paths_from_harness(harness: Any) -> list[str]:
 
     for text in candidates:
         paths = extract_task_target_paths(text)
+        paths = _filter_blocked(paths)
         if paths:
             return paths
+
+    last_handoff = scratchpad.get("_last_task_handoff")
+    if isinstance(last_handoff, dict):
+        handoff_paths = last_handoff.get("target_paths")
+        if isinstance(handoff_paths, list):
+            cleaned = _filter_blocked([str(path).strip() for path in handoff_paths if str(path).strip()])
+            if cleaned:
+                return cleaned
+        handoff_text_candidates = [
+            str(last_handoff.get("effective_task") or ""),
+            str(last_handoff.get("current_goal") or ""),
+            str(last_handoff.get("raw_task") or ""),
+        ]
+        for text in handoff_text_candidates:
+            paths = _filter_blocked(extract_task_target_paths(text))
+            if paths:
+                return paths
+
+    session = getattr(state, "write_session", None)
+    session_target = str(getattr(session, "write_target_path", "") or "").strip()
+    if session_target:
+        if session_target.lower() in blocked_paths or PurePosixPath(session_target).name.lower() in blocked_basenames:
+            return []
+        return [session_target]
     return []
 
 

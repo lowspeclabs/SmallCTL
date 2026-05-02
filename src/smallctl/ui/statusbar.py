@@ -21,10 +21,12 @@ class StatusBar(Static):
         contract_phase: str = "",
         acceptance_progress: str = "",
         latest_verdict: str = "",
+        show_model: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._model = model
+        self._show_model = show_model
         self._phase = phase
         self._step = step
         self._mode = mode
@@ -82,12 +84,16 @@ class StatusBar(Static):
         self._refresh_display()
 
     def _build_status_text(self) -> str:
-        parts = [
-            f"model: {self._model}",
-            f"phase: {self._phase}",
-            f"step: {self._step}",
-            f"mode: {self._mode}",
-        ]
+        parts = []
+        if getattr(self, "_show_model", True):
+            parts.append(f"model: {self._model}")
+        parts.extend(
+            [
+                f"phase: {self._phase}",
+                f"step: {self._step}",
+                f"mode: {self._mode}",
+            ]
+        )
         if self._plan:
             parts.append(f"plan: {self._plan}")
         if self._active_step:

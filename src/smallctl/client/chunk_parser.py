@@ -7,7 +7,7 @@ import re
 from typing import Any, Literal
 
 _REASONING_WRAPPER_TAGS = ("analysis", "plan")
-_ASSISTANT_WRAPPER_TAGS = ("execution",)
+_ASSISTANT_WRAPPER_TAGS = ("execution", "response")
 
 
 def _normalize_thinking_tag_aliases(
@@ -46,6 +46,21 @@ def _extract_reasoning_wrapper_blocks(text: str) -> tuple[str, str]:
         normalized = re.sub(rf"</?{tag_name}>", "", normalized, flags=re.IGNORECASE)
 
     return normalized, "".join(reasoning_parts)
+
+
+def extract_response_from_wrapper_tags(text: str) -> str:
+    """Extract assistant response bodies wrapped in protocol-style tags."""
+    normalized = str(text or "")
+    response_parts: list[str] = []
+    pattern = re.compile(
+        r"<response>(?P<body>.*?)</response>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    for match in pattern.finditer(normalized):
+        body = match.group("body")
+        if body:
+            response_parts.append(body)
+    return "".join(response_parts)
 
 
 def merge_reasoning_text(*parts: str) -> str:
@@ -162,7 +177,7 @@ def _content_fragment_kind(
     value = str(raw_type or "").strip().lower()
     if value in {"reasoning", "reasoning_content", "thinking", "summary_text", "analysis", "plan"}:
         return "thinking"
-    if value in {"text", "output_text", "input_text", "message", "output_message"}:
+    if value in {"text", "output_text", "input_text", "message", "output_message", "response"}:
         return "assistant"
     return default_kind
 

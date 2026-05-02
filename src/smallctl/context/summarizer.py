@@ -8,6 +8,7 @@ from typing import Any
 from ..models.conversation import ConversationMessage
 from ..state import ContextBrief, EpisodicSummary, LoopState, TurnBundle
 from .policy import ContextPolicy, estimate_text_tokens
+from .observations import ObservationPacket, build_observation_packets
 from ..client import OpenAICompatClient
 
 
@@ -289,6 +290,7 @@ class ContextSummarizer:
             disproven_causes=data.get("disproven_causes", []),
             next_observations_needed=data.get("next_observations_needed", []),
             evidence_refs=data.get("evidence_refs", artifact_ids),
+            observation_refs=data.get("observation_refs", data.get("evidence_refs", [])),
             claim_refs=data.get("claim_refs", []),
             new_facts=data.get("new_facts", data.get("facts_confirmed", data.get("key_discoveries", []))),
             invalidated_facts=data.get("invalidated_facts", []),
@@ -331,6 +333,7 @@ class ContextSummarizer:
         state: LoopState,
         messages: list[ConversationMessage],
         step_range: tuple[int, int],
+        observation_packets: list[ObservationPacket] | None = None,
     ) -> TurnBundle | None:
         if not messages:
             return None
@@ -347,11 +350,54 @@ class ContextSummarizer:
             if artifact and artifact.source:
                 files_touched.append(artifact.source)
         files_touched = _dedupe(files_touched)
-        summary_lines = _dedupe(
+        transcript_summary_lines = _dedupe(
             _collect_messages(messages, role="assistant", limit=3)
             + _collect_messages(messages, role="tool", limit=2)
             + _collect_messages(messages, role="user", limit=1)
         )[:6]
+        selected_packets = _select_compaction_observation_packets(
+            state=state,
+            messages=messages,
+            artifact_ids=artifact_ids,
+            supplied_packets=observation_packets,
+            limit=max(8, min(16, len(messages) * 3)),
+        )
+        observation_summary_lines = _dedupe(
+            [_format_observation_summary_for_bundle(packet) for packet in selected_packets]
+        )[:6]
+        observation_refs = _dedupe(
+            [
+                str(packet.observation_id or "").strip()
+                for packet in selected_packets
+                if str(packet.observation_id or "").strip()
+            ]
+        )[:12]
+        observation_kinds = _dedupe(
+            [str(packet.kind or "").strip() for packet in selected_packets if str(packet.kind or "").strip()]
+        )[:8]
+        min_observation_lines = 2 if len(messages) >= 3 else 1
+        transcript_fallback_used = len(observation_summary_lines) < min_observation_lines
+        if observation_summary_lines:
+            summary_lines = list(observation_summary_lines)
+            if transcript_fallback_used:
+                for line in transcript_summary_lines:
+                    if line and line not in summary_lines:
+                        summary_lines.append(line)
+                    if len(summary_lines) >= 6:
+                        break
+            compaction_strategy = (
+                "observation_first_with_transcript_fallback"
+                if transcript_fallback_used
+                else "observation_first"
+            )
+        else:
+            summary_lines = transcript_summary_lines
+            compaction_strategy = "transcript_fallback"
+            transcript_fallback_used = True
+        evidence_refs = _dedupe(
+            observation_refs
+            + [record.evidence_id for record in state.reasoning_graph.evidence_records[-6:] if record.evidence_id]
+        )[:12]
         return TurnBundle(
             bundle_id=bundle_id,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -361,7 +407,12 @@ class ContextSummarizer:
             summary_lines=summary_lines,
             files_touched=files_touched[:6],
             artifact_ids=artifact_ids[:8],
-            evidence_refs=[record.evidence_id for record in state.reasoning_graph.evidence_records[-4:] if record.evidence_id],
+            evidence_refs=evidence_refs,
+            observation_refs=observation_refs,
+            observation_summaries=observation_summary_lines,
+            observation_kinds=observation_kinds,
+            compaction_strategy=compaction_strategy,
+            transcript_fallback_used=transcript_fallback_used,
             source_message_count=len(messages),
         )
 
@@ -380,15 +431,18 @@ class ContextSummarizer:
         files_touched: list[str] = []
         artifact_ids: list[str] = []
         evidence_refs: list[str] = []
+        observation_refs: list[str] = []
         for bundle in bundles:
             summary_lines.extend(bundle.summary_lines)
             files_touched.extend(bundle.files_touched)
             artifact_ids.extend(bundle.artifact_ids)
             evidence_refs.extend(bundle.evidence_refs)
+            observation_refs.extend(bundle.observation_refs)
         summary_lines = _dedupe(summary_lines)
         files_touched = _dedupe(files_touched)
         artifact_ids = _dedupe(artifact_ids)
         evidence_refs = _dedupe(evidence_refs)
+        observation_refs = _dedupe(observation_refs)
         key_discoveries = summary_lines[:4] or ["Turn-bundle compaction captured recent progress"]
         next_action_hint = (
             state.working_memory.next_actions[-1]
@@ -411,6 +465,7 @@ class ContextSummarizer:
             staleness_step=state.step_count,
             facts_confirmed=key_discoveries[:4],
             evidence_refs=evidence_refs[:12],
+            observation_refs=observation_refs[:12],
             new_facts=key_discoveries[:4],
             state_changes=_dedupe([f"Compacted turn bundle {bundle.bundle_id}" for bundle in bundles])[:4],
             decision_deltas=summary_lines[:4],
@@ -489,6 +544,118 @@ class ContextSummarizer:
         
         result = OpenAICompatClient.collect_stream(chunks)
         return result.assistant_text.strip()
+
+
+def _select_compaction_observation_packets(
+    *,
+    state: LoopState,
+    messages: list[ConversationMessage],
+    artifact_ids: list[str],
+    supplied_packets: list[ObservationPacket] | None,
+    limit: int,
+) -> list[ObservationPacket]:
+    fetch_limit = max(limit * 3, 24)
+    source_packets = supplied_packets or build_observation_packets(state, limit=fetch_limit)
+    packets = [packet for packet in source_packets if packet.summary]
+    if not packets:
+        return []
+    normalized_artifact_ids = {
+        str(artifact_id or "").strip() for artifact_id in artifact_ids if str(artifact_id or "").strip()
+    }
+    operation_ids = {
+        str(message.metadata.get("operation_id") or "").strip()
+        for message in messages
+        if isinstance(message.metadata, dict) and message.metadata.get("operation_id")
+    }
+
+    selected: list[ObservationPacket] = []
+    if normalized_artifact_ids:
+        selected.extend(
+            [
+                packet
+                for packet in packets
+                if str(packet.artifact_id or "").strip() in normalized_artifact_ids
+            ]
+        )
+    if operation_ids:
+        selected.extend(
+            [
+                packet
+                for packet in packets
+                if str(packet.operation_id or "").strip() in operation_ids
+            ]
+        )
+    selected = _dedupe_observation_packets(selected)
+    if not selected:
+        selected = [packet for packet in packets if not packet.stale]
+    if not selected:
+        selected = list(packets)
+    return _prioritize_compaction_observation_packets(selected, limit=limit)
+
+
+def _dedupe_observation_packets(packets: list[ObservationPacket]) -> list[ObservationPacket]:
+    deduped: list[ObservationPacket] = []
+    seen: set[str] = set()
+    for packet in packets:
+        observation_id = str(packet.observation_id or "").strip()
+        key = f"id:{observation_id}" if observation_id else f"{packet.kind}|{packet.summary}|{packet.path}|{packet.command}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(packet)
+    return deduped
+
+
+def _prioritize_compaction_observation_packets(
+    packets: list[ObservationPacket],
+    *,
+    limit: int,
+) -> list[ObservationPacket]:
+    if not packets:
+        return []
+    indexed = list(enumerate(packets))
+    indexed.sort(
+        key=lambda item: (
+            _observation_priority(item[1]),
+            -item[0],  # prefer more recent packets within a priority tier
+        )
+    )
+    selected = indexed[: max(0, limit)]
+    selected.sort(key=lambda item: item[0])  # preserve chronological flow for rendering
+    return [packet for _, packet in selected]
+
+
+def _observation_priority(packet: ObservationPacket) -> int:
+    if packet.stale:
+        return 90
+    adapter = str(getattr(packet, "adapter", "") or "").strip().lower()
+    if adapter == "verifier_verdict":
+        return 0
+    if adapter in {"file_read_fact", "file_state"}:
+        return 1
+    kind = str(packet.kind or "").strip().lower()
+    if kind == "verifier_verdict":
+        return 0
+    if kind == "file_fact":
+        return 1
+    if kind == "negative_observation":
+        return 2
+    if kind == "observation_list":
+        return 3
+    if kind == "shell_observation":
+        return 4
+    if kind == "artifact_replay":
+        return 5
+    return 6
+
+
+def _format_observation_summary_for_bundle(packet: ObservationPacket) -> str:
+    summary = str(packet.summary or "").strip()
+    if not summary:
+        return ""
+    if packet.observation_id:
+        return f"{packet.observation_id} {summary}"[:340]
+    return summary[:320]
 
 
 def _collect_messages(messages: list[ConversationMessage], *, role: str, limit: int) -> list[str]:

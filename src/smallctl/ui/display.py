@@ -13,7 +13,12 @@ from difflib import SequenceMatcher
 import re
 from typing import Any
 
-from ..models.events import UIEvent, UIEventType
+from ..models.events import (
+    UIEvent,
+    UIEventType,
+    UIStatusSnapshot,
+    compute_activity_for_event,
+)
 
 
 _DUPLICATE_STOPWORDS = {
@@ -91,6 +96,8 @@ def should_render_run_log_row(row: dict[str, Any]) -> bool:
 
 def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool_calls: bool) -> bool:
     """Determine if an event should be rendered based on user preferences."""
+    if event.event_type == UIEventType.STATUS:
+        return False
     if event.event_type in {UIEventType.SYSTEM, UIEventType.METRICS} and not show_system_messages:
         return False
     if event.event_type in {UIEventType.TOOL_CALL, UIEventType.TOOL_RESULT} and not show_tool_calls:
@@ -260,31 +267,6 @@ def _is_standalone_ip(token: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", token))
 
 
-def format_verifier_verdict(verdict: Any) -> str:
-    if not isinstance(verdict, dict) or not verdict:
-        return ""
-    verdict_name = str(verdict.get("verdict") or "").strip()
-    target = str(verdict.get("target") or verdict.get("command") or "").strip()
-    exit_code = verdict.get("exit_code")
-    status = verdict_name or "unknown"
-    if verdict_name == "needs_human":
-        status = "needs human"
-    bits = [status]
-    if target:
-        bits.append(target)
-    if exit_code not in (None, ""):
-        bits.append(f"exit {exit_code}")
-    return " | ".join(bits)
-
-
-def format_acceptance_progress(checklist: list[dict[str, Any]] | None) -> str:
-    if not checklist:
-        return ""
-    total = len(checklist)
-    satisfied = sum(1 for item in checklist if bool(item.get("satisfied")))
-    return f"{satisfied}/{total}"
-
-
 class StatusState:
     """
     Immutable state object for status bar values.
@@ -336,64 +318,37 @@ class StatusState:
         api_errors: int = 0,
         active_task: Any = None,
     ) -> "StatusState":
-        """Build a StatusState from a Harness instance and kwargs."""
-        model = str(harness_kwargs.get("model", "n/a"))
-        phase = str(harness_kwargs.get("phase", "explore"))
-        step: int | str = 0
-        mode = "execution"
-        plan_label = ""
-        active_step_label = ""
-        contract_phase = ""
-        acceptance_progress = ""
-        latest_verdict = ""
-        contract_flow_ui = bool(harness_kwargs.get("contract_flow_ui", False))
-        token_usage = 0
-        token_limit = 0
-
-        if harness is not None:
-            phase = harness.state.current_phase
-            step = harness.state.step_count
-            mode = "planning" if harness.state.planning_mode_enabled else "execution"
-            plan = harness.state.active_plan or harness.state.draft_plan
-            if plan is not None:
-                total_steps = max(1, len(plan.iter_steps()))
-                completed_steps = sum(1 for item in plan.iter_steps() if item.status == "completed")
-                plan_label = f"{completed_steps}/{total_steps}"
-                active_step = plan.active_step()
-                if active_step is not None:
-                    active_step_label = active_step.step_id
-            contract_phase = harness.state.contract_phase()
-            acceptance_progress = format_acceptance_progress(harness.state.acceptance_checklist())
-            latest_verdict = format_verifier_verdict(harness.state.current_verifier_verdict())
-            token_usage = int(
-                harness.state.scratchpad.get("context_used_tokens", getattr(harness.state, "token_usage", 0))
-            )
-            context_policy = getattr(harness, "context_policy", None)
-            server_context_limit = getattr(harness, "server_context_limit", None)
-            guards = getattr(harness, "guards", None)
-            token_limit = (
-                getattr(context_policy, "max_prompt_tokens", None)
-                or server_context_limit
-                or getattr(guards, "max_tokens", 0)
-            )
-
-        if not activity and active_task is not None and not active_task.done():
-            activity = "thinking..."
-
-        return cls(
-            model=model,
-            phase=phase,
-            step=step,
-            mode=mode,
-            plan=plan_label,
-            active_step=active_step_label,
-            activity=activity,
-            contract_flow_ui=contract_flow_ui,
-            contract_phase=contract_phase,
-            acceptance_progress=acceptance_progress,
-            latest_verdict=latest_verdict,
-            token_usage=token_usage,
-            token_total=harness.state.token_usage if harness else 0,
-            token_limit=token_limit or 0,
+        snapshot_activity = activity
+        if not snapshot_activity and active_task is not None and not active_task.done():
+            snapshot_activity = "thinking..."
+        snapshot = UIStatusSnapshot.from_harness(
+            harness,
+            harness_kwargs,
+            activity=snapshot_activity,
             api_errors=api_errors,
+        )
+        return cls.from_snapshot(snapshot)
+
+    @classmethod
+    def from_snapshot(cls, snapshot: UIStatusSnapshot | dict[str, Any]) -> "StatusState":
+        if isinstance(snapshot, UIStatusSnapshot):
+            payload = snapshot.to_dict()
+        else:
+            payload = dict(snapshot)
+        return cls(
+            model=str(payload.get("model", "n/a") or "n/a"),
+            phase=str(payload.get("phase", "explore") or "explore"),
+            step=payload.get("step", 0),
+            mode=str(payload.get("mode", "execution") or "execution"),
+            plan=str(payload.get("plan", "") or ""),
+            active_step=str(payload.get("active_step", "") or ""),
+            activity=str(payload.get("activity", "") or ""),
+            contract_flow_ui=bool(payload.get("contract_flow_ui", False)),
+            contract_phase=str(payload.get("contract_phase", "") or ""),
+            acceptance_progress=str(payload.get("acceptance_progress", "") or ""),
+            latest_verdict=str(payload.get("latest_verdict", "") or ""),
+            token_usage=max(0, int(payload.get("token_usage", 0) or 0)),
+            token_total=max(0, int(payload.get("token_total", 0) or 0)),
+            token_limit=max(0, int(payload.get("token_limit", 0) or 0)),
+            api_errors=max(0, int(payload.get("api_errors", 0) or 0)),
         )

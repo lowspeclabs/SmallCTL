@@ -34,6 +34,14 @@ from .provider_adapters import (
 from .streaming import SSEStreamer
 from .usage import extract_context_limit, extract_runtime_context_limit
 from .usage import detect_provider_profile
+from .model_listing import (
+    ModelListResult,
+    ProviderModel,
+    fetch_available_models,
+    parse_lmstudio_models,
+    parse_ollama_models,
+    parse_openai_models,
+)
 
 __all__ = [
     # Data classes
@@ -62,4 +70,11 @@ __all__ = [
     "extract_context_limit",
     "extract_runtime_context_limit",
     "detect_provider_profile",
+    # Model listing
+    "ModelListResult",
+    "ProviderModel",
+    "fetch_available_models",
+    "parse_lmstudio_models",
+    "parse_ollama_models",
+    "parse_openai_models",
 ]

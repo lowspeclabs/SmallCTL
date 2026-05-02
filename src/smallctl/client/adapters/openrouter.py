@@ -27,7 +27,24 @@ class OpenRouterAdapter:
         return mutated
 
     def mutate_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return dict(payload)
+        mutated = dict(payload)
+        raw_tools = mutated.get("tools")
+        if not isinstance(raw_tools, list):
+            raw_tools = []
+        available_tool_names = {
+            str((tool.get("function") or {}).get("name") or "").strip()
+            for tool in raw_tools
+            if isinstance(tool, dict)
+            and isinstance(tool.get("function"), dict)
+            and str((tool.get("function") or {}).get("name") or "").strip()
+        }
+        messages = mutated.get("messages")
+        if isinstance(messages, list):
+            mutated["messages"] = sanitize_messages_for_openrouter(
+                messages,
+                available_tool_names=available_tool_names or None,
+            )
+        return mutated
 
     def should_retry_without_stream_options(self, exc: Any) -> bool:
         return _retry_without_stream_options(exc)

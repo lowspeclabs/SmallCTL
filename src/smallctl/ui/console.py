@@ -12,6 +12,7 @@ class ConsolePane(VerticalScroll):
         super().__init__(*args, **kwargs)
         self._active_assistant_turn: AssistantTurnWidget | None = None
         self._last_system_message: str = ""
+        self._autoscroll_scheduled = False
 
     async def on_mount(self) -> None:
         await self.mount(Vertical(id="bubble-stack"))
@@ -61,14 +62,20 @@ class ConsolePane(VerticalScroll):
                 await self._append_assistant(event.content)
             return
         if event.event_type == UIEventType.THINKING:
+            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
-            await self._append_thinking(event.content)
+            if event.data.get("kind") == "replace":
+                await self._replace_thinking(event.content)
+            else:
+                await self._append_thinking(event.content)
             return
         if event.event_type == UIEventType.SHELL_STREAM:
+            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
             await self._append_shell_stream(event.content)
             return
         if event.event_type == UIEventType.TOOL_CALL:
+            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
             await self._append_tool_call(
                 str(event.data.get("display_text") or event.content),
@@ -128,6 +135,11 @@ class ConsolePane(VerticalScroll):
         await turn.append_thinking_text(text)
         self._schedule_autoscroll()
 
+    async def _replace_thinking(self, text: str) -> None:
+        turn = await self._ensure_assistant_turn()
+        await turn.replace_thinking_text(text)
+        self._schedule_autoscroll()
+
     async def _append_shell_stream(self, text: str) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.append_shell_stream(text)
@@ -178,6 +190,16 @@ class ConsolePane(VerticalScroll):
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
 
+    def _maybe_roll_assistant_turn_for_meta_event(self, event_type: UIEventType) -> None:
+        turn = self._active_assistant_turn
+        if turn is None or not turn.has_assistant_text():
+            return
+        if event_type == UIEventType.THINKING:
+            self._active_assistant_turn = None
+            return
+        if event_type in {UIEventType.TOOL_CALL, UIEventType.SHELL_STREAM} and turn.has_meta_content():
+            self._active_assistant_turn = None
+
     def _schedule_autoscroll(self) -> None:
         """
         Smart autoscroll: only scroll to end if we are already at or near the bottom.
@@ -186,8 +208,16 @@ class ConsolePane(VerticalScroll):
         # If we are within 2 lines of the bottom, consider it 'at bottom' for autoscroll.
         # We use a small threshold (e.g. 20 pixels or 2 lines) to account for layout jitter.
         THRESHOLD = 2
-        if self.scroll_y >= self.max_scroll_y - THRESHOLD:
-            self.call_after_refresh(self.scroll_end, animate=False)
+        if self.scroll_y < self.max_scroll_y - THRESHOLD:
+            return
+        if self._autoscroll_scheduled:
+            return
+        self._autoscroll_scheduled = True
+        self.call_after_refresh(self._run_scheduled_autoscroll)
+
+    def _run_scheduled_autoscroll(self) -> None:
+        self._autoscroll_scheduled = False
+        self.scroll_end(animate=False)
 
     def get_last_system_message(self) -> str:
         return self._last_system_message

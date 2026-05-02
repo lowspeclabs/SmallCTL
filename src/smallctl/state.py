@@ -25,6 +25,10 @@ from .state_schema import (
     PromptBudgetSnapshot,
     ReasoningGraph,
     RunBrief,
+    StepEvidenceArtifact,
+    StepOutputSpec,
+    StepVerificationResult,
+    StepVerifierSpec,
     TurnBundle,
     WorkingMemory,
     WriteSession,
@@ -37,6 +41,8 @@ from .state_coercion import (
     _coerce_working_memory,
     _coerce_execution_plan,
     _coerce_plan_interrupt,
+    _coerce_step_evidence_artifact,
+    _coerce_step_verification_result,
     _coerce_artifact_record,
     _coerce_episodic_summary,
     _coerce_context_brief,
@@ -106,6 +112,12 @@ class LoopState(LoopStateFlowMixin):
     planner_requested_output_format: str = ""
     planner_resume_target_mode: str = "loop"
     planner_interrupt: PlanInterrupt | None = None
+    plan_execution_mode: bool = False
+    active_step_id: str = ""
+    active_step_run_id: str = ""
+    step_sandbox_history: list[ConversationMessage] = field(default_factory=list)
+    step_evidence: dict[str, StepEvidenceArtifact] = field(default_factory=dict)
+    step_verification_result: StepVerificationResult | None = None
     artifacts: dict[str, ArtifactRecord] = field(default_factory=dict)
     episodic_summaries: list[EpisodicSummary] = field(default_factory=list)
     context_briefs: list[ContextBrief] = field(default_factory=list)
@@ -192,6 +204,15 @@ class LoopState(LoopStateFlowMixin):
             "planner_requested_output_format": self.planner_requested_output_format,
             "planner_resume_target_mode": self.planner_resume_target_mode,
             "planner_interrupt": json_safe_value(self.planner_interrupt),
+            "plan_execution_mode": self.plan_execution_mode,
+            "active_step_id": self.active_step_id,
+            "active_step_run_id": self.active_step_run_id,
+            "step_sandbox_history": [
+                json_safe_value(m.to_dict(include_retrieval_safe_text=True))
+                for m in self.step_sandbox_history
+            ],
+            "step_evidence": json_safe_value(self.step_evidence),
+            "step_verification_result": json_safe_value(self.step_verification_result),
             "artifacts": json_safe_value(self.artifacts),
             "episodic_summaries": json_safe_value(self.episodic_summaries),
             "context_briefs": json_safe_value(self.context_briefs),
@@ -231,7 +252,7 @@ class LoopState(LoopStateFlowMixin):
         migrated = _migrate_loop_state_payload(dict(data), incoming_version=incoming_version)
         raw_recent_messages = migrated.get("recent_messages")
         if raw_recent_messages is None:
-            raw_recent_messages = _coerce_list_payload(migrated.get("conversation_history"))[-6:]
+            raw_recent_messages = _coerce_list_payload(migrated.get("conversation_history"))
         else:
             raw_recent_messages = _coerce_list_payload(raw_recent_messages)
         recent_messages = [
@@ -242,7 +263,9 @@ class LoopState(LoopStateFlowMixin):
         raw = dict(migrated)
         raw["schema_version"] = LOOP_STATE_SCHEMA_VERSION
         raw.pop("conversation_history", None)
-        recent_limit = max(_coerce_int(migrated.get("recent_message_limit"), default=6), 1)
+        stored_recent_limit = migrated.get("recent_message_limit")
+        default_recent_limit = max(len(recent_messages), 6)
+        recent_limit = max(_coerce_int(stored_recent_limit, default=default_recent_limit), 1)
         recent_messages = _trim_recent_messages(recent_messages, limit=recent_limit)
         raw["current_phase"] = str(migrated.get("current_phase", "explore") or "explore")
         raw["thread_id"] = str(migrated.get("thread_id", "") or "")
@@ -276,6 +299,22 @@ class LoopState(LoopStateFlowMixin):
         raw["planner_requested_output_format"] = str(migrated.get("planner_requested_output_format", "") or "")
         raw["planner_resume_target_mode"] = str(migrated.get("planner_resume_target_mode", "loop") or "loop")
         raw["planner_interrupt"] = _coerce_plan_interrupt(migrated.get("planner_interrupt"))
+        raw["plan_execution_mode"] = _coerce_bool(migrated.get("plan_execution_mode"), default=False)
+        raw["active_step_id"] = str(migrated.get("active_step_id", "") or "")
+        raw["active_step_run_id"] = str(migrated.get("active_step_run_id", "") or "")
+        raw["step_sandbox_history"] = [
+            message
+            for msg in _coerce_list_payload(migrated.get("step_sandbox_history"))
+            if (message := _coerce_conversation_message(msg)) is not None
+        ]
+        raw["step_evidence"] = {
+            str(key): evidence
+            for key, value in _coerce_dict_payload(migrated.get("step_evidence")).items()
+            if (evidence := _coerce_step_evidence_artifact(value, step_id=str(key))) is not None
+        }
+        raw["step_verification_result"] = _coerce_step_verification_result(
+            migrated.get("step_verification_result")
+        )
         raw["artifacts"] = {
             key: _coerce_artifact_record(value, artifact_id=key)
             for key, value in _coerce_dict_payload(migrated.get("artifacts")).items()

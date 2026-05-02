@@ -223,11 +223,13 @@ class LoopStateFlowMixin:
             return True
         normalized_intent = normalize_intent_label(self.active_intent)
         if normalized_intent in {
+            "author_write",
             "write_file",
             "requested_write_file",
             "requested_file_write",
             "requested_file_append",
             "requested_file_patch",
+            "requested_ast_patch",
             "requested_file_delete",
         }:
             return True
@@ -237,7 +239,7 @@ class LoopStateFlowMixin:
             for tag in (self.intent_tags or [])
             if str(tag).strip()
         }
-        if intent_tags & {"write_file", "file_write", "file_patch", "mutate_repo"}:
+        if intent_tags & {"write_file", "file_write", "file_patch", "ast_patch", "mutate_repo"}:
             return True
 
         target_paths = self.scratchpad.get("_task_target_paths")
@@ -262,6 +264,9 @@ class LoopStateFlowMixin:
             "replace ",
             "refactor ",
             "fix ",
+            "setup ",
+            "deploy ",
+            "configure ",
         )
         artifact_markers = (
             "script",
@@ -276,8 +281,12 @@ class LoopStateFlowMixin:
             "test suite",
             "tests",
         )
-        return any(marker in task_text for marker in write_markers) and (
-            has_targets or any(marker in task_text for marker in artifact_markers)
+        is_setup_or_deploy = any(
+            marker in task_text for marker in ("setup ", "deploy ", "configure ")
+        )
+        return is_setup_or_deploy or (
+            any(marker in task_text for marker in write_markers)
+            and (has_targets or any(marker in task_text for marker in artifact_markers))
         )
 
     def contract_phase(self) -> str:

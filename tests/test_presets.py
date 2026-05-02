@@ -10,6 +10,7 @@ def test_preset_applies_defaults(monkeypatch, tmp_path: Path) -> None:
     cfg = resolve_config({"preset": "safe-small-model"})
     assert cfg.preset == "safe-small-model"
     assert cfg.max_prompt_tokens == 4096
+    assert cfg.max_prompt_tokens_explicit is False
     assert cfg.reasoning_mode == "off"
 
 
@@ -17,6 +18,7 @@ def test_cli_override_wins_over_preset(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     cfg = resolve_config({"preset": "safe-small-model", "max_prompt_tokens": 6000})
     assert cfg.max_prompt_tokens == 6000
+    assert cfg.max_prompt_tokens_explicit is True
 
 
 def test_local_yaml_override_wins_over_preset(monkeypatch, tmp_path: Path) -> None:
@@ -60,3 +62,27 @@ def test_lmstudio_warns_when_first_token_timeout_is_too_low(monkeypatch, tmp_pat
     monkeypatch.chdir(tmp_path)
     cfg = resolve_config({"provider_profile": "lmstudio", "first_token_timeout_sec": 25})
     assert any("first_token_timeout_sec below 45s" in item for item in cfg.compatibility_warnings)
+
+
+def test_invalid_provider_profile_fails_fast(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    try:
+        resolve_config({"provider_profile": "invalid-provider"})
+    except ValueError as exc:
+        message = str(exc)
+        assert "Invalid provider profile" in message
+        assert "Supported provider_profile values" in message
+    else:
+        raise AssertionError("resolve_config should fail for invalid provider profiles")
+
+
+def test_openrouter_endpoint_overrides_generic_profile_with_warning(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = resolve_config(
+        {
+            "endpoint": "https://openrouter.ai/api/v1",
+            "provider_profile": "generic",
+        }
+    )
+    assert cfg.provider_profile == "openrouter"
+    assert any("OpenRouter endpoint detected; overriding provider_profile" in item for item in cfg.compatibility_warnings)

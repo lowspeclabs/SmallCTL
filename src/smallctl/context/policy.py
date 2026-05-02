@@ -26,6 +26,10 @@ class ContextPolicy:
     max_summary_items: int = 3
     max_artifact_snippets: int = 4
     artifact_snippet_token_limit: int = 400
+    multi_file_artifact_snippet_limit: int = 8
+    multi_file_primary_file_limit: int = 3
+    remote_task_artifact_snippet_limit: int = 8
+    remote_task_primary_file_limit: int = 2
     artifact_summarization_threshold: int = 1560
     prior_outcome_token_limit: int = 220
     max_prior_outcomes: int = 4
@@ -38,8 +42,12 @@ class ContextPolicy:
     hot_message_limit: int = 8
     warm_brief_limit: int = 3
     warm_tier_token_budget: int = 400
-    observation_token_limit: int = 260
-    max_observation_items: int = 6
+    observation_token_limit: int = 768
+    observation_token_floor: int = 2048
+    min_observation_items: int = 3
+    max_observation_items: int = 8
+    fresh_tool_output_token_limit: int = 1200
+    fresh_tool_output_items: int = 4
     turn_bundle_limit: int = 6
     coding_profile_enabled: bool = True
     cold_fact_limit: int = 12
@@ -57,6 +65,19 @@ class ContextPolicy:
     max_hot_messages: int = 256
     compaction_strategy: str = "lazy"   # "lazy" | "aggressive"
     backend_profile: str = "generic"
+
+    def scaled_inline_limit(
+        self,
+        *,
+        soft_limit: int | None,
+        ratio: float,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if soft_limit is None or soft_limit <= 0:
+            return minimum
+        scaled = int(soft_limit * ratio)
+        return max(minimum, min(maximum, scaled))
 
     @property
     def section_token_limits(self) -> dict[str, int]:
@@ -107,6 +128,23 @@ class ContextPolicy:
             self.warm_tier_ratio = 0.10
             self.min_hot_messages = 8
 
+    def apply_model_profile(self, model_name: str | None) -> None:
+        """Tune context pressure for small local models after provider defaults."""
+        from ..guards import is_four_b_or_under_model_name
+
+        if not is_four_b_or_under_model_name(model_name):
+            return
+        if self.backend_profile not in {"lmstudio", "ollama", "llamacpp"}:
+            return
+
+        self.messages_per_k_tokens = min(self.messages_per_k_tokens, 0.60)
+        self.hot_history_ratio = min(self.hot_history_ratio, 0.34)
+        self.retrieval_ratio = min(self.retrieval_ratio, 0.16)
+        self.warm_tier_ratio = min(self.warm_tier_ratio, 0.08)
+        self.min_hot_messages = min(self.min_hot_messages, 6)
+        self.max_hot_messages = min(self.max_hot_messages, 24)
+        self.compaction_strategy = "aggressive"
+
     def recalculate_quotas(self, total_context: int, *, backend_profile: str | None = None) -> None:
         """Called once after server context discovery. Recalculates all section
         token budgets from ratios so the policy is internally consistent."""
@@ -124,6 +162,18 @@ class ContextPolicy:
         self.episodic_summary_token_limit = int(combined_retrieval * 0.25)
         self.working_memory_token_limit = int(combined_retrieval * 0.15)
         self.warm_tier_token_budget = int(soft * self.warm_tier_ratio)
+        self.tool_result_inline_token_limit = self.scaled_inline_limit(
+            soft_limit=soft,
+            ratio=0.02,
+            minimum=325,
+            maximum=8000,
+        )
+        self.artifact_read_inline_token_limit = self.scaled_inline_limit(
+            soft_limit=soft,
+            ratio=0.04,
+            minimum=1024,
+            maximum=16000,
+        )
 
         # Hot message window — linear scaling
         self.hot_message_limit = max(

@@ -6,9 +6,18 @@ from typing import Any, Awaitable, Callable, Literal
 
 ToolHandler = Callable[..., dict[str, Any] | Awaitable[dict[str, Any]]]
 ToolTier = Literal["tier1", "tier2"]
-ToolRisk = Literal["low", "medium", "high"]
+ToolRisk = Literal["low", "medium", "high", "network_read"]
 ToolMode = Literal["chat", "loop", "indexer", "planning"]
-ToolProfile = Literal["core", "data", "network", "support", "mutate", "indexer"]
+ToolProfile = Literal[
+    "core",
+    "data",
+    "network",
+    "network_read",
+    "network_raw",
+    "support",
+    "mutate",
+    "indexer",
+]
 
 
 @dataclass

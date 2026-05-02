@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from ..models.conversation import ConversationMessage
 from ..redaction import redact_sensitive_text
+from ..state_memory import trim_recent_messages
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -13,16 +14,11 @@ from ..state import (
     LoopState,
     PromptBudgetSnapshot,
     TurnBundle,
-    clip_string_list,
-    clip_text_value,
-    normalize_intent_label,
 )
 from .frame import PromptStateFrame
 from .frame_compiler import PromptStateFrameCompiler
 from .observations import ObservationPacket
 from .policy import ContextPolicy, estimate_text_tokens
-from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
-from .retrieval import LexicalRetriever
 
 
 @dataclass
@@ -69,7 +65,7 @@ class PromptAssembler:
         system_tokens = estimate_text_tokens(system_msg_text)
 
         transcript_limit = recent_message_limit or self.policy.recent_message_limit
-        transcript = state.recent_messages[-transcript_limit:]
+        transcript = trim_recent_messages(list(state.recent_messages), limit=transcript_limit)
         max_transcript_tokens = getattr(self.policy, "transcript_token_limit", int(soft_limit * 0.45))
         transcript_tokens = 0
         final_transcript = []
@@ -105,6 +101,7 @@ class PromptAssembler:
             "run_brief": run_brief_tokens,
             "working_memory": working_memory_tokens,
             "normalized_observations": 0,
+            "fresh_tool_outputs": 0,
             "turn_bundles": 0,
             "warm_briefs": 0,
             "episodic_summaries": 0,
@@ -165,16 +162,43 @@ class PromptAssembler:
             else ""
         )
 
-        observation_items = list(frame.evidence_packet.observations[: self.policy.max_observation_items])
+        observation_items = list(frame.evidence_packet.observations[-self.policy.max_observation_items :])
         winners_observations: list[ObservationPacket] = []
         observation_t = 0
-        for observation in observation_items:
+        observation_budget = self._observation_budget(
+            soft_limit=soft_limit,
+            remaining_budget=remaining_budget,
+        )
+        min_observation_items = max(1, int(getattr(self.policy, "min_observation_items", 3) or 3))
+        priority_indices = set(
+            range(max(0, len(observation_items) - min_observation_items), len(observation_items))
+        )
+        selected_indices: set[int] = set()
+
+        for index in sorted(priority_indices):
+            observation = observation_items[index]
             text = self._render_observation_item(observation)
             t = estimate_text_tokens(text)
-            if observation_t + t > min(self.policy.observation_token_limit, remaining_budget * 0.35) and winners_observations:
-                break
+            if observation_t + t <= observation_budget or len(selected_indices) < min_observation_items:
+                observation_t += t
+                selected_indices.add(index)
+
+        for index in range(len(observation_items) - 1, -1, -1):
+            if index in selected_indices:
+                continue
+            observation = observation_items[index]
+            text = self._render_observation_item(observation)
+            t = estimate_text_tokens(text)
+            if observation_t + t > observation_budget:
+                continue
             observation_t += t
-            winners_observations.append(observation)
+            selected_indices.add(index)
+
+        winners_observations = [
+            observation
+            for index, observation in enumerate(observation_items)
+            if index in selected_indices
+        ]
         dropped_observation_ids = [
             observation.observation_id
             for observation in observation_items
@@ -197,6 +221,12 @@ class PromptAssembler:
             if frame.evidence_packet.observations
             else ""
         )
+
+        fresh_tool_output_text = self._render_fresh_tool_outputs(state) if include_structured_sections else ""
+        fresh_tool_output_t = estimate_text_tokens(fresh_tool_output_text)
+        if fresh_tool_output_text:
+            section_tokens["fresh_tool_outputs"] = fresh_tool_output_t
+            remaining_budget -= fresh_tool_output_t
 
         turn_bundle_items = list(frame.evidence_packet.turn_bundles)
         winners_turn_bundles: list[TurnBundle] = []
@@ -336,20 +366,43 @@ class PromptAssembler:
         messages = [
             ConversationMessage(role="system", content=system_msg_text).to_dict()
         ]
-        
-        has_user = False
+
+        user_contents: set[str] = set()
         for message in final_transcript:
             normalized = self._normalize_recent_message(message)
             if normalized is not None:
                 messages.append(normalized.to_dict())
                 if normalized.role == "user":
-                    if normalized.content == frame.spine.task_goal:
-                        has_user = True
-        
-        if not has_user:
-            task_text = frame.spine.task_goal
-            if task_text:
-                messages.insert(1, ConversationMessage(role="user", content=task_text).to_dict())
+                    user_contents.add(self._normalize_user_prompt_text(normalized.content))
+
+        preserved_user_messages: list[ConversationMessage] = []
+        task_text = str(frame.spine.task_goal or "").strip()
+        task_key = self._normalize_user_prompt_text(task_text)
+        if task_text and task_key not in user_contents:
+            preserved_user_messages.append(ConversationMessage(role="user", content=task_text))
+            user_contents.add(task_key)
+
+        latest_user = self._latest_visible_user_message(state)
+        if latest_user is not None:
+            latest_user = self._compact_message_for_prompt(
+                state,
+                latest_user,
+                transcript_token_limit=max_transcript_tokens,
+            )
+            latest_key = self._normalize_user_prompt_text(latest_user.content)
+            if latest_key and latest_key not in user_contents:
+                preserved_user_messages.append(latest_user)
+                user_contents.add(latest_key)
+
+        if preserved_user_messages:
+            preserved_tokens = sum(
+                estimate_text_tokens(message.content or "")
+                for message in preserved_user_messages
+            )
+            transcript_tokens += preserved_tokens
+            section_tokens["recent_messages"] += preserved_tokens
+            for message in reversed(preserved_user_messages):
+                messages.insert(1, message.to_dict())
 
         if not include_structured_sections:
             if frame.evidence_packet.observations:
@@ -408,6 +461,8 @@ class PromptAssembler:
         ephemeral_sections = []
         if include_structured_sections and observation_text:
             ephemeral_sections.append(observation_text)
+        if include_structured_sections and fresh_tool_output_text:
+            ephemeral_sections.append(fresh_tool_output_text)
         if include_structured_sections and turn_bundle_text:
             ephemeral_sections.append(turn_bundle_text)
         if include_structured_sections and experience_text:
@@ -483,328 +538,38 @@ class PromptAssembler:
 
     @staticmethod
     def _render_run_brief(state: LoopState) -> str:
-        brief = state.run_brief
-        has_content = any(
-            [
-                brief.original_task,
-                brief.task_contract,
-                brief.current_phase_objective,
-                state.active_intent,
-                bool(brief.constraints),
-                bool(brief.acceptance_criteria),
-            ]
-        )
-        if not has_content:
-            return ""
-        parts = ["Run brief:"]
-        parts.append(f"  CWD: {state.cwd}")
-
-        if brief.original_task:
-            parts.append(f"  Goal: {brief.original_task}")
-
-        if brief.task_contract:
-            parts.append(f"  Contract: {brief.task_contract}")
-
-        if brief.current_phase_objective:
-            parts.append(f"  Phase focus: {brief.current_phase_objective}")
-
-        if state.active_intent:
-            parts.append(f"  Active intent: {normalize_intent_label(state.active_intent)}")
-
-        if brief.constraints:
-            parts.append("  Constraints: " + "; ".join(brief.constraints))
-
-        if brief.acceptance_criteria:
-            parts.append("  Acceptance criteria: " + "; ".join(brief.acceptance_criteria))
-
-        if len(parts) == 1:
-            return ""
-        return "\n".join(parts)
+        return PromptStateFrameCompiler._render_run_brief(state)
 
     @staticmethod
     def _render_working_memory(state: LoopState) -> str:
-        memory = state.working_memory
-        plan = state.active_plan or state.draft_plan
-        has_content = any(
-            [
-                memory.current_goal,
-                memory.plan,
-                memory.decisions,
-                memory.open_questions,
-                memory.known_facts,
-                memory.failures,
-                memory.next_actions,
-                bool((state.scratchpad.get("_session_notepad") or {}).get("entries"))
-                if isinstance(state.scratchpad.get("_session_notepad"), dict)
-                else False,
-                plan is not None,
-                bool(state.artifacts),
-                state.write_session is not None,
-            ]
+        return PromptStateFrameCompiler._render_working_memory(
+            state,
+            phase_lines=PromptStateFrameCompiler._render_phase_context(state),
+            coding_anchor_lines=PromptStateFrameCompiler._coding_anchor_lines(state),
         )
-        if not has_content:
-            return ""
-        sections = [f"Current CWD: {state.cwd}"]
-        task_targets = state.scratchpad.get("_task_target_paths")
-        if isinstance(task_targets, list):
-            cleaned_targets = [str(path).strip() for path in task_targets if str(path).strip()]
-            if cleaned_targets:
-                sections.append("Task targets: " + " | ".join(cleaned_targets[:3]))
-        current_goal = LexicalRetriever._effective_current_goal(state)
-        if current_goal:
-            sections.append("Current goal: " + current_goal)
-        if memory.plan:
-            sections.append("Plan: " + " | ".join(memory.plan))
-        if memory.decisions:
-            sections.append("Decisions: " + " | ".join(memory.decisions))
-        if memory.open_questions:
-            sections.append("Open questions: " + " | ".join(memory.open_questions))
-        if memory.known_facts:
-            sections.append("Known facts: " + " | ".join(memory.known_facts))
-        if memory.failures:
-            sections.append("Known failures: " + " | ".join(memory.failures))
-        if memory.next_actions:
-            sections.append("Next actions: " + " | ".join(memory.next_actions))
-        notepad_section = PromptAssembler._render_session_notepad(state)
-        if notepad_section:
-            sections.append(notepad_section)
-        phase_sections = PromptAssembler._render_phase_context(state)
-        if phase_sections:
-            sections.extend(phase_sections)
-        if plan is not None:
-            sections.append("Plan summary: " + plan.goal)
-            sections.append(f"Plan status: {plan.status}")
-            sections.append(
-                "Plan resolved: "
-                + ("yes" if state.plan_resolved else "no")
-                + (f" | Plan artifact: {state.plan_artifact_id}" if state.plan_artifact_id else "")
-            )
-            if state.plan_artifact_id:
-                sections.append(
-                    f"Plan playbook artifact: {state.plan_artifact_id} (use this as the staged implementation checklist)"
-                )
-            active_step = plan.active_step()
-            if active_step is not None:
-                sections.append(f"Active step: {active_step.step_id} [{active_step.status}] {active_step.title}")
-            for step in plan.steps[:6]:
-                sections.append(f"Plan step: [{step.status}] {step.step_id} {step.title}")
-            if plan.requested_output_path:
-                sections.append(f"Plan export: {plan.requested_output_path}")
-        elif state.plan_resolved and memory.plan:
-            sections.append(
-                "Plan resolved: yes"
-                + (f" | Plan artifact: {state.plan_artifact_id}" if state.plan_artifact_id else "")
-            )
-            if state.plan_artifact_id:
-                sections.append(
-                    f"Plan playbook artifact: {state.plan_artifact_id} (use this as the staged implementation checklist)"
-                )
-        if state.contract_phase() == "repair":
-            repair_bits = [f"Repair phase: {state.contract_phase()}"]
-            if state.last_failure_class:
-                repair_bits.append(f"Failure class: {state.last_failure_class}")
-            if state.repair_cycle_id:
-                repair_bits.append(
-                    f"System repair cycle: {state.repair_cycle_id} (diagnostic only; not a write_session_id)"
-                )
-            if state.files_changed_this_cycle:
-                repair_bits.append(
-                    "Files changed this cycle: " + ", ".join(state.files_changed_this_cycle[-5:])
-                )
-            if state.stagnation_counters:
-                counters = ", ".join(
-                    f"{name}={count}"
-                    for name, count in sorted(state.stagnation_counters.items())
-                    if count
-                )
-                if counters:
-                    repair_bits.append(f"Stagnation: {counters}")
-            sections.append("Repair focus: " + " | ".join(repair_bits))
-        if state.write_session:
-            sections.append(PromptAssembler._render_write_session(state))
-
-        if state.artifacts:
-            art_lines = []
-            for aid, art in state.artifacts.items():
-                if is_superseded_artifact(art):
-                    continue
-                if not is_prompt_visible_artifact(art):
-                    continue
-                summary_snippet = (art.summary or art.tool_name or "").strip()[:90]
-                art_lines.append(f"  - {aid}: {summary_snippet}")
-            if art_lines:
-                sections.append(
-                    "Available Artifacts (compressed summaries already in context; page forward with artifact_read(start_line=...) only if you need more unseen lines):\n"
-                    + "\n".join(art_lines)
-                )
-        if not sections:
-            return ""
-        return "Working memory:\n" + "\n".join(sections)
 
     @staticmethod
     def _render_session_notepad(state: LoopState) -> str:
-        payload = state.scratchpad.get("_session_notepad")
-        if not isinstance(payload, dict):
-            return ""
-        raw_entries = payload.get("entries")
-        if not isinstance(raw_entries, list):
-            return ""
-
-        entries, clipped = clip_string_list(
-            raw_entries,
-            limit=5,
-            item_char_limit=160,
-        )
-        if not entries:
-            return ""
-
-        bits = ["Session notepad: " + " | ".join(entries)]
-        bits.append("Keep this brief; the notepad is durable session memory, not a transcript dump.")
-        if clipped or len(entries) < len([item for item in raw_entries if str(item).strip()]):
-            bits.append("Some entries were clipped to keep the session note concise.")
-        return " ".join(bits)
+        return PromptStateFrameCompiler._render_session_notepad(state)
 
     @staticmethod
     def _render_write_session(state: LoopState) -> str:
-        session = state.write_session
-        ws_bits = [f"Session: {session.write_session_id}"]
-        if session.write_target_path:
-            ws_bits.append(f"Target: {session.write_target_path}")
-        if session.write_staging_path:
-            ws_bits.append(f"Staging: {session.write_staging_path}")
-        if session.write_staging_path:
-            ws_bits.append("Reminder: the staging path is for read/verify only; write to the target path.")
-        else:
-            ws_bits.append("Reminder: write to the target path; staged copies are for read/verify.")
-        ws_bits.append(f"Mode: {session.write_session_mode}")
-        ws_bits.append(f"Intent: {session.write_session_intent}")
-        ws_bits.append(f"Status: {session.status}")
-        if session.write_current_section:
-            ws_bits.append(f"Current section: {session.write_current_section}")
-        if session.write_next_section:
-            ws_bits.append(f"Next section: {session.write_next_section}")
-        if session.write_sections_completed:
-            ws_bits.append(f"Completed sections: {', '.join(session.write_sections_completed)}")
-        if session.suggested_sections:
-            ws_bits.append(f"Suggested sections: {', '.join(session.suggested_sections)}")
-        if session.write_failed_local_patches:
-            ws_bits.append(f"Local patch failures: {session.write_failed_local_patches}")
-        if session.write_pending_finalize:
-            ws_bits.append("Pending finalize: yes")
-        else:
-            ws_bits.append("Pending finalize: no")
-        next_action = PromptAssembler._render_write_session_next_action(session)
-        if next_action:
-            ws_bits.append(f"Next action: {next_action}")
-        verifier = session.write_last_verifier or {}
-        if verifier:
-            ws_bits.append(f"Last verifier verdict: {verifier.get('verdict', 'unknown')}")
-            command = str(verifier.get("command", "") or "").strip()
-            if command:
-                ws_bits.append(f"Verifier command: {command}")
-            verifier_output, clipped = clip_text_value(str(verifier.get("output", "") or "").strip(), limit=180)
-            if verifier_output:
-                suffix = " [truncated]" if clipped else ""
-                ws_bits.append(f"Verifier output: {verifier_output}{suffix}")
-        return "Active Write Session: " + " | ".join(ws_bits)
+        return PromptStateFrameCompiler._render_write_session(state)
 
     @staticmethod
     def _render_write_session_next_action(session: Any) -> str:
-        if bool(getattr(session, "write_pending_finalize", False)):
-            return "Finalize the staged copy after verification."
-        next_section = str(getattr(session, "write_next_section", "") or "").strip()
-        if next_section:
-            return f"Continue with section {next_section}."
-        current_section = str(getattr(session, "write_current_section", "") or "").strip()
-        if current_section:
-            return f"Complete section {current_section} or move to verification once it is ready."
-        completed = list(getattr(session, "write_sections_completed", []) or [])
-        if completed:
-            return "Choose the next section or verify the completed staged file."
-        return "Continue authoring the active target file."
+        return PromptStateFrameCompiler._render_write_session_next_action(session)
 
     @staticmethod
     def _render_phase_context(state: LoopState) -> list[str]:
-        phase = state.contract_phase()
-        sections: list[str] = []
-        reasoning = state.reasoning_graph
-        if phase == "explore":
-            sections.append("Phase handoff: explore -> plan")
-            if state.context_briefs:
-                brief = state.context_briefs[-1]
-                brief_bits = [f"brief={brief.brief_id}", f"phase={brief.current_phase}"]
-                if brief.key_discoveries:
-                    brief_bits.append("facts=" + "; ".join(brief.key_discoveries[:4]))
-                if brief.open_questions:
-                    brief_bits.append("questions=" + "; ".join(brief.open_questions[:3]))
-                if brief.evidence_refs:
-                    brief_bits.append("evidence=" + ", ".join(brief.evidence_refs[:5]))
-                sections.append("Explore brief: " + " | ".join(brief_bits))
-        elif phase == "plan":
-            sections.append("Phase handoff: plan from compressed evidence")
-            evidence_bits = []
-            for record in reasoning.evidence_records[-5:]:
-                statement = record.statement.strip()
-                if statement:
-                    evidence_bits.append(f"{record.evidence_id}: {statement}")
-            if evidence_bits:
-                sections.append("Evidence packet: " + " | ".join(evidence_bits))
-            if reasoning.claim_records:
-                claim_bits = []
-                for claim in reasoning.claim_records[-4:]:
-                    claim_bits.append(f"{claim.claim_id} [{claim.status}] {claim.statement}".strip())
-                if claim_bits:
-                    sections.append("Claims: " + " | ".join(claim_bits))
-            plan = state.active_plan or state.draft_plan
-            if plan is not None and getattr(plan, "claim_refs", None):
-                sections.append("Plan claim refs: " + ", ".join(plan.claim_refs[:5]))
-        elif phase == "author":
-            sections.append("Phase handoff: plan -> author")
-            plan = state.active_plan or state.draft_plan
-            if plan is not None:
-                sections.append(f"Authoring plan: {plan.plan_id} | {plan.goal}")
-                active_step = plan.active_step()
-                if active_step is not None:
-                    sections.append(
-                        f"Current step: {active_step.step_id} [{active_step.status}] {active_step.title}"
-                    )
-                    if active_step.claim_refs:
-                        sections.append("Current step claims: " + ", ".join(active_step.claim_refs[:5]))
-                if plan.acceptance_criteria:
-                    sections.append("Acceptance: " + "; ".join(plan.acceptance_criteria[:4]))
-                if getattr(plan, "claim_refs", None):
-                    sections.append("Plan claims: " + ", ".join(plan.claim_refs[:5]))
-                if plan.requested_output_path:
-                    sections.append(f"Target output: {plan.requested_output_path}")
-        elif phase == "execute":
-            sections.append("Phase handoff: author -> execute")
-            plan = state.active_plan or state.draft_plan
-            if plan is not None:
-                sections.append(f"Execution plan: {plan.plan_id} [{plan.status}]")
-                if getattr(plan, "claim_refs", None):
-                    sections.append("Plan claims: " + ", ".join(plan.claim_refs[:5]))
-            if state.reasoning_graph.evidence_records:
-                evidence_ids = [record.evidence_id for record in state.reasoning_graph.evidence_records[-5:]]
-                sections.append("Evidence refs: " + ", ".join(evidence_ids))
-        elif phase == "verify":
-            sections.append("Phase handoff: execute -> verify")
-            if state.current_verifier_verdict():
-                sections.append("Verifier verdict present")
-            if state.run_brief.acceptance_criteria:
-                sections.append("Acceptance criteria: " + "; ".join(state.run_brief.acceptance_criteria[:4]))
-        elif phase == "repair":
-            sections.append("Phase handoff: verify -> repair")
-            if state.last_failure_class:
-                sections.append(f"Failure class: {state.last_failure_class}")
-            if state.files_changed_this_cycle:
-                sections.append("Files changed: " + ", ".join(state.files_changed_this_cycle[-5:]))
-            if state.write_session:
-                sections.append(f"Write session: {state.write_session.write_session_id}")
-        return sections
+        return PromptStateFrameCompiler._render_phase_context(state)
 
     def _render_summaries(self, summaries: list[EpisodicSummary]) -> str:
-        return "Retrieved summaries:\n" + "\n\n".join(
-            self._render_summary_item(summary) for summary in summaries
+        return (
+            "PREVIOUS TASK SUMMARIES (these describe earlier tasks, not the current one):\n"
+            + "\n\n".join(
+                self._render_summary_item(summary) for summary in summaries
+            )
         )
 
     @staticmethod
@@ -874,6 +639,87 @@ class PromptAssembler:
         return "Normalized observations:\n" + "\n".join(
             self._render_observation_item(packet) for packet in observations
         )
+
+    def _observation_budget(self, *, soft_limit: int, remaining_budget: int) -> int:
+        if remaining_budget <= 0:
+            return 0
+        floor = max(0, int(getattr(self.policy, "observation_token_floor", 0) or 0))
+        scaled_floor = min(floor, max(0, int(soft_limit * 0.12)))
+        target = max(
+            int(getattr(self.policy, "observation_token_limit", 0) or 0),
+            scaled_floor,
+        )
+        return min(max(1, target), max(1, remaining_budget))
+
+    def _render_fresh_tool_outputs(self, state: LoopState) -> str:
+        records = self._fresh_tool_output_records(state)
+        if not records:
+            return ""
+
+        limit = max(1, int(getattr(self.policy, "fresh_tool_output_items", 4) or 4))
+        token_limit = max(1, int(getattr(self.policy, "fresh_tool_output_token_limit", 1200) or 1200))
+        selected: list[str] = []
+        used_tokens = 0
+        for record in records[-limit:]:
+            tool_name = str(record.get("tool_name") or "tool").strip() or "tool"
+            artifact_id = str(record.get("artifact_id") or "").strip()
+            content = str(record.get("content") or "").strip()
+            if not content:
+                continue
+            if len(content) > 1200:
+                content = content[:1190].rstrip() + " [truncated]"
+            label = f"[{tool_name}"
+            if artifact_id:
+                label += f" {artifact_id}"
+            label += "]"
+            rendered = f"{label}\n{content}"
+            rendered_tokens = estimate_text_tokens(rendered)
+            if selected and used_tokens + rendered_tokens > token_limit:
+                break
+            used_tokens += rendered_tokens
+            selected.append(rendered)
+
+        if not selected:
+            return ""
+        return "Fresh tool outputs (latest preserved evidence):\n" + "\n\n".join(selected)
+
+    @staticmethod
+    def _fresh_tool_output_records(state: LoopState) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        scratchpad = getattr(state, "scratchpad", {})
+        preserved = scratchpad.get("_fresh_tool_outputs") if isinstance(scratchpad, dict) else None
+        if isinstance(preserved, list):
+            records.extend(item for item in preserved if isinstance(item, dict))
+
+        for message in getattr(state, "recent_messages", []) or []:
+            if getattr(message, "role", "") != "tool":
+                continue
+            content = str(getattr(message, "content", "") or "").strip()
+            if not content:
+                continue
+            metadata = getattr(message, "metadata", {}) or {}
+            artifact_id = metadata.get("artifact_id") if isinstance(metadata, dict) else ""
+            records.append(
+                {
+                    "tool_name": str(getattr(message, "name", "") or "tool").strip() or "tool",
+                    "artifact_id": str(artifact_id or "").strip(),
+                    "content": content,
+                }
+            )
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            key = (
+                str(record.get("tool_name") or ""),
+                str(record.get("artifact_id") or ""),
+                str(record.get("content") or "")[:200],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(record)
+        return deduped
 
     @staticmethod
     def _render_observation_item(packet: ObservationPacket) -> str:
@@ -1025,6 +871,21 @@ class PromptAssembler:
         clipped = text[: max(0, char_cap - len(suffix))].rstrip()
         return f"{clipped}{suffix}" if clipped else suffix
 
+    def _latest_visible_user_message(self, state: LoopState) -> ConversationMessage | None:
+        for raw_message in reversed(state.recent_messages):
+            normalized = self._normalize_recent_message(raw_message)
+            if normalized is None or normalized.role != "user":
+                continue
+            if normalized.metadata.get("is_recovery_nudge") is True:
+                continue
+            if str(normalized.content or "").strip():
+                return normalized
+        return None
+
+    @staticmethod
+    def _normalize_user_prompt_text(value: Any) -> str:
+        return " ".join(str(value or "").strip().split()).casefold()
+
     @staticmethod
     def _render_warm_item(m: ExperienceMemory) -> str:
         # Prevent retrieval interference: clearly label these as PAST execution info.
@@ -1048,6 +909,11 @@ class PromptAssembler:
 
     def _normalize_recent_message(self, message: ConversationMessage) -> ConversationMessage | None:
         if message.metadata.get("hidden_from_prompt") is True:
+            return None
+        if (
+            message.metadata.get("is_recovery_nudge") is True
+            and str(message.content or "").lstrip().startswith("### SYSTEM ALERT")
+        ):
             return None
         # Reasoning Pruning implementation
         if message.role == "assistant" and "thinking_insight" in message.metadata:

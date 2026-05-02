@@ -11,7 +11,7 @@ from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, json_safe_value
 
 
 def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    if tool_name not in {"file_write", "file_append", "file_patch"}:
+    if tool_name not in {"file_write", "file_append", "file_patch", "ast_patch"}:
         return args
     if not isinstance(args, dict):
         return {}
@@ -39,6 +39,8 @@ def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> 
         "replace_strategy",
         "target_text",
         "replacement_text",
+        "language",
+        "operation",
     ):
         value = normalized.get(key)
         if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
@@ -53,6 +55,7 @@ class PendingToolCall:
     args: dict[str, Any]
     tool_call_id: str | None = None
     raw_arguments: str = ""
+    source: str = "model"
 
     @classmethod
     def from_payload(cls, payload: Any) -> "PendingToolCall | None":
@@ -228,6 +231,7 @@ class GraphRunState:
     interrupt_payload: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     latency_metrics: dict[str, float | int] = field(default_factory=dict)
+    recorded_tool_call_ids: list[str] = field(default_factory=list)
 
 
 def build_operation_id(
@@ -257,6 +261,7 @@ def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
         "interrupt_payload": _coerce_optional_dict_payload(graph_state.interrupt_payload),
         "error": _coerce_optional_dict_payload(graph_state.error),
         "latency_metrics": _coerce_dict_payload(graph_state.latency_metrics),
+        "recorded_tool_call_ids": graph_state.recorded_tool_call_ids,
     }
 
 
@@ -276,6 +281,7 @@ def inflate_graph_state(payload: dict[str, Any]) -> GraphRunState:
     final_result = _coerce_optional_dict_payload(payload.get("final_result"))
     interrupt_payload = _coerce_optional_dict_payload(payload.get("interrupt_payload"))
     error = _coerce_optional_dict_payload(payload.get("error"))
+    recorded_tool_call_ids = _coerce_list_payload(payload.get("recorded_tool_call_ids"))
     return GraphRunState(
         loop_state=loop_state,
         thread_id=str(payload.get("thread_id", loop_state.thread_id or "")),
@@ -289,6 +295,7 @@ def inflate_graph_state(payload: dict[str, Any]) -> GraphRunState:
         interrupt_payload=interrupt_payload,
         error=error,
         latency_metrics=_coerce_dict_payload(payload.get("latency_metrics")),
+        recorded_tool_call_ids=[str(item) for item in recorded_tool_call_ids],
     )
 
 
@@ -308,6 +315,7 @@ def _serialize_pending_tool_call(item: PendingToolCall) -> dict[str, Any]:
         "tool_name": item.tool_name,
         "args": _coerce_dict_payload(item.args),
         "tool_call_id": item.tool_call_id,
+        "source": str(item.source or "model"),
     }
 
 
@@ -326,10 +334,14 @@ def _coerce_pending_tool_call(value: Any) -> PendingToolCall | None:
     if not isinstance(value, dict):
         return None
     tool_call_id = value.get("tool_call_id")
+    source = str(value.get("source", "model") or "model").strip().lower()
+    if source not in {"model", "system"}:
+        source = "model"
     return PendingToolCall(
         tool_name=str(value.get("tool_name", "")),
         args=_coerce_dict_payload(value.get("args")),
         tool_call_id=None if tool_call_id is None else str(tool_call_id),
+        source=source,
     )
 
 

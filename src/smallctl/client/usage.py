@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
+
+from ..provider_profiles import detect_provider_profile as _detect_provider_profile
+from ..state import json_safe_value
 
 
 def extract_context_limit(payload: Any) -> int | None:
@@ -93,34 +95,31 @@ def detect_provider_profile(
     default: str = "generic",
 ) -> str:
     """Best-effort provider/backend detection from endpoint and model hints."""
-    endpoint = str(base_url or "").strip().lower()
-    model_name = str(model or "").strip().lower()
-    parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}", scheme="http")
+    return _detect_provider_profile(base_url, model, default=default)
 
-    host = str(parsed.hostname or "").lower()
-    path = str(parsed.path or "").lower()
-    port = parsed.port
-    blob = " ".join(
-        part for part in (endpoint, host, path, model_name) if part
-    )
 
-    if "openrouter" in blob:
-        return "openrouter"
-    if "api.openai.com" in blob or host.endswith(".openai.com") or "openai" in blob:
-        return "openai"
-    if "vllm" in blob:
-        return "vllm"
-    if "lmstudio" in blob or "lm-studio" in blob:
-        return "lmstudio"
-    if "ollama" in blob or port == 11434:
-        return "ollama"
-    if "llamacpp" in blob or "llama.cpp" in blob or "llama-cpp" in blob:
-        return "llamacpp"
-    if port == 1234 and host in {"localhost", "127.0.0.1", "::1"}:
-        return "lmstudio"
-    if "lmstudio" in model_name:
-        return "lmstudio"
-    return default
+def coerce_usage_token_count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def apply_usage_metrics(harness: Any, usage: dict[str, Any]) -> None:
+    normalized_usage = json_safe_value(usage or {})
+    if not isinstance(normalized_usage, dict) or not normalized_usage:
+        return
+    prompt_tokens = coerce_usage_token_count(normalized_usage.get("prompt_tokens"))
+    completion_tokens = coerce_usage_token_count(normalized_usage.get("completion_tokens"))
+    total_tokens = coerce_usage_token_count(normalized_usage.get("total_tokens"))
+    harness.state.token_usage += total_tokens
+    if prompt_tokens > 0:
+        harness.state.scratchpad["context_used_tokens"] = prompt_tokens
+    elif total_tokens > 0:
+        harness.state.scratchpad["context_used_tokens"] = total_tokens
+    harness.state.last_completion_tokens = completion_tokens
+    harness.state.scratchpad["last_completion_tokens"] = completion_tokens
+    harness._runlog("usage", "token usage update", usage=normalized_usage)
 
 
 def _parse_positive_int(value: Any) -> int | None:

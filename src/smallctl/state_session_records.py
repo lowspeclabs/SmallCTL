@@ -103,6 +103,7 @@ def _coerce_context_brief(value: Any) -> Any:
             "disproven_causes",
             "next_observations_needed",
             "evidence_refs",
+            "observation_refs",
             "claim_refs",
             "new_facts",
             "invalidated_facts",
@@ -134,6 +135,7 @@ def _coerce_context_brief(value: Any) -> Any:
         disproven_causes=[],
         next_observations_needed=[],
         evidence_refs=[],
+        observation_refs=[],
         claim_refs=[],
         new_facts=[],
         invalidated_facts=[],
@@ -165,6 +167,11 @@ def _coerce_turn_bundle(value: Any) -> Any:
         payload["files_touched"] = _coerce_string_list(payload.get("files_touched"))
         payload["artifact_ids"] = _coerce_string_list(payload.get("artifact_ids"))
         payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
+        payload["observation_refs"] = _coerce_string_list(payload.get("observation_refs"))
+        payload["observation_summaries"] = _coerce_string_list(payload.get("observation_summaries"))
+        payload["observation_kinds"] = _coerce_string_list(payload.get("observation_kinds"))
+        payload["compaction_strategy"] = str(payload.get("compaction_strategy", "") or "")
+        payload["transcript_fallback_used"] = bool(payload.get("transcript_fallback_used", False))
         payload["source_message_count"] = _coerce_int(payload.get("source_message_count"), default=0)
         return TurnBundle(**_filter_dataclass_payload(TurnBundle, payload))
 

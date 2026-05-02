@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Any
 
+from ..guards import is_four_b_or_under_model_name
+from ..remote_scope import has_any_session_ssh_target, remote_scope_is_active
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -26,6 +28,16 @@ from .frame import (
 from .observations import build_observation_packets
 from .policy import ContextPolicy
 from .retrieval import LexicalRetriever
+
+_MUTATION_TOOL_NAMES = {
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+    "file_write",
+    "file_append",
+    "file_patch",
+    "ast_patch",
+}
 
 
 class PromptStateFrameCompiler:
@@ -230,6 +242,13 @@ class PromptStateFrameCompiler:
         if not isinstance(queued, list):
             return []
         return PromptStateFrameCompiler._dedupe([str(item).strip() for item in queued if str(item).strip()])
+
+    @staticmethod
+    def _state_model_name(state: LoopState) -> str:
+        scratchpad = getattr(state, "scratchpad", {})
+        if isinstance(scratchpad, dict):
+            return str(scratchpad.get("_model_name") or "").strip()
+        return ""
 
     @classmethod
     def _filter_invalidated_turn_bundles(
@@ -646,6 +665,25 @@ class PromptStateFrameCompiler:
         return PromptStateFrameCompiler._dedupe(anchors)
 
     @staticmethod
+    def _artifact_evidence_rows(state: LoopState, *, limit: int = 8) -> list[str]:
+        rows: list[str] = []
+        for aid, art in state.artifacts.items():
+            if is_superseded_artifact(art):
+                continue
+            if not is_prompt_visible_artifact(art):
+                continue
+            metadata = getattr(art, "metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            source_candidates = PromptStateFrameCompiler._artifact_path_candidates(art, metadata)
+            source = " / ".join(PromptStateFrameCompiler._dedupe(source_candidates)[:2]) or "observed"
+            summary = (getattr(art, "summary", "") or getattr(art, "tool_name", "") or "").strip()
+            rows.append(f"  {aid} | {source.replace('|', '/')} | {summary.replace('|', '/')[:110]}")
+            if len(rows) >= limit:
+                break
+        return rows
+
+    @staticmethod
     def _render_run_brief(state: LoopState) -> str:
         brief = state.run_brief
         has_content = any(
@@ -675,15 +713,170 @@ class PromptStateFrameCompiler:
         if state.active_intent:
             parts.append(f"  Active intent: {normalize_intent_label(state.active_intent)}")
 
+        ssh_sessions = PromptStateFrameCompiler._active_ssh_session_labels(state)
+        if ssh_sessions and PromptStateFrameCompiler._should_render_active_ssh_sessions(state):
+            parts.append("  Active SSH sessions: " + " | ".join(ssh_sessions[:3]))
+
         if brief.constraints:
             parts.append("  Constraints: " + "; ".join(brief.constraints))
 
         if brief.acceptance_criteria:
             parts.append("  Acceptance criteria: " + "; ".join(brief.acceptance_criteria))
 
+        resolved = state.scratchpad.get("_resolved_followup")
+        if isinstance(resolved, dict):
+            title = str(resolved.get("option_title") or "").strip()
+            index = str(resolved.get("option_index") or "").strip()
+            paths = resolved.get("target_paths")
+            if isinstance(paths, list):
+                cleaned_paths = [str(path).strip() for path in paths if str(path).strip()]
+            else:
+                cleaned_paths = []
+            if title and index:
+                if cleaned_paths:
+                    parts.append(
+                        f"  Resolved follow-up: proposal #{index} = {title} in {', '.join(cleaned_paths)}."
+                    )
+                else:
+                    parts.append(f"  Resolved follow-up: proposal #{index} = {title}.")
+
         if len(parts) == 1:
             return ""
         return "\n".join(parts)
+
+    @staticmethod
+    def _active_ssh_session_labels(state: LoopState) -> list[str]:
+        labels: list[str] = []
+        seen: set[str] = set()
+
+        resolved_remote = state.scratchpad.get("_resolved_remote_followup")
+        if isinstance(resolved_remote, dict):
+            host = str(resolved_remote.get("host") or "").strip().lower()
+            user = str(resolved_remote.get("user") or "").strip()
+            if host:
+                label = f"{user}@{host}" if user else host
+                seen.add(label)
+                labels.append(label)
+
+        targets = state.scratchpad.get("_session_ssh_targets")
+        if not isinstance(targets, dict):
+            return labels
+
+        for key, value in targets.items():
+            if not isinstance(value, dict):
+                continue
+            host = str(value.get("host") or key or "").strip().lower()
+            if not host:
+                continue
+            user = str(value.get("user") or "").strip()
+            label = f"{user}@{host}" if user else host
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+        return labels
+
+    @staticmethod
+    def _continuation_anchor_lines(state: LoopState) -> list[str]:
+        handoff = state.scratchpad.get("_last_task_handoff")
+        if not isinstance(handoff, dict) or not handoff:
+            return []
+        if not (
+            state.scratchpad.get("_task_boundary_previous_task")
+            or state.scratchpad.get("_resolved_followup")
+            or state.scratchpad.get("_resolved_remote_followup")
+        ):
+            return []
+
+        lines: list[str] = []
+        next_required_tool = handoff.get("next_required_tool")
+        if isinstance(next_required_tool, dict):
+            tool_name = str(next_required_tool.get("tool_name") or "").strip()
+            if tool_name:
+                lines.append(f"next_required_tool={tool_name}")
+
+        last_failed_tool = handoff.get("last_failed_tool")
+        if isinstance(last_failed_tool, dict):
+            failed_tool_name = str(last_failed_tool.get("tool_name") or "").strip()
+            if failed_tool_name:
+                lines.append(f"last_failed_tool={failed_tool_name}")
+
+        ssh_target = handoff.get("ssh_target")
+        if isinstance(ssh_target, dict):
+            host = str(ssh_target.get("host") or "").strip().lower()
+            user = str(ssh_target.get("user") or "").strip()
+            if host:
+                lines.append(f"ssh_target={user + '@' if user else ''}{host}")
+                targets = state.scratchpad.get("_session_ssh_targets")
+                if isinstance(targets, dict):
+                    target_entry = targets.get(host)
+                    if isinstance(target_entry, dict):
+                        validated_tools = target_entry.get("validated_tools")
+                        if isinstance(validated_tools, list):
+                            cleaned_tools = [str(item).strip() for item in validated_tools if str(item).strip()]
+                        else:
+                            cleaned_tools = []
+                        last_path = str(target_entry.get("last_validated_path") or "").strip()
+                        if cleaned_tools:
+                            tool_line = f"validated_remote={user + '@' if user else ''}{host} via {', '.join(cleaned_tools[:2])}"
+                            if last_path:
+                                tool_line += f" on {last_path}"
+                            lines.append(tool_line)
+
+        artifact_ids = handoff.get("last_good_artifact_ids")
+        if isinstance(artifact_ids, list):
+            cleaned_ids = [str(item).strip() for item in artifact_ids if str(item).strip()]
+            if cleaned_ids:
+                lines.append("recent_artifacts=" + ", ".join(cleaned_ids[:3]))
+        research_artifact_ids = handoff.get("recent_research_artifact_ids")
+        if isinstance(research_artifact_ids, list):
+            cleaned_research_ids = [str(item).strip() for item in research_artifact_ids if str(item).strip()]
+            if cleaned_research_ids:
+                lines.append("recent_research_artifacts=" + ", ".join(cleaned_research_ids[:2]))
+        return PromptStateFrameCompiler._dedupe(lines)
+
+    @staticmethod
+    def _should_render_active_ssh_sessions(state: LoopState) -> bool:
+        return remote_scope_is_active(state) or has_any_session_ssh_target(state)
+
+    @staticmethod
+    def _render_task_ground_truth(state: LoopState) -> str:
+        """Render explicit ground-truth about successful tools in the current task.
+
+        This prevents model confabulation where the model hallucinates that
+        mutating work was already performed in a prior turn or task.
+        """
+        successful_tools: list[str] = []
+        for entry in state.tool_history:
+            if not isinstance(entry, str):
+                continue
+            parts = entry.split("|")
+            if len(parts) >= 3 and parts[-1] == "success":
+                successful_tools.append(parts[0])
+
+        if not successful_tools:
+            return (
+                "Task ground truth: No tools have succeeded in this task yet. "
+                "Do not assume any work is already complete."
+            )
+
+        mutation_tools = [t for t in successful_tools if t in _MUTATION_TOOL_NAMES]
+        if mutation_tools:
+            changed = ", ".join(state.files_changed_this_cycle[-5:]) if state.files_changed_this_cycle else "none"
+            return (
+                "Task ground truth: Mutating operations performed this task: "
+                + ", ".join(mutation_tools)
+                + ". Files changed this cycle: "
+                + changed
+                + "."
+            )
+        else:
+            return (
+                "Task ground truth: Only read/observation tools have succeeded so far ("
+                + ", ".join(successful_tools[-5:])
+                + "). No mutating operations have been performed in this task yet. "
+                "Do not assume any work is already complete."
+            )
 
     @staticmethod
     def _render_working_memory(
@@ -721,6 +914,9 @@ class PromptStateFrameCompiler:
             cleaned_targets = [str(path).strip() for path in task_targets if str(path).strip()]
             if cleaned_targets:
                 sections.append("Task targets: " + " | ".join(cleaned_targets[:3]))
+        ground_truth = PromptStateFrameCompiler._render_task_ground_truth(state)
+        if ground_truth:
+            sections.append(ground_truth)
         current_goal = LexicalRetriever._effective_current_goal(state)
         if current_goal:
             sections.append("Current goal: " + current_goal)
@@ -732,10 +928,17 @@ class PromptStateFrameCompiler:
             sections.append("Open questions: " + " | ".join(memory.open_questions))
         if memory.known_facts:
             sections.append("Known facts: " + " | ".join(memory.known_facts))
+        sub4b_web_findings = PromptStateFrameCompiler._render_sub4b_top_web_findings(state)
+        if sub4b_web_findings:
+            sections.append(sub4b_web_findings)
         if memory.failures:
             sections.append("Known failures: " + " | ".join(memory.failures))
         if memory.next_actions:
             sections.append("Next actions: " + " | ".join(memory.next_actions))
+        continuation_anchor_lines = PromptStateFrameCompiler._continuation_anchor_lines(state)
+        if continuation_anchor_lines:
+            sections.append("Continuation anchor:")
+            sections.extend(f"  {line}" for line in continuation_anchor_lines[:4])
         notepad_section = PromptStateFrameCompiler._render_session_notepad(state)
         if notepad_section:
             sections.append(notepad_section)
@@ -806,13 +1009,47 @@ class PromptStateFrameCompiler:
                 summary_snippet = (art.summary or art.tool_name or "").strip()[:90]
                 art_lines.append(f"  - {aid}: {summary_snippet}")
             if art_lines:
-                sections.append(
-                    "Available Artifacts (compressed summaries already in context; page forward with artifact_read(start_line=...) only if you need more unseen lines):\n"
-                    + "\n".join(art_lines)
-                )
+                if is_four_b_or_under_model_name(PromptStateFrameCompiler._state_model_name(state)):
+                    evidence_rows = PromptStateFrameCompiler._artifact_evidence_rows(state)
+                    if evidence_rows:
+                        sections.append(
+                            "Available Evidence (pinned for this 4B-or-under model; use these artifact/source cues before rereading):\n"
+                            "  artifact_id | source/path | summary\n"
+                            + "\n".join(evidence_rows)
+                            + "\n  Only page forward with artifact_read(start_line=...) when you need unseen lines."
+                        )
+                else:
+                    sections.append(
+                        "Available Artifacts (compressed summaries already in context; page forward with artifact_read(start_line=...) only if you need more unseen lines):\n"
+                        + "\n".join(art_lines)
+                    )
         if not sections:
             return ""
         return "Working memory:\n" + "\n".join(sections)
+
+    @staticmethod
+    def _render_sub4b_top_web_findings(state: LoopState) -> str:
+        if not is_four_b_or_under_model_name(PromptStateFrameCompiler._state_model_name(state)):
+            return ""
+        packets = [
+            packet
+            for packet in build_observation_packets(state, limit=8)
+            if packet.tool_name in {"web_search", "web_fetch"} and not packet.stale and str(packet.summary or "").strip()
+        ]
+        if not packets:
+            return ""
+        findings: list[str] = []
+        for packet in packets[-3:]:
+            summary = str(packet.summary or "").strip()
+            if not summary:
+                continue
+            if len(summary) > 180:
+                summary = summary[:179].rstrip() + "..."
+            if summary not in findings:
+                findings.append(summary)
+        if not findings:
+            return ""
+        return "Top web findings: " + " | ".join(findings)
 
     @staticmethod
     def _render_session_notepad(state: LoopState) -> str:

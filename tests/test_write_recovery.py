@@ -139,6 +139,115 @@ def test_recovered_small_chunk_keeps_session_default_next_section() -> None:
     assert intent.next_section_name == "types_interfaces"
 
 
+def test_recovered_complete_python_file_from_tool_args_clears_next_section() -> None:
+    session = new_write_session(
+        session_id="ws_test",
+        target_path="./temp/task_queue.py",
+        intent="replace_file",
+        suggested_sections=["imports", "types_interfaces", "constants_globals"],
+        next_section="imports",
+    )
+    session.write_current_section = "imports"
+    harness = _FakeHarness(session)
+    # the pending tool call itself has the full code
+    content = (
+        '"""Priority Task Queue Implementation."""\n'
+        "import heapq\n"
+        "import unittest\n\n"
+        "class Task:\n"
+        "    pass\n\n"
+        "def enqueue() -> None:\n"
+        "    pass\n\n"
+        "class TestTaskQueue(unittest.TestCase):\n"
+        "    def test_enqueue(self) -> None:\n"
+        "        self.assertTrue(True)\n\n"
+        'if __name__ == "__main__":\n'
+        "    unittest.main()\n"
+    )
+    from smallctl.graph.state import PendingToolCall
+    pending = PendingToolCall(
+        tool_name="file_write",
+        args={
+            "path": "./temp/task_queue.py",
+            "content": content,
+            "next_section_name": "types_interfaces",
+        },
+        raw_arguments=""
+    )
+
+    intent = recover_write_intent(
+        harness=harness,
+        pending=pending,
+        assistant_text="",
+        partial_tool_calls=[],
+    )
+
+    assert intent is not None
+    assert intent.next_section_name == "types_interfaces"
+    assert intent.next_section_name_origin == "tool_args"
+    assert intent.source == "tool_args_content"
+
+    changed = maybe_finalize_recovered_assistant_write(intent)
+
+    assert changed is True
+    assert intent.next_section_name == ""
+    assert intent.next_section_name_origin == ""
+    assert "cleared_session_default_next_section_name" in intent.evidence
+
+
+def test_recovered_complete_python_file_from_partial_tool_args_clears_next_section() -> None:
+    session = new_write_session(
+        session_id="ws_test",
+        target_path="./temp/task_queue.py",
+        intent="replace_file",
+    )
+    session.write_current_section = "imports"
+    harness = _FakeHarness(session)
+    content = (
+        "import os\n"
+        "def main():\n"
+        "    pass\n"
+        "class TestMain:\n"
+        "    def test_main(self):\n"
+        "        pass\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+    partial_tool_calls = [
+        {
+            "id": "partial-1",
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "arguments": json.dumps({
+                    "path": "./temp/task_queue.py",
+                    "content": content,
+                    "next_section_name": "foo"
+                })
+            },
+        }
+    ]
+
+    intent = recover_write_intent(
+        harness=harness,
+        pending=None,
+        assistant_text="",
+        partial_tool_calls=partial_tool_calls,
+    )
+
+    assert intent is not None
+    assert intent.next_section_name == "foo"
+    assert intent.next_section_name_origin == "partial_tool_calls"
+    assert intent.source == "partial_tool_arguments"
+
+    changed = maybe_finalize_recovered_assistant_write(intent)
+
+    assert changed is True
+    assert intent.next_section_name == ""
+    assert intent.next_section_name_origin == ""
+    assert "cleared_session_default_next_section_name" in intent.evidence
+
+
 def test_recovered_write_intent_rebinds_mismatched_active_write_session_id() -> None:
     session = new_write_session(
         session_id="ws_active",

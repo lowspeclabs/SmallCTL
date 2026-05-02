@@ -19,7 +19,7 @@ from ..logging_utils import log_kv
 
 class SSEStreamer:
     """SSE stream handler for model chat completions."""
-    
+
     STREAM_CONNECT_TIMEOUT_SEC = 10.0
     STREAM_WRITE_TIMEOUT_SEC = 30.0
     STREAM_READ_TIMEOUT_SEC = 120.0
@@ -70,10 +70,7 @@ class SSEStreamer:
                 float(self.first_token_timeout_sec),
             )
         if tool_call_stream_active and (self.provider_profile == "lmstudio" or self.aggressive_tool_call_timeout):
-            return min(
-                float(self.STREAM_READ_TIMEOUT_SEC),
-                float(self.tool_call_continuation_timeout_sec),
-            )
+            return max(1.0, float(self.tool_call_continuation_timeout_sec))
         return float(self.STREAM_READ_TIMEOUT_SEC)
 
     async def stream_sse(
@@ -91,9 +88,13 @@ class SSEStreamer:
         chunk_count = 0
         saw_done = False
         tool_call_stream_active = False
+        read_timeout_cap = max(
+            float(self.STREAM_READ_TIMEOUT_SEC),
+            float(self.tool_call_continuation_timeout_sec),
+        )
         timeout = httpx.Timeout(
             connect=self.STREAM_CONNECT_TIMEOUT_SEC,
-            read=self.STREAM_READ_TIMEOUT_SEC,
+            read=read_timeout_cap,
             write=self.STREAM_WRITE_TIMEOUT_SEC,
             pool=self.STREAM_POOL_TIMEOUT_SEC,
         )

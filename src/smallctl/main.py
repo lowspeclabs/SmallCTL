@@ -138,6 +138,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the staged reasoning strategy toggle",
     )
     parser.add_argument(
+        "--staged-execution",
+        dest="staged_execution_enabled",
+        action="store_true",
+        default=None,
+        help="Execute approved plans with the staged execution runtime",
+    )
+    parser.add_argument(
+        "--no-staged-execution",
+        dest="staged_execution_enabled",
+        action="store_false",
+        default=None,
+        help="Disable staged execution for approved plans",
+    )
+    parser.add_argument(
+        "--staged-step-prompt-tokens",
+        type=int,
+        help="Optional prompt token budget for each staged step",
+    )
+    parser.add_argument(
         "--graph-thread-id",
         help=argparse.SUPPRESS,
     )
@@ -269,6 +288,9 @@ def cli(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "failed", "reason": f"TUI unavailable: {exc}"}, indent=2))
             return 1
         strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
+        max_prompt_tokens_explicit = bool(
+            getattr(config, "max_prompt_tokens_explicit", config.max_prompt_tokens is not None)
+        )
         harness_kwargs = {
             "endpoint": config.endpoint,
             "model": config.model,
@@ -294,6 +316,7 @@ def cli(argv: list[str] | None = None) -> int:
             "restore_thread_id": config.graph_thread_id,
             "context_limit": config.context_limit,
             "max_prompt_tokens": config.max_prompt_tokens,
+            "max_prompt_tokens_explicit": max_prompt_tokens_explicit,
             "reserve_completion_tokens": config.reserve_completion_tokens,
             "reserve_tool_tokens": config.reserve_tool_tokens,
             "first_token_timeout_sec": config.first_token_timeout_sec,
@@ -311,6 +334,10 @@ def cli(argv: list[str] | None = None) -> int:
             "max_summary_items": config.max_summary_items,
             "max_artifact_snippets": config.max_artifact_snippets,
             "artifact_snippet_token_limit": config.artifact_snippet_token_limit,
+            "multi_file_artifact_snippet_limit": config.multi_file_artifact_snippet_limit,
+            "multi_file_primary_file_limit": config.multi_file_primary_file_limit,
+            "remote_task_artifact_snippet_limit": config.remote_task_artifact_snippet_limit,
+            "remote_task_primary_file_limit": config.remote_task_primary_file_limit,
             "indexer": config.indexer,
             "run_logger": run_logger,
             "task": config.task,
@@ -346,6 +373,9 @@ def cli(argv: list[str] | None = None) -> int:
             _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
     elif config.task or config.restore_graph_state:
         strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
+        max_prompt_tokens_explicit = bool(
+            getattr(config, "max_prompt_tokens_explicit", config.max_prompt_tokens is not None)
+        )
         harness = Harness(
             endpoint=config.endpoint,
             model=config.model,
@@ -368,6 +398,7 @@ def cli(argv: list[str] | None = None) -> int:
             strategy=strategy,
             context_limit=config.context_limit,
             max_prompt_tokens=config.max_prompt_tokens,
+            max_prompt_tokens_explicit=max_prompt_tokens_explicit,
             reserve_completion_tokens=config.reserve_completion_tokens,
             reserve_tool_tokens=config.reserve_tool_tokens,
             first_token_timeout_sec=config.first_token_timeout_sec,
@@ -385,6 +416,10 @@ def cli(argv: list[str] | None = None) -> int:
             max_summary_items=config.max_summary_items,
             max_artifact_snippets=config.max_artifact_snippets,
             artifact_snippet_token_limit=config.artifact_snippet_token_limit,
+            multi_file_artifact_snippet_limit=config.multi_file_artifact_snippet_limit,
+            multi_file_primary_file_limit=config.multi_file_primary_file_limit,
+            remote_task_artifact_snippet_limit=config.remote_task_artifact_snippet_limit,
+            remote_task_primary_file_limit=config.remote_task_primary_file_limit,
             indexer=config.indexer,
             run_logger=run_logger,
         )

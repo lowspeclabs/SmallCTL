@@ -11,6 +11,8 @@ from .profiles import (
     INDEXER_PROFILE,
     MUTATE_PROFILE,
     NETWORK_PROFILE,
+    NETWORK_RAW_PROFILE,
+    NETWORK_READ_PROFILE,
     SUPPORT_PROFILE,
 )
 from .registry import ToolRegistry
@@ -18,6 +20,7 @@ from .register_control_planning import register_control_planning_tools
 from .register_filesystem import register_filesystem_tools
 from .register_operational import register_operational_tools
 from .register_content import register_content_tools
+from .register_web_tools import register_web_tools
 
 Handler = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -106,6 +109,7 @@ def build_registry(
         core_profile=CORE_PROFILE,
         support_profile=SUPPORT_PROFILE,
         network_profile=NETWORK_PROFILE,
+        network_raw_profile=NETWORK_RAW_PROFILE,
     )
 
     register_content_tools(
@@ -116,6 +120,13 @@ def build_registry(
         core_profile=CORE_PROFILE,
         data_profile=DATA_PROFILE,
         indexer_profile=INDEXER_PROFILE,
+    )
+
+    register_web_tools(
+        register=_register,
+        make_registration=_make_registration,
+        inject_state_and_harness=_inject_state_and_harness,
+        network_read_profile=NETWORK_READ_PROFILE,
     )
 
     _register([

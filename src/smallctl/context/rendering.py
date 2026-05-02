@@ -52,7 +52,7 @@ def render_shell_failure(
     if isinstance(output, dict):
         transcript = render_shell_output(
             output,
-            preview_limit=preview_limit,
+            preview_limit=None,
             strip_whitespace=strip_whitespace,
         ).strip()
         if transcript == "ok":
@@ -67,4 +67,10 @@ def render_shell_failure(
         elif transcript != error_text:
             parts[-1] = transcript
 
-    return "\n\n".join(parts) or "Shell command failed."
+    text = "\n\n".join(parts) or "Shell command failed."
+    if preview_limit is None:
+        return text
+    preview, clipped = clip_text_value(text, limit=preview_limit)
+    if clipped:
+        return f"{preview}\n... output truncated"
+    return preview

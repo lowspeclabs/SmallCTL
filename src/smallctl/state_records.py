@@ -15,6 +15,10 @@ from .state_schema import (
     PlanInterrupt,
     ReasoningGraph,
     RunBrief,
+    StepEvidenceArtifact,
+    StepOutputSpec,
+    StepVerificationResult,
+    StepVerifierSpec,
     WorkingMemory,
 )
 from .state_support import (
@@ -226,12 +230,113 @@ def _coerce_plan_step(value: Any) -> Any | None:
     payload["depends_on"] = _coerce_string_list(payload.get("depends_on"))
     payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
     payload["claim_refs"] = _coerce_string_list(payload.get("claim_refs"))
+    payload["task"] = str(payload.get("task", "") or "")
+    payload["tool_allowlist"] = _coerce_string_list(payload.get("tool_allowlist"))
+    payload["prompt_token_budget"] = max(0, _coerce_int(payload.get("prompt_token_budget"), default=0))
+    payload["acceptance"] = _coerce_string_list(payload.get("acceptance"))
+    payload["verifiers"] = [
+        spec
+        for item in _coerce_list_payload(payload.get("verifiers"))
+        if (spec := _coerce_step_verifier_spec(item)) is not None
+    ]
+    payload["outputs_expected"] = [
+        spec
+        for item in _coerce_list_payload(payload.get("outputs_expected"))
+        if (spec := _coerce_step_output_spec(item)) is not None
+    ]
+    payload["max_retries"] = max(0, _coerce_int(payload.get("max_retries"), default=3))
+    payload["retry_count"] = max(0, _coerce_int(payload.get("retry_count"), default=0))
+    payload["failure_reasons"] = _coerce_string_list(payload.get("failure_reasons"))[-10:]
     payload["substeps"] = [
         substep
         for item in _coerce_list_payload(payload.get("substeps"))
         if (substep := _coerce_plan_step(item)) is not None
     ]
     return PlanStep(**_filter_dataclass_payload(PlanStep, payload))
+
+
+def _coerce_step_verifier_spec(value: Any) -> StepVerifierSpec | None:
+    if isinstance(value, StepVerifierSpec):
+        return value
+    if isinstance(value, str):
+        kind = value.strip()
+        if not kind:
+            return None
+        return StepVerifierSpec(kind=kind)
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    kind = str(payload.get("kind", "") or "").strip()
+    if not kind:
+        return None
+    payload["kind"] = kind
+    args = json_safe_value(payload.get("args") or {})
+    payload["args"] = args if isinstance(args, dict) else {}
+    payload["required"] = _coerce_bool(payload.get("required"), default=True)
+    payload["timeout_sec"] = max(1, _coerce_int(payload.get("timeout_sec"), default=30))
+    return StepVerifierSpec(**_filter_dataclass_payload(StepVerifierSpec, payload))
+
+
+def _coerce_step_output_spec(value: Any) -> StepOutputSpec | None:
+    if isinstance(value, StepOutputSpec):
+        return value
+    if isinstance(value, str):
+        ref = value.strip()
+        if not ref:
+            return None
+        return StepOutputSpec(ref=ref)
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    payload["kind"] = str(payload.get("kind", "artifact") or "artifact")
+    payload["ref"] = str(payload.get("ref", "") or "")
+    payload["description"] = str(payload.get("description", "") or "")
+    payload["required"] = _coerce_bool(payload.get("required"), default=True)
+    if not payload["ref"] and not payload["description"]:
+        return None
+    return StepOutputSpec(**_filter_dataclass_payload(StepOutputSpec, payload))
+
+
+def _coerce_step_verification_result(value: Any) -> StepVerificationResult | None:
+    if isinstance(value, StepVerificationResult):
+        return value
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    step_id = str(payload.get("step_id", "") or "").strip()
+    if not step_id:
+        return None
+    payload["step_id"] = step_id
+    payload["step_run_id"] = str(payload.get("step_run_id", "") or "")
+    payload["passed"] = _coerce_bool(payload.get("passed"), default=False)
+    payload["failed_criteria"] = _coerce_string_list(payload.get("failed_criteria"))
+    results = json_safe_value(payload.get("verifier_results") or [])
+    payload["verifier_results"] = results if isinstance(results, list) else []
+    payload["evidence_artifact_id"] = str(payload.get("evidence_artifact_id", "") or "")
+    return StepVerificationResult(**_filter_dataclass_payload(StepVerificationResult, payload))
+
+
+def _coerce_step_evidence_artifact(value: Any, *, step_id: str | None = None) -> StepEvidenceArtifact | None:
+    if isinstance(value, StepEvidenceArtifact):
+        return value
+    if not isinstance(value, dict):
+        return None
+    payload = dict(value)
+    resolved_step_id = str(payload.get("step_id", "") or step_id or "").strip()
+    if not resolved_step_id:
+        return None
+    payload["step_id"] = resolved_step_id
+    payload["step_run_id"] = str(payload.get("step_run_id", "") or "")
+    payload["attempt"] = max(1, _coerce_int(payload.get("attempt"), default=1))
+    payload["summary"] = str(payload.get("summary", "") or "")
+    payload["artifact_ids"] = _coerce_string_list(payload.get("artifact_ids"))
+    payload["files_touched"] = _coerce_string_list(payload.get("files_touched"))
+    payload["decisions"] = _coerce_string_list(payload.get("decisions"))
+    results = json_safe_value(payload.get("verifier_results") or [])
+    payload["verifier_results"] = results if isinstance(results, list) else []
+    payload["tool_operation_ids"] = _coerce_string_list(payload.get("tool_operation_ids"))
+    payload["created_at"] = _coerce_timestamp_string(payload.get("created_at"))
+    return StepEvidenceArtifact(**_filter_dataclass_payload(StepEvidenceArtifact, payload))
 
 
 def _coerce_execution_plan(value: Any) -> Any | None:

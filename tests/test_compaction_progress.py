@@ -6,10 +6,11 @@ from types import SimpleNamespace
 from smallctl.context import ContextPolicy, ContextSummarizer
 from smallctl.context.summarizer import CompactionAttemptResult
 from smallctl.harness.compaction import CompactionService
+from smallctl.context.tiers import MessageTierManager
 from smallctl.harness.memory import MemoryService
 from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import ContextBrief, LoopState, TurnBundle
+from smallctl.state import ContextBrief, EvidenceRecord, LoopState, TurnBundle
 
 
 class _RunLogger:
@@ -187,6 +188,45 @@ def test_fallback_compaction_backoffs_until_under_budget() -> None:
     assert len(harness.prompt_assembler.calls) >= 3
 
 
+def test_emergency_compaction_uses_mission_preserving_recent_trim(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 8
+    state.recent_messages = [
+        ConversationMessage(role="user", content="update remote files with darkmode across the whole site"),
+        ConversationMessage(role="assistant", content="I found the current CSS and page templates."),
+        ConversationMessage(role="tool", name="ssh_exec", content="cat /var/www/html/index.html"),
+        ConversationMessage(role="assistant", content="The home page still hardcodes light colors."),
+        ConversationMessage(role="user", content="also make the footer consistent on every page"),
+        ConversationMessage(role="tool", name="ssh_exec", content="cat /var/www/html/footer.html"),
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=3,
+            hot_message_limit=2,
+        ),
+        token_fn=lambda _count: 500,
+    )
+
+    async def _no_structured_compaction(self, **_: object) -> None:
+        return None
+
+    monkeypatch.setattr(MessageTierManager, "compact_to_warm", _no_structured_compaction)
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="inspect budget pressure",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    assert [message.role for message in state.recent_messages] == ["user", "assistant", "user"]
+    assert state.recent_messages[0].content == "update remote files with darkmode across the whole site"
+    assert state.recent_messages[-1].content == "also make the footer consistent on every page"
+
+
 def test_compact_recent_messages_clears_stale_markers_for_reused_summary_and_artifact_ids() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "execute"
@@ -248,6 +288,206 @@ def test_compact_turn_bundles_to_brief_clears_stale_markers_for_reused_brief_and
     assert brief.full_artifact_id == "A-FULL-1"
     assert "B0001" not in state.scratchpad.get("_context_brief_staleness", {})
     assert "A-FULL-1" not in state.scratchpad.get("_artifact_staleness", {})
+
+
+def test_compact_to_turn_bundle_prefers_normalized_observation_packets() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.active_intent = "requested_shell_exec"
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-file",
+            tool_name="file_read",
+            statement="file_read: src/app.py exposes parse_config()",
+            metadata={"path": "src/app.py"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-verifier",
+            tool_name="shell_exec",
+            statement="shell_exec failed: pytest reports parser regression",
+            negative=True,
+            metadata={"command": "pytest -q", "exit_code": 1},
+        ),
+    ]
+    messages = [
+        ConversationMessage(role="assistant", content="transcript-only: exploratory chatter"),
+        ConversationMessage(role="tool", content="transcript-only: raw terminal log blob"),
+        ConversationMessage(role="user", content="transcript-only: please continue"),
+    ]
+    summarizer = ContextSummarizer(ContextPolicy())
+
+    bundle = summarizer.compact_to_turn_bundle(
+        state=state,
+        messages=messages,
+        step_range=(1, 3),
+    )
+
+    assert bundle is not None
+    assert bundle.compaction_strategy == "observation_first"
+    assert bundle.transcript_fallback_used is False
+    assert bundle.observation_refs == ["E-file", "E-verifier"]
+    assert bundle.summary_lines
+    assert "File fact" in bundle.summary_lines[0]
+    assert "Verifier verdict" in bundle.summary_lines[1]
+    assert all("transcript-only" not in line for line in bundle.summary_lines)
+
+
+def test_compact_to_turn_bundle_prioritizes_file_and_verifier_observations_under_pressure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.active_intent = "requested_file_patch"
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-file-1",
+            tool_name="file_read",
+            statement="file_read: src/app.py defines parse_config",
+            metadata={"path": "src/app.py", "observation_adapter": "file_read_fact"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-shell-1",
+            tool_name="shell_exec",
+            statement="shell_exec: generic output",
+            metadata={"command": "echo ok", "observation_adapter": "shell_observation"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-verifier-1",
+            tool_name="shell_exec",
+            statement="shell_exec failed: pytest reports parser regression",
+            negative=True,
+            metadata={
+                "command": "pytest -q",
+                "exit_code": 1,
+                "observation_adapter": "verifier_verdict",
+                "verdict": "fail",
+            },
+        ),
+        EvidenceRecord(
+            evidence_id="E-replay-1",
+            tool_name="artifact_read",
+            statement="artifact_read: reused A100",
+            replayed=True,
+            evidence_type="replayed_or_cached",
+            metadata={"artifact_id": "A100", "observation_adapter": "artifact_replay"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-shell-1",
+            tool_name="shell_exec",
+            statement="shell_exec: generic output 1",
+            metadata={"command": "echo 1", "observation_adapter": "shell_observation"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-list-1",
+            tool_name="search",
+            statement="search: parser references 1",
+            metadata={
+                "observation_adapter": "search_observation_list",
+                "observation_items": ["src/a.py:1 parser"],
+            },
+        ),
+        EvidenceRecord(
+            evidence_id="E-replay-2",
+            tool_name="artifact_read",
+            statement="artifact_read: reused A101",
+            replayed=True,
+            evidence_type="replayed_or_cached",
+            metadata={"artifact_id": "A101", "observation_adapter": "artifact_replay"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-shell-2",
+            tool_name="shell_exec",
+            statement="shell_exec: generic output 2",
+            metadata={"command": "echo 2", "observation_adapter": "shell_observation"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-list-2",
+            tool_name="search",
+            statement="search: parser references 2",
+            metadata={
+                "observation_adapter": "search_observation_list",
+                "observation_items": ["src/config.py:10 parse_config"],
+            },
+        ),
+        EvidenceRecord(
+            evidence_id="E-replay-3",
+            tool_name="artifact_read",
+            statement="artifact_read: reused A102",
+            replayed=True,
+            evidence_type="replayed_or_cached",
+            metadata={"artifact_id": "A102", "observation_adapter": "artifact_replay"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-shell-3",
+            tool_name="shell_exec",
+            statement="shell_exec: generic output 3",
+            metadata={"command": "echo 3", "observation_adapter": "shell_observation"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-list-3",
+            tool_name="search",
+            statement="search: parser references 3",
+            metadata={
+                "observation_adapter": "search_observation_list",
+                "observation_items": ["src/c.py:3 parser"],
+            },
+        ),
+        EvidenceRecord(
+            evidence_id="E-replay-4",
+            tool_name="artifact_read",
+            statement="artifact_read: reused A103",
+            replayed=True,
+            evidence_type="replayed_or_cached",
+            metadata={"artifact_id": "A103", "observation_adapter": "artifact_replay"},
+        ),
+    ]
+    messages = [
+        ConversationMessage(role="assistant", content="transcript chatter"),
+        ConversationMessage(role="tool", content="terminal blob"),
+        ConversationMessage(role="user", content="continue"),
+    ]
+    summarizer = ContextSummarizer(ContextPolicy())
+
+    bundle = summarizer.compact_to_turn_bundle(
+        state=state,
+        messages=messages,
+        step_range=(1, 3),
+    )
+
+    assert bundle is not None
+    assert bundle.compaction_strategy == "observation_first"
+    assert bundle.transcript_fallback_used is False
+    assert len(bundle.summary_lines) == 6
+    # Even when file/verifier evidence is old, priority selection keeps it in the capped packet set.
+    assert bundle.observation_refs[:2] == ["E-file-1", "E-verifier-1"]
+    replay_ids = {"E-replay-1", "E-replay-2", "E-replay-3", "E-replay-4"}
+    assert not replay_ids.issubset(set(bundle.observation_refs))
+    assert "file_fact" in bundle.observation_kinds
+    assert "verifier_verdict" in bundle.observation_kinds
+    assert any("File fact" in line for line in bundle.summary_lines)
+    assert any("Verifier verdict" in line for line in bundle.summary_lines)
+
+
+def test_compact_to_turn_bundle_falls_back_to_transcript_without_observations() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    messages = [
+        ConversationMessage(role="assistant", content="Investigating failing parser tests."),
+        ConversationMessage(role="tool", content="pytest output: 2 failed, 120 passed."),
+        ConversationMessage(role="user", content="Focus on parser failures first."),
+    ]
+    summarizer = ContextSummarizer(ContextPolicy())
+
+    bundle = summarizer.compact_to_turn_bundle(
+        state=state,
+        messages=messages,
+        step_range=(4, 6),
+    )
+
+    assert bundle is not None
+    assert bundle.compaction_strategy == "transcript_fallback"
+    assert bundle.transcript_fallback_used is True
+    assert bundle.observation_refs == []
+    assert bundle.summary_lines[0] == "Investigating failing parser tests."
+    assert "pytest output: 2 failed, 120 passed." in bundle.summary_lines
 
 
 def test_fallback_compaction_records_no_compactable_messages_stop_reason() -> None:
@@ -356,6 +596,36 @@ def test_compact_oversized_tool_messages_replaces_large_tool_content_with_artifa
     assert state.artifacts["A1"].artifact_id == "A1"
 
 
+def test_compact_oversized_tool_messages_skip_low_pressure_small_tool_results() -> None:
+    state = LoopState(cwd="/tmp")
+    original_content = "x" * 590
+    message = ConversationMessage(
+        role="tool",
+        name="ssh_exec",
+        content=original_content,
+        metadata={"artifact_id": "A1"},
+    )
+    state.recent_messages = [message]
+    state.artifacts["A1"] = _Artifact("A1")
+
+    policy = ContextPolicy(max_prompt_tokens=32768)
+    policy.recalculate_quotas(32768)
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=_ArtifactStore(),
+        context_policy=policy,
+        _current_user_task=lambda: "Inspect logs",
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    changed = ToolResultService(harness).compact_oversized_tool_messages(
+        soft_limit=policy.soft_prompt_token_limit or 0,
+    )
+
+    assert changed is False
+    assert state.recent_messages[0].content == original_content
+
+
 def test_compact_oversized_tool_messages_preserves_artifact_read_content() -> None:
     state = LoopState(cwd="/tmp")
     original_content = "line\n" * 600
@@ -460,6 +730,8 @@ def test_compact_oversized_shell_tool_messages_preserve_failure_status_when_shel
 def test_structured_compaction_demotes_l0_to_l1_turn_bundle() -> None:
     state = LoopState(cwd="/tmp")
     state.step_count = 12
+    state.current_phase = "repair"
+    state.active_intent = "requested_file_patch"
     state.recent_messages = [
         ConversationMessage(role="assistant", content=f"message {index}")
         for index in range(6)
@@ -490,6 +762,8 @@ def test_structured_compaction_demotes_l0_to_l1_turn_bundle() -> None:
     assert demotion_entries
     assert demotion_entries[-1]["data"]["from_level"] == "L0"
     assert demotion_entries[-1]["data"]["to_level"] == "L1"
+    assert demotion_entries[-1]["data"]["active_phase"] == "repair"
+    assert demotion_entries[-1]["data"]["active_intent"] == "requested_file_patch"
 
 
 def test_structured_compaction_clears_stale_marker_for_new_turn_bundle_id() -> None:
@@ -641,6 +915,10 @@ def test_structured_compaction_promotes_l2_to_l3_when_warm_brief_limit_exceeded(
     assert l3_entries[-1]["data"]["brief_id"] == "B0001"
     assert l3_entries[-1]["data"]["summary_id"]
     assert l3_entries[-1]["data"]["full_artifact_id"] == "A100-FULL"
+    l4_entries = [entry for entry in demotion_entries if entry["data"]["to_level"] == "L4"]
+    assert l4_entries
+    assert l4_entries[-1]["data"]["summary_id"] == l3_entries[-1]["data"]["summary_id"]
+    assert l4_entries[-1]["data"]["full_artifact_id"] == "A100-FULL"
 
 
 def test_structured_compaction_clears_stale_marker_for_new_summary_id() -> None:
@@ -781,6 +1059,46 @@ def test_structured_compaction_promotes_l2_to_l3_persists_l4_artifact_when_missi
     l3_entries = [entry for entry in demotion_entries if entry["data"]["to_level"] == "L3"]
     assert l3_entries
     assert l3_entries[-1]["data"]["full_artifact_id"] == "A-FULL-1"
+    l4_entries = [entry for entry in demotion_entries if entry["data"]["to_level"] == "L4"]
+    assert l4_entries
+    assert l4_entries[-1]["data"]["summary_id"] == l3_entries[-1]["data"]["summary_id"]
+    assert l4_entries[-1]["data"]["full_artifact_id"] == "A-FULL-1"
+
+
+def test_fallback_compaction_emits_l0_to_l3_demotion_events() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.active_intent = "requested_shell_exec"
+    state.step_count = 4
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content=f"message {index}")
+        for index in range(4)
+    ]
+
+    harness = _Harness(
+        state=state,
+        context_policy=ContextPolicy(
+            max_prompt_tokens=2048,
+            recent_message_limit=6,
+            hot_message_limit=1,
+        ),
+        token_fn=lambda count: 2000 if count > 2 else 500,
+    )
+
+    asyncio.run(
+        CompactionService(harness).maybe_compact_context(
+            query="inspect budget pressure",
+            system_prompt="SYSTEM",
+        )
+    )
+
+    demotion_entries = [entry for entry in harness.run_logger.entries if entry["event"] == "compaction_level_demoted"]
+    legacy_entries = [entry for entry in demotion_entries if entry["data"].get("compaction_strategy") == "legacy_fallback"]
+    assert legacy_entries
+    assert all(entry["data"]["from_level"] == "L0" for entry in legacy_entries)
+    assert all(entry["data"]["to_level"] == "L3" for entry in legacy_entries)
+    assert all(entry["data"]["active_phase"] == "execute" for entry in legacy_entries)
+    assert all(entry["data"]["active_intent"] == "requested_shell_exec" for entry in legacy_entries)
 
 
 def test_update_working_memory_invokes_oversized_tool_compaction() -> None:

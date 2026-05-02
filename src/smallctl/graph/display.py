@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..context.messages import _request_has_full_artifact_intent, render_dir_list_tree
+from ..context.messages import _request_has_full_artifact_intent, render_dir_list_result
 from ..context.rendering import render_shell_output
 from ..state import clip_text_value, json_safe_value
 
@@ -133,31 +133,13 @@ def format_dir_list_display(*, result: Any) -> str:
     if not isinstance(output, list):
         return "directory listed"
 
-    lines: list[str] = []
-    path = metadata.get("path")
-    count = metadata.get("count")
-    if isinstance(path, str) and path.strip():
-        if isinstance(count, int) and count >= 0:
-            lines.append(f"{path.strip()} ({count} items)")
-        else:
-            lines.append(path.strip())
-    elif isinstance(count, int) and count >= 0:
-        lines.append(f"{count} items")
-
-    preview_items = output[:_DIR_LIST_PREVIEW_ENTRY_LIMIT]
-    tree_preview = render_dir_list_tree(
-        preview_items,
+    text = render_dir_list_result(
+        output,
+        metadata=metadata,
         max_depth=2,
         max_children=_DIR_LIST_PREVIEW_ENTRY_LIMIT,
+        max_items=_DIR_LIST_PREVIEW_ENTRY_LIMIT,
     )
-    if tree_preview:
-        lines.append(tree_preview)
-
-    remaining = len(output) - len(preview_items)
-    if remaining > 0:
-        lines.append(f"... {remaining} more items")
-
-    text = "\n".join(lines).strip() or "directory listed"
     preview, clipped = clip_text_value(text, limit=420)
     if clipped:
         return f"{preview}\n... output truncated"

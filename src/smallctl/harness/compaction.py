@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from ..models.events import UIEvent, UIEventType
 from ..context import MessageTierManager
 from ..context.summarizer import CompactionAttemptResult
+from ..state_memory import trim_recent_messages
 
 if TYPE_CHECKING:
     from ..harness import Harness
@@ -119,6 +120,12 @@ class CompactionService:
                         summary_id=demotion.get("summary_id", ""),
                         full_artifact_id=demotion.get("full_artifact_id", ""),
                         messages_compacted=demotion.get("messages_compacted", 0),
+                        compaction_strategy=demotion.get("compaction_strategy", ""),
+                        transcript_fallback_used=bool(demotion.get("transcript_fallback_used", False)),
+                        observation_ref_count=demotion.get("observation_ref_count", 0),
+                        observation_refs=demotion.get("observation_refs", []),
+                        active_phase=str(getattr(self.harness.state, "current_phase", "") or ""),
+                        active_intent=str(getattr(self.harness.state, "active_intent", "") or ""),
                     )
                 primary_demotion = demotion_events[0] if demotion_events else {}
                 if brief or demotion_events:
@@ -152,7 +159,10 @@ class CompactionService:
         # 3. Ratio-based Safety Fallback (Legacy/Emergency Truncation)
         if len(self.harness.state.recent_messages) > self.harness.context_policy.recent_message_limit:
             self.harness._runlog("compaction_emergency", "Emergency truncation triggered (message limit exceeded)")
-            self.harness.state.recent_messages = self.harness.state.recent_messages[-self.harness.context_policy.recent_message_limit:]
+            self.harness.state.recent_messages = trim_recent_messages(
+                list(self.harness.state.recent_messages),
+                limit=self.harness.context_policy.recent_message_limit,
+            )
 
         def _build_probe() -> Any:
             return self.harness.prompt_assembler.build_messages(
@@ -294,6 +304,19 @@ class CompactionService:
                     files_touched=summary.files_touched,
                     keep_recent=keep_recent,
                     messages_compacted=max(0, before_count - after_count),
+                )
+                self.harness._runlog(
+                    "compaction_level_demoted",
+                    "legacy fallback demoted L0 transcript into episodic summary",
+                    from_level="L0",
+                    to_level="L3",
+                    summary_id=summary.summary_id,
+                    artifact_ids=summary.artifact_ids,
+                    messages_compacted=max(0, before_count - after_count),
+                    compaction_strategy="legacy_fallback",
+                    transcript_fallback_used=True,
+                    active_phase=str(getattr(self.harness.state, "current_phase", "") or ""),
+                    active_intent=str(getattr(self.harness.state, "active_intent", "") or ""),
                 )
                 post_probe = _build_probe()
                 if post_probe.estimated_prompt_tokens <= threshold:

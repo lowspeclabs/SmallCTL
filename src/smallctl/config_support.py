@@ -109,6 +109,8 @@ def _env_config() -> dict[str, Any]:
         "planning_mode": env_or_dotenv(f"{ENV_PREFIX}PLANNING_MODE"),
         "contract_flow_ui": env_or_dotenv(f"{ENV_PREFIX}CONTRACT_FLOW_UI"),
         "staged_reasoning": env_or_dotenv(f"{ENV_PREFIX}STAGED_REASONING"),
+        "staged_execution_enabled": env_or_dotenv(f"{ENV_PREFIX}STAGED_EXECUTION"),
+        "staged_step_prompt_tokens": env_or_dotenv(f"{ENV_PREFIX}STAGED_STEP_PROMPT_TOKENS"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -134,6 +136,10 @@ def _env_config() -> dict[str, Any]:
         "max_summary_items": env_or_dotenv(f"{ENV_PREFIX}MAX_SUMMARY_ITEMS"),
         "max_artifact_snippets": env_or_dotenv(f"{ENV_PREFIX}MAX_ARTIFACT_SNIPPETS"),
         "artifact_snippet_token_limit": env_or_dotenv(f"{ENV_PREFIX}ARTIFACT_SNIPPET_TOKEN_LIMIT"),
+        "multi_file_artifact_snippet_limit": env_or_dotenv(f"{ENV_PREFIX}MULTI_FILE_ARTIFACT_SNIPPET_LIMIT"),
+        "multi_file_primary_file_limit": env_or_dotenv(f"{ENV_PREFIX}MULTI_FILE_PRIMARY_FILE_LIMIT"),
+        "remote_task_artifact_snippet_limit": env_or_dotenv(f"{ENV_PREFIX}REMOTE_TASK_ARTIFACT_SNIPPET_LIMIT"),
+        "remote_task_primary_file_limit": env_or_dotenv(f"{ENV_PREFIX}REMOTE_TASK_PRIMARY_FILE_LIMIT"),
         "summarizer_endpoint": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_ENDPOINT"),
         "summarizer_model": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_MODEL"),
         "summarizer_api_key": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_API_KEY"),
@@ -182,6 +188,8 @@ def _env_config() -> dict[str, Any]:
         cfg["contract_flow_ui"] = _to_bool(cfg["contract_flow_ui"])
     if "staged_reasoning" in cfg:
         cfg["staged_reasoning"] = _to_bool(cfg["staged_reasoning"])
+    if "staged_execution_enabled" in cfg:
+        cfg["staged_execution_enabled"] = _to_bool(cfg["staged_execution_enabled"])
     if "indexer" in cfg:
         cfg["indexer"] = _to_bool(cfg["indexer"])
     if "chunk_mode_new_file_only" in cfg:
@@ -227,6 +235,10 @@ def _env_config() -> dict[str, Any]:
         "max_summary_items",
         "max_artifact_snippets",
         "artifact_snippet_token_limit",
+        "multi_file_artifact_snippet_limit",
+        "multi_file_primary_file_limit",
+        "remote_task_artifact_snippet_limit",
+        "remote_task_primary_file_limit",
         "artifact_summarization_threshold",
         "chunk_mode_min_bytes",
         "small_model_soft_write_chars",
@@ -237,6 +249,7 @@ def _env_config() -> dict[str, Any]:
         "loop_guard_level2_threshold",
         "loop_guard_recent_writes_limit",
         "loop_guard_tail_lines",
+        "staged_step_prompt_tokens",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])

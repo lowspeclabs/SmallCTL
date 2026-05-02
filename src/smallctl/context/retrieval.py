@@ -17,6 +17,7 @@ from ..memory_namespace import (
 from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
 from ..redaction import redact_sensitive_text
 from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
+from ..guards import is_over_twenty_b_model_name
 from ..state import (
     ArtifactRecord,
     ArtifactSnippet,
@@ -36,6 +37,7 @@ _CHAT_SUPPRESSED_TOOL_NAMES = {
     "file_write",
     "file_append",
     "file_patch",
+    "ast_patch",
     "file_delete",
     "process_kill",
     "http_post",
@@ -50,6 +52,51 @@ _CHAT_SUPPRESSED_MEMORY_TAGS = {
     "command",
     "command_line",
 }
+_LIVE_REMOTE_CORRECTION_PHRASES = (
+    "actually use ssh",
+    "do it live",
+    "redo the remote action",
+    "do not rely on past records",
+    "don't rely on past records",
+    "dont rely on past records",
+    "do not rely on prior records",
+    "don't rely on prior records",
+    "re-run on the host",
+    "rerun on the host",
+    "run it live",
+    "redo it live",
+    "fresh ssh",
+    "fresh run",
+)
+_LIVE_REMOTE_CORRECTION_HINTS = (
+    "actually",
+    "again",
+    "fresh",
+    "live",
+    "redo",
+    "rerun",
+    "re-run",
+    "retry",
+    "retest",
+    "verify",
+)
+_REMOTE_FILE_TOOLS = {
+    "ssh_exec",
+    "ssh_file_read",
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
+_MUTATION_RESULT_TOOLS = {
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+    "file_write",
+    "file_append",
+    "file_patch",
+    "ast_patch",
+}
+_FILE_LIKE_PATH_RE = re.compile(r"(?:^|\s)(?:\.{0,2}/|/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*(?:\.[A-Za-z0-9_.-]+)")
 
 @dataclass
 class RetrievalBundle:
@@ -70,6 +117,21 @@ class RetrievalBundle:
 class LexicalRetriever:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
+
+    @staticmethod
+    def _state_model_name(state: LoopState) -> str:
+        scratchpad = getattr(state, "scratchpad", {})
+        if isinstance(scratchpad, dict):
+            return str(scratchpad.get("_model_name") or "").strip()
+        return ""
+
+    @classmethod
+    def _uses_light_artifact_policy(cls, state: LoopState) -> bool:
+        return is_over_twenty_b_model_name(cls._state_model_name(state))
+
+    @classmethod
+    def _artifact_signal_threshold(cls, state: LoopState) -> float:
+        return 5.0 if cls._uses_light_artifact_policy(state) else 2.5
 
     def retrieve_bundle(
         self,
@@ -280,6 +342,7 @@ class LexicalRetriever:
                 continue
             score = self._score_artifact(
                 artifact=artifact,
+                query=query,
                 query_tokens=query_tokens,
                 recency=index,
                 state=state,
@@ -369,9 +432,24 @@ class LexicalRetriever:
         token_budget: int | None = None,
     ) -> list[ArtifactSnippet]:
         snippets: list[ArtifactSnippet] = []
-        budget = token_budget or (self.policy.artifact_snippet_token_limit * self.policy.max_artifact_snippets)
+        remote_profile = self._uses_remote_artifact_profile(state=state, query=query)
+        multi_file_profile = self._uses_multi_file_artifact_profile(state=state, query=query)
+        snippet_limit = self.policy.max_artifact_snippets
+        primary_file_limit = 1
+        mutation_result_limit = 1
+        verifier_limit = 1
+        other_limit = 1
+        if remote_profile:
+            snippet_limit = max(snippet_limit, self.policy.remote_task_artifact_snippet_limit)
+            primary_file_limit = max(primary_file_limit, self.policy.remote_task_primary_file_limit)
+            mutation_result_limit = 2
+        if multi_file_profile:
+            snippet_limit = max(snippet_limit, self.policy.multi_file_artifact_snippet_limit)
+            primary_file_limit = max(primary_file_limit, self.policy.multi_file_primary_file_limit)
+        budget = token_budget or (self.policy.artifact_snippet_token_limit * snippet_limit)
         used_tokens = 0
         detail_requested = self._query_requests_specific_detail(query)
+        light_artifact_policy = self._uses_light_artifact_policy(state)
         verifier_passed = False
         verdict = state.current_verifier_verdict()
         if isinstance(verdict, dict):
@@ -379,19 +457,32 @@ class LexicalRetriever:
 
         primary_file_count = 0
         verifier_count = 0
+        mutation_result_count = 0
         other_count = 0
-        semantic_limit = self.policy.max_artifact_snippets if detail_requested else min(2, self.policy.max_artifact_snippets)
+        semantic_limit = snippet_limit if detail_requested else min(2, snippet_limit)
+        if remote_profile or multi_file_profile:
+            semantic_limit = min(snippet_limit, max(semantic_limit, primary_file_limit + mutation_result_limit + verifier_limit))
+        if light_artifact_policy and not detail_requested and not (remote_profile or multi_file_profile):
+            semantic_limit = min(semantic_limit, 1)
 
-        for score, artifact in ranked[: self.policy.max_artifact_snippets * 4]:
+        if ranked and light_artifact_policy and not detail_requested and not (remote_profile or multi_file_profile):
+            top_score, top_artifact = ranked[0]
+            top_is_verifier = self._artifact_category(top_artifact) == "verifier"
+            if not top_is_verifier and top_score < self._artifact_signal_threshold(state):
+                return []
+
+        for score, artifact in ranked[: snippet_limit * 4]:
             category = self._artifact_category(artifact)
             if verifier_passed and not detail_requested and category == "primary_file":
                 continue
             if not detail_requested:
-                if category == "primary_file" and primary_file_count >= 1:
+                if category == "primary_file" and primary_file_count >= primary_file_limit:
                     continue
-                if category == "verifier" and verifier_count >= 1:
+                if category == "verifier" and verifier_count >= verifier_limit:
                     continue
-                if category == "other" and other_count >= 1:
+                if category == "mutation_result" and mutation_result_count >= mutation_result_limit:
+                    continue
+                if category == "other" and other_count >= other_limit:
                     continue
                 if len(snippets) >= semantic_limit:
                     break
@@ -405,9 +496,11 @@ class LexicalRetriever:
                 primary_file_count += 1
             elif category == "verifier":
                 verifier_count += 1
+            elif category == "mutation_result":
+                mutation_result_count += 1
             else:
                 other_count += 1
-            if len(snippets) >= self.policy.max_artifact_snippets and token_budget is None:
+            if len(snippets) >= snippet_limit and token_budget is None:
                 break
         return snippets
 
@@ -470,7 +563,9 @@ class LexicalRetriever:
             if state.artifacts or state.episodic_summaries or state.warm_experiences:
                 reasons.append("first pass found no strong match")
 
-        if not reasons and art_score < 2.5 and (bundle.candidate_counts.get("artifacts", 0) > 1 or state.artifacts):
+        if not reasons and art_score < self._artifact_signal_threshold(state) and (
+            bundle.candidate_counts.get("artifacts", 0) > 1 or state.artifacts
+        ):
             reasons.append("artifact signal is weak")
 
         if not reasons and sum_score < 1.5 and bundle.candidate_counts.get("summaries", 0) > 1:
@@ -593,15 +688,24 @@ class LexicalRetriever:
             write_target_tokens = _tokens(write_target)
             if write_target_tokens & item_tokens:
                 score += 3.0
+        touched_symbols = self._state_touched_symbols(state)
+        if touched_symbols:
+            symbol_overlap = len(touched_symbols & item_tokens)
+            if symbol_overlap:
+                score += min(2.5, symbol_overlap * 0.8)
 
         # Terminal summaries are useful for coarse history, but they should not
         # outrank actionable tool patterns during a live execution/resteer turn.
         if m.tool_name == "task_complete":
             score *= 0.7
+            if self._is_model_terminal_claim(m):
+                score *= 0.8
             if requested_tool in {"shell_exec", "ssh_exec"}:
                 score *= 0.7
             if requested_tool is None and active_intent == "general_task":
                 score *= 0.35
+            if self._query_requests_live_remote_correction(query_text):
+                score *= 0.45
 
         return score
 
@@ -713,6 +817,11 @@ class LexicalRetriever:
             write_target_tokens = _tokens(write_target_path)
             if write_target_tokens and write_target_tokens & haystack_tokens:
                 score += 0.9
+        touched_symbols = self._state_touched_symbols(state)
+        if touched_symbols:
+            symbol_overlap = len(touched_symbols & haystack_tokens)
+            if symbol_overlap:
+                score += min(1.8, symbol_overlap * 0.6)
         entity_overlap = len(self._state_entity_tags(state) & haystack_tokens)
         if entity_overlap:
             score += min(1.5, entity_overlap * 0.4)
@@ -790,6 +899,34 @@ class LexicalRetriever:
             return False
         return True
 
+    @staticmethod
+    def _query_requests_live_remote_correction(query_text: str) -> bool:
+        text = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+        if not text:
+            return False
+        if any(phrase in text for phrase in _LIVE_REMOTE_CORRECTION_PHRASES):
+            return True
+        has_live_correction_language = any(marker in text for marker in _LIVE_REMOTE_CORRECTION_HINTS)
+        has_remote_anchor = any(token in text for token in ("ssh", "remote", "host", "server"))
+        has_reliance_negation = any(
+            phrase in text
+            for phrase in (
+                "don't rely",
+                "do not rely",
+                "dont rely",
+                "do not trust",
+                "don't trust",
+            )
+        )
+        return has_live_correction_language and (has_remote_anchor or has_reliance_negation)
+
+    @classmethod
+    def _is_model_terminal_claim(cls, memory: ExperienceMemory) -> bool:
+        return (
+            str(memory.tool_name or "").strip().lower() == "task_complete"
+            and str(getattr(memory, "source", "") or "").strip().lower() == "model_terminal_claim"
+        )
+
     @classmethod
     def _state_entity_tags(cls, state: LoopState) -> set[str]:
         return _tokens(
@@ -827,6 +964,19 @@ class LexicalRetriever:
         return paths
 
     @staticmethod
+    def _state_touched_symbols(state: LoopState) -> set[str]:
+        payload = state.scratchpad.get("_touched_symbols")
+        if not isinstance(payload, list):
+            return set()
+        symbols: set[str] = set()
+        for value in payload:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            symbols |= _tokens(text)
+        return symbols
+
+    @staticmethod
     def _path_match(left: str, right: str) -> bool:
         lhs = str(left or "").strip().lower()
         rhs = str(right or "").strip().lower()
@@ -843,6 +993,40 @@ class LexicalRetriever:
                 if "(" in action:
                     return action.split("(")[0].strip()
         return None
+
+    def _uses_remote_artifact_profile(self, *, state: LoopState, query: str) -> bool:
+        requested_tool = self._infer_requested_tool(state)
+        if requested_tool in _REMOTE_FILE_TOOLS:
+            return True
+        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+        if task_mode == "remote_execute":
+            return True
+        tags = {str(tag).strip().lower() for tag in getattr(state, "intent_tags", []) or []}
+        if tags & _REMOTE_FILE_TOOLS:
+            return True
+        text = " ".join(
+            [
+                str(query or ""),
+                str(getattr(state.run_brief, "original_task", "") or ""),
+                str(getattr(state.working_memory, "current_goal", "") or ""),
+            ]
+        ).lower()
+        return any(token in text for token in ("ssh", "remote", "host", "server")) and bool(self._file_like_paths(text))
+
+    def _uses_multi_file_artifact_profile(self, *, state: LoopState, query: str) -> bool:
+        paths = set(self._file_like_paths(query))
+        paths |= self._state_target_paths(state)
+        return len(paths) > 1
+
+    @staticmethod
+    def _file_like_paths(text: str) -> set[str]:
+        paths: set[str] = set()
+        for match in _FILE_LIKE_PATH_RE.finditer(str(text or "")):
+            value = match.group(0).strip()
+            if not value or "." not in Path(value).name:
+                continue
+            paths.add(Path(value).as_posix().lower())
+        return paths
 
     @staticmethod
     def _artifact_text(artifact: ArtifactRecord) -> str:
@@ -865,18 +1049,58 @@ class LexicalRetriever:
                 details.append(f"Key output: {transcript}")
             return "\n".join(details)[:900]
 
+        if LexicalRetriever._artifact_category(artifact) == "mutation_result":
+            path = str(metadata.get("path") or artifact.source or "").strip()
+            host = str(metadata.get("host") or "").strip()
+            changed = metadata.get("changed")
+            bits = [f"Mutation result: {artifact.summary or artifact.tool_name}"]
+            if host or path:
+                target = f"{host}:{path}" if host and path else host or path
+                bits.append(f"Target: {target}")
+            if isinstance(changed, bool):
+                bits.append(f"Changed: {'yes' if changed else 'no'}")
+            for key in ("bytes_written", "actual_occurrences", "expected_occurrences", "new_sha256"):
+                value = metadata.get(key)
+                if value not in (None, ""):
+                    bits.append(f"{key}: {value}")
+            readback_sha = str(metadata.get("readback_sha256") or "").strip()
+            new_sha = str(metadata.get("new_sha256") or "").strip()
+            verification = metadata.get("verification") if isinstance(metadata.get("verification"), dict) else {}
+            if readback_sha or verification:
+                verified = bool(verification.get("readback_sha256_matches")) or bool(new_sha and readback_sha == new_sha)
+                bits.append(f"Readback verified: {'yes' if verified else 'no'}")
+            return "\n".join(bits)[:900]
+
         base = f"{artifact.source or artifact.tool_name} | {artifact.summary}"
-        preview = artifact.preview_text or artifact.inline_content or ""
+        preview = artifact.preview_text or artifact.inline_content or LexicalRetriever._artifact_body_excerpt(artifact)
         if metadata.get("complete_file") and preview:
             preview = f"Full file already captured; excerpt below is preview only.\n{preview[:500].rstrip()}"
         combined = f"{base}\n{preview}".strip()
         return combined[:900]
 
     @staticmethod
+    def _artifact_body_excerpt(artifact: ArtifactRecord, *, limit: int = 500) -> str:
+        content_path = str(getattr(artifact, "content_path", "") or "").strip()
+        if not content_path:
+            return ""
+        try:
+            text = Path(content_path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        excerpt = text[:limit].strip()
+        if not excerpt:
+            return ""
+        if len(text) > limit:
+            return f"{excerpt}..."
+        return excerpt
+
+    @staticmethod
     def _artifact_category(artifact: ArtifactRecord) -> str:
         metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
         if str(metadata.get("verifier_verdict") or "").strip():
             return "verifier"
+        if str(artifact.tool_name or artifact.kind or "").strip() in _MUTATION_RESULT_TOOLS:
+            return "mutation_result"
         if artifact.kind == "file_read" and bool(metadata.get("complete_file")):
             return "primary_file"
         return "other"
@@ -897,11 +1121,91 @@ class LexicalRetriever:
                 or ""
             ).strip()
             return f"verifier:{target.lower()}"
+        if category == "mutation_result":
+            path = str(metadata.get("path") or artifact.source or "").strip()
+            host = str(metadata.get("host") or "").strip().lower()
+            if path:
+                return f"mutation_result:{host}:{Path(path).as_posix().lower()}"
+            return f"mutation_result:{artifact.artifact_id}"
         path = str(metadata.get("path") or artifact.source or "").strip()
         if path:
             normalized = Path(path).as_posix().lower()
             return f"{category}:{normalized}"
         return f"{category}:{artifact.artifact_id}"
+
+    @staticmethod
+    def _artifact_success(artifact: ArtifactRecord) -> bool:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        if "success" in metadata:
+            return bool(metadata.get("success"))
+        return True
+
+    @staticmethod
+    def _artifact_host(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        host = str(metadata.get("host") or "").strip().lower()
+        if host:
+            return host
+        arguments = metadata.get("arguments")
+        if isinstance(arguments, dict):
+            return str(arguments.get("host") or "").strip().lower()
+        return ""
+
+    @staticmethod
+    def _artifact_path(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        path = str(metadata.get("path") or "").strip()
+        if not path:
+            arguments = metadata.get("arguments")
+            if isinstance(arguments, dict):
+                path = str(arguments.get("path") or "").strip()
+        if not path:
+            source = str(artifact.source or "").strip()
+            if source.startswith("/"):
+                path = source
+        return Path(path).as_posix().lower() if path else ""
+
+    @classmethod
+    def _artifact_has_resolved_successor(
+        cls,
+        *,
+        state: LoopState,
+        artifact: ArtifactRecord,
+        max_gap: int = 6,
+    ) -> bool:
+        if cls._artifact_success(artifact):
+            return False
+        artifact_items = list(state.artifacts.items())
+        artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
+        current_index = next(
+            (index for index, (candidate_id, _) in enumerate(artifact_items) if candidate_id == artifact_id),
+            -1,
+        )
+        if current_index < 0:
+            return False
+
+        failure_path = cls._artifact_path(artifact)
+        failure_host = cls._artifact_host(artifact)
+        if not failure_path:
+            return False
+
+        failure_tool = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
+        for _, successor in artifact_items[current_index + 1 : current_index + 1 + max_gap]:
+            if not cls._artifact_success(successor):
+                continue
+            successor_path = cls._artifact_path(successor)
+            if successor_path != failure_path:
+                continue
+            successor_host = cls._artifact_host(successor)
+            if failure_host and successor_host and successor_host != failure_host:
+                continue
+            successor_tool = str(
+                getattr(successor, "tool_name", "") or getattr(successor, "kind", "") or ""
+            ).strip().lower()
+            if failure_tool and successor_tool and successor_tool != failure_tool:
+                continue
+            return True
+        return False
 
     @staticmethod
     def _query_requests_specific_detail(query: str) -> bool:
@@ -926,13 +1230,51 @@ class LexicalRetriever:
             "narrow excerpt",
             "exact excerpt",
             "specific excerpt",
+            "prior evidence",
+            "artifact summary",
+            "artifact summaries",
+            "artifact snippet",
+            "artifact snippets",
+            "show evidence",
+            "reuse evidence",
         )
         return any(marker in lowered for marker in detail_markers)
+
+    @staticmethod
+    def _handoff_recent_research_artifact_ids(state: LoopState) -> set[str]:
+        scratchpad = getattr(state, "scratchpad", None)
+        if not isinstance(scratchpad, dict):
+            return set()
+        handoff = scratchpad.get("_last_task_handoff")
+        if not isinstance(handoff, dict):
+            return set()
+        artifact_ids = handoff.get("recent_research_artifact_ids")
+        if not isinstance(artifact_ids, list):
+            return set()
+        return {
+            str(artifact_id).strip()
+            for artifact_id in artifact_ids
+            if str(artifact_id).strip()
+        }
+
+    @staticmethod
+    def _should_pin_recent_research_artifacts(state: LoopState) -> bool:
+        scratchpad = getattr(state, "scratchpad", None)
+        if not isinstance(scratchpad, dict):
+            return False
+        if scratchpad.get("_task_boundary_previous_task"):
+            return True
+        if isinstance(scratchpad.get("_resolved_followup"), dict):
+            return True
+        if isinstance(scratchpad.get("_resolved_remote_followup"), dict):
+            return True
+        return False
 
     @staticmethod
     def _score_artifact(
         *,
         artifact: ArtifactRecord,
+        query: str,
         query_tokens: set[str],
         recency: int,
         state: LoopState,
@@ -985,6 +1327,16 @@ class LexicalRetriever:
         if metadata_intent and metadata_intent in secondary_intents:
             intent_bonus += 1.2
 
+        pinned_research_bonus = 0.0
+        recent_research_artifact_ids = LexicalRetriever._handoff_recent_research_artifact_ids(state)
+        if (
+            recent_research_artifact_ids
+            and artifact.artifact_id in recent_research_artifact_ids
+            and str(getattr(artifact, "kind", "")).strip() in {"web_search", "web_fetch"}
+            and LexicalRetriever._should_pin_recent_research_artifacts(state)
+        ):
+            pinned_research_bonus += 6.0
+
         target_path_bonus = 0.0
         target_paths = LexicalRetriever._state_target_paths(state)
         source_path = Path(artifact.source).as_posix().lower() if artifact.source else ""
@@ -999,6 +1351,13 @@ class LexicalRetriever:
         if entity_overlap:
             entity_bonus = min(2.0, entity_overlap * 0.5)
 
+        terminal_claim_penalty = 1.0
+        artifact_source = str(metadata.get("source") or artifact.source or "").strip().lower()
+        if artifact.tool_name == "task_complete" or artifact_source == "model_terminal_claim":
+            terminal_claim_penalty *= 0.7
+            if LexicalRetriever._query_requests_live_remote_correction(query):
+                terminal_claim_penalty *= 0.45
+
         failure_bonus = 0.0
         failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
         if failure_mode:
@@ -1011,6 +1370,18 @@ class LexicalRetriever:
             ).lower()
             if failure_mode in failure_haystack:
                 failure_bonus += 2.0
+        touched_symbol_bonus = 0.0
+        touched_symbols = LexicalRetriever._state_touched_symbols(state)
+        if touched_symbols:
+            symbol_overlap = len(touched_symbols & (summary_tokens | keyword_tokens | path_tokens | metadata_tokens))
+            if symbol_overlap:
+                touched_symbol_bonus = min(2.5, symbol_overlap * 0.8)
+        resolved_failure_penalty = 0.0
+        if not LexicalRetriever._artifact_success(artifact) and LexicalRetriever._artifact_has_resolved_successor(
+            state=state,
+            artifact=artifact,
+        ):
+            resolved_failure_penalty = 10.0
 
         relevance = (
             overlap
@@ -1021,10 +1392,13 @@ class LexicalRetriever:
             + confidence_bonus
             + phase_bonus
             + intent_bonus
+            + pinned_research_bonus
             + target_path_bonus
             + entity_bonus
             + failure_bonus
-        )
+            + touched_symbol_bonus
+            - resolved_failure_penalty
+        ) * terminal_claim_penalty
         if relevance <= 0:
             return 0.0
         recency_bonus = recency * 0.05
@@ -1108,6 +1482,11 @@ def build_retrieval_query(state: LoopState) -> str:
         parts.append(f"Intent: {normalize_intent_label(state.active_intent)}")
     if state.intent_tags:
         parts.append(f"Tags: {' '.join(state.intent_tags)}")
+    touched_symbols = state.scratchpad.get("_touched_symbols")
+    if isinstance(touched_symbols, list):
+        cleaned_symbols = [str(symbol).strip() for symbol in touched_symbols if str(symbol).strip()]
+        if cleaned_symbols:
+            parts.append("Touched symbols: " + " ".join(cleaned_symbols[:8]))
     current_goal = LexicalRetriever._effective_current_goal(state)
     if current_goal:
         parts.append(f"Current goal: {current_goal}")
@@ -1145,6 +1524,7 @@ def build_retrieval_query(state: LoopState) -> str:
     for content in _dedupe_nonempty_texts([
         _retrieval_message_text(message)
         for message in state.recent_messages[-3:]
+        if not _is_recovery_nudge_message(message)
     ]):
         parts.append(content)
     return "\n".join(part for part in parts if part)
@@ -1181,7 +1561,10 @@ def build_refined_retrieval_query(
             parts.append("Summary notes: " + " ".join(summary.notes[:2]))
     if bundle.experiences:
         memory = bundle.experiences[0]
-        if not LexicalRetriever._is_generic_terminal_memory(state, memory):
+        if not (
+            memory.tool_name == "task_complete"
+            and LexicalRetriever._query_requests_live_remote_correction(base_query)
+        ) and not LexicalRetriever._is_generic_terminal_memory(state, memory):
             parts.append(
                 f"Prior outcome: {normalize_intent_label(memory.intent)} / {memory.tool_name} / {memory.outcome}"
             )
@@ -1199,6 +1582,11 @@ def build_refined_retrieval_query(
             visible_memory_tags = LexicalRetriever._prompt_visible_memory_tags(state, memory)
             if visible_memory_tags:
                 parts.append("Memory tags: " + " ".join(visible_memory_tags[:4]))
+    touched_symbols = state.scratchpad.get("_touched_symbols")
+    if isinstance(touched_symbols, list):
+        cleaned_symbols = [str(symbol).strip() for symbol in touched_symbols if str(symbol).strip()]
+        if cleaned_symbols:
+            parts.append("Touched symbols: " + " ".join(cleaned_symbols[:8]))
     if state.working_memory.open_questions:
         parts.append("Open questions: " + " ".join(state.working_memory.open_questions[-2:]))
     retrieval_failures = _retrieval_failure_texts(state.working_memory.failures[-2:])

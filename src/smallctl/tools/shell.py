@@ -3,459 +3,33 @@ from __future__ import annotations
 import asyncio
 import asyncio.subprocess
 import os
-import re
-import shlex
+from pathlib import Path
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
-from ..state import LoopState, _coerce_background_process_record
+from .. import shell_utils as _shell_attempts
+from ..models.events import UIEvent, UIEventType
+from ..state import LoopState
 from ..risk_policy import evaluate_risk_policy
 from .common import fail, needs_human, ok
-
-
-# Patterns that indicate a sudo/password prompt is waiting for input
-SUDO_PROMPT_PATTERNS = [
-    re.compile(r'\[sudo\] password for', re.IGNORECASE),
-    re.compile(r'^password:', re.IGNORECASE),
-    re.compile(r'password for .*:', re.IGNORECASE),
-    re.compile(r'sudo:.*no password was provided', re.IGNORECASE),
-    re.compile(r'sudo:.*password is required', re.IGNORECASE),
-    re.compile(r'sudo:.*a password is required', re.IGNORECASE),
-    re.compile(r'sudo:.*no tty present', re.IGNORECASE),
-    re.compile(r'sudo:.*a terminal is required', re.IGNORECASE),
-    re.compile(r'sudo:.*must be run from a terminal', re.IGNORECASE),
-]
-
-SUDO_INVALID_PASSWORD_PATTERNS = [
-    re.compile(r"sorry,\s*try again", re.IGNORECASE),
-    re.compile(r"incorrect password", re.IGNORECASE),
-    re.compile(r"authentication failure", re.IGNORECASE),
-    re.compile(r"\bincorrect password attempts?\b", re.IGNORECASE),
-]
-
-SUDO_PERMISSION_DENIED_PATTERNS = [
-    re.compile(r"not in the sudoers file", re.IGNORECASE),
-    re.compile(r"may not run sudo", re.IGNORECASE),
-]
-
-_SHELL_WRAPPER_TOKENS = {
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    "pwsh",
-    "powershell",
-    "cmd",
-    "cmd.exe",
-}
-_SHELL_WRAPPER_COMMAND_FLAGS = {"-c", "-lc", "/c", "-Command", "-command"}
-
-_ARGPARSE_REQUIRED_ARGS_PATTERN = re.compile(
-    r"(?:error:\s*)?the following arguments are required:\s*(.+)",
-    re.IGNORECASE,
+from .process_streams import read_stream_chunks
+from .shell_processes import cwd_get, cwd_set, env_get, env_set, process_kill, shell_job_launch, shell_job_status
+from .shell_foreground import shell_exec_foreground, _command_uses_leading_sudo
+from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
+from .shell_support import (
+    _build_argparse_missing_args_question,
+    _build_shell_status_update,
+    _detect_unsupported_shell_syntax,
+    _extract_missing_argparse_arguments,
+    _shell_execution_authoring_guard,
+    _shell_status_update_interval,
+    _shell_write_session_artifact_delete_guard,
+    _shell_write_session_target_path_guard,
+    _shell_workspace_relative_hint,
 )
-
-
-def _extract_missing_argparse_arguments(error_text: str) -> list[str]:
-    match = _ARGPARSE_REQUIRED_ARGS_PATTERN.search(str(error_text or ""))
-    if not match:
-        return []
-
-    missing = match.group(1).strip()
-    if not missing:
-        return []
-
-    # argparse usually prints comma-separated flags, but keep the parser narrow so
-    # we only hand off the clearly missing names instead of guessing at aliases.
-    missing = missing.replace(" and ", ", ")
-    values = [part.strip(" .`'\"") for part in missing.split(",")]
-    return [value for value in values if value]
-
-
-def _build_argparse_missing_args_question(command: str, missing_args: list[str]) -> str:
-    missing_text = ", ".join(missing_args) if missing_args else "required arguments"
-    return (
-        f"The command `{command}` is missing required arguments: {missing_text}. "
-        "What values should I use?"
-    )
-
-
-def _detect_unsupported_shell_syntax(command: str) -> str | None:
-    # Keep this intentionally narrow: the current failure mode is Bash here-string
-    # redirection, which /bin/sh does not understand.
-    if "<<<" in command:
-        return (
-            "Command uses Bash-only here-string redirection (`<<<`), but smallctl runs shell "
-            "commands through /bin/sh on Unix. Rewrite it with POSIX syntax (for example, "
-            "use `printf` piped into the command) or wrap the whole command in `bash -lc`."
-        )
-    return None
-
-
-def _shell_workspace_relative_hint(command: str, cwd: str | None = None) -> str | None:
-    raw_command = str(command or "")
-    match = re.search(r"(?<![\w/])(/temp(?:/[^\s\"'`]+)*)", raw_command)
-    if match is None:
-        return None
-
-    suspicious_path = match.group(1)
-    trimmed = suspicious_path.lstrip("/")
-    if not trimmed:
-        return None
-
-    base = Path(cwd) if cwd else Path.cwd()
-    workspace_candidate = (base / Path(trimmed)).resolve()
-    if not (workspace_candidate.exists() or workspace_candidate.parent.exists()):
-        return None
-
-    return (
-        f"That command used the root-level `{suspicious_path}` path. "
-        f"If you meant the workspace copy, retry with `{('./' + trimmed)}` instead."
-    )
-
-
-def _shell_execution_authoring_guard(state: LoopState, command: str) -> dict[str, Any] | None:
-    """
-    Keep small-model runs in the authoring contract until they have produced an
-    actual artifact to verify.
-
-    This allows file creation/replacement to happen first, then shell execution
-    can resume once there is something concrete to test.
-    """
-    plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
-    if plan is not None and not getattr(plan, "approved", False):
-        return fail(
-            "Shell execution is blocked until the spec contract is approved.",
-            metadata={
-                "command": command,
-                "reason": "spec_not_approved",
-                "plan_id": getattr(plan, "plan_id", ""),
-            },
-        )
-
-    if state.contract_phase() == "author":
-        if not state.files_changed_this_cycle:
-            return fail(
-                "Shell execution is blocked until the authoring contract has produced a target artifact.",
-                metadata={
-                    "command": command,
-                    "reason": "authoring_target_missing",
-                    "contract_phase": state.contract_phase(),
-                    "files_changed_this_cycle": state.files_changed_this_cycle,
-                },
-            )
-    return None
-
-
-def _shell_tokens(command: str) -> list[str]:
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return command.split()
-
-
-def _looks_like_env_assignment(token: str) -> bool:
-    if "=" not in token:
-        return False
-    key, _value = token.split("=", 1)
-    return key.isidentifier()
-
-
-def _leading_command_tokens(command: str, *, max_depth: int = 3) -> list[str]:
-    current = command
-    for _ in range(max_depth):
-        tokens = _shell_tokens(current)
-        if not tokens:
-            return []
-        if len(tokens) >= 3 and tokens[0].lower() in _SHELL_WRAPPER_TOKENS and tokens[1] in _SHELL_WRAPPER_COMMAND_FLAGS:
-            current = tokens[2]
-            continue
-        index = 0
-        if tokens[0].lower() == "env":
-            index = 1
-            while index < len(tokens) and tokens[index].startswith("-"):
-                index += 1
-        while index < len(tokens) and _looks_like_env_assignment(tokens[index]):
-            index += 1
-        return tokens[index:]
-    return _shell_tokens(current)
-
-
-def _command_uses_leading_sudo(command: str) -> bool:
-    tokens = _leading_command_tokens(command)
-    return bool(tokens) and tokens[0].lower() == "sudo"
-
-
-def _matches_any_pattern(text: str, patterns: list[re.Pattern[str]]) -> bool:
-    return any(pattern.search(text) for pattern in patterns)
-
-
-def _shell_status_update_interval(timeout_sec: int) -> float:
-    return max(1.0, min(max(1, timeout_sec) / 3.0, 10.0))
-
-
-def _build_shell_status_update(command: str, *, elapsed_sec: float, timeout_sec: int) -> str:
-    elapsed_text = f"{elapsed_sec:.0f}s"
-    timeout_text = f"{max(1, timeout_sec)}s"
-    return f"[still running after {elapsed_text} of {timeout_text}] {command}"
-
-
-def _find_active_process_by_pid(harness: Any, pid: int) -> Any | None:
-    active_processes = getattr(harness, "_active_processes", None)
-    if not isinstance(active_processes, set):
-        return None
-    for proc in active_processes:
-        if getattr(proc, "pid", None) == pid:
-            return proc
-    return None
-
-
-def _background_job_record(state: LoopState, job_id: str) -> dict[str, Any] | None:
-    record = state.background_processes.get(job_id)
-    if not isinstance(record, dict):
-        return None
-    return dict(record)
-
-
-async def _shell_job_status(job_id: str, state: LoopState, harness: Any = None) -> dict[str, Any]:
-    record = _background_job_record(state, job_id)
-    if record is None:
-        return fail(f"Unknown job id: {job_id}")
-
-    pid = int(record.get("pid") or 0)
-    proc = _find_active_process_by_pid(harness, pid) if harness is not None else None
-    status = str(record.get("status") or "unknown").strip().lower()
-    command = str(record.get("command") or "").strip()
-    cwd = str(record.get("cwd") or "").strip()
-
-    if proc is not None:
-        returncode = getattr(proc, "returncode", None)
-        if returncode is None:
-            record["status"] = "running"
-            state.background_processes[job_id] = record
-            state.touch()
-            return ok(
-                {
-                    "job_id": job_id,
-                    "pid": pid,
-                    "command": command,
-                    "cwd": cwd,
-                    "status": "running",
-                    "started_at": record.get("started_at"),
-                }
-            )
-        status = "completed" if returncode == 0 else "failed"
-        record["status"] = status
-        record["exit_code"] = returncode
-        state.background_processes[job_id] = record
-        state.touch()
-        if harness is not None and hasattr(harness, "_active_processes"):
-            try:
-                harness._active_processes.discard(proc)
-            except Exception:
-                pass
-        return ok(
-            {
-                "job_id": job_id,
-                "pid": pid,
-                "command": command,
-                "cwd": cwd,
-                "status": status,
-                "exit_code": returncode,
-                "started_at": record.get("started_at"),
-            }
-        )
-
-    if os.name != "nt" and pid > 0:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            status = "unknown"
-        except PermissionError:
-            status = "running"
-        else:
-            status = "running"
-    if status == "running":
-        record["status"] = "running"
-        state.background_processes[job_id] = record
-        state.touch()
-        return ok(
-            {
-                "job_id": job_id,
-                "pid": pid,
-                "command": command,
-                "cwd": cwd,
-                "status": "running",
-                "started_at": record.get("started_at"),
-            }
-        )
-
-    record["status"] = "unknown"
-    state.background_processes[job_id] = record
-    state.touch()
-    return ok(
-        {
-            "job_id": job_id,
-            "pid": pid,
-            "command": command,
-            "cwd": cwd,
-            "status": "unknown",
-            "started_at": record.get("started_at"),
-        }
-    )
-
-
-async def _run_sudo_validation(
-    *,
-    cwd: str,
-    harness: Any = None,
-    timeout_sec: int = 10,
-    password: str | None = None,
-) -> dict[str, Any]:
-    proc = None
-    try:
-        command = "sudo -n -v" if password is None else "sudo -S -p '' -v"
-        stdin = asyncio.subprocess.DEVNULL if password is None else asyncio.subprocess.PIPE
-        proc = await _create_process(
-            command=command,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=stdin,
-            harness=harness,
-        )
-        input_bytes = None if password is None else f"{password}\n".encode("utf-8")
-        stdout, stderr = await asyncio.wait_for(proc.communicate(input_bytes), timeout=max(1, timeout_sec))
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
-        combined = "\n".join(part for part in (stderr_text.strip(), stdout_text.strip()) if part).strip()
-        if proc.returncode in (0, None):
-            return {"status": "ok", "stdout": stdout_text, "stderr": stderr_text}
-        if _matches_any_pattern(combined, SUDO_INVALID_PASSWORD_PATTERNS):
-            return {
-                "status": "invalid_password",
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-                "error": combined or "Incorrect sudo password.",
-            }
-        if _matches_any_pattern(combined, SUDO_PROMPT_PATTERNS):
-            return {
-                "status": "password_required",
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-                "error": combined or "Sudo password is required.",
-            }
-        if _matches_any_pattern(combined, SUDO_PERMISSION_DENIED_PATTERNS):
-            return {
-                "status": "permission_denied",
-                "stdout": stdout_text,
-                "stderr": stderr_text,
-                "error": combined or "Sudo permission denied.",
-            }
-        return {
-            "status": "error",
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "error": combined or f"sudo validation exited with code {proc.returncode}",
-        }
-    except asyncio.TimeoutError:
-        if proc and proc.returncode is None:
-            try:
-                proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            except Exception:
-                pass
-        return {"status": "error", "error": f"sudo validation timed out after {max(1, timeout_sec)}s"}
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-    finally:
-        if harness and proc and hasattr(harness, "_active_processes"):
-            try:
-                harness._active_processes.discard(proc)
-            except Exception:
-                pass
-
-
-async def _ensure_sudo_credentials(
-    *,
-    command: str,
-    cwd: str,
-    harness: Any = None,
-    timeout_sec: int = 30,
-    sudo_human_message: str,
-) -> dict[str, Any] | None:
-    if not _command_uses_leading_sudo(command):
-        return None
-
-    validation_timeout = max(5, min(timeout_sec, 15))
-    validation = await _run_sudo_validation(cwd=cwd, harness=harness, timeout_sec=validation_timeout)
-    status = str(validation.get("status") or "").strip().lower()
-    if status == "ok":
-        return None
-    if status == "permission_denied":
-        return fail(
-            str(validation.get("error") or "Sudo permission denied."),
-            metadata={"command": command, "reason": "sudo_permission_denied", "sudo_validation": validation},
-        )
-    if status not in {"password_required", "invalid_password"}:
-        return fail(
-            str(validation.get("error") or "Unable to validate sudo credentials."),
-            metadata={"command": command, "reason": "sudo_validation_failed", "sudo_validation": validation},
-        )
-
-    password_fn = getattr(harness, "request_sudo_password", None)
-    if not callable(password_fn) or getattr(harness, "event_handler", None) is None:
-        return needs_human(
-            f"Command requires sudo/password input: '{command}'. {sudo_human_message}",
-            metadata={"command": command, "reason": "sudo_password_required", "sudo_validation": validation},
-        )
-
-    prompt_text = "Enter the sudo password to continue this command."
-    validation_error = str(validation.get("error") or "").strip()
-    if validation_error:
-        prompt_text = f"{prompt_text}\n\n{validation_error}"
-
-    for attempt in range(1, 4):
-        password = await password_fn(command=command, prompt_text=prompt_text)
-        if password is None:
-            return fail(
-                "Sudo password entry cancelled by user.",
-                metadata={"command": command, "reason": "sudo_password_cancelled"},
-            )
-        validation = await _run_sudo_validation(
-            cwd=cwd,
-            harness=harness,
-            timeout_sec=validation_timeout,
-            password=password,
-        )
-        status = str(validation.get("status") or "").strip().lower()
-        if status == "ok":
-            return None
-        if status == "permission_denied":
-            return fail(
-                str(validation.get("error") or "Sudo permission denied."),
-                metadata={"command": command, "reason": "sudo_permission_denied", "sudo_validation": validation},
-            )
-        if status in {"password_required", "invalid_password"} and attempt < 3:
-            prompt_text = "Incorrect sudo password. Try again."
-            validation_error = str(validation.get("error") or "").strip()
-            if validation_error:
-                prompt_text = f"{prompt_text}\n\n{validation_error}"
-            continue
-        if status in {"password_required", "invalid_password"}:
-            return fail(
-                "Sudo authentication failed after 3 attempts.",
-                metadata={"command": command, "reason": "sudo_password_rejected", "sudo_validation": validation},
-            )
-        return fail(
-            str(validation.get("error") or "Unable to validate sudo credentials."),
-            metadata={"command": command, "reason": "sudo_validation_failed", "sudo_validation": validation},
-        )
-    return None
+from .ui_streaming import BufferedUIEventEmitter
 
 
 async def _shell_exec_foreground(
@@ -524,9 +98,11 @@ async def _shell_exec_foreground(
                 denied["status"] = "denied"
                 return denied
 
-        sudo_guard = await _ensure_sudo_credentials(
+        sudo_guard = await ensure_sudo_credentials(
             command=command,
             cwd=state.cwd,
+            is_leading_sudo=_command_uses_leading_sudo(command),
+            create_process=_create_process,
             harness=harness,
             timeout_sec=timeout_sec,
             sudo_human_message=sudo_human_message,
@@ -541,52 +117,32 @@ async def _shell_exec_foreground(
         detection_buffer = ""  # Buffer for pattern detection
         heartbeat_interval = _shell_status_update_interval(timeout_sec)
         start_time = time.monotonic()
+        stream_emitter = BufferedUIEventEmitter(
+            harness=harness,
+            event_type=UIEventType.SHELL_STREAM,
+        )
 
         async def read_stream(stream, out_list, is_stderr: bool = False):
             nonlocal password_prompt_detected, detection_buffer
-            if not stream or not hasattr(stream, "read"):
-                return
-            while True:
-                try:
-                    chunk = await stream.read(2048)
-                except Exception:
-                    break
-                if not chunk:
-                    break
-                chunk_str = chunk.decode("utf-8", errors="replace")
-                out_list.append(chunk_str)
-                
+
+            async def handle_chunk(chunk_str: str) -> None:
+                nonlocal password_prompt_detected, detection_buffer
+
                 # Check for password prompt in output (check both this chunk and buffer)
                 if not password_prompt_detected:
                     detection_buffer += chunk_str
                     # Keep buffer size manageable
                     if len(detection_buffer) > 4096:
                         detection_buffer = detection_buffer[-2048:]
-                    
+
                     for pattern in SUDO_PROMPT_PATTERNS:
                         if pattern.search(detection_buffer):
                             password_prompt_detected = True
                             break
-                
-                if harness and hasattr(harness, "_emit") and getattr(harness, "event_handler", None):
-                    from ..models.events import UIEvent, UIEventType
-                    # Sanity check: cap emittable content to avoid UI overwhelm if chunk is massive
-                    emittable = chunk_str
-                    if len(emittable) > 16384:
-                         emittable = emittable[:16384] + "\n[UI TRUNCATED - LARGE OUTPUT]"
-                         
-                    evt = UIEvent(
-                        event_type=UIEventType.SHELL_STREAM,
-                        content=emittable,
-                    )
-                    # Use await instead of create_task to provide natural backpressure
-                    # so we don't spam the UI loop faster than it can render.
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            await harness._emit(harness.event_handler, evt)
-                    except RuntimeError:
-                        pass
+
+                await stream_emitter.emit_text(chunk_str)
+
+            await read_stream_chunks(stream, out_list, chunk_size=2048, on_chunk=handle_chunk)
 
         async def emit_status_update() -> None:
             elapsed_sec = time.monotonic() - start_time
@@ -596,18 +152,9 @@ async def _shell_exec_foreground(
                 timeout_sec=timeout_sec,
             )
             progress_updates.append(status_text)
-            if harness and hasattr(harness, "_emit") and getattr(harness, "event_handler", None):
-                from ..models.events import UIEvent, UIEventType
-
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        await harness._emit(
-                            harness.event_handler,
-                            UIEvent(event_type=UIEventType.SHELL_STREAM, content=status_text),
-                        )
-                except RuntimeError:
-                    pass
+            await stream_emitter.emit_event(
+                UIEvent(event_type=UIEventType.SHELL_STREAM, content=status_text)
+            )
 
         if hasattr(proc, "stdout") and hasattr(proc, "stderr") and hasattr(proc.stdout, "read"):
             stdout_task = asyncio.create_task(read_stream(proc.stdout, stdout_data, is_stderr=False))
@@ -635,6 +182,7 @@ async def _shell_exec_foreground(
                         proc.kill()
                     except Exception:
                         pass
+                await stream_emitter.flush()
                 try:
                     await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task), timeout=1.0)
                 except Exception:
@@ -674,18 +222,13 @@ async def _shell_exec_foreground(
                 "stderr": stderr.decode("utf-8", errors="replace"),
                 "exit_code": proc.returncode,
             }
-            if harness and hasattr(harness, "_emit") and getattr(harness, "event_handler", None):
-                from ..models.events import UIEvent, UIEventType
-                stdout_txt = output.get("stdout", "") if isinstance(output.get("stdout"), str) else ""
-                stderr_txt = output.get("stderr", "") if isinstance(output.get("stderr"), str) else ""
-                msg = stdout_txt + stderr_txt
-                if msg:
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            await harness._emit(harness.event_handler, UIEvent(event_type=UIEventType.SHELL_STREAM, content=msg))
-                    except RuntimeError:
-                        pass
+            stdout_txt = output.get("stdout", "") if isinstance(output.get("stdout"), str) else ""
+            stderr_txt = output.get("stderr", "") if isinstance(output.get("stderr"), str) else ""
+            msg = stdout_txt + stderr_txt
+            if msg:
+                await stream_emitter.emit_event(
+                    UIEvent(event_type=UIEventType.SHELL_STREAM, content=msg)
+                )
             if progress_updates:
                 output["progress_updates"] = progress_updates
 
@@ -808,79 +351,24 @@ async def shell_exec(
     if state is None:
         return fail("Shell execution requires state context.", metadata={"reason": "missing_state"})
     if poll_job_id:
-        return await _shell_job_status(job_id=poll_job_id, state=state, harness=harness)
+        return await shell_job_status(job_id=poll_job_id, state=state, harness=harness)
     if not command:
         return fail("Shell execution requires a command or a job_id to poll.", metadata={"reason": "missing_command"})
+    artifact_delete_guard = _shell_write_session_artifact_delete_guard(state, command)
+    if artifact_delete_guard is not None:
+        return artifact_delete_guard
+    write_session_guard = _shell_write_session_target_path_guard(state, command)
+    if write_session_guard is not None:
+        return write_session_guard
     if background:
-        return await _shell_job_launch(command=command, state=state, harness=harness)
-    return await _shell_exec_foreground(command, state=state, timeout_sec=timeout_sec, harness=harness)
-
-
-async def _shell_job_launch(command: str, state: LoopState, harness: Any = None) -> dict[str, Any]:
-    try:
-        proc = await _create_process(
-            command=command,
-            cwd=state.cwd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            harness=harness,
-        )
-        job_id = str(proc.pid)
-        state.background_processes[job_id] = _coerce_background_process_record(
-            {
-                "pid": proc.pid,
-                "command": command,
-                "cwd": state.cwd,
-                "status": "running",
-            },
-            job_id=job_id,
-        )
-        state.touch()
-        return ok({"job_id": job_id, "pid": proc.pid, "command": command})
-    except Exception as exc:
-        return fail(str(exc))
-
-
-async def process_kill(job_id: str, state: LoopState) -> dict[str, Any]:
-    proc_meta = state.background_processes.get(job_id)
-    if not proc_meta:
-        return fail(f"Unknown job id: {job_id}")
-    pid = int(proc_meta["pid"])
-    try:
-        if os.name == "nt":
-            await asyncio.create_subprocess_shell(f"taskkill /PID {pid} /F")
-        else:
-            os.kill(pid, 9)
-        del state.background_processes[job_id]
-        state.touch()
-        return ok(f"killed {pid}")
-    except Exception as exc:
-        return fail(str(exc))
-
-
-async def env_get(name: str) -> dict[str, Any]:
-    return ok({"name": name, "value": os.getenv(name)})
-
-
-async def env_set(name: str, value: str) -> dict[str, Any]:
-    os.environ[name] = value
-    return ok({"name": name, "value": value})
-
-
-async def cwd_get(state: LoopState) -> dict[str, Any]:
-    return ok({"cwd": state.cwd})
-
-
-async def cwd_set(path: str, state: LoopState) -> dict[str, Any]:
-    new_cwd = Path(path)
-    if not new_cwd.is_absolute():
-        new_cwd = Path(state.cwd) / new_cwd
-    new_cwd = new_cwd.resolve()
-    if not new_cwd.exists() or not new_cwd.is_dir():
-        return fail(f"Invalid directory: {new_cwd}")
-    state.cwd = str(new_cwd)
-    state.touch()
-    return ok({"cwd": state.cwd})
+        return await shell_job_launch(command=command, state=state, create_process=_create_process, harness=harness)
+    return await shell_exec_foreground(
+        command,
+        state=state,
+        timeout_sec=timeout_sec,
+        harness=harness,
+        create_process=_create_process,
+    )
 
 
 async def create_process(

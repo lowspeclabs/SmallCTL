@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("smallctl.harness.approvals")
 
+
+def _set_future_result_if_pending(future: asyncio.Future[Any], value: Any) -> None:
+    if future.done():
+        return
+    future.set_result(value)
+
+
 class ApprovalService:
     def __init__(self, harness: Harness):
         self.harness = harness
@@ -59,9 +66,7 @@ class ApprovalService:
 
     def resolve_shell_approval(self, approval_id: str, approved: bool) -> None:
         future = self._shell_approval_waiters.get(approval_id)
-        if future is None or future.done():
-            return
-        future.set_result(bool(approved))
+        self._resolve_future(future, bool(approved))
 
     def reject_pending_shell_approvals(self) -> None:
         for approval_id in list(self._shell_approval_waiters.keys()):
@@ -69,9 +74,7 @@ class ApprovalService:
 
     def _reject_shell_approval(self, approval_id: str) -> None:
         future = self._shell_approval_waiters.get(approval_id)
-        if future is None or future.done():
-            return
-        future.set_result(False)
+        self._resolve_future(future, False)
 
     async def request_sudo_password(
         self,
@@ -108,9 +111,7 @@ class ApprovalService:
 
     def resolve_sudo_password(self, prompt_id: str, password: str | None) -> None:
         future = self._sudo_password_waiters.get(prompt_id)
-        if future is None or future.done():
-            return
-        future.set_result(password)
+        self._resolve_future(future, password)
 
     def reject_pending_sudo_password_prompts(self) -> None:
         for prompt_id in list(self._sudo_password_waiters.keys()):
@@ -118,6 +119,18 @@ class ApprovalService:
 
     def _reject_sudo_password_prompt(self, prompt_id: str) -> None:
         future = self._sudo_password_waiters.get(prompt_id)
+        self._resolve_future(future, None)
+
+    @staticmethod
+    def _resolve_future(future: asyncio.Future[Any] | None, value: Any) -> None:
         if future is None or future.done():
             return
-        future.set_result(None)
+        loop = future.get_loop()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            _set_future_result_if_pending(future, value)
+            return
+        loop.call_soon_threadsafe(_set_future_result_if_pending, future, value)

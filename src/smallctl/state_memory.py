@@ -32,11 +32,13 @@ def _compact_plan_step_lines(step: Any, *, depth: int = 0) -> list[str]:
     return lines
 
 
-def _trim_recent_messages(
+def trim_recent_messages(
     messages: list[ConversationMessage],
     *,
     limit: int,
 ) -> list[ConversationMessage]:
+    if limit <= 0:
+        return []
     if len(messages) <= limit:
         return list(messages)
 
@@ -44,27 +46,73 @@ def _trim_recent_messages(
     if not user_indices:
         return list(messages[-limit:])
 
-    anchor = messages[user_indices[0]]
-    suffix_size = max(limit - 1, 1)
-    start_idx = len(messages) - suffix_size
-    while start_idx > 0 and messages[start_idx].role == "tool":
-        start_idx -= 1
+    if limit == 1:
+        return [messages[user_indices[-1]]]
 
-    suffix = messages[start_idx:]
-    if any(m is anchor for m in suffix):
-        return list(suffix)
+    latest_user_index = user_indices[-1]
+    first_user_index = user_indices[0]
+    chosen: set[int] = set()
 
-    result = [anchor] + list(suffix)
-    if len(result) > limit:
-        to_drop = len(result) - limit
-        trimmed_suffix = list(suffix)
-        while to_drop > 0 and trimmed_suffix:
-            trimmed_suffix.pop(0)
-            to_drop -= 1
-        while trimmed_suffix and trimmed_suffix[0].role == "tool":
-            trimmed_suffix.pop(0)
-        return [anchor] + trimmed_suffix
-    return result
+    def _choose(index: int) -> None:
+        if len(chosen) >= limit:
+            return
+        if 0 <= index < len(messages):
+            chosen.add(index)
+
+    _choose(first_user_index)
+    _choose(latest_user_index)
+
+    previous_user_index = user_indices[-2] if len(user_indices) >= 2 else -1
+    offset = 1
+    while len(chosen) < limit:
+        added_any = False
+
+        left_index = latest_user_index - offset
+        if left_index > previous_user_index and messages[left_index].role != "user":
+            before = len(chosen)
+            _choose(left_index)
+            added_any = len(chosen) > before
+
+        right_index = latest_user_index + offset
+        if right_index < len(messages) and messages[right_index].role != "user":
+            before = len(chosen)
+            _choose(right_index)
+            added_any = len(chosen) > before or added_any
+
+        if not added_any:
+            break
+        offset += 1
+
+    recent_non_tool: list[int] = []
+    recent_tool: list[int] = []
+    for index in range(len(messages) - 1, -1, -1):
+        if index in chosen or messages[index].role == "user":
+            continue
+        if messages[index].role == "tool":
+            recent_tool.append(index)
+        else:
+            recent_non_tool.append(index)
+
+    for bucket in (recent_non_tool, recent_tool):
+        for index in bucket:
+            before = len(chosen)
+            _choose(index)
+            if len(chosen) == before:
+                continue
+            if len(chosen) >= limit:
+                break
+        if len(chosen) >= limit:
+            break
+
+    return [messages[index] for index in sorted(chosen)]
+
+
+def _trim_recent_messages(
+    messages: list[ConversationMessage],
+    *,
+    limit: int,
+) -> list[ConversationMessage]:
+    return trim_recent_messages(messages, limit=limit)
 
 
 def align_memory_entries(

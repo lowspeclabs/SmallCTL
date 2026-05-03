@@ -8,6 +8,8 @@ from smallctl.context import ContextPolicy, PromptAssembler, build_retrieval_que
 from smallctl.context.frame import PromptStateFrame
 from smallctl.context.retrieval import RetrievalBundle
 from smallctl.evidence import normalize_tool_result
+from smallctl.fama.signals import ActiveMitigation
+from smallctl.fama.state import activate_mitigations
 from smallctl.graph.deps import GraphRuntimeDeps
 from smallctl.graph.nodes import LoopRoute, interpret_model_output
 from smallctl.graph.state import GraphRunState
@@ -85,6 +87,97 @@ def test_prompt_assembler_builds_prompt_state_frame_and_spine_fields() -> None:
     assert "Frame compiles before rendering" in assembly.frame.spine.unmet_acceptance_criteria
     assert "Run brief:" in assembly.messages[0]["content"]
     assert "Working memory:" in assembly.messages[0]["content"]
+
+
+def test_prompt_assembler_renders_fama_capsules_in_working_memory() -> None:
+    state = LoopState(cwd="/tmp")
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            ),
+            ActiveMitigation(
+                name="acceptance_checklist_capsule",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            ),
+        ],
+        max_active=2,
+    )
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    content = assembly.messages[0]["content"]
+    assert "FAMA mitigation:" in content
+    assert "Before task_complete, satisfy the latest verifier/acceptance evidence" in content
+    assert "Use the acceptance checklist and latest verifier result as the finish gate." in content
+    assert assembly.frame is not None
+    assert len(assembly.frame.spine.fama_capsule_lines) == 2
+    assert assembly.section_tokens["fama_capsules"] > 0
+
+
+def test_prompt_assembler_omits_fama_capsules_when_disabled() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            ),
+        ],
+        max_active=2,
+    )
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assert "FAMA mitigation:" not in assembly.messages[0]["content"]
+    assert assembly.frame is not None
+    assert assembly.frame.spine.fama_capsule_lines == []
+    assert assembly.section_tokens["fama_capsules"] == 0
+
+
+def test_prompt_assembler_drops_expired_fama_capsules() -> None:
+    state = LoopState(cwd="/tmp", step_count=4)
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            ),
+        ],
+        max_active=2,
+    )
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assert "FAMA mitigation:" not in assembly.messages[0]["content"]
+    assert assembly.frame is not None
+    assert assembly.frame.spine.fama_capsule_lines == []
 
 
 def test_sub4b_working_memory_pins_available_evidence_sources() -> None:

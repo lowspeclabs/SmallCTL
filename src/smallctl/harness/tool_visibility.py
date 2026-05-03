@@ -375,6 +375,11 @@ def hidden_tool_reason(
 
 def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
     normalized_mode = _normalize_turn_mode(mode)
+    from ..fama.runtime import expire_for_turn
+    from ..fama.tool_policy import apply_fama_tool_exposure, fama_hidden_tools_for_exposure
+
+    expire_for_turn(harness, mode=normalized_mode)
+    config = getattr(harness, "config", None)
 
     if normalized_mode == "chat":
         chat_mode_tools = getattr(harness, "_chat_mode_tools", None)
@@ -385,6 +390,20 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
 
             schemas = list(chat_mode_tools_helper(harness))
         schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
+        hidden_tools = fama_hidden_tools_for_exposure(
+            schemas,
+            state=harness.state,
+            mode=normalized_mode,
+            config=config,
+        )
+        schemas = apply_fama_tool_exposure(
+            schemas,
+            state=harness.state,
+            mode=normalized_mode,
+            config=config,
+        )
+        if hidden_tools:
+            _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
         return {
             "schemas": schemas,
             "names": _tool_names(schemas),
@@ -413,7 +432,40 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         mode=normalized_mode,
     )
     schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
+    hidden_tools = fama_hidden_tools_for_exposure(
+        schemas,
+        state=harness.state,
+        mode=normalized_mode,
+        config=config,
+    )
+    schemas = apply_fama_tool_exposure(
+        schemas,
+        state=harness.state,
+        mode=normalized_mode,
+        config=config,
+    )
+    if hidden_tools:
+        _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
     return {
         "schemas": schemas,
         "names": _tool_names(schemas),
     }
+
+
+def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) -> None:
+    runlog = getattr(harness, "_runlog", None)
+    if not callable(runlog):
+        return
+    try:
+        from ..fama.state import active_mitigation_names
+
+        active = sorted(active_mitigation_names(harness.state))
+    except Exception:
+        active = []
+    runlog(
+        "fama_tool_exposure_applied",
+        "FAMA tool exposure policy applied",
+        hidden_tools=sorted(hidden_tools),
+        active_mitigations=active,
+        mode=mode,
+    )

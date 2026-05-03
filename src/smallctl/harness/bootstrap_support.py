@@ -160,6 +160,15 @@ def build_harness_kwargs(
     allow_interactive_shell_approval: bool,
     shell_approval_session_default: bool,
     provider_profile_resolved: str,
+    fama_enabled: bool,
+    fama_mode: str,
+    fama_default_ttl_steps: int,
+    fama_max_active_mitigations: int,
+    fama_signal_window: int,
+    fama_done_gate_on_failure: bool,
+    fama_capsule_token_budget: int,
+    fama_llm_judge_enabled: bool,
+    fama_llm_judge_min_severity: int,
 ) -> dict[str, Any]:
     return {
         "endpoint": endpoint,
@@ -212,6 +221,15 @@ def build_harness_kwargs(
         "indexer": indexer,
         "allow_interactive_shell_approval": allow_interactive_shell_approval,
         "shell_approval_session_default": shell_approval_session_default,
+        "fama_enabled": fama_enabled,
+        "fama_mode": fama_mode,
+        "fama_default_ttl_steps": fama_default_ttl_steps,
+        "fama_max_active_mitigations": fama_max_active_mitigations,
+        "fama_signal_window": fama_signal_window,
+        "fama_done_gate_on_failure": fama_done_gate_on_failure,
+        "fama_capsule_token_budget": fama_capsule_token_budget,
+        "fama_llm_judge_enabled": fama_llm_judge_enabled,
+        "fama_llm_judge_min_severity": fama_llm_judge_min_severity,
     }
 
 

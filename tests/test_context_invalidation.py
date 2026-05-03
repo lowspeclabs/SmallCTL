@@ -582,6 +582,88 @@ def test_frame_compiler_prunes_verifier_invalidated_optimistic_items() -> None:
     assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-neutral"]
 
 
+def test_frame_compiler_treats_fama_failure_like_verifier_failure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.turn_bundles = [
+        TurnBundle(
+            bundle_id="TB-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(1, 2),
+            phase="repair",
+            summary_lines=["Verified fix and all tests pass"],
+            files_touched=["src/app.py"],
+        ),
+        TurnBundle(
+            bundle_id="TB-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            step_range=(3, 4),
+            phase="repair",
+            summary_lines=["Collect failure traces from verifier"],
+            files_touched=["src/app.py"],
+        ),
+    ]
+    state.context_briefs = [
+        ContextBrief(
+            brief_id="B-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(1, 2),
+            task_goal="Repair tests",
+            current_phase="repair",
+            key_discoveries=["All tests pass after patch"],
+            tools_tried=["shell_exec"],
+            blockers=[],
+            files_touched=["src/app.py"],
+            artifact_ids=["A1"],
+            next_action_hint="Complete task",
+            staleness_step=2,
+            new_facts=["verified success on pytest"],
+        ),
+        ContextBrief(
+            brief_id="B-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            tier="warm",
+            step_range=(3, 4),
+            task_goal="Repair tests",
+            current_phase="repair",
+            key_discoveries=["Verifier still failing on assertions"],
+            tools_tried=["shell_exec"],
+            blockers=["failing tests"],
+            files_touched=["src/app.py"],
+            artifact_ids=["A2"],
+            next_action_hint="Collect failing test names",
+            staleness_step=4,
+        ),
+    ]
+    summaries = [
+        EpisodicSummary(
+            summary_id="S-optimistic",
+            created_at="2026-04-19T00:00:00+00:00",
+            notes=["Successfully fixed all tests"],
+        ),
+        EpisodicSummary(
+            summary_id="S-neutral",
+            created_at="2026-04-19T00:00:00+00:00",
+            notes=["Still investigating failure output"],
+        ),
+    ]
+    state.scratchpad["_context_invalidations"] = [
+        {
+            "reason": "fama_failure_detected",
+            "paths": [],
+            "fama_signal": "early_stop",
+            "step": state.step_count,
+        }
+    ]
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_summaries=summaries)
+
+    assert [bundle.bundle_id for bundle in frame.evidence_packet.turn_bundles] == ["TB-neutral"]
+    assert [brief.brief_id for brief in frame.evidence_packet.context_briefs] == ["B-neutral"]
+    assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-neutral"]
+
+
 def test_frame_compiler_prunes_invalidated_experience_memories() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"
@@ -870,3 +952,74 @@ def test_frame_compiler_prunes_stale_observations_after_invalidation() -> None:
     )
     assert drop.dropped_count == 1
     assert set(drop.dropped_ids) == {"E-src"}
+
+
+def test_phase_advanced_preserves_recent_evidence() -> None:
+    """Evidence created in the current or immediately preceding step must survive
+    phase-advanced invalidation so the model can reason about the successful tool
+    call that triggered the transition."""
+    state = LoopState(cwd="/tmp")
+    state.step_count = 4
+    state.current_phase = "execute"
+
+    # Old evidence from repair phase (step 1) – should be invalidated
+    state.reasoning_graph.evidence_records.append(
+        EvidenceRecord(
+            evidence_id="E-OLD",
+            statement="old repair observation",
+            phase="repair",
+            tool_name="ssh_exec",
+            created_at_step=1,
+        )
+    )
+
+    # Recent evidence from repair phase (step 3) – the successful ssh_exec that
+    # caused the repair -> execute transition. Must NOT be invalidated.
+    state.reasoning_graph.evidence_records.append(
+        EvidenceRecord(
+            evidence_id="E-RECOVERY",
+            statement="ssh_exec succeeded",
+            phase="repair",
+            tool_name="ssh_exec",
+            created_at_step=3,
+        )
+    )
+
+    state.invalidate_context(
+        reason="phase_advanced",
+        details={"from_phase": "repair", "to_phase": "execute"},
+    )
+
+    stale_ids = set(state.scratchpad.get("_observation_staleness", {}).keys())
+    assert "E-OLD" in stale_ids
+    assert "E-RECOVERY" not in stale_ids
+
+    frame = PromptStateFrameCompiler().compile(state=state)
+    observation_ids = {p.observation_id for p in frame.evidence_packet.observations}
+    assert "E-RECOVERY" in observation_ids
+    assert "E-OLD" not in observation_ids
+
+
+def test_environment_changed_preserves_recent_evidence() -> None:
+    """Same grace applies for environment_changed invalidation."""
+    state = LoopState(cwd="/tmp")
+    state.step_count = 2
+    state.current_phase = "execute"
+
+    state.reasoning_graph.evidence_records.append(
+        EvidenceRecord(
+            evidence_id="E-FRESH",
+            statement="http_get 200 OK",
+            phase="repair",
+            tool_name="http_get",
+            created_at_step=1,
+        )
+    )
+
+    state.invalidate_context(
+        reason="environment_changed",
+        details={"state_change": "Execution environment changed"},
+    )
+
+    stale_ids = set(state.scratchpad.get("_observation_staleness", {}).keys())
+    assert "E-FRESH" not in stale_ids

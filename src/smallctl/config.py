@@ -140,6 +140,15 @@ class SmallctlConfig:
     loop_guard_cumulative_write_gate: bool = True
     loop_guard_checkpoint_gate: bool = True
     loop_guard_diff_gate: bool = True
+    fama_enabled: bool = True
+    fama_mode: str = "lite"
+    fama_default_ttl_steps: int = 2
+    fama_max_active_mitigations: int = 2
+    fama_signal_window: int = 8
+    fama_done_gate_on_failure: bool = True
+    fama_capsule_token_budget: int = 180
+    fama_llm_judge_enabled: bool = False
+    fama_llm_judge_min_severity: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -202,6 +211,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "loop_guard_cumulative_write_gate",
         "loop_guard_checkpoint_gate",
         "loop_guard_diff_gate",
+        "fama_enabled",
+        "fama_done_gate_on_failure",
+        "fama_llm_judge_enabled",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -237,6 +249,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "loop_guard_recent_writes_limit",
         "loop_guard_tail_lines",
         "staged_step_prompt_tokens",
+        "fama_default_ttl_steps",
+        "fama_max_active_mitigations",
+        "fama_signal_window",
+        "fama_capsule_token_budget",
+        "fama_llm_judge_min_severity",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -281,6 +298,22 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["preset"] = preset_name
     if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
         merged["staged_execution_enabled"] = True
+    for key in ("fama_enabled", "fama_done_gate_on_failure", "fama_llm_judge_enabled"):
+        if key in merged:
+            merged[key] = _to_bool(merged[key])
+    for key in (
+        "fama_default_ttl_steps",
+        "fama_max_active_mitigations",
+        "fama_signal_window",
+        "fama_capsule_token_budget",
+        "fama_llm_judge_min_severity",
+    ):
+        if key in merged:
+            parsed_limit = _to_int(merged[key])
+            if parsed_limit is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = parsed_limit
 
     explicit_prompt_budget = "max_prompt_tokens" in explicit_merged
     merged["max_prompt_tokens_explicit"] = explicit_prompt_budget

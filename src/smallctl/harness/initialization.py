@@ -105,6 +105,15 @@ def initialize_harness(self: Any, **params: Any) -> None:
     loop_guard_cumulative_write_gate = params.get("loop_guard_cumulative_write_gate", True)
     loop_guard_checkpoint_gate = params.get("loop_guard_checkpoint_gate", True)
     loop_guard_diff_gate = params.get("loop_guard_diff_gate", True)
+    fama_enabled = params.get("fama_enabled", True)
+    fama_mode = params.get("fama_mode", "lite")
+    fama_default_ttl_steps = params.get("fama_default_ttl_steps", 2)
+    fama_max_active_mitigations = params.get("fama_max_active_mitigations", 2)
+    fama_signal_window = params.get("fama_signal_window", 8)
+    fama_done_gate_on_failure = params.get("fama_done_gate_on_failure", True)
+    fama_capsule_token_budget = params.get("fama_capsule_token_budget", 180)
+    fama_llm_judge_enabled = params.get("fama_llm_judge_enabled", False)
+    fama_llm_judge_min_severity = params.get("fama_llm_judge_min_severity", 3)
 
     normalized_phase = normalize_phase(phase)
     self._initial_phase = normalized_phase
@@ -223,6 +232,15 @@ def initialize_harness(self: Any, **params: Any) -> None:
         allow_interactive_shell_approval=self.allow_interactive_shell_approval,
         shell_approval_session_default=self.shell_approval_session_default,
         provider_profile_resolved=self.provider_profile,
+        fama_enabled=bool(fama_enabled),
+        fama_mode=str(fama_mode or "lite"),
+        fama_default_ttl_steps=int(fama_default_ttl_steps),
+        fama_max_active_mitigations=int(fama_max_active_mitigations),
+        fama_signal_window=int(fama_signal_window),
+        fama_done_gate_on_failure=bool(fama_done_gate_on_failure),
+        fama_capsule_token_budget=int(fama_capsule_token_budget),
+        fama_llm_judge_enabled=bool(fama_llm_judge_enabled),
+        fama_llm_judge_min_severity=int(fama_llm_judge_min_severity),
     )
     self._harness_kwargs.update(
         {
@@ -238,6 +256,13 @@ def initialize_harness(self: Any, **params: Any) -> None:
         }
     )
     self.config = SimpleNamespace(**self._harness_kwargs)
+    self.state.scratchpad["_fama_config"] = {
+        "enabled": bool(self.config.fama_enabled),
+        "mode": str(self.config.fama_mode or "lite"),
+        "capsule_token_budget": int(self.config.fama_capsule_token_budget),
+        "llm_judge_enabled": bool(self.config.fama_llm_judge_enabled),
+        "llm_judge_min_severity": int(self.config.fama_llm_judge_min_severity),
+    }
     self.state.scratchpad["_chunk_write_loop_guard_config"] = {
         "enabled": self.config.loop_guard_enabled,
         "stagnation_threshold": self.config.loop_guard_stagnation_threshold,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Iterable
 
+from ..interrupt_replies import is_interrupt_response
 from ..models.conversation import ConversationMessage
 
 _IP_ADDRESS_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -676,10 +677,14 @@ def classify_runtime_intent(
     task: str,
     *,
     recent_messages: Iterable[ConversationMessage],
+    pending_interrupt: dict | None = None,
 ) -> RuntimeIntent:
     text = str(task or "").strip()
     if not text:
         return RuntimeIntent(label="chat_only", task_mode="chat")
+
+    if is_interrupt_response(pending_interrupt, text):
+        return RuntimeIntent(label="interrupt_continuation", task_mode="loop")
 
     task_mode = classify_task_mode(text)
     if is_smalltalk(text):
@@ -717,6 +722,7 @@ def runtime_policy_for_intent(intent: RuntimeIntent) -> RuntimePolicy:
         "contextual_execute",
         "execute",
         "content_lookup",
+        "interrupt_continuation",
     }:
         return RuntimePolicy(route_mode="loop", chat_requires_tools=True)
     if intent.label == "readonly_lookup":

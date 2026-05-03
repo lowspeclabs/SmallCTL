@@ -10,6 +10,7 @@ from ..state import clip_text_value, json_safe_value
 from .recovery_context import build_goal_recap
 from .state import GraphRunState, PendingToolCall
 from .tool_call_parser import _extract_artifact_id_from_args
+from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
 from .chat_progress_guard import (
     _chat_failure_evidence_excerpt,
     _chat_failure_signature,
@@ -332,10 +333,16 @@ def build_artifact_evidence_unavailable_message(harness: Any, *, artifact_id: st
 
 def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> str:
     raw_path = str(pending.args.get("path", "") or "").strip()
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+    tx_lines = recovery_context_lines(transaction)
+    tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
     if not raw_path:
         return (
             "You already read this file. Do not reread it; use the evidence you already have "
             "to patch the file, run the focused test, or move on."
+            f"{tx_note}"
         )
 
     path = Path(raw_path)
@@ -355,6 +362,7 @@ def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> 
     return (
         f"You already read `{path}`. Do not reread the same file; use the evidence you already "
         "have to patch it, run the focused test, or move on."
+        f"{tx_note}"
     )
 
 
@@ -379,7 +387,11 @@ def build_repeated_tool_loop_interrupt_payload(
         if isinstance(raw_entries, list):
             entries = raw_entries[-5:]
     progress = " | ".join(entries) if entries else "exploration in progress"
-    base_guidance = f"TASK ANCHOR: {goal_recap}. PROGRESS SO FAR: {progress}. "
+    scratchpad = harness.state.scratchpad
+    transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+    tx_lines = recovery_context_lines(transaction)
+    tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
+    base_guidance = f"TASK ANCHOR: {goal_recap}. PROGRESS SO FAR: {progress}.{tx_note} "
     question = (
         f"PAUSED: You were looping on `{pending.tool_name}` while working on: "
         f"{goal_recap or 'the current task'}. "

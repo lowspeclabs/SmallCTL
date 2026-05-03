@@ -446,8 +446,8 @@ def test_same_scope_resteer_soft_resets_without_losing_live_evidence() -> None:
     assert state.working_memory.failures == ["Repeating artifact_read(A0010) is not useful"]
     assert state.recent_messages[-1].content == "I have read the file and found the reset path."
     assert state.episodic_summaries[-1].summary_id == "S-prior"
-    assert state.scratchpad["_tool_attempt_history"][0]["tool_name"] == "artifact_read"
-    assert state.scratchpad["_chunk_write_loop_guard"]["events"] == ["blocked"]
+    assert "_tool_attempt_history" not in state.scratchpad
+    assert "_chunk_write_loop_guard" not in state.scratchpad
 
 
 def test_loop_guard_nudge_preserves_goal_and_memory_after_soft_reset() -> None:
@@ -630,11 +630,10 @@ def test_corrective_tool_resteer_preserves_goal_and_working_memory_fields() -> N
     assert resolved == f"Continue current task: {prior}. User correction: {raw}"
     assert state.run_brief.original_task == resolved
     assert state.working_memory.current_goal == prior
-    assert state.working_memory.plan == ["Patch reset_task_boundary_state"]
+    assert state.working_memory.plan == []
     assert state.working_memory.open_questions == ["Should hard switches still clear task-local plans?"]
-    assert state.working_memory.next_actions[-1]
-    assert "Use a narrow patch" in state.working_memory.next_actions
-    assert state.working_memory.next_action_meta[0].content == "Use a narrow patch"
+    assert "Use a narrow patch" not in state.working_memory.next_actions
+    assert state.working_memory.next_action_meta == []
     assert state.working_memory.known_facts == ["The target reset path is in task_boundary.py"]
 
 

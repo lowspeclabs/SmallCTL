@@ -9,6 +9,7 @@ from ..docker_retry_normalization import docker_retry_family
 from ..guards import is_four_b_or_under_model_name
 from ..state import json_safe_value
 from .state import PendingToolCall
+from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
 from .tool_loop_guard_progress import (
     _artifact_read_line_progress_is_progress,
     _coerce_int_or_none,
@@ -34,6 +35,7 @@ _REPEATED_TOOL_UNIQUE_LIMIT = 5
 _STRICT_LOOP_GUARD_TOOLS = {
     "dir_list",
     "file_read",
+    "ssh_file_read",
     "artifact_read",
     "artifact_grep",
     "artifact_print",
@@ -280,9 +282,22 @@ def _directive_hint_for_repeated_tool(harness: Any, pending: PendingToolCall) ->
 
 def _format_repeated_tool_loop_message(harness: Any, pending: PendingToolCall, message: str) -> str:
     hint = _directive_hint_for_repeated_tool(harness, pending)
-    if not hint:
-        return message
-    return f"{message}. {hint}"
+    parts = [message]
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+    tx_lines = recovery_context_lines(transaction)
+    if tx_lines:
+        parts.append(" ".join(tx_lines))
+    tool_name = str(getattr(pending, "tool_name", "") or "").strip()
+    if tool_name:
+        parts.append(f"Last repeated action: `{tool_name}`.")
+    if hint:
+        parts.append(hint)
+    parts.append(
+        "Choose exactly one: A. Explain the blocker and stop. B. Try a different specific fix. C. Ask for missing information."
+    )
+    return " ".join(parts)
 
 
 def _artifact_record_for_pending_read(harness: Any, pending: PendingToolCall) -> Any | None:

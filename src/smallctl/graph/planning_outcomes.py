@@ -26,6 +26,20 @@ async def _emit_ui_event(harness: Any, event_handler: Any, event: UIEvent) -> No
         await maybe_awaitable
 
 
+def _terminal_message_text(output: Any) -> str:
+    if isinstance(output, dict):
+        for key in ("message", "output", "text", "question"):
+            value = output.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    if isinstance(output, str):
+        return output.strip()
+    if output is None:
+        return ""
+    return str(output).strip()
+
+
 async def apply_planning_tool_outcomes(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
@@ -191,9 +205,23 @@ async def apply_planning_tool_outcomes(
             }
             return LoopRoute.FINALIZE
         if record.tool_name == "task_complete" and record.result.success:
-            plan = harness.state.active_plan or harness.state.draft_plan
-            if plan is not None and plan.approved:
-                return LoopRoute.FINALIZE
+            _auto_update_active_plan_step(harness, status="completed", note=str(record.result.output or ""))
+            harness.state.planning_mode_enabled = False
+            message = _terminal_message_text(record.result.output)
+            assistant_text = str(graph_state.last_assistant_text or "").strip() or message
+            await _emit_ui_event(
+                harness,
+                deps.event_handler,
+                UIEvent(event_type=UIEventType.SYSTEM, content="Task marked complete."),
+            )
+            graph_state.final_result = {
+                "status": "completed",
+                "message": record.result.output,
+                "assistant": assistant_text,
+                "thinking": graph_state.last_thinking_text,
+                "usage": graph_state.last_usage,
+            }
+            return LoopRoute.FINALIZE
 
     graph_state.last_tool_results = []
     return LoopRoute.NEXT_STEP

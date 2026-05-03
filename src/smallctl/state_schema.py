@@ -212,6 +212,7 @@ class EvidenceRecord:
     decision_ids: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    created_at_step: int = 0
 
 
 @dataclass

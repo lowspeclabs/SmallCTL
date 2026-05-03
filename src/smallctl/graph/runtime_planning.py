@@ -4,6 +4,7 @@ from typing import Any
 
 from langgraph.graph import END
 
+from ..interrupt_replies import interrupt_response_action
 from .nodes import apply_planning_tool_outcomes, model_call, prepare_planning_prompt, select_planning_tools
 from .runtime import LoopGraphRuntime
 from .runtime_base import (
@@ -70,8 +71,7 @@ class PlanningGraphRuntime(LoopGraphRuntime):
         harness = self.deps.harness
         pending = harness.state.pending_interrupt or {}
         if isinstance(pending, dict) and pending.get("kind") == "plan_execute_approval":
-            normalized = human_input.strip().lower()
-            if normalized in {"yes", "y", "approve", "approved", "execute", "go ahead", "run it"}:
+            if interrupt_response_action(pending, human_input) == "approve":
                 graph_state = GraphRunState(
                     loop_state=harness.state,
                     thread_id=harness.state.thread_id or harness.conversation_id,

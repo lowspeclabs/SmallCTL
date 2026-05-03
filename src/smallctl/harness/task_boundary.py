@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..context.policy import estimate_text_tokens
+from ..interrupt_replies import is_interrupt_response
 from ..remote_scope import handoff_supports_remote_continuation, task_matches_remote_continuation
 from ..models.conversation import ConversationMessage
 from ..state import (
@@ -32,6 +33,11 @@ from .task_classifier import (
     looks_like_write_patch_request,
 )
 from .task_intent import derive_task_contract, next_action_for_task
+from .task_transactions import (
+    FollowupClassification,
+    FollowupSignals,
+    classify_followup_transaction,
+)
 
 _SYSTEM_FOLLOW_UP_SPLIT_RE = re.compile(r"\nFollow-up:\s*", re.IGNORECASE)
 _INLINE_CONTINUE_TASK_PREFIX_RE = re.compile(
@@ -109,6 +115,10 @@ _GUARD_RECOVERY_NUDGE_RE = re.compile(
 )
 _GUARD_FAILURE_RE = re.compile(
     r"\b(?:guard\s+tripped|loop\s+detected|repeated\s+tool|stagnation|stuck\s+in\s+(?:a\s+)?loop|max_consecutive_errors)\b",
+    re.IGNORECASE,
+)
+_RETRY_FOLLOWUP_RE = re.compile(
+    r"\b(?:try\s+again|retry|rerun|run\s+it\s+again|attempt\s+again|give\s+it\s+another\s+try)\b",
     re.IGNORECASE,
 )
 _CORRECTIVE_TOOL_NAMES = (
@@ -365,6 +375,22 @@ _REMOTE_CORRECTIVE_CLEANUP_PHRASES = (
     "stuck to the bottom",
     "trailing text",
     "trailing shell echo",
+)
+_REMOTE_SITE_MUTATION_ACTION_RE = re.compile(
+    r"\b(?:"
+    r"add|adjust|change|delete|drop|fix|make|modify|remove|replace|restyle|strip|"
+    r"swap|turn|update"
+    r")\b",
+    re.IGNORECASE,
+)
+_REMOTE_SITE_MUTATION_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"animation|animations|brand|branded|branding|button|buttons|card|cards|"
+    r"color|colors|copy|css|design|font|fonts|footer|header|html|layout|"
+    r"logo|logos|page|pages|palette|site|style|styles|styling|text|theme|"
+    r"theming|ui|website"
+    r")\b",
+    re.IGNORECASE,
 )
 _SEMANTIC_RECENT_TAIL_TOKEN_CAP = 320
 
@@ -1128,6 +1154,55 @@ class TaskBoundaryService:
             return False
         return task_matches_remote_continuation(self.harness.state, text)
 
+    def _looks_like_remote_site_mutation_followup(
+        self,
+        task: str,
+        handoff: dict[str, Any],
+    ) -> bool:
+        text = str(task or "").strip()
+        if not text:
+            return False
+        if looks_like_write_patch_request(text) or looks_like_write_file_request(text):
+            return False
+        if extract_task_target_paths(text) or self._extract_remote_absolute_paths(text):
+            return False
+        if self._remote_targets_from_texts(text):
+            return False
+        if not self._handoff_has_remote_context(handoff):
+            return False
+        if not handoff_supports_remote_continuation(self.harness.state):
+            return False
+        recent_remote_paths = self._recent_remote_target_paths(handoff=handoff)
+        has_remote_site_context = any(
+            path.startswith("/var/www/")
+            or path.endswith(".html")
+            or path.endswith(".htm")
+            for path in recent_remote_paths
+        )
+        if not has_remote_site_context:
+            candidate_text = " ".join(
+                str(handoff.get(key) or "").lower()
+                for key in ("effective_task", "current_goal", "raw_task")
+            )
+            has_remote_site_context = any(
+                marker in candidate_text
+                for marker in (
+                    "index.html",
+                    "html",
+                    "page",
+                    "site",
+                    "theme",
+                    "website",
+                    "/var/www/",
+                )
+            )
+        if not has_remote_site_context:
+            return False
+        return bool(
+            _REMOTE_SITE_MUTATION_ACTION_RE.search(text)
+            and _REMOTE_SITE_MUTATION_TARGET_RE.search(text)
+        )
+
     def _is_remote_correction_followup(self, task: str) -> bool:
         return self._looks_like_remote_live_correction_followup(task, self.last_task_handoff())
 
@@ -1146,6 +1221,7 @@ class TaskBoundaryService:
         is_diagnostic_followup = self._looks_like_remote_diagnostic_followup(text, handoff)
         is_artifact_cleanup_followup = self._looks_like_remote_artifact_cleanup_followup(text, handoff)
         is_contextual_site_followup = self._looks_like_remote_contextual_site_followup(text, handoff)
+        is_site_mutation_followup = self._looks_like_remote_site_mutation_followup(text, handoff)
         if not (
             is_operational_followup
             or is_clarification_followup
@@ -1153,6 +1229,7 @@ class TaskBoundaryService:
             or is_diagnostic_followup
             or is_artifact_cleanup_followup
             or is_contextual_site_followup
+            or is_site_mutation_followup
         ):
             return None
         if not handoff_supports_remote_continuation(self.harness.state):
@@ -1170,6 +1247,7 @@ class TaskBoundaryService:
                 or is_diagnostic_followup
                 or is_artifact_cleanup_followup
                 or is_contextual_site_followup
+                or is_site_mutation_followup
             )
             and not explicit_targets
             and not (chosen_targets or self._confirmed_session_ssh_targets())
@@ -1263,7 +1341,11 @@ class TaskBoundaryService:
         handoff = self.last_task_handoff()
         if not handoff or not self._handoff_has_remote_context(handoff):
             return None
-        if not self._recent_assistant_requested_action_confirmation() and not self._can_assume_remote_affirmative_continuation():
+        if (
+            not self._recent_assistant_requested_action_confirmation()
+            and not self._can_assume_remote_affirmative_continuation()
+            and not self._has_plan_execution_approval_context()
+        ):
             return None
 
         mission_task = self._current_or_handoff_continuity_task()
@@ -1327,23 +1409,30 @@ class TaskBoundaryService:
         self._consume_session_restored_flag()
         normalized_raw = str(raw_task or "").strip()
         normalized_effective = str(effective_task or normalized_raw).strip()
+
+        # Don't abort the current scope if the user is responding to a pending interrupt
+        pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
         current = self._active_task_scope_payload()
-        if current:
-            current_effective = str(
-                current.get("effective_task") or current.get("raw_task") or ""
-            ).strip()
-            current_raw = str(current.get("raw_task") or "").strip()
-            if (
-                (current_effective and current_effective == normalized_effective)
-                or (current_raw and current_raw == normalized_raw)
-            ):
+        if is_interrupt_response(pending_interrupt, normalized_raw):
+            if current:
                 return current
-            self.finalize_task_scope(
-                terminal_event="task_aborted",
-                status="aborted",
-                reason="replaced_by_new_task",
-                replacement_task=normalized_effective,
-            )
+        else:
+            if current:
+                current_effective = str(
+                    current.get("effective_task") or current.get("raw_task") or ""
+                ).strip()
+                current_raw = str(current.get("raw_task") or "").strip()
+                if (
+                    (current_effective and current_effective == normalized_effective)
+                    or (current_raw and current_raw == normalized_raw)
+                ):
+                    return current
+                self.finalize_task_scope(
+                    terminal_event="task_aborted",
+                    status="aborted",
+                    reason="replaced_by_new_task",
+                    replacement_task=normalized_effective,
+                )
 
         prior_sequence = getattr(self.harness, "_task_sequence", 0)
         if not prior_sequence:
@@ -1493,6 +1582,7 @@ class TaskBoundaryService:
             "_session_ssh_targets",
             "_last_task_text",
             "_last_task_handoff",
+            "_task_transaction",
             "_resolved_remote_followup",
             "_task_boundary_previous_task",
             "_task_sequence",
@@ -1614,6 +1704,10 @@ class TaskBoundaryService:
         )
 
     def maybe_reset_for_new_task(self, task: str, *, raw_task: str | None = None) -> None:
+        pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
+        if is_interrupt_response(pending_interrupt, raw_task or task):
+            return
+
         previous_task = _collapse_task_chain(
             self.harness.state.run_brief.original_task
             or self.harness.state.scratchpad.get("_last_task_text")
@@ -1633,11 +1727,27 @@ class TaskBoundaryService:
                 effective_task=new_task,
                 previous_task=previous_task,
             ) or remote_correction
-            preserve_recent_tail = same_scope_followup or session_restored or remote_correction
+            classification = self._build_followup_classification(
+                raw_task=raw_task or task,
+                effective_task=new_task,
+                previous_task=previous_task,
+                same_scope_followup=same_scope_followup,
+                remote_correction=remote_correction,
+            )
+            transaction = self._store_task_transaction(classification)
+            turn_type = str(transaction.get("turn_type") or classification.turn_type)
+            policy = classification.reset_policy
+            preserve_prior_result = bool(policy.keep_prior_result)
+            preserve_recent_tail = preserve_prior_result or session_restored or remote_correction
             if previous_task:
                 self.store_task_handoff(raw_task=previous_task, effective_task=previous_task)
-            reset_reason = "task_soft_switch" if same_scope_followup else "task_switch"
-            if session_restored and not same_scope_followup:
+            if turn_type == "CLARIFICATION":
+                reset_reason = "task_clarification"
+            elif preserve_prior_result:
+                reset_reason = "task_soft_switch"
+            else:
+                reset_reason = "task_switch"
+            if session_restored and not preserve_prior_result:
                 reset_reason = "task_resume_switch"
             self.finalize_task_scope(
                 terminal_event="task_aborted",
@@ -1649,12 +1759,17 @@ class TaskBoundaryService:
                 reason=reset_reason,
                 new_task=new_task,
                 previous_task=previous_task,
-                preserve_memory=same_scope_followup,
-                preserve_summaries=same_scope_followup,
+                preserve_memory=preserve_prior_result,
+                preserve_summaries=preserve_prior_result,
                 preserve_recent_tail=preserve_recent_tail,
-                semantic_recent_tail=same_scope_followup or remote_correction,
-                preserve_guard_context=same_scope_followup,
+                semantic_recent_tail=turn_type in {"ITERATION", "CORRECTION", "RETRY"} or remote_correction,
+                preserve_guard_context=bool(policy.preserve_guard_context),
             )
+            if preserve_prior_result:
+                self.harness.state.scratchpad["_task_transaction"] = transaction
+                self._apply_classified_reset_followup(classification)
+            else:
+                self.harness.state.scratchpad.pop("_task_transaction", None)
 
     def has_task_local_context(self) -> bool:
         return self.has_resettable_context() or self.has_durable_context()
@@ -1780,6 +1895,18 @@ class TaskBoundaryService:
             if assistant_message_proposes_concrete_implementation(text):
                 return True
         return False
+
+    def _has_plan_execution_approval_context(self) -> bool:
+        state = self.harness.state
+        pending_interrupt = getattr(state, "pending_interrupt", None)
+        if isinstance(pending_interrupt, dict) and pending_interrupt.get("kind") == "plan_execute_approval":
+            return True
+        planner_interrupt = getattr(state, "planner_interrupt", None)
+        if str(getattr(planner_interrupt, "kind", "") or "").strip() == "plan_execute_approval":
+            return True
+        plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
+        status = str(getattr(plan, "status", "") or "").strip().lower()
+        return status == "awaiting_approval"
 
     def _has_contextual_reference_to_current_task(self, task: str) -> bool:
         text = str(task or "").replace("\u2019", "'").strip()
@@ -1961,6 +2088,201 @@ class TaskBoundaryService:
         if candidate_paths and self._is_sequential_remote_followup(raw_task, candidate_paths):
             return True
         return False
+
+    def _followup_allowed_paths(
+        self,
+        *,
+        raw_task: str,
+        effective_task: str,
+        previous_task: str,
+    ) -> list[str]:
+        handoff = self.last_task_handoff()
+        paths: list[str] = []
+        for source in (
+            extract_task_target_paths(effective_task),
+            extract_task_target_paths(raw_task),
+            self._extract_remote_absolute_paths(effective_task),
+            self._extract_remote_absolute_paths(raw_task),
+            handoff.get("target_paths") if isinstance(handoff, dict) else [],
+            handoff.get("remote_target_paths") if isinstance(handoff, dict) else [],
+            extract_task_target_paths(previous_task),
+            self._extract_remote_absolute_paths(previous_task),
+        ):
+            if not isinstance(source, list):
+                continue
+            paths.extend(str(path).strip() for path in source if str(path).strip())
+        return dedupe_keep_tail(paths, limit=12)
+
+    def _followup_allowed_artifacts(self) -> list[str]:
+        handoff = self.last_task_handoff()
+        candidates: list[str] = []
+        for key in ("last_good_artifact_ids", "recent_research_artifact_ids"):
+            values = handoff.get(key)
+            if isinstance(values, list):
+                candidates.extend(str(item).strip() for item in values if str(item).strip())
+        retrieval_cache = getattr(self.harness.state, "retrieval_cache", None)
+        if isinstance(retrieval_cache, list):
+            candidates.extend(str(item).strip() for item in retrieval_cache if str(item).strip())
+        return dedupe_keep_tail(candidates, limit=8)
+
+    def _followup_failure_summary(self) -> str:
+        fragments: list[str] = []
+        last_failed = self.last_task_handoff().get("last_failed_tool")
+        if isinstance(last_failed, dict):
+            tool_name = str(last_failed.get("tool_name") or "").strip()
+            error = str(last_failed.get("error") or "").strip()
+            if tool_name:
+                fragments.append(f"{tool_name}: {error}" if error else tool_name)
+        recent_errors = getattr(self.harness.state, "recent_errors", None)
+        if isinstance(recent_errors, list):
+            fragments.extend(str(error or "").strip() for error in recent_errors[-2:] if str(error or "").strip())
+        scratchpad = getattr(self.harness.state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            for key in ("_task_failed_message", "_last_guard_error"):
+                value = str(scratchpad.get(key) or "").strip()
+                if value:
+                    fragments.append(value)
+        return self._clip_task_summary_text("; ".join(fragments), limit=220)
+
+    def _followup_verification_hint(self, *, task_mode: str) -> str:
+        handoff = self.last_task_handoff()
+        next_required_tool = handoff.get("next_required_tool")
+        if isinstance(next_required_tool, dict):
+            tool_name = str(next_required_tool.get("tool_name") or "").strip()
+            if tool_name:
+                return f"Use `{tool_name}` if it is still the required next verifier."
+        if task_mode == "remote_execute":
+            return "Use a focused SSH read or command to verify the remote result."
+        if task_mode == "local_execute":
+            return "Run the focused local verifier for the changed target."
+        return ""
+
+    def _build_followup_classification(
+        self,
+        *,
+        raw_task: str,
+        effective_task: str,
+        previous_task: str,
+        same_scope_followup: bool | None = None,
+        remote_correction: bool | None = None,
+    ) -> FollowupClassification:
+        raw = str(raw_task or "").strip()
+        effective = str(effective_task or raw).strip()
+        handoff = self.last_task_handoff()
+        known_paths = self._known_target_paths()
+        raw_explicit_paths = extract_task_target_paths(raw) or self._extract_remote_absolute_paths(raw)
+        explicit_paths = raw_explicit_paths or (
+            extract_task_target_paths(effective) or self._extract_remote_absolute_paths(effective)
+        )
+        previous_paths = extract_task_target_paths(previous_task) or self._extract_remote_absolute_paths(previous_task)
+        has_overlap = bool(
+            (explicit_paths and self._target_paths_overlap(explicit_paths, known_paths))
+            or (explicit_paths and self._target_paths_overlap(explicit_paths, previous_paths))
+        )
+        explicit_conflicting_target = bool(
+            explicit_paths
+            and (known_paths or previous_paths)
+            and not has_overlap
+            and not same_scope_followup
+        )
+        selected_action = isinstance(self._selected_action_option(raw, handoff), dict)
+        remote_clarification = self._looks_like_remote_clarification_followup(raw, handoff)
+        corrective_resteer = self._is_corrective_resteer_followup(raw)
+        guard_recovery_followup = self._is_guard_recovery_followup(raw)
+        quality_followup = self._is_quality_followup(raw)
+        remote_live_correction = (
+            bool(remote_correction)
+            or self._looks_like_remote_live_correction_followup(raw, handoff)
+        )
+        guard_failure_context = self._has_recent_guard_failure_context()
+        retry_language = bool(_RETRY_FOLLOWUP_RE.search(raw))
+        task_mode = classify_task_mode(effective)
+        return classify_followup_transaction(
+            raw_task=raw,
+            effective_task=effective,
+            previous_task=previous_task,
+            task_mode=task_mode,
+            signals=FollowupSignals(
+                has_prior_task=bool(previous_task),
+                has_overlap=has_overlap,
+                explicit_conflicting_target=explicit_conflicting_target,
+                selected_action_option=selected_action,
+                contextual_reference=self._has_contextual_reference_to_current_task(raw)
+                or self._is_continue_like_followup(raw),
+                same_target_delta=bool(same_scope_followup) or has_overlap,
+                corrective_resteer=corrective_resteer or guard_recovery_followup,
+                quality_followup=quality_followup,
+                remote_live_correction=remote_live_correction,
+                remote_clarification=remote_clarification,
+                guard_failure_context=guard_failure_context,
+                retry_language=retry_language,
+            ),
+            allowed_paths=self._followup_allowed_paths(
+                raw_task=raw,
+                effective_task=effective,
+                previous_task=previous_task,
+            ),
+            allowed_artifacts=self._followup_allowed_artifacts(),
+            failure_summary=self._followup_failure_summary(),
+            verification_hint=self._followup_verification_hint(task_mode=task_mode),
+        )
+
+    def _store_task_transaction(self, classification: FollowupClassification) -> dict[str, Any]:
+        payload = classification.to_dict()
+        self.harness.state.scratchpad["_task_transaction"] = payload
+        return payload
+
+    def _store_followup_transaction_for_resolution(
+        self,
+        *,
+        raw_task: str,
+        effective_task: str,
+    ) -> None:
+        previous_task = self._current_or_handoff_continuity_task() or _collapse_task_chain(
+            self.harness.state.run_brief.original_task
+            or self.harness.state.scratchpad.get("_last_task_text")
+            or ""
+        )
+        if not previous_task:
+            return
+        same_scope_followup = self._is_same_scope_transition(
+            raw_task=raw_task,
+            effective_task=effective_task,
+            previous_task=previous_task,
+        )
+        remote_correction = self._is_remote_correction_followup(raw_task)
+        classification = self._build_followup_classification(
+            raw_task=raw_task,
+            effective_task=effective_task,
+            previous_task=previous_task,
+            same_scope_followup=same_scope_followup,
+            remote_correction=remote_correction,
+        )
+        self._store_task_transaction(classification)
+
+    def _clear_fresh_plan_state_for_transaction(self) -> None:
+        memory = self.harness.state.working_memory
+        memory.plan = []
+        memory.next_actions = []
+        memory.next_action_meta = []
+        self.harness.state.draft_plan = None
+        self.harness.state.active_plan = None
+        self.harness.state.plan_resolved = False
+        self.harness.state.plan_artifact_id = ""
+        for key in (
+            "_tool_attempt_history",
+            "_progress_read_history",
+            "_progress_prior_plan_step",
+            "_progress_prior_verdict",
+            "_retrieval_query",
+            "_last_verifier_command",
+        ):
+            self.harness.state.scratchpad.pop(key, None)
+
+    def _apply_classified_reset_followup(self, classification: FollowupClassification) -> None:
+        policy = classification.reset_policy
+        if policy.force_fresh_plan:
+            self._clear_fresh_plan_state_for_transaction()
 
     def _is_sequential_remote_followup(self, task: str, candidate_paths: list[str]) -> bool:
         if not candidate_paths or not self._confirmed_session_ssh_targets():
@@ -2204,17 +2526,22 @@ class TaskBoundaryService:
             target_info = self._resolve_option_target_paths(raw_task, option, handoff)
             resolved = self._resolved_option_task(raw_task, option, handoff)
             self._apply_resolved_followup_metadata(raw_task, option, target_info, resolved)
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
             return resolved
 
         remote_resolution = self._remote_followup_resolution(raw_task)
         if remote_resolution is not None:
             self._apply_remote_followup_metadata(raw_task, remote_resolution)
-            return str(remote_resolution.get("effective_task") or raw_task).strip()
+            resolved = str(remote_resolution.get("effective_task") or raw_task).strip()
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+            return resolved
 
         affirmative_remote_resolution = self._affirmative_remote_execution_followup_resolution(raw_task)
         if affirmative_remote_resolution is not None:
             self._apply_remote_followup_metadata(raw_task, affirmative_remote_resolution)
-            return str(affirmative_remote_resolution.get("effective_task") or raw_task).strip()
+            resolved = str(affirmative_remote_resolution.get("effective_task") or raw_task).strip()
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+            return resolved
 
         if self._is_corrective_resteer_followup(raw_task):
             resolved = self._resolved_corrective_resteer_task(raw_task)
@@ -2223,6 +2550,7 @@ class TaskBoundaryService:
                 "effective_task": resolved,
                 "kind": "corrective_tool_resteer",
             }
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
             return resolved
 
         if not self._is_contextual_followup(raw_task):
@@ -2249,8 +2577,11 @@ class TaskBoundaryService:
             or self._is_quality_followup(raw_task)
             or self._is_guard_recovery_followup(raw_task)
         ):
-            return f"Continue current task: {candidate}. User follow-up: {raw_task}"
+            resolved = f"Continue current task: {candidate}. User follow-up: {raw_task}"
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+            return resolved
 
+        self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=candidate)
         return candidate
 
     def store_task_handoff(self, *, raw_task: str, effective_task: str) -> None:
@@ -2289,17 +2620,49 @@ class TaskBoundaryService:
         next_required_tool = self._continuation_next_required_tool(previous)
         last_failed_tool = self._continuation_last_failed_tool(previous)
         ssh_target = self._continuation_primary_ssh_target(ssh_targets, previous)
+        transaction = self.harness.state.scratchpad.get("_task_transaction")
+        if not isinstance(transaction, dict):
+            transaction = {}
+        failure_summary = ""
+        if isinstance(last_failed_tool, dict) and str(last_failed_tool.get("tool_name") or "").strip():
+            failure_summary = self._clip_task_summary_text(
+                f"{last_failed_tool.get('tool_name')}: {last_failed_tool.get('error') or ''}",
+                limit=220,
+            )
+        allowed_paths = dedupe_keep_tail(list(target_paths) + list(remote_target_paths), limit=12)
+        allowed_artifacts = dedupe_keep_tail(
+            list(last_good_artifact_ids) + list(recent_research_artifact_ids),
+            limit=8,
+        )
         self.harness.state.scratchpad["_last_task_handoff"] = {
             "task_id": active_task_id or str(previous.get("task_id") or "").strip(),
+            "status": str(previous.get("status") or "closed").strip(),
+            "turn_type": str(transaction.get("turn_type") or previous.get("turn_type") or "NEW_TASK").strip(),
             "raw_task": str(raw_task or "").strip(),
             "effective_task": effective,
             "current_goal": current_goal,
+            "user_goal": self._clip_task_summary_text(
+                transaction.get("user_goal") if transaction.get("user_goal") else current_goal,
+                limit=320,
+            ),
+            "success_condition": self._clip_task_summary_text(
+                transaction.get("success_condition") or "Task is completed and relevant verification is captured.",
+                limit=220,
+            ),
+            "previous_task_relevance": str(
+                transaction.get("previous_task_relevance") or previous.get("previous_task_relevance") or "high"
+            ).strip(),
             "task_mode": task_mode,
             "active_tool_profiles": list(getattr(self.harness.state, "active_tool_profiles", []) or []),
             "ssh_target": ssh_target,
             "ssh_targets": list(ssh_targets),
             "target_paths": list(target_paths),
             "remote_target_paths": list(remote_target_paths),
+            "allowed_paths": list(allowed_paths),
+            "allowed_artifacts": list(allowed_artifacts),
+            "ignored_context": list(transaction.get("ignored_context") or []),
+            "failure_summary": str(transaction.get("failure_summary") or failure_summary).strip(),
+            "verification_hint": str(transaction.get("verification_hint") or "").strip(),
             "action_options": list(existing_options),
             "last_good_artifact_ids": list(last_good_artifact_ids),
             "recent_research_artifact_ids": list(recent_research_artifact_ids),

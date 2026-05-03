@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from difflib import SequenceMatcher
 import hashlib
 import json
 import re
@@ -56,6 +57,44 @@ def _preview_match_context(content: str, start: int, end: int, *, limit: int = 2
         "start": start_idx,
         "end": end_idx,
     }
+
+
+def _best_patch_match(content: str, target_text: str, *, limit: int = 240) -> dict[str, Any] | None:
+    if not content or not target_text:
+        return None
+    content_lines = content.splitlines()
+    if not content_lines:
+        return None
+    target_lines = target_text.splitlines() or [target_text]
+    window_sizes = sorted({max(1, len(target_lines) - 1), max(1, len(target_lines)), len(target_lines) + 1})
+    normalized_target = " ".join(target_text.split())
+    best: dict[str, Any] | None = None
+    best_score = -1.0
+    for window_size in window_sizes:
+        for start_index in range(0, max(1, len(content_lines) - window_size + 1)):
+            snippet_lines = content_lines[start_index : start_index + window_size]
+            if not snippet_lines:
+                continue
+            snippet = "\n".join(snippet_lines)
+            exact_score = SequenceMatcher(None, target_text, snippet).ratio()
+            normalized_snippet = " ".join(snippet.split())
+            normalized_score = (
+                SequenceMatcher(None, normalized_target, normalized_snippet).ratio()
+                if normalized_target and normalized_snippet
+                else 0.0
+            )
+            score = max(exact_score, normalized_score)
+            if score <= best_score:
+                continue
+            best_score = score
+            best = {
+                **_preview_match_context(snippet, 0, len(snippet), limit=limit),
+                "start_line": start_index + 1,
+                "end_line": start_index + len(snippet_lines),
+                "similarity": round(score, 3),
+                "match_basis": "whitespace_normalized" if normalized_score > exact_score else "exact",
+            }
+    return best
 
 
 def _normalize_whitespace_with_spans(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -164,6 +203,7 @@ def apply_exact_patch_content(
             if not whitespace_normalized
             else "No whitespace-normalized patch target matched. Read the remote file and run a dry-run first."
         )
+        metadata["best_match"] = _best_patch_match(content, target_text)
         return False, content, metadata
     if actual != expected_occurrences:
         metadata["error_kind"] = "patch_occurrence_mismatch"
@@ -264,7 +304,7 @@ def apply_replace_between_content(
 
 
 _REMOTE_HELPER_SOURCE = r"""
-import base64, hashlib, json, os, pathlib, shutil, signal, sys, tempfile, time, traceback
+import base64, difflib, hashlib, json, os, pathlib, shutil, signal, sys, tempfile, time, traceback
 
 def emit(payload):
     print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
@@ -297,6 +337,43 @@ def preview_match_context(content, start, end, limit=240):
         "start": start_idx,
         "end": end_idx,
     }
+
+def best_patch_match(content, target_text, limit=240):
+    if not content or not target_text:
+        return None
+    content_lines = content.splitlines()
+    if not content_lines:
+        return None
+    target_lines = target_text.splitlines() or [target_text]
+    window_sizes = sorted({max(1, len(target_lines) - 1), max(1, len(target_lines)), len(target_lines) + 1})
+    normalized_target = " ".join(target_text.split())
+    best = None
+    best_score = -1.0
+    for window_size in window_sizes:
+        for start_index in range(0, max(1, len(content_lines) - window_size + 1)):
+            snippet_lines = content_lines[start_index : start_index + window_size]
+            if not snippet_lines:
+                continue
+            snippet = "\n".join(snippet_lines)
+            exact_score = difflib.SequenceMatcher(None, target_text, snippet).ratio()
+            normalized_snippet = " ".join(snippet.split())
+            normalized_score = (
+                difflib.SequenceMatcher(None, normalized_target, normalized_snippet).ratio()
+                if normalized_target and normalized_snippet
+                else 0.0
+            )
+            score = max(exact_score, normalized_score)
+            if score <= best_score:
+                continue
+            best_score = score
+            best = preview_match_context(snippet, 0, len(snippet), limit=limit)
+            best.update({
+                "start_line": start_index + 1,
+                "end_line": start_index + len(snippet_lines),
+                "similarity": round(score, 3),
+                "match_basis": "whitespace_normalized" if normalized_score > exact_score else "exact",
+            })
+    return best
 
 def normalize_whitespace_with_spans(text):
     normalized_chars = []
@@ -501,6 +578,7 @@ def apply_patch_content(content, payload):
                 if not whitespace_normalized
                 else "No whitespace-normalized patch target matched. Read the remote file and run a dry-run first."
             ),
+            "best_match": best_patch_match(content, target),
         })
         return content, meta
     if actual != expected:

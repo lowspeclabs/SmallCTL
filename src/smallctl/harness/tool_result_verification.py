@@ -60,6 +60,15 @@ _REMOTE_MUTATING_COMMAND_RE = re.compile(
     r"\b(?:mv|cp)\b.+\s+/(?:etc|var|usr|opt|srv|root)/\S+",
     re.IGNORECASE | re.DOTALL,
 )
+_NGINX_VERIFIER_COMMAND_RE = re.compile(r"\bnginx\s+-t\b", re.IGNORECASE)
+_NGINX_VERIFIER_FAILURE_RE = re.compile(
+    r"nginx:\s*configuration\s*file\b.*\btest\s*failed\b"
+    r"|"
+    r"\[\s*emerg\s*\].*?\bin\s+/etc/nginx/"
+    r"|"
+    r"unexpected\s+end\s+of\s*file,\s*expecting\s+[\"']?[;}]",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _ssh_auth_recovery_entry_key(host: str, user: str) -> str:
@@ -183,9 +192,12 @@ def _store_verifier_verdict(
     exit_code = output.get("exit_code") if isinstance(output, dict) else None
     stdout = _snip_text(output.get("stdout") if isinstance(output, dict) else "", limit=400)
     stderr = _snip_text(output.get("stderr") if isinstance(output, dict) else "", limit=400)
+    semantic_failure = _semantic_verifier_failure(command=command, stdout=stdout, stderr=stderr)
     status = str(result.status or metadata.get("status") or "").strip()
     if status == "needs_human":
         verdict = "needs_human"
+    elif semantic_failure:
+        verdict = "fail"
     elif result.success and (exit_code in (0, None)):
         verdict = "pass"
     elif (
@@ -209,7 +221,9 @@ def _store_verifier_verdict(
     )
     acceptance_delta = {
         "status": "satisfied" if verdict == "pass" else "blocked",
-        "notes": ["execution succeeded"] if verdict == "pass" else [str(result.error or status or "execution failed")],
+        "notes": ["execution succeeded"] if verdict == "pass" else [
+            str(semantic_failure or result.error or stderr or stdout or status or "execution failed")
+        ],
     }
     normalized = {
         "tool": tool_name,
@@ -246,6 +260,17 @@ def _store_verifier_verdict(
         docker_retry=docker_retry,
     )
     return normalized
+
+
+def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str:
+    combined = "\n".join(part for part in (stdout, stderr) if str(part or "").strip())
+    if not combined:
+        return ""
+    if _NGINX_VERIFIER_COMMAND_RE.search(command) or "nginx:" in combined.lower():
+        match = _NGINX_VERIFIER_FAILURE_RE.search(combined)
+        if match:
+            return _snip_text(match.group(0), limit=240)
+    return ""
 
 
 def assess_remote_mutation_verification(

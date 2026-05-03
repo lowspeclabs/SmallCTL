@@ -17,6 +17,11 @@ from .tool_execution_recovery_helpers import (
     _maybe_emit_repair_recovery_nudge,
     _maybe_schedule_repair_loop_status_autocontinue,
 )
+from .error_hardening import (
+    _maybe_emit_ground_truth_diffusion,
+    _maybe_emit_nginx_sites_enabled_nudge,
+    _maybe_schedule_web_search_for_repeated_error,
+)
 from .tool_outcome_resolution import maybe_apply_terminal_tool_outcome
 from .progress_guard import _update_progress_tracking
 from .tool_execution_support import (
@@ -47,9 +52,15 @@ async def apply_tool_outcomes(
         if record.tool_name == "shell_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
             _maybe_schedule_repair_loop_status_autocontinue(graph_state, harness, record)
+            _maybe_emit_nginx_sites_enabled_nudge(harness, record)
+            _maybe_emit_ground_truth_diffusion(harness, record)
+            _maybe_schedule_web_search_for_repeated_error(graph_state, harness, record)
         elif record.tool_name == "ssh_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
             _maybe_schedule_repair_loop_status_autocontinue(graph_state, harness, record)
+            _maybe_emit_nginx_sites_enabled_nudge(harness, record)
+            _maybe_emit_ground_truth_diffusion(harness, record)
+            _maybe_schedule_web_search_for_repeated_error(graph_state, harness, record)
 
         if await maybe_apply_terminal_tool_outcome(graph_state, deps, record, chat_mode=False):
             return LoopRoute.FINALIZE

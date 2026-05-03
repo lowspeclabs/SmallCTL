@@ -3,7 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import re
+
 from .chunk_parser import extract_content_fragments, extract_thinking_from_tags, format_tool_call_text, maybe_parse_tool_args, merge_reasoning_text
+
+_REASONING_HALLUCINATION_PATTERNS = [
+    re.compile(r"<tool_call\b[^>]*>"),
+    re.compile(r"<function\b[^>]*>"),
+    re.compile(r"<call\b[^>]*>"),
+    re.compile(r"</tool_call>"),
+    re.compile(r"</function>"),
+    re.compile(r"</call>"),
+]
+
+
+def _scrub_reasoning_hallucinations(text: str) -> str:
+    """Strip unauthorized tool-call-like XML tokens that models hallucinate in reasoning."""
+    cleaned = str(text or "")
+    for pattern in _REASONING_HALLUCINATION_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned
 
 
 @dataclass
@@ -62,7 +81,7 @@ def collect_stream(
                 text_parts.append(fragment)
         field_reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if isinstance(field_reasoning, str) and field_reasoning:
-            reasoning_parts.append(field_reasoning)
+            reasoning_parts.append(_scrub_reasoning_hallucinations(field_reasoning))
 
         tc_deltas = delta.get("tool_calls") or []
         for tc in tc_deltas:
@@ -173,7 +192,7 @@ class _TimelineCollector:
             if self.reasoning_mode in {"field", "auto", "tags"}:
                 if self.reasoning_mode == "auto" and not self._auto_used_tag_thinking:
                     self._auto_prefers_field = True
-                self._append_text("thinking", field_reasoning)
+                self._append_text("thinking", _scrub_reasoning_hallucinations(field_reasoning))
 
         tc_deltas = delta.get("tool_calls") or []
         if tc_deltas:

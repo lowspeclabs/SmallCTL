@@ -187,6 +187,29 @@ def build_system_prompt(
                 repair_bits.append(f"stagnation counters: {counters}")
         if repair_bits:
             parts.append("REPAIR FOCUS: " + " | ".join(repair_bits) + ". ")
+        # A1) Structured Reflection Gate
+        counters = getattr(state, "stagnation_counters", {}) or {}
+        stall_level = max(
+            int(counters.get("repeat_patch", 0) or 0),
+            int(counters.get("no_progress", 0) or 0),
+            int(counters.get("repeat_command", 0) or 0),
+        )
+        if stall_level >= 2:
+            parts.append(
+                "REFLECTION GATE: Before attempting the same fix again, you MUST explain in your reasoning: "
+                "(1) what file the error message actually names, "
+                "(2) what is currently in that file, and "
+                "(3) why your previous fix did not affect that file. "
+                "Do not call any repair tool until you have answered these three questions."
+            )
+        # A4) Meta-Cognitive Repair Brief
+        verifier_verdict = state.current_verifier_verdict() or {}
+        if verifier_verdict and str(verifier_verdict.get("verdict") or "").strip() not in {"", "pass"}:
+            parts.append(
+                "META-COGNITIVE REPAIR BRIEF: If a configuration test or verifier fails, "
+                "read the exact file path named in the error message before modifying any other file. "
+                "Do not patch a source file (e.g., sites-available) when the error names a different path (e.g., sites-enabled)."
+            )
     current_contract_phase = state.contract_phase()
     if current_contract_phase == "explore":
         parts.append(

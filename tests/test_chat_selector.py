@@ -301,7 +301,9 @@ def test_smallctl_app_chat_resume_falls_back_to_saved_state(monkeypatch, tmp_pat
         )
         self.harness = harness
 
-    async def _fake_render_restored_chat(self: SmallctlApp) -> None:
+    async def _fake_render_restored_chat(
+        self: SmallctlApp, messages: list[dict[str, str]] | None = None
+    ) -> None:
         restored_states.append(str(self.harness.state.thread_id))
 
     monkeypatch.setattr(SmallctlApp, "_create_harness", _fake_create_harness)

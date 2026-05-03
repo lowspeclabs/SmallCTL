@@ -7,6 +7,7 @@ from ..models.tool_result import ToolEnvelope
 from ..state import LoopState
 
 file_read_cache_key = shell_utils.file_read_cache_key
+ssh_file_read_cache_key = shell_utils.ssh_file_read_cache_key
 shell_tokens = shell_utils.shell_tokens
 looks_like_env_assignment = shell_utils.looks_like_env_assignment
 shell_unwrap_command = shell_utils.shell_unwrap_command

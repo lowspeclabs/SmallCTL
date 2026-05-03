@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
@@ -17,7 +18,7 @@ from .run_mode import (
     resolve_mode_task,
     should_enable_complex_write_chat_draft,
 )
-from .artifact_tracking import file_read_cache_key
+from .artifact_tracking import file_read_cache_key, ssh_file_read_cache_key
 
 _CHAT_WRITE_TOOL_NAMES = {"file_write", "file_patch", "ast_patch"}
 _READONLY_CHAT_TOOL_BLOCKLIST = {
@@ -54,6 +55,7 @@ def _refresh_runtime_intent(harness: Any, task: str) -> tuple[str, str]:
     runtime_intent = classify_runtime_intent(
         task,
         recent_messages=getattr(harness.state, "recent_messages", []),
+        pending_interrupt=getattr(harness.state, "pending_interrupt", None),
     )
     _scratchpad(harness)["_chat_runtime_intent"] = runtime_intent.label
     return runtime_intent.label, runtime_intent.task_mode
@@ -126,13 +128,29 @@ def _chat_terminal_tools(harness: Any) -> list[dict[str, Any]]:
         mode="chat",
         profiles=set(harness.state.active_tool_profiles),
     )
-    return [
+    selected = [
         entry
         for entry in tools
         if isinstance(entry, dict)
         and isinstance(entry.get("function"), dict)
         and str(entry["function"].get("name") or "") in _CHAT_TERMINAL_TOOL_NAMES
     ]
+    from ..fama.tool_policy import apply_fama_tool_exposure, fama_hidden_tools_for_exposure
+
+    hidden_tools = fama_hidden_tools_for_exposure(
+        selected,
+        state=harness.state,
+        mode="chat",
+        config=getattr(harness, "config", None),
+    )
+    if hidden_tools:
+        _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode="chat")
+    return apply_fama_tool_exposure(
+        selected,
+        state=harness.state,
+        mode="chat",
+        config=getattr(harness, "config", None),
+    )
 
 
 def _task_excerpt(task: str, *, limit: int = 160) -> str:
@@ -164,10 +182,14 @@ def _log_chat_tool_selection_error(
 
 
 def chat_mode_requires_tools(harness: Any, task: str) -> bool:
+    transaction = _scratchpad(harness).get("_task_transaction")
+    if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
+        return False
     _refresh_task_mode(harness, task)
     runtime_intent = classify_runtime_intent(
         task,
         recent_messages=getattr(harness.state, "recent_messages", []),
+        pending_interrupt=getattr(harness.state, "pending_interrupt", None),
     )
     _scratchpad(harness)["_chat_runtime_intent"] = runtime_intent.label
     runtime_policy = runtime_policy_for_intent(runtime_intent)
@@ -254,7 +276,22 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
                 reason="approval_gated_shell",
                 runtime_intent=runtime_intent_label,
             )
-        return tools
+        from ..fama.tool_policy import apply_fama_tool_exposure, fama_hidden_tools_for_exposure
+
+        hidden_tools = fama_hidden_tools_for_exposure(
+            tools,
+            state=harness.state,
+            mode="chat",
+            config=getattr(harness, "config", None),
+        )
+        if hidden_tools:
+            _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode="chat")
+        return apply_fama_tool_exposure(
+            tools,
+            state=harness.state,
+            mode="chat",
+            config=getattr(harness, "config", None),
+        )
     except Exception as exc:
         _log_chat_tool_selection_error(
             harness,
@@ -287,6 +324,29 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
             )
             tool_name = sanitized
 
+    from ..fama.tool_policy import enforce_fama_tool_call
+
+    blocked = enforce_fama_tool_call(
+        tool_name,
+        args,
+        state=harness.state,
+        mode=getattr(harness.state, "run_mode", "loop"),
+        config=getattr(harness, "config", None),
+    )
+    if blocked is not None:
+        harness._runlog(
+            "fama_tool_call_blocked",
+            "FAMA blocked tool call",
+            tool_name=tool_name,
+            active_mitigation=blocked.metadata.get("active_mitigation"),
+            mode=getattr(harness.state, "run_mode", "loop"),
+        )
+        return blocked
+
+    patch_first = maybe_block_full_write_for_iteration(harness, tool_name=tool_name, args=args)
+    if patch_first is not None:
+        return patch_first
+
     return await harness.dispatcher.dispatch(tool_name, args)
 
 
@@ -302,9 +362,161 @@ def attempt_tool_sanitization(harness: Any, tool_name: str) -> str | None:
 
 
 def maybe_reuse_file_read(harness: Any, *, tool_name: str, args: dict[str, Any]) -> ToolEnvelope | None:
-    if tool_name != "file_read":
+    if tool_name == "file_read":
+        return _reuse_cached_file_read(harness, args)
+    if tool_name == "ssh_file_read":
+        return _reuse_cached_ssh_file_read(harness, args)
+    return None
+
+
+def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) -> None:
+    runlog = getattr(harness, "_runlog", None)
+    if not callable(runlog):
+        return
+    try:
+        from ..fama.state import active_mitigation_names
+
+        active = sorted(active_mitigation_names(harness.state))
+    except Exception:
+        active = []
+    runlog(
+        "fama_tool_exposure_applied",
+        "FAMA tool exposure policy applied",
+        hidden_tools=sorted(hidden_tools),
+        active_mitigations=active,
+        mode=mode,
+    )
+
+
+def maybe_block_full_write_for_iteration(
+    harness: Any,
+    *,
+    tool_name: str,
+    args: dict[str, Any],
+) -> ToolEnvelope | None:
+    if tool_name not in {"file_write", "ssh_file_write"}:
         return None
-    return _reuse_cached_file_read(harness, args)
+    scratchpad = _scratchpad(harness)
+    transaction = scratchpad.get("_task_transaction")
+    if not isinstance(transaction, dict):
+        return None
+    turn_type = str(transaction.get("turn_type") or "").strip()
+    if turn_type not in {"ITERATION", "CORRECTION"}:
+        return None
+    if _full_rewrite_explicitly_requested(harness, args):
+        return None
+    if _has_active_write_session(harness) or str(args.get("write_session_id") or "").strip():
+        return None
+
+    path = str(args.get("path") or args.get("target_path") or "").strip()
+    if not path:
+        return None
+    suggested = "file_patch" if tool_name == "file_write" else "ssh_file_patch"
+    if not _patch_tool_available(harness, suggested):
+        return None
+    if tool_name == "file_write":
+        if not _local_target_exists(harness, path):
+            return None
+    elif not _remote_target_known_existing(transaction, scratchpad, path):
+        return None
+
+    note = {
+        "tool_name": tool_name,
+        "path": path,
+        "turn_type": turn_type,
+        "suggested_tool": suggested,
+    }
+    scratchpad["_patch_first_blocked_write"] = note
+    return ToolEnvelope(
+        success=False,
+        status="recoverable",
+        error=(
+            f"Patch-first policy for {turn_type}: `{tool_name}` would rewrite existing target `{path}`. "
+            f"Use `{suggested}` for the narrow edit, or explicitly request a full rewrite."
+        ),
+        metadata={
+            "reason": "patch_first_required",
+            "tool_name": tool_name,
+            "path": path,
+            "turn_type": turn_type,
+            "suggested_tool": suggested,
+            "recoverable": True,
+        },
+    )
+
+
+def _patch_tool_available(harness: Any, tool_name: str) -> bool:
+    registry = getattr(harness, "registry", None)
+    names = getattr(registry, "names", None)
+    if not callable(names):
+        return True
+    try:
+        return tool_name in set(names())
+    except Exception:
+        return True
+
+
+def _local_target_exists(harness: Any, path: str) -> bool:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate.exists()
+    cwd = getattr(getattr(harness, "state", None), "cwd", None)
+    base = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+    return (base / candidate).exists()
+
+
+def _remote_target_known_existing(
+    transaction: dict[str, Any],
+    scratchpad: dict[str, Any],
+    path: str,
+) -> bool:
+    normalized = _normalize_path(path)
+    candidates: list[Any] = []
+    for key in ("allowed_paths", "remote_target_paths", "target_paths"):
+        value = transaction.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+    handoff = scratchpad.get("_last_task_handoff")
+    if isinstance(handoff, dict):
+        for key in ("remote_target_paths", "allowed_paths"):
+            value = handoff.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+    return any(_normalize_path(item) == normalized for item in candidates)
+
+
+def _normalize_path(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/").lower()
+
+
+def _full_rewrite_explicitly_requested(harness: Any, args: dict[str, Any]) -> bool:
+    strategy = str(args.get("replace_strategy") or args.get("mode") or "").strip().lower()
+    if strategy in {"overwrite", "rewrite", "full", "replace_all"}:
+        return True
+    task = ""
+    current_task = getattr(harness, "_current_user_task", None)
+    if callable(current_task):
+        try:
+            task = str(current_task() or "")
+        except Exception:
+            task = ""
+    text = f"{task} {args.get('instruction') or ''} {args.get('reason') or ''}".lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "rewrite the whole file",
+            "rewrite the entire file",
+            "replace the whole file",
+            "replace the entire file",
+            "regenerate the file",
+            "full rewrite",
+            "complete rewrite",
+            "overwrite",
+        )
+    )
 
 
 def _reuse_cached_file_read(harness: Any, args: dict[str, Any]) -> ToolEnvelope | None:
@@ -340,5 +552,45 @@ def _reuse_cached_file_read(harness: Any, args: dict[str, Any]) -> ToolEnvelope 
             "artifact_id": artifact_id,
             "path": artifact.source,
             "tool_name": "file_read",
+        },
+    )
+
+
+def _reuse_cached_ssh_file_read(harness: Any, args: dict[str, Any]) -> ToolEnvelope | None:
+    cache = harness.state.scratchpad.get("ssh_file_read_cache")
+    if not isinstance(cache, dict):
+        return None
+    cache_key = ssh_file_read_cache_key(args)
+    if not cache_key:
+        return None
+    artifact_id = cache.get(cache_key)
+    if not isinstance(artifact_id, str) or not artifact_id:
+        return None
+    artifact = harness.state.artifacts.get(artifact_id)
+    if artifact is None:
+        return None
+    harness._runlog(
+        "tool_cache_hit",
+        "reusing prior ssh_file_read result",
+        tool_name="ssh_file_read",
+        artifact_id=artifact_id,
+        path=artifact.source,
+        host=str(args.get("host") or "").strip(),
+    )
+    return ToolEnvelope(
+        success=True,
+        output={
+            "status": "cached",
+            "artifact_id": artifact_id,
+            "path": artifact.source,
+            "host": str(args.get("host") or "").strip(),
+            "summary": artifact.summary,
+        },
+        metadata={
+            "cache_hit": True,
+            "artifact_id": artifact_id,
+            "path": artifact.source,
+            "host": str(args.get("host") or "").strip(),
+            "tool_name": "ssh_file_read",
         },
     )

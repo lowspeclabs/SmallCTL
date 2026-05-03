@@ -36,6 +36,7 @@ def record_evidence(
         phase=str(getattr(service.harness.state, "current_phase", "") or context.get("phase", "") or ""),
         evidence_context=context,
         replayed=replayed,
+        created_at_step=getattr(service.harness.state, "step_count", 0) or 0,
     )
     reasoning_graph = getattr(service.harness.state, "reasoning_graph", None)
     if reasoning_graph is not None:

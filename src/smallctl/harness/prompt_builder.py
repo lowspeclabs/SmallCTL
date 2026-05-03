@@ -233,6 +233,13 @@ class PromptBuilderService:
                 selected_brief_ids=[item.brief_id for item in frame.evidence_packet.context_briefs],
                 selected_summary_ids=[item.summary_id for item in frame.evidence_packet.summaries],
             )
+            if frame.spine.fama_capsule_lines:
+                self.harness._runlog(
+                    "fama_capsule_rendered",
+                    "FAMA capsule rendered into working memory",
+                    line_count=len(frame.spine.fama_capsule_lines),
+                    token_estimate=assembly.section_tokens.get("fama_capsules", 0),
+                )
             for lane, count in included_lane_counts.items():
                 self.harness._runlog(
                     "context_lane_selected",

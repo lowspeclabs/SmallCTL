@@ -7,6 +7,7 @@ from ..state import LoopState
 from .common import fail, ok
 from .fs_patching import (
     _apply_exact_patch,
+    _build_patch_best_match,
     _build_patch_ambiguity_hint,
     _build_patch_failure_metadata,
     _build_patch_failure_message,
@@ -264,6 +265,7 @@ async def handle_file_patch(
                     "actual_occurrences": 0,
                     "expected_occurrences": normalized_expected_occurrences,
                     "ambiguity_hint": ambiguity_hint,
+                    "best_match": _build_patch_best_match(source_text, normalized_target_text),
                     "target_text_preview": _build_patch_text_preview(normalized_target_text),
                     "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
                 },

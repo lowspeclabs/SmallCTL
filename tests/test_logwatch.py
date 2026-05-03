@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOGWATCH = ROOT / "temp" / "logwatch.py"
+LOGWATCH = ROOT / "logwatch.py"
 
 
 def test_logwatch_accepts_run_directory_input(tmp_path: Path) -> None:
@@ -31,8 +31,9 @@ def test_logwatch_accepts_run_directory_input(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0
-    assert "Parsed records: 2" in completed.stdout
-    assert "Errors: 1" in completed.stdout
+    logwatch_output = (run_dir / "harness.logwatch.log").read_text(encoding="utf-8")
+    assert "Parsed records: 2" in logwatch_output
+    assert "Errors: 1" in logwatch_output
 
 
 def test_logwatch_accepts_log_file_input(tmp_path: Path) -> None:
@@ -51,5 +52,6 @@ def test_logwatch_accepts_log_file_input(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0
-    assert "Parsed records: 1" in completed.stdout
-    assert "Errors: 1" in completed.stdout
+    logwatch_output = log_path.with_suffix(".logwatch.log").read_text(encoding="utf-8")
+    assert "Parsed records: 1" in logwatch_output
+    assert "Errors: 1" in logwatch_output

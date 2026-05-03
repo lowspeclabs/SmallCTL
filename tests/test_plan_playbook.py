@@ -393,7 +393,7 @@ def test_file_patch_zero_occurrences_fails_without_mutating_file(tmp_path: Path)
     result = asyncio.run(
         fs.file_patch(
             path=str(target),
-            target_text="missing",
+            target_text="alpah",
             replacement_text="replacement",
             cwd=str(tmp_path),
             state=state,
@@ -404,7 +404,9 @@ def test_file_patch_zero_occurrences_fails_without_mutating_file(tmp_path: Path)
     assert result["metadata"]["error_kind"] == "patch_target_not_found"
     assert result["metadata"]["actual_occurrences"] == 0
     assert "not found" in result["metadata"]["ambiguity_hint"]
-    assert result["metadata"]["target_text_preview"]["preview"] == "missing"
+    assert result["metadata"]["target_text_preview"]["preview"] == "alpah"
+    assert result["metadata"]["best_match"]["preview"] == "alpha"
+    assert result["metadata"]["best_match"]["start_line"] == 1
     assert target.read_text(encoding="utf-8") == "alpha\nbeta\n"
 
 
@@ -1635,8 +1637,8 @@ def test_resume_continue_after_repeated_tool_loop_reseeds_guard_and_adds_nudge()
     assert state.recent_messages[-1].role == "system"
     assert "Do not call `dir_list` again with the same arguments" in state.recent_messages[-1].content
     assert "trust the visible listing" in state.recent_messages[-1].content
-    assert _detect_repeated_tool_loop(harness, PendingToolCall(tool_name="dir_list", args={})) == (
-        "Guard tripped: repeated dir_list loop (same path repeated without progress)"
+    assert "Guard tripped: repeated dir_list loop (same path repeated without progress)" in (
+        _detect_repeated_tool_loop(harness, PendingToolCall(tool_name="dir_list", args={})) or ""
     )
     assert getattr(emitted[0], "content", "") == "continue"
 
@@ -2035,8 +2037,8 @@ def test_repeated_shell_exec_command_still_trips_after_the_updated_streak_limit(
 
     pending = PendingToolCall(tool_name="shell_exec", args={"command": "python -V"})
 
-    assert _detect_repeated_tool_loop(harness, pending) == (
-        "Guard tripped: repeated tool call loop (shell_exec repeated with identical arguments)"
+    assert "Guard tripped: repeated tool call loop (shell_exec repeated with identical arguments)" in (
+        _detect_repeated_tool_loop(harness, pending) or ""
     )
 
 
@@ -2053,8 +2055,8 @@ def test_repeated_artifact_print_trips_after_one_repeat() -> None:
 
     pending = PendingToolCall(tool_name="artifact_print", args={"artifact_id": "A0002"})
 
-    assert _detect_repeated_tool_loop(harness, pending) == (
-        "Guard tripped: repeated tool call loop (artifact_print repeated with identical arguments)"
+    assert "Guard tripped: repeated tool call loop (artifact_print repeated with identical arguments)" in (
+        _detect_repeated_tool_loop(harness, pending) or ""
     )
 
 
@@ -2078,8 +2080,8 @@ def test_one_shot_repeat_guard_allows_scheduled_recovery_file_read_once() -> Non
 
     assert _detect_repeated_tool_loop(harness, pending) is None
     assert "_repeat_guard_one_shot_fingerprints" not in state.scratchpad
-    assert _detect_repeated_tool_loop(harness, pending) == (
-        "Guard tripped: repeated tool call loop (file_read repeated with identical arguments)"
+    assert "Guard tripped: repeated tool call loop (file_read repeated with identical arguments)" in (
+        _detect_repeated_tool_loop(harness, pending) or ""
     )
 
 

@@ -4,6 +4,8 @@ from pathlib import Path
 
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.context.artifacts import ArtifactStore, artifact_storage_id
+from smallctl.state import LoopState
+from smallctl.tools.artifact import artifact_read
 
 
 def test_artifact_storage_id_prefixes_session_id_when_distinct() -> None:
@@ -105,6 +107,45 @@ def test_artifact_store_persists_dir_list_as_readable_listing_text(tmp_path) -> 
     assert "src [dir] (2 children)" in content
     assert "README.md [file] (42 bytes)" in content
     assert '"name": "src"' not in content
+
+
+def test_artifact_store_persists_ssh_file_read_content_for_paging(tmp_path) -> None:
+    store = ArtifactStore(tmp_path, "run-1")
+    remote_content = "\n".join(f"line-{index}" for index in range(1, 135)) + "\n"
+
+    artifact = store.persist_tool_result(
+        tool_name="ssh_file_read",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "bytes": len(remote_content.encode("utf-8")),
+                "content": remote_content,
+                "encoding": "utf-8",
+                "host": "192.168.1.89",
+                "path": "/etc/nginx/sites-enabled/default",
+                "truncated": False,
+            },
+            metadata={
+                "complete_file": True,
+                "host": "192.168.1.89",
+                "path": "/etc/nginx/sites-enabled/default",
+                "total_lines": 134,
+            },
+        ),
+    )
+
+    content = Path(artifact.content_path).read_text(encoding="utf-8")
+    state = LoopState(cwd=".")
+    state.artifacts[artifact.artifact_id] = artifact
+    paged = artifact_read(state, artifact_id=artifact.artifact_id, start_line=130, end_line=134)
+
+    assert content == remote_content
+    assert not content.lstrip().startswith("{")
+    assert artifact.summary == "default full file (134 lines)"
+    assert paged["success"] is True
+    assert "line-130" in paged["output"]
+    assert "line-134" in paged["output"]
+    assert paged["metadata"]["total_lines"] == 134
 
 
 def test_artifact_store_dir_list_preview_uses_listing_text(tmp_path) -> None:

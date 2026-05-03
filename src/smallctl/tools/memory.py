@@ -12,6 +12,17 @@ from .common import fail, ok
 SESSION_NOTEPAD_KEY = "_session_notepad"
 SESSION_NOTEPAD_LIMIT = 40
 SESSION_NOTEPAD_ITEM_CHAR_LIMIT = 240
+_VERIFIER_SUCCESS_CLAIM_MARKERS = (
+    "verified",
+    "verifier passed",
+    "verification passed",
+    "syntax verified",
+    "syntax is valid",
+    "nginx -t passed",
+    "nginx config syntax verified",
+    "tests pass",
+    "tests passed",
+)
 
 
 def _normalize_notepad_entry(content: str, *, tag: str = "") -> str:
@@ -63,6 +74,25 @@ def append_session_notepad_entry(
     state.scratchpad[SESSION_NOTEPAD_KEY] = payload
     state.touch()
     return entry, False, len(payload["entries"])
+
+
+def _looks_like_verifier_success_claim(content: str) -> bool:
+    text = " ".join(str(content or "").strip().lower().split())
+    if not text:
+        return False
+    return any(marker in text for marker in _VERIFIER_SUCCESS_CLAIM_MARKERS)
+
+
+def _latest_verifier_blocks_success_claim(state: LoopState, content: str) -> dict[str, Any] | None:
+    if not _looks_like_verifier_success_claim(content):
+        return None
+    verdict = state.current_verifier_verdict()
+    if not isinstance(verdict, dict) or not verdict:
+        return None
+    verdict_label = str(verdict.get("verdict") or "").strip().lower()
+    if verdict_label in {"", "pass"}:
+        return None
+    return verdict
 
 
 async def scratch_set(key: str, value: Any, state: LoopState, persist: bool = False) -> dict[str, Any]:
@@ -141,6 +171,19 @@ async def memory_update(
     target_list = getattr(state.working_memory, section)
     
     if action == "add":
+        if section in {"known_facts", "decisions"}:
+            contradictory_verdict = _latest_verifier_blocks_success_claim(state, content)
+            if contradictory_verdict is not None:
+                return fail(
+                    "Refusing to store a verifier success claim while the latest verifier is unresolved or failing. "
+                    "Fix the failure and rerun the verifier before recording success.",
+                    metadata={
+                        "section": section,
+                        "action": action,
+                        "reason": "contradictory_verifier_success_claim",
+                        "last_verifier_verdict": contradictory_verdict,
+                    },
+                )
         # Enforce item-level limit first
         char_limit = 400 if section in ("plan", "decisions") else 320
         clipped_content, _ = clip_text_value(content, limit=char_limit)

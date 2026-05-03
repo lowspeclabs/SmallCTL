@@ -10,6 +10,7 @@ from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop, _record_
 from smallctl.graph.progress_guard import (
     _update_progress_tracking,
     _check_progress_stagnation,
+    _next_unread_artifact_line,
     _turn_has_actionable_progress,
 )
 from smallctl.models.tool_result import ToolEnvelope
@@ -431,6 +432,134 @@ def test_new_artifact_range_is_progress() -> None:
     graph_state2 = _make_graph_state(tool_results=[_make_record("artifact_read", {"artifact_id": "A0003", "start_line": 51, "end_line": 100})])
     _update_progress_tracking(harness, graph_state2)
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+
+
+def test_artifact_read_effective_metadata_tracks_actual_covered_lines() -> None:
+    harness = _FakeHarness()
+
+    graph_state1 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0100", "start_line": 1, "end_line": 50},
+                metadata={
+                    "artifact_id": "A0100",
+                    "line_start": 1,
+                    "line_end": 100,
+                    "total_lines": 200,
+                    "truncated": True,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state1)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+    assert _next_unread_artifact_line(harness, "A0100") == 101
+
+    graph_state2 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0100", "start_line": 51, "end_line": 100},
+                metadata={
+                    "artifact_id": "A0100",
+                    "line_start": 51,
+                    "line_end": 100,
+                    "total_lines": 200,
+                    "truncated": True,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state2)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+    assert _next_unread_artifact_line(harness, "A0100") == 101
+
+
+def test_artifact_read_fully_covered_overlap_is_no_progress() -> None:
+    harness = _FakeHarness()
+
+    graph_state1 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0101", "start_line": 1, "end_line": 200},
+                metadata={
+                    "artifact_id": "A0101",
+                    "line_start": 1,
+                    "line_end": 200,
+                    "total_lines": 400,
+                    "truncated": True,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state1)
+
+    graph_state2 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0101", "start_line": 50, "end_line": 150},
+                metadata={
+                    "artifact_id": "A0101",
+                    "line_start": 50,
+                    "line_end": 150,
+                    "total_lines": 400,
+                    "truncated": True,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state2)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+    assert _next_unread_artifact_line(harness, "A0101") == 201
+
+
+def test_artifact_read_next_uncovered_span_progresses_to_complete() -> None:
+    harness = _FakeHarness()
+
+    graph_state1 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0102", "start_line": 1, "end_line": 300},
+                metadata={
+                    "artifact_id": "A0102",
+                    "line_start": 1,
+                    "line_end": 300,
+                    "total_lines": 400,
+                    "truncated": True,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state1)
+    assert _next_unread_artifact_line(harness, "A0102") == 301
+
+    graph_state2 = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "artifact_read",
+                {"artifact_id": "A0102", "start_line": 301, "end_line": 400},
+                metadata={
+                    "artifact_id": "A0102",
+                    "line_start": 301,
+                    "line_end": 400,
+                    "total_lines": 400,
+                    "truncated": False,
+                },
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state2)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+    assert _next_unread_artifact_line(harness, "A0102") is None
+    assert harness.state.scratchpad["_artifact_read_coverage"]["A0102"]["complete"] is True
 
 
 def test_three_no_progress_cycles_inject_nudge() -> None:

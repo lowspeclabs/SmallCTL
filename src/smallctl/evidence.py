@@ -48,6 +48,7 @@ def normalize_tool_result(
     phase: str = "",
     evidence_context: dict[str, Any] | None = None,
     replayed: bool = False,
+    created_at_step: int = 0,
 ) -> EvidenceRecord:
     context = dict(evidence_context or {})
     metadata = _build_metadata(
@@ -110,6 +111,7 @@ def normalize_tool_result(
         decision_ids=decision_ids,
         evidence_refs=evidence_refs,
         metadata=metadata,
+        created_at_step=created_at_step,
     )
 
 

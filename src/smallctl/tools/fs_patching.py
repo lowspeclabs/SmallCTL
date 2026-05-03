@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,58 @@ def _build_patch_text_preview(text: str, *, limit: int = 120) -> dict[str, Any]:
         "bytes": len(text.encode("utf-8")),
         "line_count": text.count("\n") + (1 if text else 0),
     }
+
+
+def _build_patch_best_match(
+    content: str,
+    target_text: str,
+    *,
+    limit: int = 240,
+) -> dict[str, Any] | None:
+    """Return a compact nearest snippet for exact patch misses."""
+
+    if not content or not target_text:
+        return None
+
+    content_lines = content.splitlines()
+    if not content_lines:
+        return None
+    target_lines = target_text.splitlines() or [target_text]
+    window_sizes = sorted({max(1, len(target_lines) - 1), max(1, len(target_lines)), len(target_lines) + 1})
+    normalized_target = " ".join(target_text.split())
+
+    best: dict[str, Any] | None = None
+    best_score = -1.0
+    for window_size in window_sizes:
+        if window_size < 1:
+            continue
+        for start_index in range(0, max(1, len(content_lines) - window_size + 1)):
+            snippet_lines = content_lines[start_index : start_index + window_size]
+            if not snippet_lines:
+                continue
+            snippet = "\n".join(snippet_lines)
+            exact_score = SequenceMatcher(None, target_text, snippet).ratio()
+            normalized_snippet = " ".join(snippet.split())
+            normalized_score = (
+                SequenceMatcher(None, normalized_target, normalized_snippet).ratio()
+                if normalized_target and normalized_snippet
+                else 0.0
+            )
+            score = max(exact_score, normalized_score)
+            if score <= best_score:
+                continue
+            preview, clipped = clip_text_value(snippet, limit=limit)
+            best_score = score
+            best = {
+                "preview": preview,
+                "clipped": clipped,
+                "chars": len(snippet),
+                "start_line": start_index + 1,
+                "end_line": start_index + len(snippet_lines),
+                "similarity": round(score, 3),
+                "match_basis": "whitespace_normalized" if normalized_score > exact_score else "exact",
+            }
+    return best
 
 
 def _build_patch_ambiguity_hint(

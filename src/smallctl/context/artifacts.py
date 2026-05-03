@@ -40,6 +40,7 @@ class ArtifactPolicy:
         "yaml_read",
         "shell_exec",
         "find_files",
+        "ssh_file_read",
     )
 
     def should_externalize(self, *, tool_name: str, serialized_output: str) -> bool:
@@ -127,6 +128,12 @@ class ArtifactStore:
                 max_depth=2,
                 max_children=max(8, len(result.output)),
             )
+        elif tool_name == "ssh_file_read" and isinstance(result.output, dict):
+            content = result.output.get("content")
+            if isinstance(content, str):
+                txt_content = content
+            else:
+                txt_content = json.dumps(result.output, ensure_ascii=True, default=str, indent=2)
         elif isinstance(result.output, dict):
             plain_text = self._structured_plain_text(result.output)
             if plain_text is not None:
@@ -330,6 +337,14 @@ class ArtifactStore:
                 exit_code = output.get("exit_code")
                 if exit_code is not None:
                     return f"{tool_name} exit {exit_code}"
+            if tool_name == "ssh_file_read" and isinstance(source, str) and source:
+                total_lines = metadata.get("total_lines")
+                complete_file = bool(metadata.get("complete_file"))
+                if complete_file and isinstance(total_lines, int) and total_lines > 0:
+                    return f"{Path(source).name} full file ({total_lines} lines)"
+                content = output.get("content")
+                if isinstance(content, str):
+                    return f"{Path(source).name} text ({len(content)} chars)"
             structured_summary = summarize_structured_output(tool_name=tool_name, output=output)
             if structured_summary:
                 return structured_summary

@@ -21,8 +21,9 @@ from .tool_result_verification import (
     _store_verifier_verdict,
     assess_remote_mutation_verification,
 )
-from ..shell_utils import file_read_cache_key as _file_read_cache_key
+from ..shell_utils import file_read_cache_key as _file_read_cache_key, ssh_file_read_cache_key as _ssh_file_read_cache_key
 from ..tools.fs import is_file_mutating_tool
+from ..tools.ssh_files import SSH_FILE_MUTATING_TOOLS
 
 _SYMBOL_TOKEN_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{0,80}$")
 _SYMBOL_LINE_PATTERNS = (
@@ -881,6 +882,12 @@ def apply_artifact_success_outcome(
             cache = service.harness.state.scratchpad.setdefault("file_read_cache", {})
             if isinstance(cache, dict):
                 cache[cache_key] = artifact.artifact_id
+    elif tool_name == "ssh_file_read" and result.success:
+        cache_key = _ssh_file_read_cache_key(result.metadata)
+        if cache_key:
+            cache = service.harness.state.scratchpad.setdefault("ssh_file_read_cache", {})
+            if isinstance(cache, dict):
+                cache[cache_key] = artifact.artifact_id
     elif is_file_mutating_tool(tool_name) and result.success:
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
@@ -900,6 +907,43 @@ def apply_artifact_success_outcome(
                     details={
                         "tool_name": tool_name,
                         "state_change": f"File changed: {mutated_path}",
+                    },
+                )
+            _record_touched_symbols_from_mutation(
+                service,
+                tool_name=tool_name,
+                result=result,
+                arguments=arguments,
+                artifact=artifact,
+                mutated_path=mutated_path,
+            )
+    elif tool_name in SSH_FILE_MUTATING_TOOLS and result.success:
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
+            pass
+        else:
+            mutated_path = ""
+            host = ""
+            if isinstance(result.metadata, dict):
+                mutated_path = str(result.metadata.get("path") or "").strip()
+                host = str(result.metadata.get("host") or "").strip().lower()
+            if not mutated_path and isinstance(arguments, dict):
+                mutated_path = str(arguments.get("path") or "").strip()
+                host = str(arguments.get("host") or "").strip().lower()
+            if mutated_path and host:
+                cache = service.harness.state.scratchpad.get("ssh_file_read_cache")
+                if isinstance(cache, dict):
+                    prefix = f"ssh://{host}{mutated_path}"
+                    for key in list(cache.keys()):
+                        if key.startswith(prefix):
+                            cache.pop(key, None)
+                _emit_context_invalidation(
+                    service,
+                    reason="file_changed",
+                    paths=[f"{host}:{mutated_path}"],
+                    details={
+                        "tool_name": tool_name,
+                        "state_change": f"Remote file changed: {host}:{mutated_path}",
                     },
                 )
             _record_touched_symbols_from_mutation(

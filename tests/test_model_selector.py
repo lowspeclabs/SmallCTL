@@ -444,18 +444,30 @@ def test_switching_model_updates_harness_kwargs() -> None:
             self.config.model = model
             self.state.scratchpad["_model_name"] = model
 
+        def build_status_snapshot(self, *, activity: str = "", api_errors: int = 0) -> dict[str, object]:
+            return {
+                "model": self.client.model,
+                "phase": "explore",
+                "activity": activity,
+                "api_errors": api_errors,
+            }
+
     class _Flow(SmallctlAppFlowMixin):
         def __init__(self) -> None:
             self.harness = _Harness()
             self.harness_kwargs = {"model": "old-model", "provider_profile": "lmstudio"}
             self.refreshed = False
+            self._api_error_count = 0
+            self._latest_status_snapshot = None
+            self._status_activity = ""
+            self.active_task = None
 
         def _refresh_status(self, step_override: int | str | None = None) -> None:
             self.refreshed = True
 
     flow = _Flow()
 
-    flow._switch_model("new-model")
+    asyncio.run(flow._switch_model("new-model"))
 
     assert flow.harness_kwargs["model"] == "new-model"
     assert flow.harness.client.model == "new-model"

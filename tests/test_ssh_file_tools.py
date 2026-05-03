@@ -30,6 +30,8 @@ def test_apply_exact_patch_content_fails_on_zero_match() -> None:
     assert metadata["error_kind"] == "patch_target_not_found"
     assert metadata["actual_occurrences"] == 0
     assert metadata["expected_occurrences"] == 1
+    assert metadata["best_match"]["preview"] == "alpha beta"
+    assert metadata["best_match"]["start_line"] == 1
 
 
 def test_apply_exact_patch_content_fails_on_occurrence_mismatch() -> None:

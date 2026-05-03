@@ -714,6 +714,10 @@ class LoopStateFlowMixin:
             elif reason_label in {"phase_advanced", "environment_changed"}:
                 evidence_phase = str(getattr(evidence, "phase", "") or "").strip()
                 should_mark_stale = bool(evidence_phase and evidence_phase != str(self.current_phase or "").strip())
+                if should_mark_stale:
+                    created_at_step = int(getattr(evidence, "created_at_step", 0) or 0)
+                    if created_at_step >= max(0, self.step_count - 1):
+                        should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = (
                     str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"

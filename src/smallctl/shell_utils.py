@@ -80,6 +80,19 @@ def file_read_cache_key(cwd: str, payload: dict[str, Any] | None) -> str | None:
     return f"{resolved}|{start_line}|{end_line}|{max_bytes}"
 
 
+def ssh_file_read_cache_key(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    host = str(payload.get("host") or "").strip().lower()
+    start_line = payload.get("requested_start_line", payload.get("start_line"))
+    end_line = payload.get("requested_end_line", payload.get("end_line"))
+    max_bytes = payload.get("max_bytes", 100_000)
+    return f"ssh://{host}{path}|{start_line}|{end_line}|{max_bytes}"
+
+
 def shell_tokens(command: str) -> list[str]:
     try:
         return shlex.split(command)

@@ -166,6 +166,15 @@ def _env_config() -> dict[str, Any]:
         "loop_guard_cumulative_write_gate": env_or_dotenv(f"{ENV_PREFIX}LOOP_GUARD_CUMULATIVE_WRITE_GATE"),
         "loop_guard_checkpoint_gate": env_or_dotenv(f"{ENV_PREFIX}LOOP_GUARD_CHECKPOINT_GATE"),
         "loop_guard_diff_gate": env_or_dotenv(f"{ENV_PREFIX}LOOP_GUARD_DIFF_GATE"),
+        "fama_enabled": env_or_dotenv(f"{ENV_PREFIX}FAMA_ENABLED"),
+        "fama_mode": env_or_dotenv(f"{ENV_PREFIX}FAMA_MODE"),
+        "fama_default_ttl_steps": env_or_dotenv(f"{ENV_PREFIX}FAMA_DEFAULT_TTL_STEPS"),
+        "fama_max_active_mitigations": env_or_dotenv(f"{ENV_PREFIX}FAMA_MAX_ACTIVE_MITIGATIONS"),
+        "fama_signal_window": env_or_dotenv(f"{ENV_PREFIX}FAMA_SIGNAL_WINDOW"),
+        "fama_done_gate_on_failure": env_or_dotenv(f"{ENV_PREFIX}FAMA_DONE_GATE_ON_FAILURE"),
+        "fama_capsule_token_budget": env_or_dotenv(f"{ENV_PREFIX}FAMA_CAPSULE_TOKEN_BUDGET"),
+        "fama_llm_judge_enabled": env_or_dotenv(f"{ENV_PREFIX}FAMA_LLM_JUDGE_ENABLED"),
+        "fama_llm_judge_min_severity": env_or_dotenv(f"{ENV_PREFIX}FAMA_LLM_JUDGE_MIN_SEVERITY"),
     }
     cfg = {k: v for k, v in raw.items() if v not in (None, "")}
     if "tool_profiles" in cfg:
@@ -207,6 +216,9 @@ def _env_config() -> dict[str, Any]:
         "loop_guard_cumulative_write_gate",
         "loop_guard_checkpoint_gate",
         "loop_guard_diff_gate",
+        "fama_enabled",
+        "fama_done_gate_on_failure",
+        "fama_llm_judge_enabled",
     ):
         if key in cfg:
             cfg[key] = _to_bool(cfg[key])
@@ -250,6 +262,11 @@ def _env_config() -> dict[str, Any]:
         "loop_guard_recent_writes_limit",
         "loop_guard_tail_lines",
         "staged_step_prompt_tokens",
+        "fama_default_ttl_steps",
+        "fama_max_active_mitigations",
+        "fama_signal_window",
+        "fama_capsule_token_budget",
+        "fama_llm_judge_min_severity",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])

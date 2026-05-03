@@ -221,6 +221,18 @@ class ToolDispatcher:
                 risk=spec.risk,
                 phase=self.phase,
             )
+        blocked_by_fama = _fama_dispatch_block(tool_name, arguments, state=self.state, phase=self.phase)
+        if blocked_by_fama is not None:
+            if self.run_logger:
+                self.run_logger.log(
+                    "tools",
+                    "fama_tool_call_blocked",
+                    "FAMA blocked tool call",
+                    tool_name=tool_name,
+                    active_mitigation=blocked_by_fama.metadata.get("active_mitigation"),
+                    mode=self.phase,
+                )
+            return blocked_by_fama
         if not spec.phase_allowed(self.phase):
             log_kv(
                 self.log,
@@ -334,6 +346,11 @@ class ToolDispatcher:
         ):
             result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
             result_metadata = {**dispatch_metadata, **normalization_metadata, **result_metadata}
+            result_output = result.get("output")
+            if result_output is None and tool_name in {"shell_exec", "ssh_exec"}:
+                metadata_output = result_metadata.get("output")
+                if isinstance(metadata_output, dict):
+                    result_output = metadata_output
             log_kv(
                 self.log,
                 logging.INFO,
@@ -350,13 +367,13 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     success=bool(result["success"]),
                     tier=spec.tier,
-                    output=result.get("output"),
+                    output=result_output,
                     error=result.get("error"),
             )
             return ToolEnvelope(
                 success=bool(result["success"]),
                 status=result.get("status"),
-                output=result.get("output"),
+                output=result_output,
                 error=result.get("error"),
                 metadata=result_metadata,
             )
@@ -401,6 +418,28 @@ class ToolDispatcher:
             if expected_type and not _type_matches(expected_type, val):
                 return f"Field '{key}' expected type '{expected_type}'"
         return None
+
+
+def _fama_dispatch_block(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    state: Any | None,
+    phase: str,
+) -> ToolEnvelope | None:
+    if state is None:
+        return None
+    try:
+        from ..fama.tool_policy import enforce_fama_tool_call
+    except Exception:
+        return None
+    return enforce_fama_tool_call(
+        tool_name,
+        arguments if isinstance(arguments, dict) else {},
+        state=state,
+        mode=phase,
+        config=None,
+    )
 
 
 def _staged_tool_allowlist_error(state: Any | None, tool_name: str) -> ToolEnvelope | None:
@@ -517,12 +556,26 @@ def normalize_tool_request(
         return tool_name, arguments, remote_file_guard, normalization_metadata
 
     if tool_name in _SSH_FILE_TOOLS:
+        # Recover missing host/user/password from task context BEFORE normalization
+        # so that omitting target/host does not immediately fail when context is available.
+        pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
+            arguments,
+            state=state,
+        )
+        normalization_metadata.update(pre_metadata)
         try:
-            normalized_arguments = network.normalize_ssh_arguments(arguments)
+            normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
             normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
                 normalized_arguments,
                 state=state,
             )
+            # Preserve pre-normalization recovery metadata over post-normalization "explicit" labels
+            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+                if _preserve_key in normalization_metadata:
+                    ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
+            if "recovered_ssh_password_source" in normalization_metadata:
+                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
             return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
@@ -541,12 +594,25 @@ def normalize_tool_request(
             )
 
     if tool_name == "ssh_exec":
+        # Recover missing host/user/password from task context BEFORE normalization
+        pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
+            arguments,
+            state=state,
+        )
+        normalization_metadata.update(pre_metadata)
         try:
-            normalized_arguments = network.normalize_ssh_arguments(arguments)
+            normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
             normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
                 normalized_arguments,
                 state=state,
             )
+            # Preserve pre-normalization recovery metadata over post-normalization "explicit" labels
+            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+                if _preserve_key in normalization_metadata:
+                    ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
+            if "recovered_ssh_password_source" in normalization_metadata:
+                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
             auth_recovery_error, auth_recovery_metadata = _guard_ssh_auth_recovery(
                 normalized_arguments,
@@ -938,6 +1004,33 @@ def _guard_remote_shell_tool_request(
     return None
 
 
+def _infer_ssh_host_from_context(state: Any | None) -> str:
+    """Infer an SSH host from session state when the model omits target/host."""
+    if state is None:
+        return ""
+    # Prefer single confirmed session target
+    from ..remote_scope import _confirmed_session_targets
+    confirmed = _confirmed_session_targets(state)
+    if len(confirmed) == 1:
+        return confirmed[0]["host"]
+    # Fall back to execution records: most recent ssh_exec host
+    records = getattr(state, "tool_execution_records", None)
+    if isinstance(records, dict) and records:
+        for record in reversed(list(records.values())):
+            if not isinstance(record, dict):
+                continue
+            tool_name = str(record.get("tool_name") or "").strip()
+            if tool_name not in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
+                continue
+            args = record.get("args")
+            if not isinstance(args, dict):
+                continue
+            record_host = str(args.get("host") or "").strip()
+            if record_host:
+                return record_host
+    return ""
+
+
 def _recover_ssh_arguments_from_task_context(
     arguments: dict[str, Any],
     *,
@@ -953,6 +1046,15 @@ def _recover_ssh_arguments_from_task_context(
     password = str(repaired.get("password") or "").strip()
     command = str(repaired.get("command") or "").strip()
     password_source = "explicit" if password else "none"
+
+    target = str(repaired.get("target") or "").strip()
+    if not host and not target:
+        inferred_host = _infer_ssh_host_from_context(state)
+        if inferred_host:
+            repaired["host"] = inferred_host
+            host = inferred_host
+            metadata["recovered_ssh_host"] = inferred_host
+            metadata["routing_reason"] = "ssh_host_recovery"
 
     if host and not user:
         inferred_user = _infer_ssh_user_from_state_context(host, state=state)

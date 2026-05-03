@@ -110,14 +110,25 @@ async def record_result(
         operation_id=operation_id,
         tool_call_id=tool_call_id,
     )
-    if reused is not None:
-        return reused
+    message = reused
 
-    return await _persist_artifact_result(
+    if message is None:
+        message = await _persist_artifact_result(
+            service,
+            tool_name=tool_name,
+            result=result,
+            arguments=arguments,
+            operation_id=operation_id,
+            tool_call_id=tool_call_id,
+        )
+
+    from ..fama.runtime import observe_tool_result
+
+    await observe_tool_result(
         service,
         tool_name=tool_name,
         result=result,
         arguments=arguments,
         operation_id=operation_id,
-        tool_call_id=tool_call_id,
     )
+    return message

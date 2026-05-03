@@ -597,6 +597,88 @@ def test_mode_decision_routes_approval_style_remote_followup_to_loop(tmp_path) -
     assert asyncio.run(ModeDecisionService(harness).decide(raw)) == "loop"
 
 
+def test_mode_decision_recovers_remote_plan_approval_when_interrupt_context_is_missing(tmp_path) -> None:
+    async def _unexpected_stream_chat(*, messages, tools):
+        del messages, tools
+        raise AssertionError("remote plan approval should decide before model fallback")
+        if False:
+            yield {}
+
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    prior = (
+        'ssh root@192.168.1.89 with password "@S02v1735" and edit '
+        "/var/www/demo-site/index.html with dynamic animation and cards"
+    )
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.active_plan = ExecutionPlan(
+        plan_id="plan-remote",
+        goal=prior,
+        status="awaiting_approval",
+    )
+    state.recent_messages = [
+        ConversationMessage(
+            role="user",
+            content="yes",
+            metadata={"resumed_from_interrupt": True, "interrupt_kind": "plan_execute_approval"},
+        )
+    ]
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it", stream_chat=_unexpected_stream_chat),
+        state=state,
+        memory=SimpleNamespace(prime_write_policy=lambda _task: None),
+        _emit=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _initial_phase="execute",
+        _configured_planning_mode=False,
+    )
+
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    resolved = Harness._resolve_followup_task(harness, "yes")
+
+    assert resolved.startswith("Continue remote task over SSH on root@192.168.1.89.")
+    assert asyncio.run(ModeDecisionService(harness).decide("yes")) == "loop"
+
+
+def test_mode_decision_routes_remote_site_mutation_followup_to_loop(tmp_path) -> None:
+    async def _unexpected_stream_chat(*, messages, tools):
+        del messages, tools
+        raise AssertionError("remote site mutation follow-up should decide before model fallback")
+        if False:
+            yield {}
+
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    prior = (
+        'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
+        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+    )
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {"host": "192.168.1.89", "user": "root", "confirmed": True}
+    }
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it", stream_chat=_unexpected_stream_chat),
+        state=state,
+        memory=SimpleNamespace(prime_write_policy=lambda _task: None),
+        _emit=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _initial_phase="execute",
+        _configured_planning_mode=False,
+    )
+
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    raw = "remove the google branding"
+    resolved = Harness._resolve_followup_task(harness, raw)
+
+    assert resolved.startswith("Continue remote task over SSH on root@192.168.1.89.")
+    assert asyncio.run(ModeDecisionService(harness).decide(raw)) == "loop"
+
+
 def test_chat_mode_tools_keep_ssh_for_affirmative_remote_followup_after_confirmation(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
@@ -613,6 +695,62 @@ def test_chat_mode_tools_keep_ssh_for_affirmative_remote_followup_after_confirma
     ]
     state.scratchpad["_session_ssh_targets"] = {
         "192.168.1.63": {"host": "192.168.1.63", "user": "root", "confirmed": True}
+    }
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it"),
+        state=state,
+        memory=SimpleNamespace(prime_write_policy=lambda _task: None),
+        _initial_phase="execute",
+        _configured_planning_mode=False,
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: Harness._current_user_task(harness),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("file_read"),
+                _tool_schema("ssh_exec"),
+                _tool_schema("ssh_file_read"),
+                _tool_schema("ssh_file_write"),
+                _tool_schema("ssh_file_patch"),
+                _tool_schema("ssh_file_replace_between"),
+                _tool_schema("task_complete"),
+                _tool_schema("task_fail"),
+            ],
+            get=lambda name: None,
+        ),
+    )
+
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    tools = chat_mode_tools(harness)
+
+    assert _tool_names(tools) == [
+        "file_read",
+        "ssh_exec",
+        "ssh_file_read",
+        "ssh_file_write",
+        "ssh_file_patch",
+        "ssh_file_replace_between",
+        "task_complete",
+        "task_fail",
+    ]
+    assert state.scratchpad["_chat_tools_exposed"] is True
+    assert "_chat_tools_suppressed_reason" not in state.scratchpad
+
+
+def test_chat_mode_tools_keep_ssh_for_remote_site_mutation_followup(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core", "network"]
+    prior = (
+        'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
+        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+    )
+    raw = "remove the google branding"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.recent_messages = [ConversationMessage(role="user", content=raw)]
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {"host": "192.168.1.89", "user": "root", "confirmed": True}
     }
     harness = SimpleNamespace(
         client=SimpleNamespace(model="gemma-4-e2b-it"),

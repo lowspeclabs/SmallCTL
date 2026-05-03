@@ -95,11 +95,13 @@ class PromptAssembler:
         coding_prompt_pressure = bool(coding_anchor_priority and remaining_budget <= 0)
         run_brief_tokens = estimate_text_tokens(run_brief_text)
         working_memory_tokens = estimate_text_tokens(working_memory_text)
+        fama_capsule_tokens = estimate_text_tokens("\n".join(frame.spine.fama_capsule_lines))
         section_tokens = {
             "system": system_tokens - run_brief_tokens - working_memory_tokens,
             "recent_messages": transcript_tokens,
             "run_brief": run_brief_tokens,
             "working_memory": working_memory_tokens,
+            "fama_capsules": fama_capsule_tokens,
             "normalized_observations": 0,
             "fresh_tool_outputs": 0,
             "turn_bundles": 0,
@@ -516,7 +518,7 @@ class PromptAssembler:
             else:
                 final_messages.append(msg)
 
-        estimated_prompt_tokens = sum(section_tokens.values())
+        estimated_prompt_tokens = sum(section_tokens.values()) - section_tokens.get("fama_capsules", 0)
         included_levels = self._included_compaction_levels(frame=frame, transcript_tokens=transcript_tokens)
         dropped_levels = self._dropped_compaction_levels(frame=frame)
         state.prompt_budget = PromptBudgetSnapshot(

@@ -341,6 +341,15 @@ def cli(argv: list[str] | None = None) -> int:
             "indexer": config.indexer,
             "run_logger": run_logger,
             "task": config.task,
+            "fama_enabled": getattr(config, "fama_enabled", True),
+            "fama_mode": getattr(config, "fama_mode", "lite"),
+            "fama_default_ttl_steps": getattr(config, "fama_default_ttl_steps", 2),
+            "fama_max_active_mitigations": getattr(config, "fama_max_active_mitigations", 2),
+            "fama_signal_window": getattr(config, "fama_signal_window", 8),
+            "fama_done_gate_on_failure": getattr(config, "fama_done_gate_on_failure", True),
+            "fama_capsule_token_budget": getattr(config, "fama_capsule_token_budget", 180),
+            "fama_llm_judge_enabled": getattr(config, "fama_llm_judge_enabled", False),
+            "fama_llm_judge_min_severity": getattr(config, "fama_llm_judge_min_severity", 3),
         }
         app = SmallctlApp(harness_kwargs=harness_kwargs)
         try:
@@ -422,6 +431,15 @@ def cli(argv: list[str] | None = None) -> int:
             remote_task_primary_file_limit=config.remote_task_primary_file_limit,
             indexer=config.indexer,
             run_logger=run_logger,
+            fama_enabled=getattr(config, "fama_enabled", True),
+            fama_mode=getattr(config, "fama_mode", "lite"),
+            fama_default_ttl_steps=getattr(config, "fama_default_ttl_steps", 2),
+            fama_max_active_mitigations=getattr(config, "fama_max_active_mitigations", 2),
+            fama_signal_window=getattr(config, "fama_signal_window", 8),
+            fama_done_gate_on_failure=getattr(config, "fama_done_gate_on_failure", True),
+            fama_capsule_token_budget=getattr(config, "fama_capsule_token_budget", 180),
+            fama_llm_judge_enabled=getattr(config, "fama_llm_judge_enabled", False),
+            fama_llm_judge_min_severity=getattr(config, "fama_llm_judge_min_severity", 3),
         )
         if config.restore_graph_state and not config.fresh_run:
             restored = harness.restore_graph_state(thread_id=config.graph_thread_id)

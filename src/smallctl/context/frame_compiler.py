@@ -55,10 +55,19 @@ class PromptStateFrameCompiler:
         phase_lines = self._render_phase_context(state)
         coding_anchor_lines = self._coding_anchor_lines(state) if self.policy.coding_profile_enabled else []
         run_brief_text = self._render_run_brief(state)
+        from ..fama.capsules import render_fama_capsules
+
+        fama_capsule_lines = render_fama_capsules(
+            state,
+            token_budget=int(state.scratchpad.get("_fama_config", {}).get("capsule_token_budget", 180))
+            if isinstance(state.scratchpad.get("_fama_config"), dict)
+            else 180,
+        )
         working_memory_text = self._render_working_memory(
             state=state,
             phase_lines=phase_lines,
             coding_anchor_lines=coding_anchor_lines,
+            fama_capsule_lines=fama_capsule_lines,
         )
 
         plan = state.active_plan or state.draft_plan
@@ -144,6 +153,7 @@ class PromptStateFrameCompiler:
             acceptance_criteria=state.active_acceptance_criteria(),
             run_brief_text=run_brief_text,
             working_memory_text=working_memory_text,
+            fama_capsule_lines=fama_capsule_lines,
         )
         frame = PromptStateFrame(
             spine=spine,
@@ -487,7 +497,9 @@ class PromptStateFrameCompiler:
             if reason in {"phase_advanced", "environment_changed"}:
                 if bundle.phase and str(bundle.phase).strip().lower() != current_phase:
                     return True
-            if reason == "verifier_failed" and any(cls._is_optimistic_statement(line) for line in bundle.summary_lines):
+            if reason in {"verifier_failed", "fama_failure_detected"} and any(
+                cls._is_optimistic_statement(line) for line in bundle.summary_lines
+            ):
                 return True
         return False
 
@@ -509,7 +521,7 @@ class PromptStateFrameCompiler:
             if reason in {"phase_advanced", "environment_changed"}:
                 if brief.current_phase and str(brief.current_phase).strip().lower() != current_phase:
                     return True
-            if reason == "verifier_failed":
+            if reason in {"verifier_failed", "fama_failure_detected"}:
                 if any(cls._is_optimistic_statement(line) for line in brief.key_discoveries):
                     return True
                 if any(cls._is_optimistic_statement(line) for line in brief.new_facts):
@@ -531,7 +543,7 @@ class PromptStateFrameCompiler:
             if reason in {"file_changed", "write_session_target_changed"} and paths:
                 if any(cls._path_matches_any(path, paths) for path in summary.files_touched):
                     return True
-            if reason == "verifier_failed":
+            if reason in {"verifier_failed", "fama_failure_detected"}:
                 if any(cls._is_optimistic_statement(line) for line in summary.notes):
                     return True
                 if failure_mode and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches):
@@ -561,7 +573,7 @@ class PromptStateFrameCompiler:
             if reason in {"phase_advanced", "environment_changed"}:
                 if memory.phase and str(memory.phase).strip().lower() != current_phase:
                     return True
-            if reason == "verifier_failed":
+            if reason in {"verifier_failed", "fama_failure_detected"}:
                 if str(memory.outcome or "").strip().lower() == "success" and cls._is_optimistic_statement(notes):
                     return True
                 if failure_mode and str(memory.failure_mode or "").strip().lower() == failure_mode:
@@ -594,7 +606,7 @@ class PromptStateFrameCompiler:
             if reason in {"phase_advanced", "environment_changed"} and metadata_phase:
                 if metadata_phase != current_phase:
                     return True
-            if reason == "verifier_failed" and verifier_verdict == "pass":
+            if reason in {"verifier_failed", "fama_failure_detected"} and verifier_verdict == "pass":
                 return True
         return False
 
@@ -745,6 +757,62 @@ class PromptStateFrameCompiler:
         return "\n".join(parts)
 
     @staticmethod
+    def _run_boundary_lines(state: LoopState) -> list[str]:
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        transaction = scratchpad.get("_task_transaction")
+        handoff = scratchpad.get("_last_task_handoff")
+        source: dict[str, Any] = {}
+        if isinstance(transaction, dict) and transaction:
+            source = transaction
+        elif isinstance(handoff, dict) and str(handoff.get("status") or "").strip().lower() in {
+            "closed",
+            "failed",
+            "aborted",
+            "superseded",
+        }:
+            source = handoff
+        if not source:
+            return []
+
+        lines = ["Run boundary:"]
+        status = str(source.get("status") or "").strip().lower()
+        if status in {"closed", "failed", "aborted", "superseded"}:
+            lines.append("  Previous task is closed.")
+        turn_type = str(source.get("turn_type") or "").strip()
+        if turn_type:
+            lines.append(f"  Current turn type: {turn_type}.")
+        goal = str(source.get("user_goal") or source.get("current_goal") or source.get("effective_task") or "").strip()
+        if goal:
+            clipped_goal, _ = clip_text_value(goal, limit=220)
+            lines.append(f"  Current goal: {clipped_goal}")
+        relevant: list[str] = []
+        paths = source.get("allowed_paths")
+        if not isinstance(paths, list) or not paths:
+            paths = source.get("target_paths")
+        if not isinstance(paths, list) or not paths:
+            paths = source.get("remote_target_paths")
+        if isinstance(paths, list):
+            relevant.extend(str(path).strip() for path in paths if str(path).strip())
+        artifacts = source.get("allowed_artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            artifacts = source.get("last_good_artifact_ids")
+        if isinstance(artifacts, list):
+            relevant.extend(str(artifact).strip() for artifact in artifacts if str(artifact).strip())
+        relevant = PromptStateFrameCompiler._dedupe(relevant)
+        if relevant:
+            lines.append("  Relevant prior context: " + "; ".join(relevant[:4]) + ".")
+        ignored = source.get("ignored_context")
+        if isinstance(ignored, list):
+            cleaned_ignored = [str(item).strip() for item in ignored if str(item).strip()]
+            if cleaned_ignored:
+                lines.append("  Ignore: " + "; ".join(cleaned_ignored[:3]) + ".")
+        success = str(source.get("success_condition") or "").strip()
+        if success:
+            clipped_success, _ = clip_text_value(success, limit=180)
+            lines.append(f"  Stop when: {clipped_success}")
+        return lines[:7]
+
+    @staticmethod
     def _active_ssh_session_labels(state: LoopState) -> list[str]:
         labels: list[str] = []
         seen: set[str] = set()
@@ -884,7 +952,9 @@ class PromptStateFrameCompiler:
         *,
         phase_lines: list[str],
         coding_anchor_lines: list[str],
+        fama_capsule_lines: list[str] | None = None,
     ) -> str:
+        fama_capsule_lines = list(fama_capsule_lines or [])
         memory = state.working_memory
         plan = state.active_plan or state.draft_plan
         has_content = any(
@@ -904,6 +974,8 @@ class PromptStateFrameCompiler:
                 state.write_session is not None,
                 bool(phase_lines),
                 bool(coding_anchor_lines),
+                bool(fama_capsule_lines),
+                bool(PromptStateFrameCompiler._run_boundary_lines(state)),
             ]
         )
         if not has_content:
@@ -917,6 +989,12 @@ class PromptStateFrameCompiler:
         ground_truth = PromptStateFrameCompiler._render_task_ground_truth(state)
         if ground_truth:
             sections.append(ground_truth)
+        run_boundary_lines = PromptStateFrameCompiler._run_boundary_lines(state)
+        if run_boundary_lines:
+            sections.extend(run_boundary_lines)
+        if fama_capsule_lines:
+            sections.append("FAMA mitigation:")
+            sections.extend(f"  {line}" for line in fama_capsule_lines[:5])
         current_goal = LexicalRetriever._effective_current_goal(state)
         if current_goal:
             sections.append("Current goal: " + current_goal)

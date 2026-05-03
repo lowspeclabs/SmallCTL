@@ -6,6 +6,7 @@ from typing import Any
 from ..models.conversation import ConversationMessage
 from ..shell_utils import is_read_only_shell_evidence_action as _is_read_only_shell_evidence_action
 from ..state import json_safe_value
+from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
 from .tool_loop_guard_progress import (
     _coerce_int_or_none,
     _requested_artifact_read_target,
@@ -29,6 +30,7 @@ _READ_TOOLS = {
     "file_read",
 }
 _REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
+_ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
 
 def _is_ssh_exec_read_command(record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
@@ -118,6 +120,19 @@ def _artifact_read_result_is_new_range(harness: Any, record: Any) -> bool:
     artifact_id = _requested_artifact_read_target(args)
     if not artifact_id:
         return False
+    span = _artifact_read_effective_span(record)
+    if span is not None:
+        span_artifact_id, start_line, end_line, _total_lines, eof_overread = span
+        if eof_overread:
+            return False
+        artifact_id = span_artifact_id
+        coverage = _artifact_coverage_entry(harness, artifact_id)
+        if coverage is not None:
+            return _span_adds_unseen_lines(
+                start_line=start_line,
+                end_line=end_line,
+                ranges=coverage.get("ranges", []),
+            )
     candidate_range = _requested_file_read_range(args)
     state = getattr(harness, "state", None)
     if state is None:
@@ -206,6 +221,156 @@ def _record_progress_read(harness: Any, record: Any) -> None:
     history.append(entry)
     if len(history) > 24:
         del history[: len(history) - 24]
+    if record.tool_name == "artifact_read":
+        _record_artifact_read_coverage(harness, record)
+
+
+def _artifact_read_effective_span(record: Any) -> tuple[str, int, int, int | None, bool] | None:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    artifact_id = str(
+        metadata.get("artifact_id")
+        or metadata.get("source_artifact_id")
+        or _requested_artifact_read_target(args)
+        or ""
+    ).strip()
+    if not artifact_id:
+        return None
+
+    requested_start, requested_end = _requested_file_read_range(args)
+    start_line = _coerce_int_or_none(
+        metadata.get("line_start", metadata.get("requested_start_line", requested_start))
+    )
+    end_line = _coerce_int_or_none(
+        metadata.get("line_end", metadata.get("requested_end_line", requested_end))
+    )
+    total_lines = _coerce_int_or_none(metadata.get("total_lines", metadata.get("artifact_total_lines")))
+    eof_overread = bool(metadata.get("eof_overread"))
+
+    if start_line is None:
+        return None
+    if end_line is None and total_lines is not None and not bool(metadata.get("truncated")):
+        end_line = total_lines
+    if end_line is None:
+        return None
+    if total_lines is not None:
+        end_line = min(end_line, total_lines)
+    if start_line < 1 or end_line < start_line:
+        return None
+    return artifact_id, start_line, end_line, total_lines, eof_overread
+
+
+def _artifact_coverage_map(harness: Any) -> dict[str, dict[str, Any]]:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    if not isinstance(scratchpad, dict):
+        return {}
+    coverage = scratchpad.setdefault(_ARTIFACT_COVERAGE_SCRATCHPAD_KEY, {})
+    if not isinstance(coverage, dict):
+        coverage = {}
+        scratchpad[_ARTIFACT_COVERAGE_SCRATCHPAD_KEY] = coverage
+    return coverage
+
+
+def _artifact_coverage_entry(harness: Any, artifact_id: str) -> dict[str, Any] | None:
+    coverage = _artifact_coverage_map(harness)
+    entry = coverage.get(str(artifact_id or "").strip())
+    return entry if isinstance(entry, dict) else None
+
+
+def _span_adds_unseen_lines(*, start_line: int, end_line: int, ranges: Any) -> bool:
+    normalized_ranges = _normalize_line_ranges(ranges)
+    if not normalized_ranges:
+        return True
+
+    cursor = start_line
+    for prior_start, prior_end in normalized_ranges:
+        if prior_end < cursor:
+            continue
+        if prior_start > cursor:
+            return True
+        cursor = max(cursor, prior_end + 1)
+        if cursor > end_line:
+            return False
+    return cursor <= end_line
+
+
+def _normalize_line_ranges(ranges: Any) -> list[tuple[int, int]]:
+    normalized: list[tuple[int, int]] = []
+    if not isinstance(ranges, list):
+        return normalized
+    for item in ranges:
+        if isinstance(item, dict):
+            start_line = _coerce_int_or_none(item.get("start_line"))
+            end_line = _coerce_int_or_none(item.get("end_line"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            start_line = _coerce_int_or_none(item[0])
+            end_line = _coerce_int_or_none(item[1])
+        else:
+            continue
+        if start_line is None or end_line is None or start_line < 1 or end_line < start_line:
+            continue
+        normalized.append((start_line, end_line))
+    normalized.sort()
+    merged: list[tuple[int, int]] = []
+    for start_line, end_line in normalized:
+        if not merged or start_line > merged[-1][1] + 1:
+            merged.append((start_line, end_line))
+            continue
+        prior_start, prior_end = merged[-1]
+        merged[-1] = (prior_start, max(prior_end, end_line))
+    return merged
+
+
+def _record_artifact_read_coverage(harness: Any, record: Any) -> None:
+    span = _artifact_read_effective_span(record)
+    if span is None:
+        return
+    artifact_id, start_line, end_line, total_lines, eof_overread = span
+    coverage = _artifact_coverage_map(harness)
+    entry = coverage.setdefault(artifact_id, {"ranges": []})
+    if not isinstance(entry, dict):
+        entry = {"ranges": []}
+        coverage[artifact_id] = entry
+    if total_lines is not None:
+        entry["total_lines"] = total_lines
+    if eof_overread:
+        entry["eof_overread"] = True
+        return
+    ranges = _normalize_line_ranges(entry.get("ranges", []))
+    ranges.append((start_line, end_line))
+    entry["ranges"] = [
+        {"start_line": merged_start, "end_line": merged_end}
+        for merged_start, merged_end in _normalize_line_ranges(ranges)
+    ]
+    total = _coerce_int_or_none(entry.get("total_lines"))
+    if total is not None and total > 0:
+        entry["complete"] = _coverage_is_complete(ranges=entry["ranges"], total_lines=total)
+
+
+def _coverage_is_complete(*, ranges: Any, total_lines: int) -> bool:
+    if total_lines < 1:
+        return False
+    normalized_ranges = _normalize_line_ranges(ranges)
+    return bool(normalized_ranges and normalized_ranges[0][0] <= 1 and normalized_ranges[0][1] >= total_lines)
+
+
+def _next_unread_artifact_line(harness: Any, artifact_id: str) -> int | None:
+    entry = _artifact_coverage_entry(harness, artifact_id)
+    if entry is None:
+        return 1
+    total_lines = _coerce_int_or_none(entry.get("total_lines"))
+    cursor = 1
+    for start_line, end_line in _normalize_line_ranges(entry.get("ranges", [])):
+        if start_line > cursor:
+            return cursor
+        cursor = max(cursor, end_line + 1)
+    if total_lines is not None and cursor > total_lines:
+        return None
+    return cursor
 
 
 def _ssh_exec_remote_paths(record: Any) -> list[str]:
@@ -470,13 +635,32 @@ def _build_progress_stagnation_nudge(harness: Any) -> str:
         or ""
     ).strip()
     goal_note = f" for `{goal}`" if goal else ""
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+    tx_lines = recovery_context_lines(transaction)
+    last_action = _last_stalled_action(harness)
+    last_action_note = f" Last stalled action: {last_action}." if last_action else ""
+    tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
     return (
         "You have made no actionable progress in the last few turns. "
-        f"Use the evidence already visible in context{goal_note}. "
+        f"Use the evidence already visible in context{goal_note}.{tx_note}{last_action_note} "
         "Perform the next concrete mutation, run a focused verifier, or call "
         "`task_complete(message='...')` if the task is finished. "
-        "Do not repeat the same analysis or read operations."
+        "Do not repeat the same analysis or read operations. "
+        "Choose exactly one: A. Explain the blocker and stop. B. Try a different specific fix. C. Ask for missing information."
     )
+
+
+def _last_stalled_action(harness: Any) -> str:
+    history = _tool_attempt_history(harness)
+    if not history:
+        return ""
+    item = history[-1]
+    tool_name = str(item.get("tool_name") or "").strip()
+    if not tool_name:
+        return ""
+    return tool_name
 
 
 def _stagnation_thresholds_for_phase(harness: Any) -> tuple[int, int]:

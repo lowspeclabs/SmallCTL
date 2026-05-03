@@ -52,6 +52,41 @@ class SubtaskRunner:
             request.metadata.get("acceptance_criteria")
         )
         child_state.working_memory.known_facts = _coerce_string_list(request.metadata.get("known_facts"))
+        transaction = _transaction_for_child(parent_state, request)
+        if transaction:
+            user_goal = str(transaction.get("user_goal") or "").strip()
+            if user_goal:
+                child_state.run_brief.original_task = user_goal
+            success_condition = str(transaction.get("success_condition") or "").strip()
+            if success_condition:
+                child_state.run_brief.acceptance_criteria = _dedupe(
+                    child_state.run_brief.acceptance_criteria + [success_condition]
+                )[-6:]
+            turn_type = str(transaction.get("turn_type") or "").strip()
+            allowed_paths = _coerce_string_list(transaction.get("allowed_paths"))
+            if turn_type:
+                child_state.run_brief.constraints = _dedupe(
+                    child_state.run_brief.constraints + [f"turn_type={turn_type}"]
+                )[-8:]
+            if allowed_paths:
+                child_state.run_brief.constraints = _dedupe(
+                    child_state.run_brief.constraints
+                    + [f"allowed_paths={', '.join(allowed_paths[:4])}"]
+                )[-8:]
+            failure_summary = str(transaction.get("failure_summary") or "").strip()
+            if failure_summary:
+                child_state.working_memory.failures = [failure_summary]
+            verification_hint = str(transaction.get("verification_hint") or "").strip()
+            if verification_hint:
+                child_state.working_memory.next_actions = [verification_hint]
+            allowed_artifacts = _coerce_string_list(transaction.get("allowed_artifacts"))
+            for artifact_id in allowed_artifacts:
+                record = parent_state.artifacts.get(artifact_id)
+                if record is not None:
+                    child_state.artifacts[artifact_id] = record
+            child_state.scratchpad["_task_transaction"] = transaction
+            child_state.scratchpad["allowed_artifacts"] = allowed_artifacts
+            child_state.scratchpad["allowed_paths"] = allowed_paths
         child_state.scratchpad["subtask_depth"] = request.depth
         child_state.scratchpad["parent_phase"] = parent_state.current_phase
         child_state.scratchpad["parent_task"] = parent_state.run_brief.original_task
@@ -120,3 +155,14 @@ def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if str(item)]
     return []
+
+
+def _transaction_for_child(parent_state: LoopState, request: ChildRunRequest) -> dict[str, Any]:
+    metadata_tx = request.metadata.get("task_transaction")
+    if isinstance(metadata_tx, dict) and metadata_tx:
+        return dict(metadata_tx)
+    scratchpad = parent_state.scratchpad if isinstance(getattr(parent_state, "scratchpad", None), dict) else {}
+    tx = scratchpad.get("_task_transaction")
+    if isinstance(tx, dict) and tx:
+        return dict(tx)
+    return {}

@@ -8,6 +8,10 @@ from typing import Any, TYPE_CHECKING
 from ..client import OpenAICompatClient
 from .memory import assess_write_task_complexity
 from ..guards import is_four_b_or_under_model_name
+from ..interrupt_replies import (
+    is_interrupt_affirmative_response,
+    is_interrupt_response,
+)
 from ..models.events import UIEvent, UIEventType
 from ..models.conversation import ConversationMessage
 from .followup_signals import (
@@ -123,6 +127,19 @@ def _recent_assistant_proposed_concrete_implementation(messages: list[Conversati
     return False
 
 
+def _has_plan_execution_approval_context(harness: Any) -> bool:
+    state = getattr(harness, "state", None)
+    pending_interrupt = getattr(state, "pending_interrupt", None)
+    if isinstance(pending_interrupt, dict) and pending_interrupt.get("kind") == "plan_execute_approval":
+        return True
+    planner_interrupt = getattr(state, "planner_interrupt", None)
+    if str(getattr(planner_interrupt, "kind", "") or "").strip() == "plan_execute_approval":
+        return True
+    plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
+    status = str(getattr(plan, "status", "") or "").strip().lower()
+    return status == "awaiting_approval"
+
+
 def resolve_mode_task(harness: Any, task: str) -> tuple[str, str]:
     raw_task = str(task or "").strip()
     resolved_task = raw_task
@@ -143,8 +160,12 @@ def is_contextual_affirmative_execution_continuation(
     raw_task: str,
     resolved_task: str,
 ) -> bool:
+    pending_interrupt = getattr(getattr(harness, "state", None), "pending_interrupt", None)
+    if is_interrupt_affirmative_response(pending_interrupt, raw_task):
+        return True
     if not _is_affirmative_confirmation_reply(raw_task):
         return False
+
     recent_messages = list(getattr(getattr(harness, "state", None), "recent_messages", []) or [])
     has_recent_confirmation = _recent_assistant_requested_action_confirmation(recent_messages)
     if classify_task_mode(resolved_task) == "remote_execute":
@@ -164,6 +185,8 @@ def is_contextual_affirmative_execution_continuation(
     if isinstance(next_required_tool, dict) and str(next_required_tool.get("tool_name") or "").strip() == "ssh_exec":
         handoff_is_remote = True
 
+    if handoff_is_remote and _has_plan_execution_approval_context(harness):
+        return True
     if has_recent_confirmation:
         return handoff_is_remote
     if handoff_is_remote and _has_single_confirmed_session_ssh_target(harness):
@@ -194,6 +217,31 @@ class ModeDecisionService:
     async def decide(self, task: str) -> str:
         raw_task, resolved_task = resolve_mode_task(self.harness, task)
         mode_task = resolved_task or raw_task
+        scratchpad = getattr(getattr(self.harness, "state", None), "scratchpad", None)
+        transaction = scratchpad.get("_task_transaction") if isinstance(scratchpad, dict) else None
+        if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="chat",
+                raw="task_transaction_clarification",
+                raw_task=raw_task,
+                effective_task=mode_task,
+            )
+            return "chat"
+
+        pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
+        if is_interrupt_response(pending_interrupt, raw_task):
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="loop",
+                raw="pending_interrupt_response",
+                interrupt_kind=pending_interrupt.get("kind") if isinstance(pending_interrupt, dict) else "",
+                raw_task=raw_task,
+            )
+            return "loop"
+
         plan_request = self._extract_planning_request(task)
         if plan_request is not None:
             output_path, output_format = plan_request
@@ -255,9 +303,11 @@ class ModeDecisionService:
             self.harness._runlog("mode_decision", "selected run mode", mode="chat", raw="smalltalk_heuristic")
             return "chat"
 
+        pending_interrupt = getattr(self.harness.state, "pending_interrupt", None)
         runtime_intent = classify_runtime_intent(
             mode_task,
             recent_messages=self.harness.state.recent_messages,
+            pending_interrupt=pending_interrupt,
         )
         runtime_policy = runtime_policy_for_intent(runtime_intent)
         if runtime_policy.route_mode is not None:

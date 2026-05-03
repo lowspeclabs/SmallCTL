@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..interrupt_replies import is_interrupt_response
 from .deps import GraphRuntimeDeps
 
 
@@ -29,21 +30,33 @@ class AutoGraphRuntime:
         if harness.has_pending_interrupt():
             pending = harness.get_pending_interrupt() or {}
             interrupt_kind = str(pending.get("kind") or "ask_human")
-            harness._runlog(
-                "runtime_route",
-                "routing task to interrupt resume",
-                interrupt_kind=interrupt_kind,
-                execution_path=self._execution_path(),
-            )
-            if interrupt_kind == "plan_execute_approval":
-                return await PlanningGraphRuntime.from_harness(
+            if is_interrupt_response(pending, task):
+                harness._runlog(
+                    "runtime_route",
+                    "routing task to interrupt resume",
+                    interrupt_kind=interrupt_kind,
+                    execution_path=self._execution_path(),
+                )
+                if interrupt_kind == "plan_execute_approval":
+                    return await PlanningGraphRuntime.from_harness(
+                        harness,
+                        event_handler=self.deps.event_handler,
+                    ).resume(task)
+                return await LoopGraphRuntime.from_harness(
                     harness,
                     event_handler=self.deps.event_handler,
                 ).resume(task)
-            return await LoopGraphRuntime.from_harness(
-                harness,
-                event_handler=self.deps.event_handler,
-            ).resume(task)
+            harness._runlog(
+                "runtime_route",
+                "replacing pending interrupt with new task",
+                interrupt_kind=interrupt_kind,
+                interrupt_plan_id=str(pending.get("plan_id") or ""),
+                replacement_task=str(task or "")[:200],
+                execution_path=self._execution_path(),
+            )
+            harness.state.pending_interrupt = None
+            if interrupt_kind == "plan_execute_approval":
+                harness.state.planner_interrupt = None
         mode = await harness.decide_run_mode(task)
         harness._runlog(
             "runtime_route",

@@ -395,6 +395,42 @@ def test_remote_theme_followup_with_matching_remote_page_names_stays_on_active_s
     assert "network" in state.active_tool_profiles
 
 
+def test_remote_branding_removal_followup_stays_on_active_site_target() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    prior = (
+        'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
+        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+    )
+    raw = "remove the google branding"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.active_tool_profiles = ["core", "network"]
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {"host": "192.168.1.89", "user": "root", "confirmed": True}
+    }
+    harness = _make_harness(state)
+
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    resolved = Harness._resolve_followup_task(harness, raw)
+
+    assert resolved == (
+        "Continue remote task over SSH on root@192.168.1.89. "
+        "User follow-up: remove the google branding"
+    )
+    assert state.scratchpad["_resolved_remote_followup"]["target_status"] == "resolved"
+    assert state.scratchpad["_resolved_remote_followup"]["host"] == "192.168.1.89"
+
+    Harness._maybe_reset_for_new_task(harness, resolved, raw_task=raw)
+    Harness._initialize_run_brief(harness, resolved, raw_task=raw)
+    Harness._activate_tool_profiles(harness, resolved)
+
+    assert state.task_mode == "remote_execute"
+    assert state.run_brief.original_task == prior
+    assert state.working_memory.current_goal == prior
+    assert "network" in state.active_tool_profiles
+
+
 def test_remote_site_structure_correction_preserves_ssh_context_and_network_profile() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = "ssh into root@192.168.1.63 and split the site into multiple HTML pages under /var/www/html"

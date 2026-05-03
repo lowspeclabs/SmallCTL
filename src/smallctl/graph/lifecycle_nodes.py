@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from ..guards import check_guards
+from ..interrupt_replies import interrupt_response_action
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -26,6 +27,7 @@ from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_op
 from .chat_progress import _chat_progress_guard_failure
 from .recovery_context import build_goal_recap
 from .progress_guard import _check_completion_confabulation, _check_progress_stagnation
+from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
 from .write_session_outcomes import (
     maybe_finalize_stranded_write_session,
     maybe_replay_stranded_write_session_record,
@@ -110,7 +112,6 @@ async def initialize_loop_run(
         )
         graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
         return
-    harness.state.pending_interrupt = None
     if graph_state.run_mode == "chat":
         harness.state.scratchpad["_chat_rounds"] = 0
         harness.state.scratchpad.pop("_chat_progress_guard", None)
@@ -156,6 +157,7 @@ async def initialize_loop_run(
         started_scope = begin_task_scope(raw_task=task, effective_task=resolved_task)
         if isinstance(started_scope, dict):
             task_scope = started_scope
+    harness.state.pending_interrupt = None
     harness._runlog(
         "task_start",
         "task received",
@@ -276,12 +278,18 @@ async def resume_loop_run(
     if interrupted_pending is not None:
         _record_tool_attempt(harness, interrupted_pending)
         goal_recap = build_goal_recap(harness)
+        state = getattr(harness, "state", None)
+        scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+        transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+        tx_lines = recovery_context_lines(transaction)
+        tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
         resume_hint = (
             f"RESUME CONTRACT: You are resuming after a loop guard pause. "
             f"YOUR TASK (do not abandon): {goal_recap or 'Continue the current task'}. "
             f"Do not call `{interrupted_pending.tool_name}` again with the same arguments. "
             "Do not read files already in context. "
             "Do NOT switch tasks, projects, or goals. "
+            f"{tx_note} "
             "Choose a concrete next action: write, patch, run a command, or finish."
         )
         if interrupted_guidance:
@@ -385,8 +393,7 @@ async def resume_planning_run(
         UIEvent(event_type=UIEventType.USER, content=human_input),
     )
 
-    lowered = human_input.strip().lower()
-    if lowered in {"yes", "y", "approve", "approved", "execute", "go ahead", "run it"}:
+    if interrupt_response_action(pending, human_input) == "approve":
         plan = harness.state.active_plan or harness.state.draft_plan
         if plan is not None:
             plan.approved = True
@@ -529,12 +536,18 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
     recovery_hint: tuple[str, str] | None = None
     if guard_error:
         if "stagnation limit" in guard_error or "loop detected" in guard_error or "repeated tool call loop" in guard_error:
+            state = getattr(harness, "state", None)
+            scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+            transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+            tx_lines = recovery_context_lines(transaction)
+            tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
             harness.state.append_message(
                 ConversationMessage(
                     role="system",
                     content=(
                         f"System: {guard_error}. "
                         "You are stuck in a loop. Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
+                        f"{tx_note}"
                     ),
                     metadata={
                         "is_recovery_nudge": True,

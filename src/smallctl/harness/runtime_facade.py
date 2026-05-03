@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from ..interrupt_replies import is_interrupt_response
 from ..models.events import UIEvent
 
 
@@ -171,6 +172,10 @@ async def run_chat_with_events(
 ) -> dict[str, Any]:
     from ..graph.runtime import ChatGraphRuntime
 
+    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+    if redirected is not None:
+        return redirected
+
     self.event_handler = event_handler
     runtime = ChatGraphRuntime.from_harness(
         self,
@@ -185,6 +190,10 @@ async def run_auto_with_events(
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     from ..graph.runtime import AutoGraphRuntime
+
+    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+    if redirected is not None:
+        return redirected
 
     self.event_handler = event_handler
     runtime = AutoGraphRuntime.from_harness(
@@ -321,8 +330,7 @@ def _autosave_chat_session_state(self: Any) -> None:
 
 
 async def decide_run_mode(self: Any, task: str) -> str:
-    resolved_task = self._resolve_followup_task(task)
-    return await self.mode_decision.decide(resolved_task or task)
+    return await self.mode_decision.decide(task)
 
 
 def _set_planning_request(self: Any, *, output_path: str | None = None, output_format: str | None = None) -> None:
@@ -421,6 +429,10 @@ async def run_task_with_events(
 ) -> dict[str, Any]:
     from ..graph.runtime import LoopGraphRuntime
 
+    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+    if redirected is not None:
+        return redirected
+
     self.event_handler = event_handler
     runtime = LoopGraphRuntime.from_harness(
         self,
@@ -459,6 +471,21 @@ def get_pending_interrupt(self: Any) -> dict[str, Any] | None:
     if not isinstance(self.state.pending_interrupt, dict):
         return None
     return dict(self.state.pending_interrupt)
+
+
+async def _maybe_resume_pending_interrupt(
+    self: Any,
+    task: str,
+    *,
+    event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
+) -> dict[str, Any] | None:
+    get_pending_interrupt = getattr(self, "get_pending_interrupt", None)
+    if not callable(get_pending_interrupt):
+        return None
+    interrupt = get_pending_interrupt() or {}
+    if not is_interrupt_response(interrupt, task):
+        return None
+    return await self.resume_task_with_events(task, event_handler=event_handler)
 
 
 def bind_runtime_facade(cls: type[Any]) -> None:

@@ -144,6 +144,27 @@ def _extract_inline_tool_calls(
             for param_pattern in parameter_patterns:
                 for pk, pv in re.findall(param_pattern, inner_content, re.DOTALL):
                     params[pk] = pv.strip()
+            # Fallback: small models sometimes use raw parameter tags instead of <parameter> wrappers
+            if not params and tool_name in {"file_patch", "ssh_file_patch", "ast_patch"}:
+                _RAW_TAG_ALIASES: dict[str, list[str]] = {
+                    "target_text": ["target_text", "source", "old_text", "old"],
+                    "replacement_text": ["replacement_text", "dest", "new_text", "new", "replacement"],
+                    "path": ["path"],
+                    "expected_occurrences": ["expected_occurrences"],
+                    "write_session_id": ["write_session_id", "session_id"],
+                }
+                for canonical, aliases in _RAW_TAG_ALIASES.items():
+                    if canonical in params:
+                        continue
+                    for alias in aliases:
+                        match = re.search(
+                            re.escape(f"<{alias}>") + r"(.*?)" + re.escape(f"</{alias}>"),
+                            inner_content,
+                            re.DOTALL | re.IGNORECASE,
+                        )
+                        if match:
+                            params[canonical] = match.group(1).strip()
+                            break
             if params:
                 return PendingToolCall(
                     tool_name=tool_name,

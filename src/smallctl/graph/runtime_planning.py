@@ -69,7 +69,7 @@ class PlanningGraphRuntime(LoopGraphRuntime):
 
     async def resume(self, human_input: str) -> dict[str, object]:
         harness = self.deps.harness
-        pending = harness.state.pending_interrupt or {}
+        pending = harness.get_pending_interrupt() or {}
         if isinstance(pending, dict) and pending.get("kind") == "plan_execute_approval":
             if interrupt_response_action(pending, human_input) == "approve":
                 graph_state = GraphRunState(

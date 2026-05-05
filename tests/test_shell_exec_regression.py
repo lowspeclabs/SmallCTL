@@ -8,9 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from smallctl.graph.state import GraphRunState, PendingToolCall
+from smallctl.graph.tool_execution_nodes import dispatch_tools
 from smallctl.models.events import UIEventType
 from smallctl.tools import shell
 from smallctl.tools import shell_foreground
+from smallctl.tools import shell_support
 from smallctl.tools.ui_streaming import BufferedUIEventEmitter
 from smallctl.state import LoopState
 
@@ -131,3 +134,80 @@ def test_shell_exec_foreground_cancellation_kills_active_process_during_streamin
         assert proc not in harness._active_processes
 
     asyncio.run(_run())
+
+
+def test_foreground_command_guard_detects_service_and_follow_commands() -> None:
+    assert shell_support._likely_long_running_foreground_reason("caddy run /etc/caddy/Caddyfile")
+    assert shell_support._likely_long_running_foreground_reason("npm run dev")
+    assert shell_support._likely_long_running_foreground_reason("cd /srv/app && npm run dev")
+    assert shell_support._likely_long_running_foreground_reason("journalctl -f -u caddy")
+
+    assert shell_support._likely_long_running_foreground_reason("caddy start") is None
+    assert shell_support._likely_long_running_foreground_reason("caddy run --help") is None
+    assert shell_support._likely_long_running_foreground_reason("systemctl restart caddy") is None
+    assert shell_support._likely_long_running_foreground_reason("timeout 20s caddy run /etc/caddy/Caddyfile") is None
+    assert shell_support._likely_long_running_foreground_reason("nohup uvicorn app:app >/tmp/app.log 2>&1 &") is None
+
+
+def test_shell_exec_blocks_likely_foreground_service_without_launching() -> None:
+    state = LoopState(cwd="/tmp")
+
+    result = asyncio.run(shell.shell_exec(command="npm run dev", state=state, harness=None))
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "long_running_foreground_command"
+    assert "background=True" in result["error"]
+
+
+def test_dispatch_cancellation_records_synthetic_tool_result() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 3
+
+    class _Registry:
+        @staticmethod
+        def names() -> set[str]:
+            return {"ssh_exec"}
+
+    events: list[object] = []
+    runlog: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def _emit(_handler: object, event: object) -> None:
+        events.append(event)
+
+    async def _dispatch(_tool_name: str, _args: dict[str, object]) -> object:
+        raise asyncio.CancelledError
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        _dispatch_tool_call=_dispatch,
+        _active_dispatch_task=None,
+        _cancel_source="ui_stop_button",
+        _runlog=lambda *args, **kwargs: runlog.append((args, kwargs)),
+        _emit=_emit,
+        log=SimpleNamespace(log=lambda *args, **kwargs: None),
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="ssh_exec",
+                args={"host": "192.168.1.89", "command": "caddy run /etc/caddy/Caddyfile"},
+                tool_call_id="call-1",
+                source="recovered",
+            )
+        ],
+    )
+
+    asyncio.run(dispatch_tools(graph_state, SimpleNamespace(harness=harness, event_handler=object())))
+
+    assert graph_state.final_result == {"status": "cancelled", "reason": "cancel_requested"}
+    assert graph_state.last_tool_results
+    result = graph_state.last_tool_results[0].result
+    assert result.status == "cancelled"
+    assert result.metadata["reason"] == "tool_dispatch_cancelled"
+    assert result.metadata["cancellation_source"] == "ui_stop_button"
+    assert "thread-1:3:call-1:ssh_exec" in state.tool_execution_records
+    assert any(entry[0][0] == "tool_dispatch_cancelled" for entry in runlog)

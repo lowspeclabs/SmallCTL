@@ -21,6 +21,36 @@ class FamaFailureKind(str, Enum):
     CONTEXT_DRIFT = "context_drift"
 
 
+FAILURE_CLASSES = {
+    "tool_schema_invalid": "Model emitted malformed JSON, wrong tool name, or invalid args.",
+    "tool_execution_failed": "Tool ran but returned success=false or exception.",
+    "completion_blocked": "Model attempted to finish while completion gates were still blocked.",
+    "wrong_path": "Path does not exist, wrong cwd, absolute path issue, remote/local mismatch, or stale file path.",
+    "empty_write": "file_write/file_append/SSH write produced empty or near-empty content unexpectedly.",
+    "write_session_stall": "Chunked write session repeated or failed to progress.",
+    "repeated_action": "Same or near-same tool call repeated without new evidence.",
+    "verifier_failed": "Verifier/test/check says acceptance criteria are not met.",
+    "test_failed": "Unit/integration command failed.",
+    "context_missing": "Model needs evidence it has not actually retrieved.",
+    "hallucinated_assumption": "Model asserted something unsupported by tool output.",
+    "human_resteer": "User corrected direction or clarified after model drift.",
+    "backend_stream_failure": "Model/backend stream failed, truncated, or wedged.",
+    "no_progress": "Progress guard sees no new files, evidence, or subtask movement.",
+}
+
+
+DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
+    FamaFailureKind.EARLY_STOP: "completion_blocked",
+    FamaFailureKind.LOOPING: "repeated_action",
+    FamaFailureKind.REMOTE_LOCAL_CONFUSION: "wrong_path",
+    FamaFailureKind.TOOL_OUTPUT_MISREAD: "hallucinated_assumption",
+    FamaFailureKind.BAD_TOOL_ARGS: "tool_schema_invalid",
+    FamaFailureKind.WRITE_SESSION_STALL: "write_session_stall",
+    FamaFailureKind.BACKEND_STREAM_HALT: "backend_stream_failure",
+    FamaFailureKind.CONTEXT_DRIFT: "context_missing",
+}
+
+
 @dataclass(slots=True)
 class FamaSignal:
     kind: FamaFailureKind
@@ -31,6 +61,8 @@ class FamaSignal:
     tool_name: str | None = None
     operation_id: str | None = None
     suggested_mitigations: list[str] = field(default_factory=list)
+    failure_class: str | None = None
+    next_safe_action: str | None = None
 
 
 @dataclass(slots=True)
@@ -94,6 +126,9 @@ def signal_to_dict(signal: FamaSignal) -> dict[str, Any]:
         "tool_name": signal.tool_name,
         "operation_id": signal.operation_id,
         "suggested_mitigations": list(signal.suggested_mitigations),
+        "failure_class": signal.failure_class
+        or DEFAULT_FAILURE_CLASS_BY_KIND.get(signal.kind),
+        "next_safe_action": signal.next_safe_action,
     }
 
 
@@ -112,6 +147,8 @@ def signal_from_dict(payload: dict[str, Any]) -> FamaSignal | None:
         tool_name=_optional_str(payload.get("tool_name")),
         operation_id=_optional_str(payload.get("operation_id")),
         suggested_mitigations=[str(item) for item in suggested] if isinstance(suggested, list) else [],
+        failure_class=_optional_str(payload.get("failure_class")),
+        next_safe_action=_optional_str(payload.get("next_safe_action")),
     )
 
 

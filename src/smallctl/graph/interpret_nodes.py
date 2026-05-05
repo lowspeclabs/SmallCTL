@@ -256,6 +256,15 @@ async def interpret_model_output(
     if graph_state.final_result is not None:
         return LoopRoute.FINALIZE
 
+    # Bypass model-output interpretation when the runtime has system-sourced
+    # pending tool calls (e.g. recovery-scheduled file_read). Route straight
+    # to dispatch so recovery is deterministic.
+    if graph_state.pending_tool_calls and any(
+        str(getattr(p, "source", "model") or "").strip().lower() == "system"
+        for p in graph_state.pending_tool_calls
+    ):
+        return LoopRoute.DISPATCH_TOOLS
+
     summarizer_client = getattr(harness, "summarizer_client", None)
     if (
         harness.summarizer
@@ -554,7 +563,8 @@ async def interpret_model_output(
                     graph_state.last_thinking_text = ""
                     return LoopRoute.NEXT_STEP
                 missing_args = _nodes._detect_missing_required_tool_arguments(harness, pending)
-                missing_args = _nodes._detect_patch_existing_stage_read_contract_violation(harness, pending)
+                if missing_args is None:
+                    missing_args = _nodes._detect_patch_existing_stage_read_contract_violation(harness, pending)
             if missing_args is None:
                 from .tool_loop_guards import _detect_unknown_tool_call
                 missing_args = _detect_unknown_tool_call(harness, pending)
@@ -953,7 +963,7 @@ async def interpret_model_output(
         harness.state.scratchpad["_no_tool_nudges"] = nudges + 1
         msg = (
             "You reached a conclusion but did not call `task_complete`. "
-            "If you are finished, you MUST call `task_complete(message='...')` with your final answer. "
+            "If you are finished, you MUST call `task_complete(message='...')` with your final answer in this same turn. "
             "Do not repeat your earlier analysis; simply emit the tool call."
         )
         if nudges >= 2:

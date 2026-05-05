@@ -33,3 +33,4 @@ temp/
 /aho
 .ssh
 /temp
+*.toml

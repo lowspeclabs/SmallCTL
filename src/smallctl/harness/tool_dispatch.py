@@ -111,6 +111,9 @@ def _filter_chat_tools_for_task_mode(
         blocked_names -= _CHAT_WRITE_TOOL_NAMES
     else:
         blocked_names |= _CHAT_WRITE_TOOL_NAMES
+    # Repair-phase exemption: never suppress core repair tools
+    if getattr(getattr(harness, "state", None), "current_phase", None) == "repair":
+        blocked_names = set()
     filtered: list[dict[str, Any]] = []
     for entry in tools:
         function = entry.get("function") if isinstance(entry, dict) else None
@@ -182,6 +185,9 @@ def _log_chat_tool_selection_error(
 
 
 def chat_mode_requires_tools(harness: Any, task: str) -> bool:
+    # Repair phase must always have tools available to fix errors
+    if getattr(getattr(harness, "state", None), "current_phase", None) == "repair":
+        return True
     transaction = _scratchpad(harness).get("_task_transaction")
     if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
         return False

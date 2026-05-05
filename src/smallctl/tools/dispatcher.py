@@ -66,6 +66,15 @@ _TOOL_ALIAS_REPAIRS = {
     "use_ssh_exec": "ssh_exec",
     "artifact_write": "file_write",
 }
+_PATCH_ARGUMENT_ALIASES = {
+    "source": "target_text",
+    "old_text": "target_text",
+    "old": "target_text",
+    "dest": "replacement_text",
+    "new_text": "replacement_text",
+    "new": "replacement_text",
+    "replacement": "replacement_text",
+}
 _SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
 _WRITE_SESSION_PATH_REPAIR_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch"}
 _REMOTE_GUARDED_FILE_TOOLS = {"dir_list", "file_read", "file_write", "file_patch", "ast_patch"}
@@ -291,7 +300,7 @@ class ToolDispatcher:
                 )
             return intercepted_result
 
-        args = self._coerce_args(spec.schema, arguments)
+        args, dropped_keys = self._coerce_args(spec.schema, arguments)
         validation_error = self._validate_args(spec.schema, args)
         if validation_error:
             log_kv(
@@ -309,10 +318,17 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     error=validation_error,
                 )
+            metadata = {"tool_name": tool_name}
+            if dropped_keys:
+                metadata["ignored_arguments"] = dropped_keys
+                required = spec.schema.get("required", [])
+                missing = [f for f in required if f not in args]
+                if missing:
+                    validation_error += f" (Ignored unknown parameters: {', '.join(dropped_keys)})"
             return ToolEnvelope(
                 success=False,
                 error=validation_error,
-                metadata={"tool_name": tool_name},
+                metadata=metadata,
             )
 
         try:
@@ -384,21 +400,23 @@ class ToolDispatcher:
         )
 
     @staticmethod
-    def _coerce_args(schema: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    def _coerce_args(schema: dict[str, Any], arguments: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(arguments, dict):
-            return arguments
+            return arguments, []
 
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not properties and not required:
-            return {}
+            return {}, []
         coerced = dict(arguments)
+        dropped: list[str] = []
         if isinstance(properties, dict):
+            dropped = [key for key in coerced if key not in properties]
             coerced = {key: value for key, value in coerced.items() if key in properties}
             for key, value in list(coerced.items()):
                 expected_type = properties.get(key, {}).get("type")
                 coerced[key] = _coerce_value(expected_type, value)
-        return coerced
+        return coerced, dropped
 
     @staticmethod
     def _validate_args(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
@@ -510,6 +528,25 @@ class PipelineDispatcher:
         return await _run(0, tool_name, arguments)
 
 
+def _normalize_patch_argument_aliases(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if tool_name not in {"file_patch", "ssh_file_patch", "ast_patch"}:
+        return arguments, {}
+    if not isinstance(arguments, dict):
+        return arguments, {}
+    normalized = dict(arguments)
+    repairs: dict[str, str] = {}
+    for alias, canonical in _PATCH_ARGUMENT_ALIASES.items():
+        if alias in normalized and canonical not in normalized:
+            normalized[canonical] = normalized.pop(alias)
+            repairs[alias] = canonical
+    if repairs:
+        return normalized, {"argument_alias_repair": repairs}
+    return normalized, {}
+
+
 def normalize_tool_request(
     registry: ToolRegistry,
     tool_name: str,
@@ -530,6 +567,10 @@ def normalize_tool_request(
             }
         )
     tool_name = repaired_tool_name
+
+    arguments, patch_alias_metadata = _normalize_patch_argument_aliases(tool_name, arguments)
+    if patch_alias_metadata:
+        normalization_metadata.update(patch_alias_metadata)
 
     if tool_name == "artifact_read":
         tool_name, arguments, artifact_metadata = _normalize_artifact_read_request(arguments, state=state)
@@ -594,6 +635,8 @@ def normalize_tool_request(
             )
 
     if tool_name == "ssh_exec":
+        arguments, repair_metadata = _repair_ssh_exec_malformed_args(arguments)
+        normalization_metadata.update(repair_metadata)
         # Recover missing host/user/password from task context BEFORE normalization
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
@@ -943,7 +986,7 @@ def _suggested_remote_file_tool(tool_name: str, *, state: Any | None = None) -> 
         return "ssh_file_read"
     if tool_name == "file_write":
         return "ssh_file_write"
-    if tool_name == "file_patch":
+    if tool_name in {"file_patch", "ast_patch"}:
         task_text = " ".join(_ssh_task_context_texts(state)).lower() if state is not None else ""
         if any(marker in task_text for marker in ("style block", "<style>", "between ", "bounded block", "inline style")):
             return "ssh_file_replace_between"
@@ -1028,7 +1071,58 @@ def _infer_ssh_host_from_context(state: Any | None) -> str:
             record_host = str(args.get("host") or "").strip()
             if record_host:
                 return record_host
+    # Fall back to task context text
+    for text in _ssh_task_context_texts(state):
+        if not text:
+            continue
+        match = _SSH_TASK_TARGET_RE.search(text)
+        if match:
+            host = str(match.group("host") or "").strip()
+            if host:
+                return host
+        match = _AT_HOST_TARGET_RE.search(text)
+        if match:
+            host = str(match.group("host") or "").strip()
+            if host:
+                return host
+        match = _IPV4_RE.search(text)
+        if match and _REMOTE_TASK_HINT_RE.search(text):
+            host = str(match.group(0) or "").strip()
+            if host:
+                return host
     return ""
+
+
+def _repair_ssh_exec_malformed_args(
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Unwrap common small-model hallucinations in ssh_exec argument JSON."""
+    if not isinstance(arguments, dict):
+        return arguments, {}
+    repaired = dict(arguments)
+    metadata: dict[str, Any] = {}
+
+    # Unwrap nested arguments.arg -> command (e.g. {"arguments": {"arg": "..."}})
+    nested = repaired.pop("arguments", None)
+    if isinstance(nested, dict):
+        nested_cmd = nested.get("arg") or nested.get("command")
+        if nested_cmd:
+            if not repaired.get("command"):
+                repaired["command"] = str(nested_cmd).strip()
+            metadata["repaired_ssh_exec_nested_args"] = True
+
+    # Strip hallucinated inner "name" field that bleeds from function.name
+    inner_name = repaired.get("name")
+    if isinstance(inner_name, str) and inner_name.strip() and inner_name.strip() not in {
+        "ssh_exec", "shell_exec", "ssh_file_read", "ssh_file_write",
+        "ssh_file_patch", "ssh_file_replace_between",
+    }:
+        repaired.pop("name", None)
+        metadata["repaired_ssh_exec_hallucinated_name"] = True
+
+    if metadata:
+        metadata["routing_reason"] = "ssh_exec_malformed_args_repair"
+    return repaired, metadata
 
 
 def _recover_ssh_arguments_from_task_context(

@@ -34,6 +34,27 @@ def test_apply_exact_patch_content_fails_on_zero_match() -> None:
     assert metadata["best_match"]["start_line"] == 1
 
 
+def test_patch_ambiguity_hint_mentions_exact_matching() -> None:
+    from smallctl.tools.fs_patching import _build_patch_ambiguity_hint
+
+    hint = _build_patch_ambiguity_hint(actual_occurrences=0, expected_occurrences=1)
+    assert "exact character-for-character" in hint
+    assert "not regex" in hint
+
+
+def test_patch_failure_message_mentions_exact_matching() -> None:
+    from smallctl.tools.fs_patching import _build_patch_failure_message
+
+    msg = _build_patch_failure_message(
+        requested_path="foo.py",
+        source_path=None,
+        staged_only=False,
+        error_kind="patch_target_not_found",
+    )
+    assert "exact character-for-character" in msg
+    assert "does not use regex" in msg
+
+
 def test_apply_exact_patch_content_fails_on_occurrence_mismatch() -> None:
     success, _updated, metadata = ssh_files.apply_exact_patch_content(
         "alpha alpha\n",
@@ -166,6 +187,38 @@ def test_remote_file_guard_suggests_typed_patch_tool() -> None:
     assert envelope.success is False
     assert envelope.metadata["suggested_tool"] == "ssh_file_patch"
     assert "Use `ssh_file_patch`" in envelope.error
+
+
+def test_remote_file_guard_suggests_typed_patch_tool_for_ast_patch() -> None:
+    state = LoopState(cwd="/workspace")
+    state.task_mode = "remote_execute"
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.63": {"host": "192.168.1.63", "user": "root", "confirmed": True}
+    }
+
+    class _Registry:
+        @staticmethod
+        def get(tool_name: str):
+            if tool_name == "ssh_exec":
+                return SimpleNamespace(
+                    phase_allowed=lambda phase: True,
+                    profile_allowed=lambda profiles: True,
+                )
+            return SimpleNamespace() if tool_name == "ast_patch" else None
+
+    _tool_name, _args, envelope, _metadata = normalize_tool_request(
+        _Registry(),
+        "ast_patch",
+        {"path": "/var/www/html/index.html", "language": "html", "operation": "add_attribute"},
+        phase="execute",
+        state=state,
+    )
+
+    assert envelope is not None
+    assert envelope.success is False
+    assert envelope.metadata["suggested_tool"] == "ssh_file_patch"
+    assert "Use `ssh_file_patch`" in envelope.error
+    assert "Use `ssh_exec`" not in envelope.error
 
 
 def test_remote_style_task_infers_replace_between() -> None:
@@ -646,6 +699,158 @@ def test_remote_deletion_blocks_task_complete_with_deletion_specific_guidance() 
     assert result["metadata"]["next_required_action"]["tool_names"] == ["ssh_file_read"]
 
 
+def test_remote_deletion_path_guessing_ignores_shebang_and_globs() -> None:
+    state = LoopState(cwd=".")
+    state.acceptance_waived = True
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    command = """#!/bin/bash
+# Cleanup nginx installation
+rm -rf /etc/nginx/sites-enabled/* 2>/dev/null || true
+rm -f /etc/nginx/conf.d/*.conf 2>/dev/null || true
+rm -f /etc/nginx/nginx.conf 2>/dev/null || true
+find /var/www/ -type d ! -name '.' -exec rm -rf {} + 2>/dev/null || true
+rm -f /usr/sbin/nginx 2>/dev/null || true
+rm -f /usr/local/bin/nginx 2>/dev/null || true
+rm -rf /var/log/nginx/* 2>/dev/null || true
+rm -f /etc/init.d/nginx 2>/dev/null || true
+"""
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "ok", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": command,
+        },
+    )
+
+    requirement = state.scratchpad.get(ssh_files.REMOTE_MUTATION_VERIFICATION_KEY)
+    assert isinstance(requirement, dict)
+    guessed_paths = requirement["guessed_paths"]
+    assert "/bin/bash" not in guessed_paths
+    assert "/etc/nginx/sites-enabled" not in guessed_paths
+    assert "/etc/nginx/conf.d" not in guessed_paths
+    assert "/etc/nginx/nginx.conf" in guessed_paths
+    directory_checks = requirement["directory_empty_checks"]
+    assert {"path": "/etc/nginx/sites-enabled", "glob": "/etc/nginx/sites-enabled/*"} in directory_checks
+    assert {"path": "/var/log/nginx", "glob": "/var/log/nginx/*"} in directory_checks
+
+    result = asyncio.run(task_complete("done", state=state, harness=harness))
+
+    assert result["success"] is False
+    assert "/bin/bash" not in result["error"]
+    assert (
+        "ssh_file_read(host='192.168.1.89', user='root', path='/etc/nginx/nginx.conf')"
+        in result["error"]
+    )
+
+
+def test_remote_deletion_path_guessing_keeps_concrete_rm_targets() -> None:
+    command = "rm -rf /var/www/demo-site /var/www/html/test-1 2>/dev/null && echo done"
+
+    guessed_paths = tool_result_artifact_updates._guess_remote_mutation_paths(command, deletion=True)
+
+    assert guessed_paths == ["/var/www/demo-site", "/var/www/html/test-1"]
+
+
+def test_remote_glob_deletion_requires_directory_empty_verification() -> None:
+    state = LoopState(cwd=".")
+    state.acceptance_waived = True
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "ok", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "rm -rf /var/www/*",
+        },
+    )
+
+    result = asyncio.run(task_complete("done", state=state, harness=harness))
+
+    assert result["success"] is False
+    assert "remote glob deletion" in result["error"]
+    assert result["metadata"]["next_required_action"]["tool_names"] == ["ssh_exec"]
+    assert result["metadata"]["next_required_action"]["required_arguments"] == {
+        "command": "find /var/www -mindepth 1 -maxdepth 1 -print -quit",
+        "host": "192.168.1.89",
+        "user": "root",
+    }
+
+
+def test_remote_glob_directory_empty_verifier_clears_requirement() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.89",
+        "user": "root",
+        "mutation_type": "deletion",
+        "guessed_paths": [],
+        "directory_empty_checks": [{"path": "/var/www", "glob": "/var/www/*"}],
+    }
+
+    tool_result_artifact_updates._handle_remote_mutation_verifier_result(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "", "stderr": "", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "find /var/www -mindepth 1 -maxdepth 1 -print -quit",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_remote_deletion_requires_all_path_and_glob_verifiers() -> None:
+    state = LoopState(cwd=".")
+    state.acceptance_waived = True
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.89",
+        "user": "root",
+        "mutation_type": "deletion",
+        "guessed_paths": ["/etc/nginx"],
+        "directory_empty_checks": [{"path": "/var/www", "glob": "/var/www/*"}],
+    }
+
+    tool_result_artifact_updates._clear_remote_mutation_requirement_from_tool(
+        service,
+        tool_name="ssh_file_read",
+        result=ToolEnvelope(
+            success=False,
+            error="Remote file not found.",
+            metadata={"host": "192.168.1.89", "path": "/etc/nginx"},
+        ),
+        arguments={"host": "192.168.1.89", "path": "/etc/nginx"},
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY in state.scratchpad
+    result = asyncio.run(task_complete("done", state=state, harness=harness))
+    assert result["success"] is False
+    assert result["metadata"]["next_required_action"]["tool_names"] == ["ssh_exec"]
+
+    tool_result_artifact_updates._handle_remote_mutation_verifier_result(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "", "stderr": "", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "find /var/www -mindepth 1 -maxdepth 1 -print -quit",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
 def test_remote_mutation_requirement_ignores_dev_null_redirection() -> None:
     state = LoopState(cwd=".")
     harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
@@ -661,6 +866,62 @@ def test_remote_mutation_requirement_ignores_dev_null_redirection() -> None:
     )
 
     assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_remote_mutation_requirement_ignores_fd_stderr_redirect() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "curl: (7) Failed", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "curl -v http://192.168.1.89/test-site 2>&1 | head -30",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_remote_mutation_requirement_keeps_real_redirection_after_fd_redirect_strip() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "nohup caddy run > /var/log/caddy.log 2>&1 & sleep 3",
+        },
+    )
+
+    requirement = state.scratchpad.get(ssh_files.REMOTE_MUTATION_VERIFICATION_KEY)
+    assert isinstance(requirement, dict)
+    assert requirement["guessed_paths"] == ["/var/log/caddy.log"]
+
+
+def test_task_complete_ignores_stale_pathless_remote_mutation_requirement() -> None:
+    state = LoopState(cwd=".")
+    state.acceptance_waived = True
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "tool_name": "ssh_exec",
+        "host": "192.168.1.89",
+        "user": "root",
+        "command": "curl -v http://192.168.1.89/test-site 2>&1 | head -30",
+        "guessed_paths": [],
+        "directory_empty_checks": [],
+    }
+
+    result = asyncio.run(task_complete("done", state=state, harness=SimpleNamespace()))
+
+    assert result["success"] is True
+    assert result["output"]["status"] == "complete"
 
 
 def test_ssh_file_read_clears_simple_path_based_remote_requirement() -> None:
@@ -839,3 +1100,198 @@ def test_build_remote_command_exact_threshold_payload() -> None:
     command, stdin_payload = ssh_files._build_remote_command(payload)
     assert command.endswith(" --stdin")
     assert stdin_payload is not None
+
+
+def test_ssh_file_patch_whitespace_normalized_dry_run_without_precondition(monkeypatch) -> None:
+    async def _fake_run_ssh_command(**kwargs):
+        payload = {
+            "ok": True,
+            "path": "/etc/nginx/sites-enabled/default",
+            "actual_occurrences": 1,
+            "expected_occurrences": 1,
+            "old_sha256": "abc123",
+            "planned_new_sha256": "def456",
+            "changed": True,
+            "dry_run": True,
+            "match_mode": "whitespace_normalized",
+            "matched_region_previews": [{"preview": "root /var/www/demo-site;", "chars": 24, "truncated": False, "start": 10, "end": 34}],
+            "verification": {"replacement_occurrences": 1, "target_occurrences_after": 0},
+        }
+        return {
+            "success": True,
+            "output": {"stdout": json.dumps(payload), "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_patch(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            target_text="root /var/www/demo-site;",
+            replacement_text="root /srv/www/demo-site;",
+            whitespace_normalized=True,
+            dry_run=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["dry_run"] is True
+    assert result["metadata"]["old_sha256"] == "abc123"
+    assert result["metadata"]["planned_new_sha256"] == "def456"
+
+
+def test_ssh_file_patch_whitespace_normalized_write_without_precondition_fails() -> None:
+    result = asyncio.run(
+        ssh_files.ssh_file_patch(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            target_text="root /var/www/demo-site;",
+            replacement_text="root /srv/www/demo-site;",
+            whitespace_normalized=True,
+            dry_run=False,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "precondition_required_for_whitespace_normalized"
+
+
+def test_ssh_file_patch_whitespace_normalized_write_with_expected_sha256_succeeds(monkeypatch) -> None:
+    async def _fake_run_ssh_command(**kwargs):
+        payload = {
+            "ok": True,
+            "path": "/etc/nginx/sites-enabled/default",
+            "actual_occurrences": 1,
+            "expected_occurrences": 1,
+            "old_sha256": "abc123",
+            "new_sha256": "def456",
+            "readback_sha256": "def456",
+            "changed": True,
+            "match_mode": "whitespace_normalized",
+            "verification": {"readback_sha256_matches": True},
+        }
+        return {
+            "success": True,
+            "output": {"stdout": json.dumps(payload), "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_patch(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            target_text="root /var/www/demo-site;",
+            replacement_text="root /srv/www/demo-site;",
+            whitespace_normalized=True,
+            dry_run=False,
+            expected_sha256="abc123",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["new_sha256"] == "def456"
+
+
+def test_ssh_file_replace_between_whitespace_normalized_dry_run_without_precondition(monkeypatch) -> None:
+    async def _fake_run_ssh_command(**kwargs):
+        payload = {
+            "ok": True,
+            "path": "/etc/nginx/sites-enabled/default",
+            "actual_occurrences": 1,
+            "expected_occurrences": 1,
+            "old_sha256": "abc123",
+            "planned_new_sha256": "def456",
+            "changed": True,
+            "dry_run": True,
+            "match_mode": "whitespace_normalized",
+            "matched_region_previews": [{"preview": "server {\n\troot /var/www/demo-site;\n}", "chars": 32, "truncated": False, "start": 0, "end": 32}],
+            "verification": {"replacement_occurrences": 1},
+        }
+        return {
+            "success": True,
+            "output": {"stdout": json.dumps(payload), "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_replace_between(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            start_text="server {",
+            end_text="}",
+            replacement_text="server {\n\troot /srv/www/demo-site;\n}",
+            whitespace_normalized=True,
+            dry_run=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["dry_run"] is True
+    assert result["metadata"]["old_sha256"] == "abc123"
+    assert result["metadata"]["planned_new_sha256"] == "def456"
+
+
+def test_ssh_file_replace_between_whitespace_normalized_write_without_precondition_fails() -> None:
+    result = asyncio.run(
+        ssh_files.ssh_file_replace_between(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            start_text="server {",
+            end_text="}",
+            replacement_text="server {\n\troot /srv/www/demo-site;\n}",
+            whitespace_normalized=True,
+            dry_run=False,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "precondition_required_for_whitespace_normalized"
+
+
+def test_ssh_file_replace_between_whitespace_normalized_write_with_expected_sha256_succeeds(monkeypatch) -> None:
+    async def _fake_run_ssh_command(**kwargs):
+        payload = {
+            "ok": True,
+            "path": "/etc/nginx/sites-enabled/default",
+            "actual_occurrences": 1,
+            "expected_occurrences": 1,
+            "old_sha256": "abc123",
+            "new_sha256": "def456",
+            "readback_sha256": "def456",
+            "changed": True,
+            "match_mode": "whitespace_normalized",
+            "verification": {"readback_sha256_matches": True},
+        }
+        return {
+            "success": True,
+            "output": {"stdout": json.dumps(payload), "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_replace_between(
+            target="root@192.168.1.63",
+            path="/etc/nginx/sites-enabled/default",
+            start_text="server {",
+            end_text="}",
+            replacement_text="server {\n\troot /srv/www/demo-site;\n}",
+            whitespace_normalized=True,
+            dry_run=False,
+            expected_sha256="abc123",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["new_sha256"] == "def456"

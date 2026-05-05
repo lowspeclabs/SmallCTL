@@ -8,6 +8,7 @@ from smallctl.harness.task_boundary import _collapse_task_chain
 from smallctl.context.retrieval import build_retrieval_query
 from smallctl.harness import Harness
 from smallctl.models.conversation import ConversationMessage
+from smallctl.recovery_schema import FailureEvent, ReflectionMemory, Subtask, SubtaskLedger
 from smallctl.state import ArtifactRecord, EpisodicSummary, ExecutionPlan, LoopState, MemoryEntry
 from smallctl.task_targets import primary_task_target_path
 
@@ -433,6 +434,34 @@ def test_same_scope_resteer_soft_resets_without_losing_live_evidence() -> None:
         {"tool_name": "artifact_read", "fingerprint": "artifact_read|A0010"}
     ]
     state.scratchpad["_chunk_write_loop_guard"] = {"version": 1, "paths": {}, "events": ["blocked"]}
+    state.failure_events = [
+        FailureEvent(
+            event_id="F-prior",
+            timestamp=1.0,
+            failure_class="repeated_action",
+            severity="warning",
+            source="fama",
+            message="repeated read",
+        )
+    ]
+    state.reflexion_memory = [
+        ReflectionMemory(
+            reflection_id="R-prior",
+            timestamp=1.0,
+            task_id="task-prior",
+            failure_class="repeated_action",
+            subtask_id="S1",
+            lesson="Do not reread.",
+            avoid="Avoid rereading.",
+            next_safe_action="Patch the file.",
+            evidence_summary="repeated read",
+        )
+    ]
+    state.subtask_ledger = SubtaskLedger(
+        task_id="task-prior",
+        subtasks=[Subtask(subtask_id="S1", title="Patch file", goal=prior, status="active")],
+        active_subtask_id="S1",
+    )
     harness = _make_harness(state)
 
     raw = "you've read the file enough; make the change in the same file"
@@ -446,6 +475,11 @@ def test_same_scope_resteer_soft_resets_without_losing_live_evidence() -> None:
     assert state.working_memory.failures == ["Repeating artifact_read(A0010) is not useful"]
     assert state.recent_messages[-1].content == "I have read the file and found the reset path."
     assert state.episodic_summaries[-1].summary_id == "S-prior"
+    assert [event.failure_class for event in state.failure_events] == ["repeated_action", "human_resteer"]
+    assert state.reflexion_memory[0].reflection_id == "R-prior"
+    assert state.subtask_ledger is not None
+    assert state.subtask_ledger.active().next_action == raw
+    assert state.scratchpad["_recovery_metrics"]["failure_events_by_class"]["human_resteer"] == 1
     assert "_tool_attempt_history" not in state.scratchpad
     assert "_chunk_write_loop_guard" not in state.scratchpad
 
@@ -717,6 +751,35 @@ def test_unrelated_task_hard_resets_guard_state_and_durable_memory() -> None:
     state.scratchpad["_tool_attempt_history"] = [
         {"tool_name": "artifact_read", "fingerprint": "artifact_read|A0010"}
     ]
+    state.scratchpad["_recovery_config"] = {"reflexion_enabled": True}
+    state.failure_events = [
+        FailureEvent(
+            event_id="F-prior",
+            timestamp=1.0,
+            failure_class="wrong_path",
+            severity="warning",
+            source="fama",
+            message="wrong path",
+        )
+    ]
+    state.reflexion_memory = [
+        ReflectionMemory(
+            reflection_id="R-prior",
+            timestamp=1.0,
+            task_id="task-prior",
+            failure_class="wrong_path",
+            subtask_id="S1",
+            lesson="Verify path.",
+            avoid="Do not guess.",
+            next_safe_action="dir_list",
+            evidence_summary="missing",
+        )
+    ]
+    state.subtask_ledger = SubtaskLedger(
+        task_id="task-prior",
+        subtasks=[Subtask(subtask_id="S1", title="Prior", goal=prior, status="active")],
+        active_subtask_id="S1",
+    )
     harness = _make_harness(state)
 
     new_task = "write a fresh README section about deployment"
@@ -724,8 +787,60 @@ def test_unrelated_task_hard_resets_guard_state_and_durable_memory() -> None:
 
     assert state.recent_messages == []
     assert state.working_memory.known_facts == []
+    assert state.failure_events == []
+    assert state.reflexion_memory == []
+    assert state.subtask_ledger is None
+    assert state.scratchpad["_recovery_config"] == {"reflexion_enabled": True}
     assert "_tool_attempt_history" not in state.scratchpad
     assert "A0010" in state.artifacts
+
+
+def test_unrelated_task_preserves_reflexions_when_cross_task_enabled() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "read temp/logwatch.py and identify the required fix"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.recent_messages = [ConversationMessage(role="tool", name="artifact_read", content="A0010")]
+    state.scratchpad["_recovery_config"] = {
+        "reflexion_enabled": True,
+        "reflexion_persist_cross_task": True,
+    }
+    state.failure_events = [
+        FailureEvent(
+            event_id="F-prior",
+            timestamp=1.0,
+            failure_class="wrong_path",
+            severity="warning",
+            source="fama",
+            message="wrong path",
+        )
+    ]
+    state.reflexion_memory = [
+        ReflectionMemory(
+            reflection_id="R-prior",
+            timestamp=1.0,
+            task_id="task-prior",
+            failure_class="wrong_path",
+            subtask_id="S1",
+            lesson="Verify path.",
+            avoid="Do not guess.",
+            next_safe_action="dir_list",
+            evidence_summary="missing",
+        )
+    ]
+    state.subtask_ledger = SubtaskLedger(
+        task_id="task-prior",
+        subtasks=[Subtask(subtask_id="S1", title="Prior", goal=prior, status="active")],
+        active_subtask_id="S1",
+    )
+    harness = _make_harness(state)
+
+    new_task = "write a fresh README section about deployment"
+    Harness._maybe_reset_for_new_task(harness, new_task, raw_task=new_task)
+
+    assert state.failure_events == []
+    assert [reflection.reflection_id for reflection in state.reflexion_memory] == ["R-prior"]
+    assert state.subtask_ledger is None
 
 
 def test_finalize_task_scope_adds_prompt_visible_episodic_summary() -> None:

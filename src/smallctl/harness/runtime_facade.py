@@ -341,16 +341,18 @@ def _extract_planning_request(self: Any, task: str) -> tuple[str | None, str | N
     return self.mode_decision._extract_planning_request(task)
 
 
-def cancel(self: Any) -> None:
+def cancel(self: Any, source: str = "manual") -> None:
+    source_text = str(source or "manual").strip() or "manual"
     self._cancel_requested = True
     self.note_task_shutdown("cancel_requested")
+    self._cancel_source = source_text
     self.approvals.reject_pending_shell_approvals()
     self.approvals.reject_pending_sudo_password_prompts()
     if self._active_dispatch_task and not self._active_dispatch_task.done():
         self._active_dispatch_task.cancel()
     from ..logging_utils import log_kv
 
-    log_kv(self.log, logging.INFO, "harness_cancel_requested")
+    log_kv(self.log, logging.INFO, "harness_cancel_requested", source=source_text)
     asyncio.create_task(self.teardown())
 
 
@@ -464,13 +466,25 @@ async def resume_task_with_events(
 
 
 def has_pending_interrupt(self: Any) -> bool:
-    return isinstance(self.state.pending_interrupt, dict) and bool(self.state.pending_interrupt)
+    if isinstance(self.state.pending_interrupt, dict) and bool(self.state.pending_interrupt):
+        return True
+    planner_interrupt = getattr(self.state, "planner_interrupt", None)
+    return planner_interrupt is not None
 
 
 def get_pending_interrupt(self: Any) -> dict[str, Any] | None:
-    if not isinstance(self.state.pending_interrupt, dict):
-        return None
-    return dict(self.state.pending_interrupt)
+    if isinstance(self.state.pending_interrupt, dict) and self.state.pending_interrupt:
+        return dict(self.state.pending_interrupt)
+    planner_interrupt = getattr(self.state, "planner_interrupt", None)
+    if planner_interrupt is not None:
+        return {
+            "kind": getattr(planner_interrupt, "kind", "plan_execute_approval"),
+            "question": getattr(planner_interrupt, "question", ""),
+            "plan_id": getattr(planner_interrupt, "plan_id", ""),
+            "approved": getattr(planner_interrupt, "approved", False),
+            "response_mode": getattr(planner_interrupt, "response_mode", "yes/no/revise"),
+        }
+    return None
 
 
 async def _maybe_resume_pending_interrupt(

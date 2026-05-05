@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import re
+from time import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..context.policy import estimate_text_tokens
-from ..interrupt_replies import is_interrupt_response
+from ..interrupt_replies import is_interrupt_response, is_plan_approval_reply
 from ..remote_scope import handoff_supports_remote_continuation, task_matches_remote_continuation
 from ..models.conversation import ConversationMessage
+from ..recovery_metrics import record_failure_event_metric
 from ..state import (
     EpisodicSummary,
     PromptBudgetSnapshot,
@@ -19,6 +21,7 @@ from ..state import (
     clip_text_value,
     json_safe_value,
 )
+from ..recovery_schema import FailureEvent
 from ..task_targets import extract_task_target_paths
 from ..normalization import dedupe_keep_tail
 from ..state_memory import trim_recent_messages
@@ -1354,7 +1357,15 @@ class TaskBoundaryService:
         session_labels = [_format_remote_target(target) for target in session_targets]
         session_labels = [label for label in session_labels if label]
 
-        followup_text = _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT
+        followup_text = (
+            self._approved_plan_followup_text()
+            if self._has_plan_execution_approval_context()
+            else _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT
+        )
+        plan = self.harness.state.active_plan or self.harness.state.draft_plan
+        plan_goal = _collapse_task_chain(getattr(plan, "goal", "") or "")
+        if plan_goal:
+            mission_task = plan_goal
         if len(chosen_targets) == 1:
             target = chosen_targets[0]
             label = _format_remote_target(target)
@@ -1413,7 +1424,14 @@ class TaskBoundaryService:
         # Don't abort the current scope if the user is responding to a pending interrupt
         pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
         current = self._active_task_scope_payload()
-        if is_interrupt_response(pending_interrupt, normalized_raw):
+        is_interrupt = is_interrupt_response(pending_interrupt, normalized_raw)
+        # Defensive fallback for plan approval replies when pending_interrupt is missing
+        is_plan_approval_fallback = (
+            not is_interrupt
+            and is_plan_approval_reply(normalized_raw)
+            and self._has_plan_execution_approval_context()
+        )
+        if is_interrupt or is_plan_approval_fallback:
             if current:
                 return current
         else:
@@ -1578,6 +1596,9 @@ class TaskBoundaryService:
             "_model_is_small",
             "_max_steps",
             "strategy",
+            "_fama_config",
+            "_recovery_config",
+            "_recovery_metrics",
             "_session_notepad",
             "_session_ssh_targets",
             "_last_task_text",
@@ -1593,6 +1614,12 @@ class TaskBoundaryService:
             "_web_last_search_artifact_id",
             "_web_fetch_id_counter",
             "_web_budget",
+            "_artifact_staleness",
+            "_observation_staleness",
+            "_summary_staleness",
+            "_context_brief_staleness",
+            "_experience_staleness",
+            "_turn_bundle_staleness",
         ):
             if key in self.harness.state.scratchpad:
                 preserved_scratchpad[key] = self.harness.state.scratchpad[key]
@@ -1616,6 +1643,12 @@ class TaskBoundaryService:
         preserved_summaries = list(self.harness.state.episodic_summaries)
         preserved_context_briefs = list(self.harness.state.context_briefs)
         preserved_tool_history = list(self.harness.state.tool_history)
+        preserved_failure_events = list(getattr(self.harness.state, "failure_events", []) or [])
+        preserved_reflexion_memory = list(getattr(self.harness.state, "reflexion_memory", []) or [])
+        preserved_subtask_ledger = getattr(self.harness.state, "subtask_ledger", None)
+        recovery_config = preserved_scratchpad.get("_recovery_config")
+        recovery_config = recovery_config if isinstance(recovery_config, dict) else {}
+        preserve_reflexion_memory = preserve_memory or bool(recovery_config.get("reflexion_persist_cross_task", False))
         current_memory = self.harness.state.working_memory
         preserved_memory = WorkingMemory(
             current_goal=str(current_memory.current_goal or ""),
@@ -1647,6 +1680,9 @@ class TaskBoundaryService:
         self.harness.state.acceptance_waived = False
         self.harness.state.last_verifier_verdict = None
         self.harness.state.last_failure_class = ""
+        self.harness.state.failure_events = preserved_failure_events if preserve_memory else []
+        self.harness.state.reflexion_memory = preserved_reflexion_memory if preserve_reflexion_memory else []
+        self.harness.state.subtask_ledger = preserved_subtask_ledger if preserve_memory else None
 
         self.harness.state.files_changed_this_cycle = []
         self.harness.state.repair_cycle_id = ""
@@ -1706,6 +1742,9 @@ class TaskBoundaryService:
     def maybe_reset_for_new_task(self, task: str, *, raw_task: str | None = None) -> None:
         pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
         if is_interrupt_response(pending_interrupt, raw_task or task):
+            return
+        # Defensive fallback for plan approval replies when pending_interrupt is missing
+        if is_plan_approval_reply(raw_task or task) and self._has_plan_execution_approval_context():
             return
 
         previous_task = _collapse_task_chain(
@@ -1768,8 +1807,62 @@ class TaskBoundaryService:
             if preserve_prior_result:
                 self.harness.state.scratchpad["_task_transaction"] = transaction
                 self._apply_classified_reset_followup(classification)
+                self._record_same_scope_resteer(
+                    raw_task=raw_task or task,
+                    effective_task=new_task,
+                    turn_type=turn_type,
+                )
             else:
                 self.harness.state.scratchpad.pop("_task_transaction", None)
+
+    def _record_same_scope_resteer(
+        self,
+        *,
+        raw_task: str,
+        effective_task: str,
+        turn_type: str,
+    ) -> None:
+        state = self.harness.state
+        text = str(raw_task or effective_task or "").strip()
+        if not text:
+            return
+        subtask_id = ""
+        ledger = getattr(state, "subtask_ledger", None)
+        active = ledger.active() if ledger is not None and callable(getattr(ledger, "active", None)) else None
+        if active is not None:
+            subtask_id = str(getattr(active, "subtask_id", "") or "").strip()
+        event = FailureEvent(
+            event_id=f"resteer-{int(time() * 1000)}",
+            timestamp=time(),
+            failure_class="human_resteer",
+            severity="warning",
+            source="task_boundary",
+            message=f"human_resteer: user redirected same-scope work ({turn_type.lower() or 'followup'})",
+            evidence=[text[:240]],
+            subtask_id=subtask_id or None,
+            suggested_next_action=text[:240],
+            metadata={"effective_task": str(effective_task or "").strip()[:240]},
+        )
+        state.failure_events.append(event)
+        state.failure_events = state.failure_events[-40:]
+        record_failure_event_metric(state, event)
+        state.last_failure_class = "human_resteer"
+        state.scratchpad["_last_failure_class"] = "human_resteer"
+        if active is not None:
+            active.next_action = text[:240]
+            active.updated_at = event.timestamp
+            if "human_resteer" not in active.failure_classes:
+                active.failure_classes.append("human_resteer")
+        reflexion = getattr(self.harness, "reflexion", None)
+        maybe_create = getattr(reflexion, "maybe_create_reflection", None)
+        if callable(maybe_create):
+            maybe_create(event, ledger)
+        self.harness._runlog(
+            "recovery_human_resteer_recorded",
+            "same-scope human resteer recorded",
+            turn_type=turn_type,
+            subtask_id=subtask_id,
+        )
 
     def has_task_local_context(self) -> bool:
         return self.has_resettable_context() or self.has_durable_context()
@@ -1907,6 +2000,28 @@ class TaskBoundaryService:
         plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
         status = str(getattr(plan, "status", "") or "").strip().lower()
         return status == "awaiting_approval"
+
+    def _approved_plan_followup_text(self) -> str:
+        plan = self.harness.state.active_plan or self.harness.state.draft_plan
+        goal = _collapse_task_chain(getattr(plan, "goal", "") or "")
+        if not goal:
+            return _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT
+        plan_id = str(getattr(plan, "plan_id", "") or "").strip()
+        lead = "execute approved plan"
+        if plan_id:
+            lead = f"{lead} {plan_id}"
+        parts = [f"{lead}: {goal}"]
+        summary = _collapse_task_chain(getattr(plan, "summary", "") or "")
+        if summary:
+            parts.append(f"summary: {summary}")
+        target_paths = self._extract_remote_absolute_paths(
+            goal,
+            *(getattr(plan, "inputs", []) or []),
+            *(getattr(plan, "outputs", []) or []),
+        )
+        if target_paths:
+            parts.append("targets: " + ", ".join(f"`{path}`" for path in target_paths[:3]))
+        return ". ".join(parts)
 
     def _has_contextual_reference_to_current_task(self, task: str) -> bool:
         text = str(task or "").replace("\u2019", "'").strip()
@@ -2829,18 +2944,21 @@ class TaskBoundaryService:
             self.harness.state.scratchpad.pop("_task_boundary_previous_task", "") or ""
         )
         existing_task = _collapse_task_chain(self.harness.state.run_brief.original_task or "")
-        canonical_task = remote_mission_task or effective_task or existing_task or previous_task
+        if remote_mission_task and "execute approved plan" in effective_task.lower():
+            canonical_task = remote_mission_task
+        else:
+            canonical_task = effective_task or remote_mission_task or existing_task or previous_task
 
         self.harness.state.run_brief.original_task = canonical_task
         self.harness.state.run_brief.task_contract = derive_task_contract(canonical_task)
+        resolved_remote_followup = isinstance(
+            self.harness.state.scratchpad.get("_resolved_remote_followup"), dict
+        )
         task_mode_source = canonical_task
-        if (
-            isinstance(self.harness.state.scratchpad.get("_resolved_remote_followup"), dict)
-            and classify_task_mode(canonical_task) != "remote_execute"
-            and classify_task_mode(effective_task) == "remote_execute"
-        ):
-            task_mode_source = effective_task
-        self.harness.state.task_mode = classify_task_mode(task_mode_source)
+        if resolved_remote_followup and _is_remote_followup_wrapper(effective_task):
+            self.harness.state.task_mode = "remote_execute"
+        else:
+            self.harness.state.task_mode = classify_task_mode(task_mode_source)
 
         existing_phase_objective = str(self.harness.state.run_brief.current_phase_objective or "").strip()
         if remote_mission_task and effective_task:
@@ -2862,7 +2980,9 @@ class TaskBoundaryService:
         if self._is_corrective_resteer_followup(source_task) and existing_goal:
             next_goal = existing_goal
         elif remote_mission_task:
-            if plan_goal and _normalize_task_text(plan_goal) == _normalize_task_text(existing_goal):
+            if _is_remote_followup_wrapper(effective_task):
+                next_goal = canonical_task
+            elif plan_goal and _normalize_task_text(plan_goal) == _normalize_task_text(existing_goal):
                 next_goal = plan_goal
             elif existing_goal and not _is_remote_followup_wrapper(existing_goal):
                 next_goal = existing_goal

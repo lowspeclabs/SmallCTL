@@ -208,6 +208,8 @@ def _success_condition_for(turn_type: TurnType, goal: str, *, task_mode: str = "
     if turn_type == "RETRY":
         return "The previous failure is addressed and focused verification is complete."
     if turn_type == "ITERATION":
+        if task_mode == "remote_execute":
+            return "Requested delta is applied and remote state is verified."
         return "Requested delta is applied and focused verification is complete."
     if task_mode == "chat":
         return "The new request is answered."

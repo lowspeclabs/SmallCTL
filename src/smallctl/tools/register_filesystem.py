@@ -67,13 +67,13 @@ def register_filesystem_tools(
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Path to file."},
-                        "content": {"type": "string", "description": "Content to write."},
+                        "content": {"type": "string", "description": "REQUIRED. The actual file content to write. Must be a literal string. Do not use content_preview, content_bytes, content_chars, or content_sha256 as substitutes."},
                         "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
                         "section_name": {"type": "string", "description": "Brief name for this logical block (e.g. 'imports', 'class_def')."},
                         "section_id": {"type": "string", "description": "Optional stable section identifier for chunk-mode writes."},
                         "section_role": {"type": "string", "description": "Optional section role such as 'imports', 'helpers', or 'core_logic'."},
                         "next_section_name": {"type": "string", "description": "Name of the logical block you will write next. Omit for the last chunk."},
-                        "replace_strategy": {"type": "string", "description": "Optional write mode override: 'append' or 'overwrite'. Use 'overwrite' for local repair."},
+                        "replace_strategy": {"type": "string", "enum": ["append", "overwrite"], "description": "Explicit write mode: 'append' to add content, 'overwrite' to replace the entire file. During a patch_existing session with no committed sections, you MUST use 'overwrite' for the first same-target file_write."},
                         "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
                     },
                     "required": ["path", "content"],
@@ -82,7 +82,7 @@ def register_filesystem_tools(
                 handler=inject_state_and_cwd(fs.file_write),
                 category="filesystem",
                 risk="high",
-                allowed_modes={"chat", "loop"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(
@@ -108,7 +108,7 @@ def register_filesystem_tools(
                 handler=inject_state_and_cwd(fs.file_patch),
                 category="filesystem",
                 risk="high",
-                allowed_modes={"chat", "loop"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(
@@ -137,7 +137,7 @@ def register_filesystem_tools(
                 handler=inject_state_and_cwd(fs.ast_patch),
                 category="filesystem",
                 risk="high",
-                allowed_modes={"chat", "loop"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(

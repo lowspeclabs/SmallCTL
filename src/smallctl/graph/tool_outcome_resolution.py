@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..models.events import UIEvent, UIEventType
+from ..recovery_metrics import record_terminal_success_metrics
 from ..tools.fs_loop_guard import build_loop_guard_outline_interrupt_payload
 from .chat_progress import _clear_chat_progress_guard
 from .interrupts import build_interrupt_payload
@@ -10,7 +11,9 @@ from .shell_outcomes import _clear_shell_human_retry_state, _remember_shell_huma
 from .state import GraphRunState, ToolExecutionRecord
 from .write_session_outcomes import _auto_update_active_plan_step
 from .task_completion_outcomes import (
+    maybe_auto_complete_after_remote_mutation_verifier,
     _maybe_emit_task_complete_verifier_nudge,
+    _maybe_schedule_task_complete_remote_mutation_verifier,
     _maybe_schedule_task_complete_repair_loop_status,
     _maybe_schedule_task_complete_verifier_loop_status,
 )
@@ -59,7 +62,16 @@ async def maybe_apply_terminal_tool_outcome(
     harness = deps.harness
     _clear_shell_retry_state_if_applicable(harness, record)
 
+    if await maybe_auto_complete_after_remote_mutation_verifier(
+        graph_state,
+        harness,
+        record,
+        deps.event_handler,
+    ):
+        return True
+
     if record.tool_name == "task_complete" and record.result.success:
+        record_terminal_success_metrics(harness.state)
         _auto_update_active_plan_step(harness, status="completed", note=str(record.result.output or ""))
         message = _terminal_message_text(record.result.output)
         assistant_text = str(graph_state.last_assistant_text or "").strip() or message
@@ -88,17 +100,19 @@ async def maybe_apply_terminal_tool_outcome(
         return True
 
     if record.tool_name == "task_complete" and not record.result.success:
-        scheduled_loop_status = _maybe_schedule_task_complete_repair_loop_status(graph_state, harness, record)
-        if not scheduled_loop_status:
-            scheduled_loop_status = _maybe_schedule_task_complete_verifier_loop_status(graph_state, harness, record)
+        scheduled_recovery = _maybe_schedule_task_complete_remote_mutation_verifier(graph_state, harness, record)
+        if not scheduled_recovery:
+            scheduled_recovery = _maybe_schedule_task_complete_repair_loop_status(graph_state, harness, record)
+        if not scheduled_recovery:
+            scheduled_recovery = _maybe_schedule_task_complete_verifier_loop_status(graph_state, harness, record)
         _maybe_emit_task_complete_verifier_nudge(harness, record)
-        if scheduled_loop_status:
+        if scheduled_recovery:
             await _emit_ui_event(
                 harness,
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.ALERT,
-                    content="Auto-continuing recovery with `loop_status` after blocked task completion.",
+                    content="Auto-continuing recovery after blocked task completion.",
                     data={"status_activity": "auto-continuing verifier recovery"},
                 ),
             )

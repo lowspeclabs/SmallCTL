@@ -27,6 +27,7 @@ class PromptStateSpine:
     run_brief_text: str = ""
     working_memory_text: str = ""
     fama_capsule_lines: list[str] = field(default_factory=list)
+    recovery_guidance_lines: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

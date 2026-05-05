@@ -171,7 +171,7 @@ class ContextPolicy:
         self.artifact_read_inline_token_limit = self.scaled_inline_limit(
             soft_limit=soft,
             ratio=0.04,
-            minimum=1024,
+            minimum=3000,
             maximum=16000,
         )
 

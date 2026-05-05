@@ -58,6 +58,7 @@ _DIR_LIST_REPEATED_TOOL_UNIQUE_LIMIT = max(
     2,
     math.ceil(_STRICT_LOOP_GUARD_UNIQUE_LIMIT / _DIR_LIST_LOOP_GUARD_STRICTNESS_MULTIPLIER),
 )
+_DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
 _PLACEHOLDER_TOOL_NAME_TOKENS = {
     "tool_name",
     "function_name",
@@ -366,6 +367,36 @@ def _artifact_read_past_eof_is_loop(harness: Any, pending: PendingToolCall) -> b
     return False
 
 
+def _ssh_file_read_after_remote_mutation_is_progress(
+    harness: Any, pending: PendingToolCall
+) -> bool:
+    """Allow ssh_file_read right after a successful ssh_file_patch/write/replace_between
+    on the same remote path — the model needs to see the mutated state."""
+    if pending.tool_name != "ssh_file_read":
+        return False
+    read_path = str(pending.args.get("path") or "").strip()
+    read_host = str(pending.args.get("host") or "").strip().lower()
+    if not read_path:
+        return False
+    # Look back for a recent successful remote mutation on the same path.
+    # We check the last 6 attempts; if the most recent non-read attempt was a
+    # mutation on the same path/host, treat this read as progress.
+    for item in reversed(_tool_attempt_history(harness)[-6:]):
+        tool_name = str(item.get("tool_name", ""))
+        if tool_name == "ssh_file_read":
+            continue
+        if tool_name not in {"ssh_file_patch", "ssh_file_replace_between", "ssh_file_write"}:
+            continue
+        args = _extract_args_from_fingerprint(str(item.get("fingerprint", "")))
+        if not isinstance(args, dict):
+            continue
+        mutated_path = str(args.get("path") or "").strip()
+        mutated_host = str(args.get("host") or "").strip().lower()
+        if mutated_path == read_path and (not read_host or mutated_host == read_host):
+            return True
+    return False
+
+
 def _placeholder_token(value: Any) -> str:
     return _normalize_token(value)
 
@@ -541,6 +572,34 @@ def _clear_tool_attempt_history(harness: Any) -> None:
         scratchpad.pop("_tool_attempt_history", None)
 
 
+def _ssh_file_read_repeats_deterministic_not_found(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "ssh_file_read":
+        return False
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    failures = scratchpad.get(_DETERMINISTIC_READ_FAILURES_KEY)
+    if not isinstance(failures, list):
+        return False
+    path = str(pending.args.get("path") or "").strip()
+    host = str(pending.args.get("host") or "").strip()
+    user = str(pending.args.get("user") or "").strip()
+    if not path:
+        return False
+    for item in reversed(failures[-8:]):
+        if not isinstance(item, dict):
+            continue
+        if (
+            str(item.get("tool_name") or "") == "ssh_file_read"
+            and str(item.get("path") or "").strip() == path
+            and str(item.get("host") or "").strip() == host
+            and str(item.get("user") or "").strip() == user
+        ):
+            return True
+    return False
+
+
 def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | None:
     if pending.tool_name in {"task_complete", "task_fail", "ask_human"}:
         _clear_tool_attempt_history(harness)
@@ -555,6 +614,15 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return exhausted_docker_error
     if _consume_repeat_guard_one_shot_allowance(harness, pending):
         return None
+    if _ssh_file_read_repeats_deterministic_not_found(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            (
+                "Guard tripped: repeated deterministic missing remote file read "
+                "(ssh_file_read path was already reported not found)"
+            ),
+        )
     if _dir_list_same_path_repeat_is_loop(harness, pending):
         return _format_repeated_tool_loop_message(
             harness,
@@ -581,6 +649,8 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
             "Guard tripped: repeated artifact_read EOF overread loop",
         )
     if _artifact_read_line_progress_is_progress(harness, pending):
+        return None
+    if _ssh_file_read_after_remote_mutation_is_progress(harness, pending):
         return None
     history = _tool_attempt_history(harness)
     candidate = {

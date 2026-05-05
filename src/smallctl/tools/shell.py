@@ -23,6 +23,7 @@ from .shell_support import (
     _build_shell_status_update,
     _detect_unsupported_shell_syntax,
     _extract_missing_argparse_arguments,
+    _foreground_command_guard,
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
     _shell_write_session_artifact_delete_guard,
@@ -362,6 +363,13 @@ async def shell_exec(
         return write_session_guard
     if background:
         return await shell_job_launch(command=command, state=state, create_process=_create_process, harness=harness)
+    foreground_guard = _foreground_command_guard(
+        command,
+        tool_name="shell_exec",
+        allow_background_parameter=True,
+    )
+    if foreground_guard is not None:
+        return foreground_guard
     return await shell_exec_foreground(
         command,
         state=state,

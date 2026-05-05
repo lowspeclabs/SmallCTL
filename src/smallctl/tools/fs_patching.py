@@ -82,8 +82,8 @@ def _build_patch_ambiguity_hint(
 ) -> str:
     if actual_occurrences <= 0:
         return (
-            "The target text was not found. Read the smallest relevant slice first, then retry with an exact "
-            "substring from the current file contents."
+            "The target text was not found. This tool uses exact character-for-character matching (not regex). "
+            "Read the smallest relevant slice first, then retry with an exact substring copied verbatim from the current file contents."
         )
     if actual_occurrences == 1:
         return "The target text matched once, but the patch still failed. Read the smallest relevant slice and retry."
@@ -145,7 +145,12 @@ def _build_patch_failure_message(
                 f"for target {target_label}, but expected {expected_occurrences}."
             )
     if error_kind == "patch_target_not_found":
-        return f"Patch target text was not found in `{requested_path}`."
+        hint = (
+            " This tool requires an exact character-for-character match; it does not use regex."
+            if not staged_only
+            else ""
+        )
+        return f"Patch target text was not found in `{requested_path}`.{hint}"
     if error_kind == "patch_occurrence_mismatch":
         return (
             f"Patch target text occurred {actual_occurrences} times in `{requested_path}`, "

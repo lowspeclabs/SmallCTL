@@ -264,8 +264,11 @@ def split_shell_segments(command: str) -> list[str]:
     return segments
 
 
-def strip_benign_shell_redirections(command: str) -> str:
+def strip_benign_shell_redirections(command: str, *, preserve_newlines: bool = False) -> str:
     cleaned = _BENIGN_SHELL_REDIRECTION_RE.sub(" ", str(command or ""))
+    if preserve_newlines:
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.splitlines()]
+        return "\n".join(line for line in lines if line).strip()
     return re.sub(r"\s+", " ", cleaned).strip()
 
 

@@ -27,6 +27,22 @@ _OUTPUT_MISREAD_REASONS = {
     "tool_output_contradiction",
     "task_complete_contradicts_tool_output",
 }
+WRONG_PATH_MARKERS = (
+    "no such file or directory",
+    "cannot access",
+    "not found",
+    "filenotfounderror",
+    "path does not exist",
+)
+WRITE_TOOLS = {"file_write", "file_append", "ssh_file_write"}
+_TEST_FAILURE_MARKERS = (
+    "failed",
+    "error",
+    "traceback",
+    "assertionerror",
+    "pytest",
+    "test failed",
+)
 
 
 def detect_early_stop_from_result(
@@ -60,6 +76,10 @@ def detect_early_stop_from_result(
         step=current_step(state),
         tool_name="task_complete",
         operation_id=operation_id,
+        failure_class="verifier_failed"
+        if "verifier verdict" in evidence.lower() or "latest verifier" in evidence.lower()
+        else "completion_blocked",
+        next_safe_action="Read the blocking verifier or acceptance evidence, patch one narrow cause, then retry the focused check.",
     )
 
 
@@ -79,10 +99,12 @@ def detect_repeated_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal |
     if not tripped:
         return None
 
-    repeated_tool = _repeated_tool_from_history(state, threshold=threshold)
+    repeated_tool, repeated_fingerprint = _repeated_tool_from_history(state, threshold=threshold)
     evidence_bits = [f"{name}={count}" for name, count in tripped]
     if repeated_tool:
         evidence_bits.append(f"repeated_tool={repeated_tool}")
+    if repeated_fingerprint:
+        evidence_bits.append(f"repeated_fingerprint={repeated_fingerprint[:160]}")
     return FamaSignal(
         kind=FamaFailureKind.LOOPING,
         severity=2,
@@ -90,6 +112,11 @@ def detect_repeated_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal |
         evidence="; ".join(evidence_bits),
         step=current_step(state),
         tool_name=repeated_tool,
+        failure_class="repeated_action" if repeated_tool else "no_progress",
+        next_safe_action=_next_action_for_repeated_loop(
+            repeated_tool=repeated_tool,
+            counters=tripped,
+        ),
     )
 
 
@@ -120,6 +147,44 @@ def detect_remote_local_confusion(
         step=current_step(state),
         tool_name=str(tool_name or "").strip() or None,
         operation_id=operation_id,
+        failure_class="wrong_path",
+        next_safe_action="Verify the correct local or remote path/scope, then retry with the verified target.",
+    )
+
+
+def detect_wrong_path(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    if str(tool_name or "").strip() == "task_complete":
+        return None
+    if bool(getattr(result, "success", False)):
+        return None
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if str(metadata.get("reason") or "").strip() in _REMOTE_CONFUSION_REASONS:
+        return None
+    combined = _result_text(result, metadata=metadata).lower()
+    marker = next((item for item in WRONG_PATH_MARKERS if item in combined), "")
+    if not marker:
+        return None
+    path = _path_from_metadata_or_args(metadata)
+    evidence = f"path failure marker={marker}"
+    if path:
+        evidence += f"; path={path}"
+    return FamaSignal(
+        kind=FamaFailureKind.REMOTE_LOCAL_CONFUSION,
+        severity=2,
+        source="tool_result",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name=str(tool_name or "").strip() or None,
+        operation_id=operation_id,
+        failure_class="wrong_path",
+        next_safe_action="Run a narrow directory/file check in the correct scope, then retry with the verified path.",
     )
 
 
@@ -166,7 +231,96 @@ def detect_write_session_stall(state: Any, *, threshold: int = 3) -> FamaSignal 
         tool_name=str(schema_failure.get("tool_name") or "").strip()
         if isinstance(schema_failure, dict)
         else None,
+        failure_class="write_session_stall",
+        next_safe_action="Inspect the active write session state and continue or repair only the narrow stalled section.",
     )
+
+
+def looks_like_empty_write(tool_name: str, args: dict[str, Any] | None, result: Any) -> bool:
+    if str(tool_name or "").strip() not in WRITE_TOOLS:
+        return False
+    args = args if isinstance(args, dict) else {}
+    has_content_arg = "content" in args or "text" in args
+    content = str(args.get("content") or args.get("text") or "")
+    if has_content_arg and not content.strip():
+        return True
+    output_text = _result_text(result).lower()
+    return "0 bytes" in output_text or "empty write" in output_text
+
+
+def detect_empty_write(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    arguments: dict[str, Any] | None = None,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    if not looks_like_empty_write(tool_name, arguments, result):
+        return None
+    args = arguments if isinstance(arguments, dict) else {}
+    path = str(args.get("path") or args.get("target") or "").strip()
+    evidence = f"{tool_name or 'write tool'} produced empty or near-empty content"
+    if path:
+        evidence += f"; path={path}"
+    return FamaSignal(
+        kind=FamaFailureKind.WRITE_SESSION_STALL,
+        severity=2,
+        source="tool_result",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name=str(tool_name or "").strip() or None,
+        operation_id=operation_id,
+        failure_class="empty_write",
+        next_safe_action="Verify file size/content, then patch or retry the smallest write target.",
+    )
+
+
+def detect_verifier_failure_from_result(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    has_result_verifier = any(
+        key in metadata
+        for key in ("last_verifier_verdict", "verifier", "verifier_verdict")
+    )
+    if str(tool_name or "").strip() not in {"shell_exec", "ssh_exec"} and not has_result_verifier:
+        return None
+    verifier = _verifier_from_result_or_state(state, result=result)
+    if not _verifier_failed(verifier):
+        return None
+    failure_class = detect_test_failure_from_verdict(verifier) or "verifier_failed"
+    return FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="verifier",
+        evidence=_verifier_evidence(verifier),
+        step=current_step(state),
+        tool_name=str(tool_name or "").strip() or None,
+        operation_id=operation_id,
+        failure_class=failure_class,
+        next_safe_action="Read the failing output and patch one narrow cause, then rerun the smallest check.",
+    )
+
+
+def detect_test_failure_from_verdict(verdict: Any) -> str | None:
+    if not isinstance(verdict, dict) or not verdict:
+        return None
+    command = str(verdict.get("command") or verdict.get("target") or "").lower()
+    output = " ".join(
+        str(verdict.get(key) or "").lower()
+        for key in ("key_stdout", "key_stderr", "failure_mode")
+    )
+    if "pytest" in command or "test" in command:
+        return "test_failed"
+    if any(marker in output for marker in _TEST_FAILURE_MARKERS) and "test" in output:
+        return "test_failed"
+    return None
 
 
 def record_bad_tool_arg_failure(state: Any, *, tool_name: str, result: Any) -> int:
@@ -215,6 +369,8 @@ def detect_bad_tool_args(
         step=current_step(state),
         tool_name=str(tool_name or "").strip() or None,
         operation_id=operation_id,
+        failure_class="tool_schema_invalid",
+        next_safe_action="Use the tool schema and emit one minimal valid call.",
     )
 
 
@@ -257,6 +413,8 @@ def detect_tool_output_misread(
         step=current_step(state),
         tool_name="task_complete",
         operation_id=operation_id,
+        failure_class="hallucinated_assumption",
+        next_safe_action="Ground the next action in the latest tool output instead of unsupported assumptions.",
     )
 
 
@@ -294,6 +452,8 @@ def detect_backend_stream_halt(state: Any, *, threshold: int = 2) -> FamaSignal 
         source="backend_recovery",
         evidence=evidence,
         step=current_step(state),
+        failure_class="backend_stream_failure",
+        next_safe_action="Recover with a smaller, explicit next action before retrying generation.",
     )
 
 
@@ -319,6 +479,8 @@ def detect_context_drift(state: Any) -> FamaSignal | None:
         source="task_boundary",
         evidence=evidence,
         step=current_step(state),
+        failure_class="context_missing",
+        next_safe_action="Return to the active user task boundary and fetch only the missing evidence needed for the next action.",
     )
 
 
@@ -338,18 +500,48 @@ def latest_verifier_passed(state: Any, *, result: Any | None = None) -> bool:
     return False
 
 
-def _repeated_tool_from_history(state: Any, *, threshold: int) -> str | None:
+def _repeated_tool_from_history(state: Any, *, threshold: int) -> tuple[str | None, str | None]:
     history = getattr(state, "tool_history", None)
     if not isinstance(history, list) or not history:
-        return None
+        return None, None
     counts = Counter(str(item or "") for item in history if str(item or "").strip())
     for fingerprint, count in counts.most_common():
         if count < threshold:
             continue
         tool_name = fingerprint.split("|", 1)[0].strip()
         if tool_name:
-            return tool_name
-    return None
+            return tool_name, fingerprint
+    return None, None
+
+
+def _next_action_for_repeated_loop(
+    *,
+    repeated_tool: str | None,
+    counters: list[tuple[str, int]],
+) -> str:
+    tool_name = str(repeated_tool or "").strip()
+    counter_names = {name for name, _count in counters}
+    if tool_name in _READ_LOOP_TOOLS:
+        return (
+            f"Do not call {tool_name} with the same target again. Use the already-visible evidence "
+            "to make the next patch, run a focused verifier, or inspect a different missing target."
+        )
+    if tool_name in {"shell_exec", "ssh_exec"}:
+        return (
+            f"Do not rerun the same {tool_name} command unchanged. Read its prior output, then change "
+            "one variable: path, command, patch, or verifier scope."
+        )
+    if tool_name in WRITE_TOOLS or "repeat_patch" in counter_names:
+        return (
+            "Do not retry the same write/patch unchanged. Inspect the current staged/target content, "
+            "then make the smallest different patch."
+        )
+    if "no_progress" in counter_names or "no_actionable_progress" in counter_names:
+        return (
+            "Stop the current loop, state one concrete missing evidence item, and take a different "
+            "tool action that can produce it."
+        )
+    return "Reuse the prior evidence and take the next smallest different action."
 
 
 def _early_stop_evidence(metadata: dict[str, Any], *, error: str, state: Any) -> str:
@@ -377,6 +569,31 @@ def _early_stop_evidence(metadata: dict[str, Any], *, error: str, state: Any) ->
 
 def _metadata_verifier(metadata: dict[str, Any]) -> dict[str, Any] | None:
     verdict = metadata.get("last_verifier_verdict")
+    return verdict if isinstance(verdict, dict) and verdict else None
+
+
+def _verifier_from_result_or_state(state: Any, *, result: Any | None) -> dict[str, Any] | None:
+    metadata = getattr(result, "metadata", None) if result is not None else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    verifier = _metadata_verifier(metadata)
+    if verifier is not None:
+        return verifier
+    nested = metadata.get("verifier")
+    if isinstance(nested, dict) and nested:
+        return nested
+    verifier_verdict = str(metadata.get("verifier_verdict") or "").strip()
+    if verifier_verdict:
+        return {
+            "verdict": verifier_verdict,
+            "command": str(metadata.get("verifier_command") or metadata.get("command") or ""),
+            "target": str(metadata.get("verifier_target") or metadata.get("target") or ""),
+            "exit_code": metadata.get("verifier_exit_code"),
+            "key_stdout": str(metadata.get("verifier_stdout") or ""),
+            "key_stderr": str(metadata.get("verifier_stderr") or ""),
+            "failure_mode": str(metadata.get("failure_mode") or ""),
+        }
+    current_verifier = getattr(state, "current_verifier_verdict", None)
+    verdict = current_verifier() if callable(current_verifier) else getattr(state, "last_verifier_verdict", None)
     return verdict if isinstance(verdict, dict) and verdict else None
 
 
@@ -466,3 +683,47 @@ def _has_human_gate(state: Any) -> bool:
         if scratchpad.get(key):
             return True
     return False
+
+
+def _result_text(result: Any, *, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    parts = [
+        str(getattr(result, "error", "") or ""),
+        str(getattr(result, "output", "") or ""),
+    ]
+    for key in (
+        "error",
+        "message",
+        "reason",
+        "path",
+        "target",
+        "stderr",
+        "stdout",
+        "verifier_stderr",
+        "verifier_stdout",
+    ):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            parts.append(str(value))
+    output = getattr(result, "output", None)
+    if isinstance(output, dict):
+        for key in ("stderr", "stdout", "message", "error"):
+            value = output.get(key)
+            if value not in (None, ""):
+                parts.append(str(value))
+    return "\n".join(parts)
+
+
+def _path_from_metadata_or_args(metadata: dict[str, Any]) -> str:
+    for key in ("path", "target", "file", "filename"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            return value
+    args = metadata.get("arguments")
+    if isinstance(args, dict):
+        for key in ("path", "target", "file", "filename"):
+            value = str(args.get(key) or "").strip()
+            if value:
+                return value
+    return ""

@@ -316,6 +316,7 @@ def _serialize_pending_tool_call(item: PendingToolCall) -> dict[str, Any]:
         "args": _coerce_dict_payload(item.args),
         "tool_call_id": item.tool_call_id,
         "source": str(item.source or "model"),
+        "raw_arguments": str(item.raw_arguments or ""),
     }
 
 
@@ -341,6 +342,7 @@ def _coerce_pending_tool_call(value: Any) -> PendingToolCall | None:
         tool_name=str(value.get("tool_name", "")),
         args=_coerce_dict_payload(value.get("args")),
         tool_call_id=None if tool_call_id is None else str(tool_call_id),
+        raw_arguments=str(value.get("raw_arguments", "")),
         source=source,
     )
 

@@ -166,6 +166,14 @@ def _attach_session_metadata(intent: Any, *, harness: Any) -> None:
                     intent.next_section_name_origin = "session_default"
                 break
 
+    if (
+        not intent.replace_strategy
+        and str(getattr(session, "write_session_intent", "") or "").strip().lower() == "patch_existing"
+        and not list(getattr(session, "write_sections_completed", []) or [])
+    ):
+        intent.replace_strategy = "overwrite"
+        intent.evidence.append("patch_existing_first_write_overwrite")
+
 
 def _extract_inline_tool_paths(text: str) -> list[str]:
     paths: list[str] = []
@@ -324,6 +332,27 @@ def _pending_from_embedded_xml_text(text: str) -> PendingToolCall | None:
         params: dict[str, Any] = {}
         for param_match in re.finditer(r"<parameter=([\w_-]+)>(.*?)</parameter>", inner, re.DOTALL):
             params[str(param_match.group(1) or "").strip()] = str(param_match.group(2) or "").strip()
+        # Fallback: small models sometimes use raw parameter tags instead of <parameter> wrappers
+        if not params and tool_name in {"file_patch", "ssh_file_patch", "ast_patch"}:
+            _RAW_TAG_ALIASES: dict[str, list[str]] = {
+                "target_text": ["target_text", "source", "old_text", "old"],
+                "replacement_text": ["replacement_text", "dest", "new_text", "new", "replacement"],
+                "path": ["path"],
+                "expected_occurrences": ["expected_occurrences"],
+                "write_session_id": ["write_session_id", "session_id"],
+            }
+            for canonical, aliases in _RAW_TAG_ALIASES.items():
+                if canonical in params:
+                    continue
+                for alias in aliases:
+                    match = re.search(
+                        re.escape(f"<{alias}>") + r"(.*?)" + re.escape(f"</{alias}>"),
+                        inner,
+                        re.DOTALL | re.IGNORECASE,
+                    )
+                    if match:
+                        params[canonical] = match.group(1).strip()
+                        break
         if params:
             return PendingToolCall(
                 tool_name=tool_name,

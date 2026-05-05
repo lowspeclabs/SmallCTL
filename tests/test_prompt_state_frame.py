@@ -651,6 +651,29 @@ def test_prompt_builder_tunes_recent_message_limit_for_remote_repair_pressure() 
     assert "high_prompt_budget" in tuning_entry["data"]["reasons"]
 
 
+def test_prompt_state_frame_surfaces_pending_remote_mutation_verifier() -> None:
+    state = LoopState(cwd="/tmp")
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = "clean up nginx on root@192.168.1.89"
+    state.scratchpad["_remote_mutation_requires_verification"] = {
+        "host": "192.168.1.89",
+        "user": "root",
+        "mutation_type": "deletion",
+        "guessed_paths": [],
+        "directory_empty_checks": [{"path": "/var/www", "glob": "/var/www/*"}],
+    }
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assert assembly.frame is not None
+    assert "ssh_exec(host='192.168.1.89', user='root', command='find /var/www -mindepth 1 -maxdepth 1 -print -quit')" in assembly.frame.spine.next_allowed_action
+    assert "Remote mutation verification is pending before completion." in assembly.frame.spine.current_blockers
+    assert "Remote mutation verification pending:" in assembly.messages[0]["content"]
+
+
 def test_remote_repair_phase_does_not_reduce_recent_window_without_prompt_pressure() -> None:
     calls: dict[str, int] = {}
 

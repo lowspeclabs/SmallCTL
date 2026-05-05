@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models.conversation import ConversationMessage
+from .recovery_schema import FailureEvent, ReflectionMemory, SubtaskLedger
 from .state_flow import LoopStateFlowMixin
 from .state_schema import (
     ArtifactRecord,
@@ -55,6 +56,11 @@ from .state_coercion import (
     _coerce_turn_bundle,
     _coerce_memory_entry_list,
 )
+from .recovery_coercion import (
+    _coerce_failure_event,
+    _coerce_reflection_memory,
+    _coerce_subtask_ledger,
+)
 from .state_memory import align_memory_entries, memory_entry_is_stale, _trim_recent_messages
 from .state_support import (
     LOOP_STATE_SCHEMA_VERSION,
@@ -100,6 +106,9 @@ class LoopState(LoopStateFlowMixin):
     acceptance_waived: bool = False
     last_verifier_verdict: dict[str, Any] | None = None
     last_failure_class: str = ""
+    failure_events: list[FailureEvent] = field(default_factory=list)
+    reflexion_memory: list[ReflectionMemory] = field(default_factory=list)
+    subtask_ledger: SubtaskLedger | None = None
     files_changed_this_cycle: list[str] = field(default_factory=list)
     repair_cycle_id: str = ""
     stagnation_counters: dict[str, int] = field(default_factory=dict)
@@ -194,6 +203,9 @@ class LoopState(LoopStateFlowMixin):
             "acceptance_waived": self.acceptance_waived,
             "last_verifier_verdict": json_safe_value(self.last_verifier_verdict),
             "last_failure_class": self.last_failure_class,
+            "failure_events": json_safe_value(self.failure_events),
+            "reflexion_memory": json_safe_value(self.reflexion_memory),
+            "subtask_ledger": json_safe_value(self.subtask_ledger),
             "files_changed_this_cycle": json_safe_value(self.files_changed_this_cycle),
             "repair_cycle_id": self.repair_cycle_id,
             "stagnation_counters": json_safe_value(self.stagnation_counters),
@@ -289,6 +301,17 @@ class LoopState(LoopStateFlowMixin):
         raw["acceptance_waived"] = bool(migrated.get("acceptance_waived", False))
         raw["last_verifier_verdict"] = _coerce_json_dict_payload(migrated.get("last_verifier_verdict"))
         raw["last_failure_class"] = str(migrated.get("last_failure_class", "") or "")
+        raw["failure_events"] = [
+            event
+            for item in _coerce_list_payload(migrated.get("failure_events"))
+            if (event := _coerce_failure_event(item)) is not None
+        ]
+        raw["reflexion_memory"] = [
+            reflection
+            for item in _coerce_list_payload(migrated.get("reflexion_memory"))
+            if (reflection := _coerce_reflection_memory(item)) is not None
+        ]
+        raw["subtask_ledger"] = _coerce_subtask_ledger(migrated.get("subtask_ledger"))
         raw["files_changed_this_cycle"] = _coerce_string_list(migrated.get("files_changed_this_cycle"))
         raw["repair_cycle_id"] = str(migrated.get("repair_cycle_id", "") or "")
         raw["stagnation_counters"] = _coerce_int_map(migrated.get("stagnation_counters"))

@@ -65,21 +65,72 @@ def _remote_mutation_verification_requirement(state: LoopState) -> dict[str, Any
         return None
     if payload.get("failed_verification_attempts", 0) >= 3:
         return None
+    if not _remote_mutation_has_pending_verifier(payload):
+        return None
     return payload
+
+
+def _remote_mutation_has_pending_verifier(requirement: dict[str, Any]) -> bool:
+    guessed_paths = requirement.get("guessed_paths")
+    if not isinstance(guessed_paths, list):
+        guessed_paths = []
+    verified_paths = {
+        str(path).strip()
+        for path in requirement.get("verified_paths", [])
+        if str(path).strip()
+    }
+    if any(str(path).strip() and str(path).strip() not in verified_paths for path in guessed_paths):
+        return True
+
+    verified_directories = {
+        str(path).strip().rstrip("/")
+        for path in requirement.get("verified_directory_empty_checks", [])
+        if str(path).strip()
+    }
+    return any(
+        check["path"] not in verified_directories
+        for check in _remote_mutation_directory_checks(requirement)
+    )
 
 
 def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any]:
     guessed_paths = requirement.get("guessed_paths")
     if not isinstance(guessed_paths, list):
         guessed_paths = []
-    path_hint = ", ".join(str(path) for path in guessed_paths[:3] if str(path).strip())
-    first_path = next((str(path).strip() for path in guessed_paths if str(path).strip()), "")
+    verified_paths = {
+        str(path).strip()
+        for path in requirement.get("verified_paths", [])
+        if str(path).strip()
+    }
+    pending_paths = [
+        str(path).strip()
+        for path in guessed_paths
+        if str(path).strip() and str(path).strip() not in verified_paths
+    ]
+    directory_checks = _remote_mutation_directory_checks(requirement)
+    verified_directories = {
+        str(path).strip().rstrip("/")
+        for path in requirement.get("verified_directory_empty_checks", [])
+        if str(path).strip()
+    }
+    pending_directory_checks = [
+        check for check in directory_checks if check["path"] not in verified_directories
+    ]
+    path_hint = ", ".join(str(path) for path in pending_paths[:3] if str(path).strip())
+    first_path = next((str(path).strip() for path in pending_paths if str(path).strip()), "")
+    first_directory_check = pending_directory_checks[0] if pending_directory_checks else {}
     host = str(requirement.get("host") or "").strip()
     user = str(requirement.get("user") or "").strip()
     mutation_type = str(requirement.get("mutation_type") or "").strip().lower()
     required_arguments: dict[str, Any] = {}
     if first_path:
         required_arguments["path"] = first_path
+    elif first_directory_check:
+        directory_path = str(first_directory_check.get("path") or "").strip()
+        if directory_path:
+            required_arguments["command"] = (
+                f"find {directory_path} -mindepth 1 -maxdepth 1 -print -quit"
+            )
     if host:
         required_arguments["host"] = host
     if user:
@@ -89,19 +140,36 @@ def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any
         required_arguments["target"] = host
 
     if mutation_type == "deletion":
-        error = (
-            "Cannot complete the task while a raw `ssh_exec` remote file deletion still needs meaningful verification. "
-            "Verify the target is gone with `ssh_file_read`; a `not found` / `no such file` result counts as successful verification."
-        )
-        next_required_action = {
-            "tool_names": ["ssh_file_read"],
-            "required_fields": sorted(required_arguments),
-            "required_arguments": required_arguments,
-            "notes": [
-                "Read the deleted path directly.",
-                "A missing-file result is valid proof for deletion tasks and will clear the requirement.",
-            ],
-        }
+        if first_path:
+            error = (
+                "Cannot complete the task while a raw `ssh_exec` remote file deletion still needs meaningful verification. "
+                "Verify the target is gone with `ssh_file_read`; a `not found` / `no such file` result counts as successful verification."
+            )
+            next_required_action = {
+                "tool_names": ["ssh_file_read"],
+                "required_fields": sorted(required_arguments),
+                "required_arguments": required_arguments,
+                "notes": [
+                    "Read the deleted path directly.",
+                    "A missing-file result is valid proof for deletion tasks and will clear the requirement.",
+                ],
+            }
+        else:
+            directory_path = str(first_directory_check.get("path") or "").strip()
+            glob = str(first_directory_check.get("glob") or "").strip()
+            error = (
+                "Cannot complete the task while a raw `ssh_exec` remote glob deletion still needs meaningful verification. "
+                "Verify the parent directory is empty with a read-only `ssh_exec` check."
+            )
+            next_required_action = {
+                "tool_names": ["ssh_exec"],
+                "required_fields": sorted(required_arguments),
+                "required_arguments": required_arguments,
+                "notes": [
+                    f"Check that `{directory_path}` has no remaining entries from `{glob or directory_path + '/*'}`.",
+                    "Empty stdout from the suggested find command is valid proof for glob deletion tasks.",
+                ],
+            }
     else:
         error = (
             "Cannot complete the task while a raw `ssh_exec` remote file mutation still needs meaningful verification. "
@@ -119,15 +187,38 @@ def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any
         }
     if path_hint:
         error += f" Suspected path(s): {path_hint}."
+    if first_directory_check:
+        error += f" Directory check: {first_directory_check.get('path')}."
     if required_arguments:
-        verifier_call = "ssh_file_read(" + ", ".join(
-            f"{key}={required_arguments[key]!r}" for key in ("target", "host", "user", "path") if key in required_arguments
+        tool_name = "ssh_file_read" if "path" in required_arguments else "ssh_exec"
+        verifier_call = tool_name + "(" + ", ".join(
+            f"{key}={required_arguments[key]!r}"
+            for key in ("target", "host", "user", "path", "command")
+            if key in required_arguments
         ) + ")"
         error += f" Next required verifier: `{verifier_call}`."
     return {
         "error": error,
         "next_required_action": next_required_action,
     }
+
+
+def _remote_mutation_directory_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
+    raw_checks = requirement.get("directory_empty_checks")
+    if not isinstance(raw_checks, list):
+        return []
+    checks: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip().rstrip("/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        glob = str(item.get("glob") or "").strip()
+        checks.append({"path": path, "glob": glob})
+    return checks
 
 
 def _write_session_resume_action(
@@ -504,6 +595,24 @@ async def loop_status(state: LoopState) -> dict:
         write_session_payload = dict(write_session_payload)
         write_session_payload["resume_action"] = next_required_tool
 
+    # Fix 3: Emit a persistent, top-level reminder while a session is open.
+    # The model must include write_session_id on every file_write/file_patch/ast_patch call
+    # to the session target; omitting it will now be rejected (see fs.py Fix 1).
+    write_session_warning: str | None = None
+    active_ws = state.write_session
+    if active_ws is not None and str(getattr(active_ws, "status", "") or "").strip().lower() not in {"complete"}:
+        _ws_id_hint = str(getattr(active_ws, "write_session_id", "") or "").strip()
+        _ws_path_hint = str(getattr(active_ws, "write_target_path", "") or "").strip()
+        _ws_next_hint = str(getattr(active_ws, "write_next_section", "") or "").strip() or "imports"
+        if _ws_id_hint and _ws_path_hint:
+            write_session_warning = (
+                f"Write Session `{_ws_id_hint}` is open for `{_ws_path_hint}`. "
+                f"All file_write / file_patch / ast_patch calls to that path MUST include "
+                f"`write_session_id='{_ws_id_hint}'` and `section_name='{_ws_next_hint}'`. "
+                f"A bare file_write without write_session_id will be rejected and will NOT "
+                f"advance the session. task_complete will be blocked until the session is finalized."
+            )
+
     return ok(
         {
             "phase": state.current_phase,
@@ -531,6 +640,7 @@ async def loop_status(state: LoopState) -> dict:
             "stagnation_counters": state.stagnation_counters,
             "next_required_tool": next_required_tool,
             "write_session": write_session_payload,
+            "write_session_warning": write_session_warning,
             "write_session_events": write_session_events,
             "loop_guard": build_loop_guard_status(state),
         }

@@ -56,7 +56,7 @@ def _maybe_emit_patch_existing_first_choice_nudge(
                 "Then choose exactly one recovery shape: use `file_patch` for a narrow exact edit, `ast_patch` for a narrow structural edit, or "
                 "`file_write` with `replace_strategy='overwrite'` only if you intentionally want to replace the entire staged file. "
                 f"DIRECTIVE: do not write, patch, append, or delete `{stage_path}` directly; write tools must use `{target_path}`. "
-                "Do not assume earlier chunks were lost or rewrite the whole file from memory."
+                "No sections are committed yet, so do not continue chunked authoring with an implicit first chunk."
             ),
             metadata={
                 "is_recovery_nudge": True,
@@ -172,7 +172,7 @@ def _maybe_schedule_patch_existing_stage_read_recovery(
                     if recovery_session_id
                     else "Auto-recovery stopped after repeated patch-existing first-chunk failures. "
                 )
-                + "Do not retry `file_write` with the same implicit first-chunk choice. "
+                + "No sections are committed yet; do not retry `file_write` with the same implicit first-chunk choice. "
                 + (
                     f"Inspect the staged copy at `{recovery_staging_path}` or reread the target with "
                     f"`file_read(path='{target_path}')`, then choose exactly one repair shape: "

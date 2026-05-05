@@ -2,9 +2,207 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..models.events import UIEvent, UIEventType
 from ..models.conversation import ConversationMessage
+from ..recovery_metrics import record_terminal_success_metrics
 from ..state import clip_text_value
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
+
+_REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
+_REMOTE_VERIFIER_PENDING_COMPLETE_KEY = "_task_complete_remote_mutation_verifier_pending_complete"
+_REMOTE_VERIFIER_TOOLS = {"ssh_file_read", "ssh_exec"}
+
+
+def _maybe_schedule_task_complete_remote_mutation_verifier(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "task_complete" or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("reason") or "").strip() != "remote_mutation_requires_verification":
+        return False
+
+    action = metadata.get("next_required_action")
+    if not isinstance(action, dict):
+        return False
+    tool_names = action.get("tool_names")
+    normalized_tool_names = {str(name).strip() for name in tool_names} if isinstance(tool_names, list) else set()
+    if not normalized_tool_names.intersection({"ssh_file_read", "ssh_exec"}):
+        return False
+    required_arguments = action.get("required_arguments")
+    if not isinstance(required_arguments, dict):
+        return False
+
+    args: dict[str, Any] = {}
+    for key in ("target", "host", "user", "path", "command"):
+        value = str(required_arguments.get(key) or "").strip()
+        if value:
+            args[key] = value
+    tool_name = "ssh_file_read" if "ssh_file_read" in normalized_tool_names and args.get("path") else "ssh_exec"
+    if tool_name == "ssh_file_read" and not args.get("path"):
+        return False
+    if tool_name == "ssh_exec" and not args.get("command"):
+        return False
+    if not (args.get("host") or args.get("target")):
+        return False
+
+    signature = "|".join(
+        [
+            str(record.tool_call_id or ""),
+            str(record.operation_id or ""),
+            f"task_complete_remote_mutation_verifier:{tool_name}",
+            str(args),
+        ]
+    )
+    if harness.state.scratchpad.get("_task_complete_remote_mutation_verifier_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_task_complete_remote_mutation_verifier_autocontinue"] = signature
+    harness.state.scratchpad[_REMOTE_VERIFIER_PENDING_COMPLETE_KEY] = {
+        "tool_name": tool_name,
+        "args": args,
+        "message": str(record.args.get("message") or ""),
+        "tool_call_id": str(record.tool_call_id or ""),
+        "operation_id": str(record.operation_id or ""),
+    }
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name=tool_name,
+            args=args,
+            raw_arguments="{}",
+            source="system",
+        )
+    ]
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "Auto-continuing remote mutation verification with `ssh_file_read` "
+                "or `ssh_exec` because `task_complete` was blocked. For deletion "
+                "tasks, a `not found` / `no such file` read or an empty directory "
+                "listing is valid proof and clears the verifier requirement. "
+                "Verification already completed means the model may call `task_complete` "
+                "immediately without additional chatter."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "task_complete_remote_mutation_verifier_autocontinue",
+                "tool_name": tool_name,
+                "required_arguments": args,
+            },
+        )
+    )
+    harness._runlog(
+        "task_complete_remote_mutation_verifier_autocontinue",
+        "scheduled automatic remote verifier after remote mutation task completion block",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        path=str(args.get("path") or ""),
+        command=str(args.get("command") or ""),
+        host=str(args.get("host") or args.get("target") or ""),
+    )
+    return True
+
+
+async def maybe_auto_complete_after_remote_mutation_verifier(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+    event_handler: Any,
+) -> bool:
+    if record.tool_name not in _REMOTE_VERIFIER_TOOLS:
+        return False
+
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    pending = scratchpad.get(_REMOTE_VERIFIER_PENDING_COMPLETE_KEY)
+    if not isinstance(pending, dict):
+        return False
+    if scratchpad.get(_REMOTE_MUTATION_VERIFICATION_KEY):
+        return False
+    if str(pending.get("tool_name") or "") != str(record.tool_name or ""):
+        return False
+    if not _arguments_match(pending.get("args"), record.args):
+        return False
+    if not _verifier_result_satisfies_remote_gate(record):
+        return False
+
+    message = str(pending.get("message") or "").strip() or "Remote mutation verified; task complete."
+    scratchpad.pop(_REMOTE_VERIFIER_PENDING_COMPLETE_KEY, None)
+    scratchpad["_task_complete"] = True
+    scratchpad["_task_complete_message"] = message
+    harness.state.touch()
+    record_terminal_success_metrics(harness.state)
+
+    emit = getattr(harness, "_emit", None)
+    if callable(emit):
+        maybe_awaitable = emit(
+            event_handler,
+            UIEvent(
+                event_type=UIEventType.SYSTEM,
+                content="Task marked complete after automatic remote verification.",
+                data={"status_activity": "remote mutation verified"},
+            ),
+        )
+        if hasattr(maybe_awaitable, "__await__"):
+            await maybe_awaitable
+
+    graph_state.final_result = {
+        "status": "completed",
+        "message": {"status": "complete", "message": message},
+        "assistant": str(graph_state.last_assistant_text or "").strip() or message,
+        "thinking": graph_state.last_thinking_text,
+        "usage": graph_state.last_usage,
+    }
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "task_complete_remote_mutation_verifier_autoaccepted",
+            "auto-accepted task completion after remote mutation verifier cleared the gate",
+            verifier_tool=record.tool_name,
+            original_tool_call_id=str(pending.get("tool_call_id") or ""),
+            original_operation_id=str(pending.get("operation_id") or ""),
+        )
+    return True
+
+
+def _verifier_result_satisfies_remote_gate(record: ToolExecutionRecord) -> bool:
+    if bool(record.result.success):
+        if record.tool_name != "ssh_exec":
+            return True
+        output = record.result.output if isinstance(record.result.output, dict) else {}
+        command = str(record.args.get("command") or "").strip()
+        stdout = str(output.get("stdout") or "").strip()
+        return not command.startswith("find ") or not stdout
+
+    if record.tool_name != "ssh_file_read":
+        return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    failure_markers = " ".join(
+        [
+            str(record.result.error or ""),
+            str(metadata.get("message") or ""),
+            str(metadata.get("error_kind") or ""),
+        ]
+    ).lower()
+    return (
+        "no such file" in failure_markers
+        or "not found" in failure_markers
+        or "file_not_found" in failure_markers
+    )
+
+
+def _arguments_match(expected: Any, actual: Any) -> bool:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    for key, expected_value in expected.items():
+        if str(actual.get(key) or "").strip() != str(expected_value or "").strip():
+            return False
+    return True
 
 
 def _maybe_schedule_task_complete_verifier_loop_status(

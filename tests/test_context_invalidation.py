@@ -1000,6 +1000,39 @@ def test_phase_advanced_preserves_recent_evidence() -> None:
     assert "E-OLD" not in observation_ids
 
 
+def test_phase_advanced_preserves_recent_known_facts_and_read_artifacts() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 10
+    state.current_phase = "execute"
+    state.working_memory.known_fact_meta = [
+        MemoryEntry(
+            content="ssh_file_read: Caddyfile full file (7 lines)",
+            created_at_step=9,
+            created_phase="repair",
+            freshness="current",
+        )
+    ]
+    state.working_memory.known_facts = [entry.content for entry in state.working_memory.known_fact_meta]
+    state.artifacts["A-caddyfile"] = ArtifactRecord(
+        artifact_id="A-caddyfile",
+        kind="ssh_file_read",
+        source="/etc/caddy/Caddyfile",
+        created_at="2026-05-03T21:34:18+00:00",
+        size_bytes=134,
+        summary="Caddyfile full file",
+        tool_name="ssh_file_read",
+        metadata={"phase": "repair", "created_at_step": 9, "path": "/etc/caddy/Caddyfile"},
+    )
+
+    event = state.invalidate_context(
+        reason="phase_advanced",
+        details={"from_phase": "repair", "to_phase": "execute"},
+    )
+
+    assert event["invalidated_fact_count"] == 0
+    assert "A-caddyfile" not in state.scratchpad.get("_artifact_staleness", {})
+
+
 def test_environment_changed_preserves_recent_evidence() -> None:
     """Same grace applies for environment_changed invalidation."""
     state = LoopState(cwd="/tmp")
@@ -1023,3 +1056,51 @@ def test_environment_changed_preserves_recent_evidence() -> None:
 
     stale_ids = set(state.scratchpad.get("_observation_staleness", {}).keys())
     assert "E-FRESH" not in stale_ids
+
+
+def test_path_scoped_verifier_failure_preserves_unrelated_validated_remote_facts() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.step_count = 18
+    state.working_memory.known_fact_meta = [
+        MemoryEntry(
+            content="ssh_exec: ssh_exec SUCCESS: journalctl -xeu caddy.service",
+            created_at_step=14,
+            created_phase="execute",
+            freshness="current",
+        ),
+        MemoryEntry(
+            content="ssh_file_read: Caddyfile full file (7 lines) /etc/caddy/Caddyfile",
+            created_at_step=4,
+            created_phase="repair",
+            freshness="current",
+        ),
+    ]
+    state.working_memory.known_facts = [entry.content for entry in state.working_memory.known_fact_meta]
+    state.artifacts["A-caddyfile"] = ArtifactRecord(
+        artifact_id="A-caddyfile",
+        kind="ssh_file_read",
+        source="/etc/caddy/Caddyfile",
+        created_at="2026-05-03T21:34:18+00:00",
+        size_bytes=134,
+        summary="ssh_file_read SUCCESS: /etc/caddy/Caddyfile",
+        tool_name="ssh_file_read",
+        metadata={
+            "path": "/etc/caddy/Caddyfile",
+            "verifier_verdict": "pass",
+            "verifier_command": "ssh_file_read /etc/caddy/Caddyfile",
+        },
+    )
+
+    event = state.invalidate_context(
+        reason="verifier_failed",
+        details={
+            "command": "grep -i error /var/log/caddy/*.log",
+            "target": "192.168.1.89 :: grep -i error /var/log/caddy/*.log",
+            "failure_mode": "path",
+        },
+    )
+
+    assert event["paths"] == ["/var/log/caddy/*.log"]
+    assert event["invalidated_fact_count"] == 0
+    assert "A-caddyfile" not in state.scratchpad.get("_artifact_staleness", {})

@@ -18,7 +18,9 @@ from .compaction import CompactionService
 from .factory import SubtaskService
 from .memory import MemoryService
 from .prompt_builder import PromptBuilderService
+from .reflexion_service import ReflexionService
 from .run_mode import ModeDecisionService
+from .subtask_ledger_service import SubtaskLedgerService
 from .task_boundary import TaskBoundaryService
 from .tool_results import ToolResultService
 
@@ -279,5 +281,7 @@ def finalize_harness_bootstrap(
     self.memory = MemoryService(self)
     self.approvals = ApprovalService(self)
     self.subtasks = SubtaskService(self)
+    self.subtask_ledger = SubtaskLedgerService(self)
+    self.reflexion = ReflexionService(self)
     self._backend_recovery_service = BackendRecoveryService(self)
     self._task_boundary_service = TaskBoundaryService(self)

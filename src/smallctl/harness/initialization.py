@@ -33,7 +33,9 @@ from .compaction import CompactionService
 from .factory import SubtaskService
 from .memory import MemoryService
 from .prompt_builder import PromptBuilderService
+from .reflexion_service import ReflexionService
 from .run_mode import ModeDecisionService
+from .subtask_ledger_service import SubtaskLedgerService
 from .task_boundary import TaskBoundaryService
 from .tool_results import ToolResultService
 
@@ -114,6 +116,15 @@ def initialize_harness(self: Any, **params: Any) -> None:
     fama_capsule_token_budget = params.get("fama_capsule_token_budget", 180)
     fama_llm_judge_enabled = params.get("fama_llm_judge_enabled", False)
     fama_llm_judge_min_severity = params.get("fama_llm_judge_min_severity", 3)
+    reflexion_enabled = params.get("reflexion_enabled", True)
+    reflexion_max_items = params.get("reflexion_max_items", 5)
+    reflexion_inject_top_k = params.get("reflexion_inject_top_k", 3)
+    reflexion_persist_cross_task = params.get("reflexion_persist_cross_task", False)
+    reflexion_min_failure_severity = params.get("reflexion_min_failure_severity", "warning")
+    subtask_ledger_enabled = params.get("subtask_ledger_enabled", True)
+    subtask_max_active = params.get("subtask_max_active", 1)
+    subtask_max_history = params.get("subtask_max_history", 12)
+    subtask_inject_completed_limit = params.get("subtask_inject_completed_limit", 3)
 
     normalized_phase = normalize_phase(phase)
     self._initial_phase = normalized_phase
@@ -253,6 +264,15 @@ def initialize_harness(self: Any, **params: Any) -> None:
             "loop_guard_cumulative_write_gate": bool(loop_guard_cumulative_write_gate),
             "loop_guard_checkpoint_gate": bool(loop_guard_checkpoint_gate),
             "loop_guard_diff_gate": bool(loop_guard_diff_gate),
+            "reflexion_enabled": bool(reflexion_enabled),
+            "reflexion_max_items": int(reflexion_max_items),
+            "reflexion_inject_top_k": int(reflexion_inject_top_k),
+            "reflexion_persist_cross_task": bool(reflexion_persist_cross_task),
+            "reflexion_min_failure_severity": str(reflexion_min_failure_severity or "warning"),
+            "subtask_ledger_enabled": bool(subtask_ledger_enabled),
+            "subtask_max_active": int(subtask_max_active),
+            "subtask_max_history": int(subtask_max_history),
+            "subtask_inject_completed_limit": int(subtask_inject_completed_limit),
         }
     )
     self.config = SimpleNamespace(**self._harness_kwargs)
@@ -262,6 +282,12 @@ def initialize_harness(self: Any, **params: Any) -> None:
         "capsule_token_budget": int(self.config.fama_capsule_token_budget),
         "llm_judge_enabled": bool(self.config.fama_llm_judge_enabled),
         "llm_judge_min_severity": int(self.config.fama_llm_judge_min_severity),
+    }
+    self.state.scratchpad["_recovery_config"] = {
+        "reflexion_enabled": bool(self.config.reflexion_enabled),
+        "reflexion_inject_top_k": int(self.config.reflexion_inject_top_k),
+        "subtask_ledger_enabled": bool(self.config.subtask_ledger_enabled),
+        "subtask_inject_completed_limit": int(self.config.subtask_inject_completed_limit),
     }
     self.state.scratchpad["_chunk_write_loop_guard_config"] = {
         "enabled": self.config.loop_guard_enabled,

@@ -96,12 +96,14 @@ class PromptAssembler:
         run_brief_tokens = estimate_text_tokens(run_brief_text)
         working_memory_tokens = estimate_text_tokens(working_memory_text)
         fama_capsule_tokens = estimate_text_tokens("\n".join(frame.spine.fama_capsule_lines))
+        recovery_guidance_tokens = estimate_text_tokens("\n".join(frame.spine.recovery_guidance_lines))
         section_tokens = {
             "system": system_tokens - run_brief_tokens - working_memory_tokens,
             "recent_messages": transcript_tokens,
             "run_brief": run_brief_tokens,
             "working_memory": working_memory_tokens,
             "fama_capsules": fama_capsule_tokens,
+            "recovery_guidance": recovery_guidance_tokens,
             "normalized_observations": 0,
             "fresh_tool_outputs": 0,
             "turn_bundles": 0,
@@ -518,7 +520,11 @@ class PromptAssembler:
             else:
                 final_messages.append(msg)
 
-        estimated_prompt_tokens = sum(section_tokens.values()) - section_tokens.get("fama_capsules", 0)
+        estimated_prompt_tokens = (
+            sum(section_tokens.values())
+            - section_tokens.get("fama_capsules", 0)
+            - section_tokens.get("recovery_guidance", 0)
+        )
         included_levels = self._included_compaction_levels(frame=frame, transcript_tokens=transcript_tokens)
         dropped_levels = self._dropped_compaction_levels(frame=frame)
         state.prompt_budget = PromptBudgetSnapshot(
@@ -548,6 +554,7 @@ class PromptAssembler:
             state,
             phase_lines=PromptStateFrameCompiler._render_phase_context(state),
             coding_anchor_lines=PromptStateFrameCompiler._coding_anchor_lines(state),
+            recovery_guidance_lines=PromptStateFrameCompiler.render_recovery_guidance(state),
         )
 
     @staticmethod
@@ -806,10 +813,15 @@ class PromptAssembler:
             inline_limit = self.policy.tool_result_inline_token_limit
             if message.name == "artifact_read":
                 inline_limit = self.policy.artifact_read_inline_token_limit
-            token_limit = min(
-                max(48, transcript_token_limit),
-                max(48, inline_limit),
-            )
+                # Allow artifact_read to use its dedicated inline budget without being
+                # further capped by the generic transcript limit, so paging results are
+                # actually visible to the model instead of forcing futile re-read loops.
+                token_limit = max(48, inline_limit)
+            else:
+                token_limit = min(
+                    max(48, transcript_token_limit),
+                    max(48, inline_limit),
+                )
         else:
             token_limit = max(96, transcript_token_limit)
 
@@ -821,7 +833,21 @@ class PromptAssembler:
             compact_content = self._compact_tool_message_for_prompt(state, message)
 
         if estimate_text_tokens(compact_content) > token_limit:
-            compact_content = self._truncate_text_for_prompt(compact_content, token_limit=token_limit)
+            truncation_note = ""
+            if message.name == "artifact_read":
+                meta = message.metadata if isinstance(message.metadata, dict) else {}
+                if meta.get("truncated") is False:
+                    total_lines = meta.get("total_lines", "?")
+                    line_start = meta.get("line_start", "?")
+                    line_end = meta.get("line_end", "?")
+                    truncation_note = (
+                        f"[artifact_read returned lines {line_start}-{line_end} of {total_lines} "
+                        f"(complete). The truncation above is only for the transcript window. "
+                        f"Do not re-call artifact_read with larger max_chars.]"
+                    )
+            compact_content = self._truncate_text_for_prompt(
+                compact_content, token_limit=token_limit, truncation_note=truncation_note
+            )
 
         return ConversationMessage(
             role=message.role,
@@ -855,7 +881,7 @@ class PromptAssembler:
                     "Use the existing file evidence instead of rereading it."
                 )
             return f"Reused Artifact {artifact.artifact_id}: {summary}"
-        if artifact.kind == "file_read":
+        if artifact.kind in {"file_read", "ssh_file_read"}:
             return (
                 f"Artifact {artifact.artifact_id}: {summary}. "
                 "Full file already captured; patch, verify, or move on instead of rereading it."
@@ -863,13 +889,15 @@ class PromptAssembler:
         return f"Artifact {artifact.artifact_id}: {summary}"
 
     @staticmethod
-    def _truncate_text_for_prompt(text: str, *, token_limit: int) -> str:
+    def _truncate_text_for_prompt(text: str, *, token_limit: int, truncation_note: str = "") -> str:
         if not text:
             return text
         char_cap = max(64, int(token_limit * 2.0))
         if len(text) <= char_cap:
             return text
         suffix = "... [truncated]"
+        if truncation_note:
+            suffix = f"{suffix}\n\n{truncation_note}"
         clipped = text[: max(0, char_cap - len(suffix))].rstrip()
         return f"{clipped}{suffix}" if clipped else suffix
 

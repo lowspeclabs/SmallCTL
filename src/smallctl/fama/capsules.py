@@ -13,6 +13,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "remote_scope_capsule": "Remote scope is active; use SSH tools for remote paths and verify remotely before finishing.",
     "micro_plan_capsule": "Break the next move into one concrete action, expected evidence, and stop condition.",
     "evidence_reuse_capsule": "Use visible evidence before repeating the same read or command.",
+    "tool_exposure_narrowing": "Do not repeat the same tool call; use prior output or switch to one different tool/action that can create new evidence.",
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
 }

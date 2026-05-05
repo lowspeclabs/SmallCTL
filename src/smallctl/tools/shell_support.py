@@ -49,6 +49,173 @@ def _detect_unsupported_shell_syntax(command: str) -> str | None:
     return None
 
 
+_DETACHED_COMMAND_MARKERS = (
+    "nohup ",
+    "setsid ",
+    "disown",
+    "daemonize ",
+    "systemd-run ",
+    "tmux ",
+    "screen ",
+)
+_FOLLOW_FLAGS = {"-f", "--follow", "--tail=follow"}
+_INSPECTION_FLAGS = {"-h", "--help", "-v", "--version", "version"}
+_SERVICE_MANAGER_COMMANDS = {"systemctl", "service", "supervisorctl", "rc-service", "launchctl"}
+_PACKAGE_RUNNERS = {"npm", "pnpm", "yarn", "bun"}
+_FOREGROUND_SUBCOMMANDS = {"dev", "develop", "serve", "server", "start", "watch"}
+_FOREGROUND_BINARIES = {
+    "air",
+    "caddy",
+    "flask",
+    "gunicorn",
+    "http-server",
+    "nodemon",
+    "rails",
+    "redis-server",
+    "uvicorn",
+    "vite",
+    "webpack-dev-server",
+}
+
+
+def _foreground_command_guard(
+    command: str,
+    *,
+    tool_name: str,
+    allow_background_parameter: bool = False,
+) -> dict[str, Any] | None:
+    reason = _likely_long_running_foreground_reason(command)
+    if reason is None:
+        return None
+
+    background_text = " or `background=True`" if allow_background_parameter else ""
+    return fail(
+        f"`{tool_name}` blocked a likely long-running foreground command: `{command}`. "
+        "Start services with a service manager, a detached/background command, or a bounded command "
+        f"such as `timeout 20s ...`{background_text}, then verify with a separate health check.",
+        metadata={
+            "command": command,
+            "reason": "long_running_foreground_command",
+            "foreground_detection": reason,
+            "next_required_action": {
+                "strategy": "detach_or_bound_then_verify",
+                "notes": [
+                    "Use a service manager for daemons when available.",
+                    "Use a detached/background launch when the command is expected to keep running.",
+                    "Use a bounded `timeout` wrapper only when sampling foreground output is intentional.",
+                    "Run a separate verification command after launch.",
+                ],
+            },
+        },
+    )
+
+
+def _likely_long_running_foreground_reason(command: str) -> str | None:
+    raw = str(command or "").strip()
+    if not raw:
+        return None
+    if _has_detached_or_bounded_marker(raw):
+        return None
+
+    commands = [raw]
+    words = _split_shell_words(raw)
+    if len(words) >= 3 and words[0] in {"bash", "sh", "/bin/bash", "/bin/sh"} and words[1] in {"-c", "-lc"}:
+        commands.append(words[2])
+
+    for candidate in commands:
+        for segment in _split_shell_command_segments(candidate):
+            reason = _likely_long_running_simple_command_reason(segment)
+            if reason is not None:
+                return reason
+    return None
+
+
+def _has_detached_or_bounded_marker(command: str) -> bool:
+    raw = str(command or "").strip()
+    if not raw:
+        return False
+    if raw.endswith("&") and not raw.endswith("&&"):
+        return True
+    lowered = raw.lower()
+    if lowered.startswith("timeout ") or lowered.startswith("/usr/bin/timeout "):
+        return True
+    return any(marker in lowered for marker in _DETACHED_COMMAND_MARKERS)
+
+
+def _likely_long_running_simple_command_reason(command: str) -> str | None:
+    words = _split_shell_words(command)
+    if not words:
+        return None
+    words = _strip_environment_and_wrappers(words)
+    if not words:
+        return None
+
+    executable = Path(words[0]).name.lower()
+    args = [word.lower() for word in words[1:]]
+    if any(arg in _INSPECTION_FLAGS for arg in args):
+        return None
+    if executable in _SERVICE_MANAGER_COMMANDS:
+        return None
+    if executable == "docker":
+        if len(args) >= 2 and args[0] == "logs" and any(arg in _FOLLOW_FLAGS for arg in args[1:]):
+            return "follow_output"
+        if "run" in args and "-d" in args:
+            return None
+        if len(args) >= 3 and args[0] == "compose" and args[1] == "up" and "-d" in args[2:]:
+            return None
+        if len(args) >= 2 and args[0] == "compose" and args[1] == "logs" and any(arg in _FOLLOW_FLAGS for arg in args[2:]):
+            return "follow_output"
+    if executable == "kubectl" and len(args) >= 1 and args[0] == "logs" and any(arg in _FOLLOW_FLAGS for arg in args[1:]):
+        return "follow_output"
+    if executable in {"tail", "journalctl"} and any(arg in _FOLLOW_FLAGS for arg in args):
+        return "follow_output"
+    if executable in _PACKAGE_RUNNERS:
+        if args[:2] == ["run", "dev"] or (args and args[0] in _FOREGROUND_SUBCOMMANDS):
+            return "package_runner_foreground"
+        if executable in {"yarn", "pnpm", "bun"} and args and args[0] == "run" and len(args) > 1 and args[1] in _FOREGROUND_SUBCOMMANDS:
+            return "package_runner_foreground"
+    if executable in {"python", "python3"} and len(args) >= 2 and args[0] == "-m" and args[1] in {"http.server", "uvicorn"}:
+        return "python_module_server"
+    if executable in _FOREGROUND_BINARIES:
+        if executable == "caddy" and args and args[0] == "start":
+            return None
+        if executable == "caddy" and args and args[0] == "reload":
+            return None
+        if args and args[0] in {"run", *list(_FOREGROUND_SUBCOMMANDS)}:
+            return "service_foreground_subcommand"
+        if executable in {"uvicorn", "gunicorn", "redis-server", "http-server", "vite", "webpack-dev-server", "nodemon"}:
+            return "service_foreground_binary"
+    return None
+
+
+def _split_shell_command_segments(command: str) -> list[str]:
+    words = _split_shell_words(command)
+    if not words:
+        return []
+    segments: list[list[str]] = [[]]
+    for word in words:
+        if word in {"&&", "||", ";", "|"}:
+            if segments[-1]:
+                segments.append([])
+            continue
+        segments[-1].append(word)
+    return [" ".join(shlex.quote(part) for part in segment) for segment in segments if segment]
+
+
+def _strip_environment_and_wrappers(words: list[str]) -> list[str]:
+    stripped = list(words)
+    while stripped and "=" in stripped[0] and not stripped[0].startswith("="):
+        key, _value = stripped[0].split("=", 1)
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            break
+        stripped.pop(0)
+    while stripped and Path(stripped[0]).name.lower() in {"sudo", "doas", "env", "command"}:
+        stripped.pop(0)
+        while stripped and stripped[0].startswith("-"):
+            stripped.pop(0)
+    return stripped
+
+
 def _shell_workspace_relative_hint(command: str, cwd: str | None = None) -> str | None:
     raw_command = str(command or "")
     match = re.search(r"(?<![\w/])(/temp(?:/[^\s\"'`]+)*)", raw_command)

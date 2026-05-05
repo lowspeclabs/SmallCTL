@@ -29,8 +29,15 @@ _READ_TOOLS = {
     "ssh_file_read",
     "file_read",
 }
+_PATCH_META_TOOLS = {
+    "artifact_grep",
+    "artifact_print",
+    "log_note",
+    "memory_update",
+}
 _REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
 _ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
+_DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
 
 def _is_ssh_exec_read_command(record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
@@ -40,10 +47,42 @@ def _is_ssh_exec_read_command(record: Any) -> bool:
     return _is_read_only_shell_evidence_action(command)
 
 
+def _record_deterministic_read_failure(harness: Any, record: Any) -> None:
+    if getattr(record, "tool_name", "") != "ssh_file_read":
+        return
+    result = getattr(record, "result", None)
+    if result is None or getattr(result, "success", False):
+        return
+    error = str(getattr(result, "error", "") or "").strip().lower()
+    if "not found" not in error and "no such file" not in error:
+        return
+    args = getattr(record, "args", None)
+    if not isinstance(args, dict):
+        args = {}
+    key = {
+        "tool_name": "ssh_file_read",
+        "host": str(args.get("host") or "").strip(),
+        "user": str(args.get("user") or "").strip(),
+        "path": str(args.get("path") or "").strip(),
+    }
+    if not key["path"]:
+        return
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    failures = scratchpad.get(_DETERMINISTIC_READ_FAILURES_KEY)
+    if not isinstance(failures, list):
+        failures = []
+    failures.append(key)
+    scratchpad[_DETERMINISTIC_READ_FAILURES_KEY] = failures[-16:]
+
+
 def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
     """Return True if the current turn changed actionable state."""
     last_tool_results = getattr(graph_state, "last_tool_results", []) or []
     last_assistant_text = str(getattr(graph_state, "last_assistant_text", "") or "").strip()
+    mutation_required = _current_task_requires_file_mutation(getattr(harness, "state", None))
 
     # 1. Task completion
     for record in last_tool_results:
@@ -97,6 +136,8 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
     # 6. Any other successful non-read, non-mutation, non-exec tool
     #    (shell_exec/ssh_exec are handled above; identical calls are caught by loop guards)
     for record in last_tool_results:
+        if mutation_required and record.tool_name in _PATCH_META_TOOLS:
+            continue
         if record.result.success and record.tool_name not in _READ_TOOLS and record.tool_name not in _MUTATION_TOOLS and record.tool_name not in {"shell_exec", "ssh_exec"}:
             return True
 
@@ -106,6 +147,27 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
             return True
 
     return False
+
+
+def _current_task_requires_file_mutation(state: Any | None) -> bool:
+    if state is None:
+        return False
+    active_intent = str(getattr(state, "active_intent", "") or "").strip()
+    if active_intent in {"requested_file_patch", "requested_write_file"}:
+        return True
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    texts.append(str(getattr(run_brief, "original_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            texts.append(str(handoff.get("effective_task") or ""))
+            texts.append(str(handoff.get("current_goal") or ""))
+    task_text = " ".join(texts).lower()
+    return "patch" in task_text and any(marker in task_text for marker in ("file", ".html", "/var/www", "do not do a direct overwrite"))
 
 
 def _prior_turn_verdict(harness: Any) -> str:
@@ -621,6 +683,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     for record in getattr(graph_state, "last_tool_results", []) or []:
         if record.tool_name in {"artifact_read", "ssh_file_read"} and record.result.success:
             _record_progress_read(harness, record)
+        _record_deterministic_read_failure(harness, record)
         if record.tool_name == "ssh_exec" and record.result.success and _is_ssh_exec_read_command(record):
             _record_progress_read(harness, record)
         if record.tool_name == "ssh_exec":
@@ -642,9 +705,17 @@ def _build_progress_stagnation_nudge(harness: Any) -> str:
     last_action = _last_stalled_action(harness)
     last_action_note = f" Last stalled action: {last_action}." if last_action else ""
     tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
+    mutation_note = ""
+    if _current_task_requires_file_mutation(state):
+        mutation_note = (
+            " For a requested file patch, memory notes, artifact searches, and repeated reads are not progress; "
+            "call `ssh_file_patch` / `ssh_file_replace_between` for a remote file, `file_patch` for a local file, "
+            "or `task_fail(message='...')` with the concrete blocker."
+        )
     return (
         "You have made no actionable progress in the last few turns. "
         f"Use the evidence already visible in context{goal_note}.{tx_note}{last_action_note} "
+        f"{mutation_note} "
         "Perform the next concrete mutation, run a focused verifier, or call "
         "`task_complete(message='...')` if the task is finished. "
         "Do not repeat the same analysis or read operations. "

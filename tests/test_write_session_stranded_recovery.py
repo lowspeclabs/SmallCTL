@@ -17,6 +17,8 @@ from smallctl.graph.write_session_recovery import (
     _invalidate_write_session_stage_artifacts,
     _register_write_session_stage_artifact,
 )
+from smallctl.harness.reflexion_service import ReflexionService
+from smallctl.harness.subtask_ledger_service import SubtaskLedgerService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
 from smallctl.tools.artifact import artifact_read
@@ -95,10 +97,18 @@ class TestWriteSessionSyntaxFailureRepairSource:
         state.write_session = session
         harness = SimpleNamespace(
             state=state,
-            config=SimpleNamespace(failed_local_patch_limit=3),
+            config=SimpleNamespace(
+                failed_local_patch_limit=3,
+                subtask_ledger_enabled=True,
+                reflexion_enabled=True,
+                reflexion_min_failure_severity="warning",
+                reflexion_max_items=5,
+            ),
             log=SimpleNamespace(error=lambda *args, **kwargs: None),
             _runlog=lambda *args, **kwargs: None,
         )
+        harness.subtask_ledger = SubtaskLedgerService(harness)
+        harness.reflexion = ReflexionService(harness)
         broken_content = "def example():\n    return (\n"
 
         result = asyncio.run(
@@ -136,6 +146,57 @@ class TestWriteSessionSyntaxFailureRepairSource:
             message.metadata.get("recovery_kind") == "syntax_error"
             for message in state.recent_messages
         )
+        assert state.failure_events[-1].failure_class == "verifier_failed"
+        assert state.failure_events[-1].source == "write_session"
+        assert state.failure_events[-1].operation_id == "op-broken"
+        assert state.subtask_ledger is not None
+        assert state.subtask_ledger.subtasks[0].failure_classes == ["verifier_failed"]
+        assert state.reflexion_memory[-1].failure_class == "verifier_failed"
+
+    def test_write_session_fallback_records_durable_stall_failure(self, tmp_path):
+        target = tmp_path / "temp" / "fallback.py"
+        state = LoopState(cwd=str(tmp_path))
+        session = new_write_session(
+            session_id="ws_fallback",
+            target_path=str(target),
+            intent="replace_file",
+        )
+        state.write_session = session
+        harness = SimpleNamespace(
+            state=state,
+            config=SimpleNamespace(
+                failed_local_patch_limit=1,
+                subtask_ledger_enabled=True,
+                reflexion_enabled=True,
+                reflexion_min_failure_severity="warning",
+                reflexion_max_items=5,
+            ),
+            log=SimpleNamespace(error=lambda *args, **kwargs: None),
+            _runlog=lambda *args, **kwargs: None,
+        )
+        harness.subtask_ledger = SubtaskLedgerService(harness)
+        harness.reflexion = ReflexionService(harness)
+
+        record = ToolExecutionRecord(
+            operation_id="op-fail",
+            tool_name="file_write",
+            args={"path": str(target), "content": ""},
+            tool_call_id="tc-fail",
+            result=ToolEnvelope(
+                success=False,
+                error="failed to write stage",
+                metadata={"write_session_id": "ws_fallback"},
+            ),
+        )
+
+        asyncio.run(_handle_write_session_outcome(harness, record))
+
+        assert session.status == "fallback"
+        assert state.failure_events[-1].failure_class == "write_session_stall"
+        assert state.failure_events[-1].metadata["recovery_kind"] == "write_session_fallback"
+        assert state.subtask_ledger is not None
+        assert "write_session_stall" in state.subtask_ledger.subtasks[0].failure_classes
+        assert state.reflexion_memory[-1].failure_class == "write_session_stall"
 
 
 class TestStrandedWriteSessionRecordReplay:

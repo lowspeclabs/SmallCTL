@@ -174,6 +174,22 @@ def test_system_prompt_web_research_prefers_result_id_and_real_answer() -> None:
     assert "do not finish with only 'found N results'" in prompt
 
 
+def test_system_prompt_guards_header_only_tables_and_inline_tool_xml() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "Check docker state on a remote host"
+
+    prompt = build_system_prompt(
+        state,
+        "execute",
+        available_tool_names=["ssh_exec", "task_complete"],
+    )
+
+    assert "only column headers and no data rows" in prompt
+    assert "never infer rows with blank fields" in prompt
+    assert "same turn that you formulate the answer" in prompt
+    assert "never XML or angle-bracket markup inside thinking" in prompt
+
+
 def test_task_complete_is_blocked_until_acceptance_is_met() -> None:
     state = _make_state()
     state.run_brief.acceptance_criteria = ["The script runs", "The test passes"]
@@ -683,10 +699,35 @@ def test_file_write_patch_existing_auto_strategy_requires_explicit_choice(tmp_pa
     assert "replace_strategy='append'" in result["error"]
     assert "file_read(path='" in result["error"]
     assert "target path is still the canonical destination" in result["error"]
-    assert "Do not assume earlier chunks were lost" in result["error"]
+    assert "No sections are committed yet" in result["error"]
     assert result["metadata"]["error_kind"] == "patch_existing_requires_explicit_replace_strategy"
     assert result["metadata"]["staged_only"] is True
     assert result["metadata"]["write_session_id"] == session.write_session_id
+
+
+def test_file_write_patch_existing_first_choice_rejects_append_strategy(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "session.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    session = _make_open_write_session(target, intent="patch_existing")
+    state.write_session = session
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="beta\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id=session.write_session_id,
+            section_name="body",
+            replace_strategy="append",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "patch_existing_requires_explicit_replace_strategy"
+    assert result["metadata"]["replace_strategy"] == "append"
+    assert "No sections are committed yet" in result["error"]
 
 
 def test_pending_tool_call_normalizes_file_patch_session_id_alias() -> None:
@@ -958,6 +999,7 @@ def test_interpret_model_output_tags_missing_task_complete_nudge_as_recovery_mes
     assert state.recent_messages
     assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
     assert state.recent_messages[-1].metadata["recovery_kind"] == "missing_task_complete"
+    assert "in this same turn" in state.recent_messages[-1].content
 
 
 def test_file_read_marks_cap_limited_reads_as_partial(tmp_path: Path) -> None:
@@ -2243,6 +2285,7 @@ def test_system_prompt_surfaces_small_model_tool_routing_card() -> None:
     assert "`shell_exec` is local-only." in prompt
     assert "Use exactly this SSH shape" in prompt
     assert "Never send both `host` and `target`." in prompt
+    assert "When connecting as `root`, do not prefix the remote command with `sudo`" in prompt
     assert 'SSH_EXEC EXAMPLE: `{"host":"192.168.1.63","user":"root","password":"...","command":"whoami"}`.' in prompt
     assert 'INVALID SSH_EXAMPLE: do not send `{"host":"192.168.1.63","target":"root@192.168.1.63",...}`.' in prompt
     assert "do not rely on retrieved historical notes alone" in prompt
@@ -2534,7 +2577,7 @@ def test_patch_existing_first_choice_failure_injects_stage_read_nudge(tmp_path: 
     assert "file_read(path='" in message.content
     assert "artifact_read(artifact_id='ws-1__stage')" in message.content
     assert "file_patch" in message.content
-    assert "Do not assume earlier chunks were lost" in message.content
+    assert "No sections are committed yet" in message.content
 
 
 def test_patch_existing_first_choice_failure_autocontinues_with_file_read(tmp_path: Path) -> None:
@@ -2795,8 +2838,9 @@ def test_dispatch_tools_blocks_ambiguous_write_after_patch_existing_stage_read(t
     assert state.recent_messages
     message = state.recent_messages[-1]
     assert message.metadata["recovery_kind"] == "schema_validation"
-    assert "must choose one explicit repair shape" in message.content
+    assert "requires one explicit same-target repair shape" in message.content
     assert "replace_strategy='overwrite'" in message.content
+    assert "replace_strategy='append'" in message.content
     assert state.scratchpad["_patch_existing_stage_read_contract"]["session_id"] == "ws-stage"
 
 
@@ -3316,6 +3360,247 @@ def test_task_complete_verifier_failure_autocontinues_with_loop_status() -> None
         for message in state.recent_messages
     )
     assert any(event == "task_complete_verifier_loop_status_autocontinue" for event, _message, _data in runlog_events)
+
+
+def test_task_complete_remote_mutation_block_autocontinues_with_ssh_file_read() -> None:
+    state = _make_state()
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-remote-delete",
+            tool_name="task_complete",
+            args={"message": "done"},
+            tool_call_id="tool-remote-delete",
+            result=ToolEnvelope(
+                success=False,
+                error=(
+                    "Cannot complete the task while a raw `ssh_exec` remote file deletion still needs meaningful "
+                    "verification. Next required verifier: `ssh_file_read(host='192.168.1.89', user='root', "
+                    "path='/var/www/demo-site')`."
+                ),
+                metadata={
+                    "reason": "remote_mutation_requires_verification",
+                    "next_required_action": {
+                        "tool_names": ["ssh_file_read"],
+                        "required_arguments": {
+                            "host": "192.168.1.89",
+                            "user": "root",
+                            "path": "/var/www/demo-site",
+                        },
+                    },
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "ssh_file_read"
+    assert pending.args == {
+        "host": "192.168.1.89",
+        "user": "root",
+        "path": "/var/www/demo-site",
+    }
+    assert any(
+        getattr(message, "metadata", {}).get("recovery_kind")
+        == "task_complete_remote_mutation_verifier_autocontinue"
+        for message in state.recent_messages
+    )
+    assert any(
+        event == "task_complete_remote_mutation_verifier_autocontinue"
+        for event, _message, _data in runlog_events
+    )
+
+
+def test_task_complete_remote_glob_deletion_block_autocontinues_with_ssh_exec() -> None:
+    state = _make_state()
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-remote-glob-delete",
+            tool_name="task_complete",
+            args={"message": "done"},
+            tool_call_id="tool-remote-glob-delete",
+            result=ToolEnvelope(
+                success=False,
+                error="Cannot complete the task while a raw `ssh_exec` remote glob deletion still needs meaningful verification.",
+                metadata={
+                    "reason": "remote_mutation_requires_verification",
+                    "next_required_action": {
+                        "tool_names": ["ssh_exec"],
+                        "required_arguments": {
+                            "host": "192.168.1.89",
+                            "user": "root",
+                            "command": "find /var/www -mindepth 1 -maxdepth 1 -print -quit",
+                        },
+                    },
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "ssh_exec"
+    assert pending.args == {
+        "host": "192.168.1.89",
+        "user": "root",
+        "command": "find /var/www -mindepth 1 -maxdepth 1 -print -quit",
+    }
+    assert any(
+        getattr(message, "metadata", {}).get("recovery_kind")
+        == "task_complete_remote_mutation_verifier_autocontinue"
+        for message in state.recent_messages
+    )
+    assert any(
+        event == "task_complete_remote_mutation_verifier_autocontinue"
+        for event, _message, _data in runlog_events
+    )
+
+
+def test_auto_remote_mutation_verifier_result_finalizes_completion() -> None:
+    state = _make_state()
+    state.scratchpad["_task_complete_remote_mutation_verifier_pending_complete"] = {
+        "tool_name": "ssh_file_read",
+        "args": {
+            "host": "192.168.1.89",
+            "user": "root",
+            "path": "/etc/systemd/system/docker.service",
+        },
+        "message": "Docker fully uninstalled.",
+        "tool_call_id": "tool-complete",
+        "operation_id": "op-complete",
+    }
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-verifier",
+            tool_name="ssh_file_read",
+            args={
+                "host": "192.168.1.89",
+                "user": "root",
+                "path": "/etc/systemd/system/docker.service",
+            },
+            tool_call_id="tool-verifier",
+            result=ToolEnvelope(
+                success=False,
+                error="Remote file not found",
+                metadata={
+                    "host": "192.168.1.89",
+                    "path": "/etc/systemd/system/docker.service",
+                    "error_kind": "file_not_found",
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == LoopRoute.FINALIZE
+    assert state.scratchpad["_task_complete"] is True
+    assert state.scratchpad["_task_complete_message"] == "Docker fully uninstalled."
+    assert "_task_complete_remote_mutation_verifier_pending_complete" not in state.scratchpad
+    assert graph_state.final_result["status"] == "completed"
+    assert any(
+        event == "task_complete_remote_mutation_verifier_autoaccepted"
+        for event, _message, _data in runlog_events
+    )
+
+
+def test_auto_remote_mutation_verifier_does_not_finalize_failed_readback() -> None:
+    state = _make_state()
+    state.scratchpad["_task_complete_remote_mutation_verifier_pending_complete"] = {
+        "tool_name": "ssh_file_read",
+        "args": {
+            "host": "192.168.1.89",
+            "path": "/etc/systemd/system/docker.service",
+        },
+        "message": "Docker fully uninstalled.",
+    }
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-verifier",
+            tool_name="ssh_file_read",
+            args={
+                "host": "192.168.1.89",
+                "path": "/etc/systemd/system/docker.service",
+            },
+            tool_call_id="tool-verifier",
+            result=ToolEnvelope(
+                success=False,
+                error="Permission denied",
+                metadata={
+                    "host": "192.168.1.89",
+                    "path": "/etc/systemd/system/docker.service",
+                    "error_kind": "permission_denied",
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert "_task_complete" not in state.scratchpad
+    assert "_task_complete_remote_mutation_verifier_pending_complete" in state.scratchpad
 
 
 def test_task_complete_repair_phase_block_autocontinues_with_loop_status() -> None:

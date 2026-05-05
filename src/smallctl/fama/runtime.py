@@ -14,16 +14,21 @@ from .detectors import (
     detect_backend_stream_halt,
     detect_bad_tool_args,
     detect_context_drift,
+    detect_empty_write,
     detect_repeated_tool_loop,
     detect_remote_local_confusion,
+    detect_verifier_failure_from_result,
     detect_tool_output_misread,
+    detect_wrong_path,
     detect_write_session_stall,
     record_bad_tool_arg_failure,
 )
 from .judge import maybe_run_llm_judge
+from .reflexion_bridge import record_fama_failure_event
 from .router import route_signal
 from .signals import FamaSignal, current_step, get_fama_state, push_fama_signal
 from .state import activate_mitigations, active_mitigations, clear_mitigations, expire_mitigations
+from ..recovery_metrics import increment_metric, increment_metric_bucket
 
 logger = logging.getLogger("smallctl.fama")
 
@@ -36,7 +41,6 @@ async def observe_tool_result(
     arguments: dict[str, Any] | None = None,
     operation_id: str | None = None,
 ) -> None:
-    del arguments
     harness = getattr(service, "harness", None)
     state = getattr(harness, "state", None)
     config = getattr(harness, "config", None)
@@ -71,6 +75,23 @@ async def observe_tool_result(
         if early_stop is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=early_stop, dedupe=False)
 
+        verifier_failure = None
+        if str(tool_name or "").strip() != "task_complete":
+            verifier_failure = detect_verifier_failure_from_result(
+                state,
+                tool_name=tool_name,
+                result=result,
+                operation_id=operation_id,
+            )
+        if verifier_failure is not None:
+            await _handle_observed_signal(
+                harness,
+                state=state,
+                config=config,
+                signal=verifier_failure,
+                dedupe=True,
+            )
+
         record_bad_tool_arg_failure(state, tool_name=tool_name, result=result)
         bad_args = detect_bad_tool_args(
             state,
@@ -90,6 +111,16 @@ async def observe_tool_result(
         if output_misread is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=output_misread, dedupe=True)
 
+        empty_write = detect_empty_write(
+            state,
+            tool_name=tool_name,
+            result=result,
+            arguments=arguments,
+            operation_id=operation_id,
+        )
+        if empty_write is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=empty_write, dedupe=True)
+
         remote_confusion = detect_remote_local_confusion(
             state,
             tool_name=tool_name,
@@ -98,6 +129,15 @@ async def observe_tool_result(
         )
         if remote_confusion is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=remote_confusion, dedupe=True)
+
+        wrong_path = detect_wrong_path(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if wrong_path is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=wrong_path, dedupe=True)
     except Exception as exc:
         logger.warning("FAMA observe failed: %s", exc)
         _runlog(
@@ -148,6 +188,13 @@ def _handle_signal(
         return False
     push_fama_signal(state, signal, window=signal_window(config))
     _mark_signature_seen(state, _signal_signature(signal))
+    increment_metric_bucket(state, "fama_signals_by_kind", signal.kind.value)
+    if signal.failure_class == "repeated_action" or signal.kind.value == "looping":
+        increment_metric(state, "repeated_action_count")
+    try:
+        record_fama_failure_event(harness, state=state, signal=signal)
+    except Exception as exc:
+        logger.warning("FAMA recovery bridge failed: %s", exc)
     _runlog(
         harness,
         "fama_signal_detected",
@@ -157,6 +204,7 @@ def _handle_signal(
         source=signal.source,
         step=signal.step,
         tool_name=signal.tool_name,
+        failure_class=signal.failure_class,
     )
     if signal.severity >= 2:
         _append_context_invalidation(state, signal)

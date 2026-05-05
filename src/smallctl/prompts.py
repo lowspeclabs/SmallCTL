@@ -108,10 +108,12 @@ def build_system_prompt(
             "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
             "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
             "TERMINAL TOOL FORMAT: When the task is complete, emit the `task_complete` JSON tool call directly. Do not write `task_complete(message='...')` in chat text or Markdown. ",
+            "TERMINAL TOOL FORMAT: If you have enough evidence to answer, call `task_complete` in the same turn that you formulate the answer. Do not send answer-only chat and wait for a later nudge. ",
             "CONCISENESS: NEVER re-type detailed tool outputs (like full directory listings or file contents) in your conversational chat. ",
             "CONCISENESS: Summarize findings in 1-2 sentences in chat, then call `task_complete(message='...')` with the definitive answer. ",
             "STRICT: No hallucinations. Do not add descriptions or metadata (like 'Python project config') to file lists unless the tool returned them. ",
-            "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. These are FORBIDDEN. ",
+            "STRICT: If tabular CLI output contains only column headers and no data rows, say `None found` or `empty result`; never infer rows with blank fields. ",
+            "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. These are FORBIDDEN. Tool calls must be top-level JSON function calls in the assistant message, never XML or angle-bracket markup inside thinking or reasoning text. If you mention a command in thinking, still emit the actual tool call as proper JSON afterwards. ",
             f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
             f"Contract phase: {state.contract_phase()}. ",
             f"Phase contract focus: {contract.focus}. ",
@@ -138,11 +140,15 @@ def build_system_prompt(
             "Use `file_patch` for small exact edits when you know the exact target text. "
             "Use `ast_patch` when the edit is easier to describe by function, class, import, call, argument, or dataclass-field structure. "
             "For localized edits to an existing file, prefer `file_patch` or `ast_patch` over rewriting the whole file with `file_write`. "
+            "PATCH VERBATIM RULE: When using `file_patch` or `ssh_file_patch`, copy the `target_text` verbatim from the most recent `file_read` or `ssh_file_read` output or artifact. "
+            "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. "
             "When using `file_write`, include these parameters: "
+            "`content`: REQUIRED. This must be a string containing the actual file content you want to write. Do not omit this field. Do not use `content_preview`, `content_bytes`, `content_chars`, or `content_sha256` as substitutes—the harness only reads the literal `content` field. "
             "`write_session_id`: Use the ID provided by the harness. "
             "`section_name` or `section_id`: A descriptive name for the current chunk (e.g., 'imports'). "
             "`section_role`: Optional role label for the chunk. "
             "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
+            "`replace_strategy`: REQUIRED enum: 'append' or 'overwrite'. Omit only when the harness explicitly tracks the mode from session metadata. "
             "When resuming an active session, prefer `file_write` for chunk continuation; the harness will track append/replace behavior from the session metadata. "
             "If you need a narrow repair inside the staged copy, prefer `file_patch` for exact text or `ast_patch` for structural edits. "
             "The target path is the canonical destination; the staged copy is for read/verify context while the session is active. "
@@ -150,8 +156,10 @@ def build_system_prompt(
             "If you rely on `artifact_read` instead, keep paging until you have covered 100% of the current staged artifact before overwriting from memory. "
             "Do not assume earlier chunks were lost and do not rewrite the whole file from memory unless you have reread the staged copy. "
             "During local repair with `file_write`, keep the same session and prefer `replace_strategy='overwrite'` so you repair the active section cleanly instead of appending duplicate code. "
+            "During a `patch_existing` session with no committed sections yet, the first same-target `file_write` MUST include `replace_strategy='overwrite'`. "
+            "Do not use `replace_strategy='auto'`; the only valid explicit values are 'append' and 'overwrite'. "
             "Complete the entire session before moving to other tasks or verification. ",
-            "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. ",
+            "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. If you have sufficient evidence to answer, call `task_complete` in the same turn as your final answer. ",
             "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
             f"Once your objective is met, stop exploring and call task_complete(message='...').",
         ]
@@ -236,6 +244,10 @@ def build_system_prompt(
         )
     if state.write_session:
         session = state.write_session
+        patch_existing_first_choice = (
+            str(session.write_session_intent or "").strip().lower() == "patch_existing"
+            and not session.write_sections_completed
+        )
         recovery_bits = [
             f"session={session.write_session_id}",
             f"mode={session.write_session_mode}",
@@ -256,7 +268,9 @@ def build_system_prompt(
             recovery_bits.append("pending_finalize=yes")
         else:
             recovery_bits.append("pending_finalize=no")
-        if session.write_next_section:
+        if patch_existing_first_choice:
+            recovery_bits.append("next_action=choose explicit patch_existing first repair")
+        elif session.write_next_section:
             recovery_bits.append(f"next_action=continue section {session.write_next_section}")
         elif session.write_current_section:
             recovery_bits.append(f"next_action=finish section {session.write_current_section}")
@@ -275,10 +289,28 @@ def build_system_prompt(
                 suffix = " [truncated]" if clipped else ""
                 verifier_bits.append(f"output={verifier_output}{suffix}")
             recovery_bits.append("last_verifier=" + " | ".join(verifier_bits))
+        if patch_existing_first_choice:
+            recovery_guidance = (
+                f"No sections are committed yet for this `patch_existing` session. First recover the current staged content with "
+                f"`file_read(path='{session.write_target_path}')` or `artifact_read(artifact_id='{session.write_session_id}__stage')`, "
+                "then choose exactly one same-target repair shape: `file_patch` for a narrow exact edit, `ast_patch` for a narrow structural edit, "
+                "or `file_write` with `replace_strategy='overwrite'` to replace the staged file. Do not continue chunked authoring with an implicit "
+                "`file_write`/`file_append` first chunk, and do not use `replace_strategy='auto'`."
+            )
+        else:
+            recovery_guidance = (
+                f"Continue from the active section instead of restarting the file. Resume with `file_write` plus the active session metadata for chunk continuation, "
+                "or use `file_patch` for a narrow exact edit inside the staged copy, or `ast_patch` for a narrow structural edit. If prior chunks are not fully visible "
+                f"because previews were truncated or compacted, recover the current staged content first with `file_read(path='{session.write_target_path}')` or "
+                f"`artifact_read(artifact_id='{session.write_session_id}__stage')`. If you use `artifact_read` for the staged artifact, keep paging `start_line` forward "
+                "until you have covered 100% of the current staged content before overwriting from memory. The staging path is for read/verify only; the target path is "
+                "the real write destination. Do not assume the chunks were lost or rewrite the whole file from memory unless you intentionally reread the staged copy "
+                "and then choose `replace_strategy='overwrite'`."
+            )
         parts.append(
             "\n\n### WRITE RECOVERY\n"
             + "\n".join(f"- {item}" for item in recovery_bits)
-            + f"\nContinue from the active section instead of restarting the file. Resume with `file_write` plus the active session metadata for chunk continuation, or use `file_patch` for a narrow exact edit inside the staged copy, or `ast_patch` for a narrow structural edit. If prior chunks are not fully visible because previews were truncated or compacted, recover the current staged content first with `file_read(path='{session.write_target_path}')` or `artifact_read(artifact_id='{session.write_session_id}__stage')`. If you use `artifact_read` for the staged artifact, keep paging `start_line` forward until you have covered 100% of the current staged content before overwriting from memory. The staging path is for read/verify only; the target path is the real write destination. Do not assume the chunks were lost or rewrite the whole file from memory unless you intentionally reread the staged copy and then choose `replace_strategy='overwrite'`."
+            + f"\n{recovery_guidance}"
         )
     loop_guard_prompt = build_loop_guard_prompt(state)
     if loop_guard_prompt:
@@ -330,6 +362,8 @@ def build_system_prompt(
                     "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available. "
                     "Use exactly this SSH shape: `ssh_exec(host='192.168.1.63', user='root', password='...', command='...')`. "
                     "Never send both `host` and `target`. Do not omit `host`. "
+                    "When connecting as `root`, do not prefix the remote command with `sudo`; run the command directly. "
+                    "For remote services or watch/follow commands, do not run a foreground command that is expected to keep running; use a service manager, detached/background launch, or a bounded `timeout ...` probe, then verify separately. "
                     "If the user explicitly asks to rerun, recheck, or confirm live, do not rely on retrieved historical notes alone; issue a fresh `ssh_exec` unless the tool is unavailable or blocked. "
                     "Do not infer remote file, package, or service absence from local shell output, local filesystem paths, or stale artifacts; strong remote claims require fresh `ssh_exec` evidence from that host."
                 )
@@ -337,7 +371,9 @@ def build_system_prompt(
                     parts.append(
                         "REMOTE FILES: Prefer typed SSH file tools over raw `ssh_exec` for remote file reads and edits. "
                         "Use `ssh_file_read` instead of cat/head/sed reads, `ssh_file_write` for full remote writes, "
-                        "`ssh_file_patch` for exact text replacement, and `ssh_file_replace_between` for multiline bounded blocks such as `<style>...</style>`."
+                        "`ssh_file_patch` for exact text replacement, and `ssh_file_replace_between` for multiline bounded blocks such as `<style>...</style>`. "
+                        "REMOTE PATCH VERBATIM RULE: When using `ssh_file_patch`, copy the `target_text` verbatim from the most recent `ssh_file_read` output or artifact. "
+                        "Do not reconstruct target text from memory or previews. If the remote file may have changed since your last read, re-read it immediately before patching."
                     )
                 if is_small_model_name(state.scratchpad.get("_model_name")):
                     parts.append(

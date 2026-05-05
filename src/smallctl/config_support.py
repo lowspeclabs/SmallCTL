@@ -175,6 +175,15 @@ def _env_config() -> dict[str, Any]:
         "fama_capsule_token_budget": env_or_dotenv(f"{ENV_PREFIX}FAMA_CAPSULE_TOKEN_BUDGET"),
         "fama_llm_judge_enabled": env_or_dotenv(f"{ENV_PREFIX}FAMA_LLM_JUDGE_ENABLED"),
         "fama_llm_judge_min_severity": env_or_dotenv(f"{ENV_PREFIX}FAMA_LLM_JUDGE_MIN_SEVERITY"),
+        "reflexion_enabled": env_or_dotenv(f"{ENV_PREFIX}REFLEXION_ENABLED"),
+        "reflexion_max_items": env_or_dotenv(f"{ENV_PREFIX}REFLEXION_MAX_ITEMS"),
+        "reflexion_inject_top_k": env_or_dotenv(f"{ENV_PREFIX}REFLEXION_INJECT_TOP_K"),
+        "reflexion_persist_cross_task": env_or_dotenv(f"{ENV_PREFIX}REFLEXION_PERSIST_CROSS_TASK"),
+        "reflexion_min_failure_severity": env_or_dotenv(f"{ENV_PREFIX}REFLEXION_MIN_FAILURE_SEVERITY"),
+        "subtask_ledger_enabled": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_LEDGER_ENABLED"),
+        "subtask_max_active": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_ACTIVE"),
+        "subtask_max_history": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_HISTORY"),
+        "subtask_inject_completed_limit": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_INJECT_COMPLETED_LIMIT"),
     }
     cfg = {k: v for k, v in raw.items() if v not in (None, "")}
     if "tool_profiles" in cfg:
@@ -219,6 +228,9 @@ def _env_config() -> dict[str, Any]:
         "fama_enabled",
         "fama_done_gate_on_failure",
         "fama_llm_judge_enabled",
+        "reflexion_enabled",
+        "reflexion_persist_cross_task",
+        "subtask_ledger_enabled",
     ):
         if key in cfg:
             cfg[key] = _to_bool(cfg[key])
@@ -267,6 +279,11 @@ def _env_config() -> dict[str, Any]:
         "fama_signal_window",
         "fama_capsule_token_budget",
         "fama_llm_judge_min_severity",
+        "reflexion_max_items",
+        "reflexion_inject_top_k",
+        "subtask_max_active",
+        "subtask_max_history",
+        "subtask_inject_completed_limit",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])

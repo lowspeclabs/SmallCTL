@@ -110,7 +110,7 @@ def register_content_tools(
             ),
             make_registration(
                 name="artifact_grep",
-                description="Search for a pattern within an artifact and return matching lines with line numbers. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
+                description="Search for a literal substring within an artifact and return matching lines with line numbers. This is not regex; search separately for alternatives such as '<button', '</div>', and '</p>'. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
                 schema={
                     "type": "object",
                     "properties": {

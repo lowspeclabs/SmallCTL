@@ -55,6 +55,7 @@ from .tool_call_parser_support import (
     _placeholder_token,
     _placeholder_value_looks_generic,
     _record_tool_attempt,
+    _undo_tool_attempt_if_cached,
     _repeat_loop_limits,
     _requested_artifact_read_target,
     _requested_file_read_range,

@@ -95,6 +95,7 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
         return None
 
     from ..tools.fs import infer_write_session_intent, new_write_session_id
+    from ..prompts import _is_write_first_task
     from .tool_outcomes import _register_write_session_stage_artifact
     from .write_session_health import (
         _abandon_staged_artifact,
@@ -104,10 +105,13 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     )
 
     suggestions = _suggested_chunk_sections(target)
+    intent = infer_write_session_intent(target, getattr(harness.state, "cwd", None))
+    if intent == "patch_existing" and _is_write_first_task(harness.state):
+        intent = "replace_file"
     session = new_write_session(
         session_id=new_write_session_id(),
         target_path=target,
-        intent=infer_write_session_intent(target, getattr(harness.state, "cwd", None)),
+        intent=intent,
         mode="chunked_author",
         suggested_sections=suggestions,
         next_section=suggestions[0] if suggestions else "",

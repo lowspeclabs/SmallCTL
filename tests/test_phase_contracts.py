@@ -128,6 +128,28 @@ def test_write_session_contract_is_explicit_in_system_prompt_and_working_memory(
     assert "Keep this brief" in prompt_content
 
 
+def test_patch_existing_first_choice_prompt_requires_explicit_repair_shape() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Update src/app.py"
+    state.working_memory.current_goal = "Update src/app.py"
+    state.write_session = WriteSession(
+        write_session_id="ws-1",
+        write_target_path="src/app.py",
+        write_session_intent="patch_existing",
+        write_session_mode="chunked_author",
+        write_staging_path="/tmp/.smallctl/write_sessions/ws-1-stage.py",
+        write_next_section="implementation",
+    )
+
+    system_prompt = build_system_prompt(state, "author")
+
+    assert "next_action=choose explicit patch_existing first repair" in system_prompt
+    assert "next_action=continue section implementation" not in system_prompt
+    assert "No sections are committed yet" in system_prompt
+    assert "replace_strategy='overwrite'" in system_prompt
+    assert "replace_strategy='auto'" in system_prompt
+
+
 def test_prompt_context_sanitizes_legacy_tool_intent_labels() -> None:
     state = LoopState(cwd="/tmp")
     state.run_brief.original_task = "Inspect the remote server"
@@ -236,7 +258,7 @@ def test_registry_exposes_file_patch_tool() -> None:
 
     assert spec is not None
     assert spec.risk == "high"
-    assert spec.allowed_modes == {"chat", "loop"}
+    assert spec.allowed_modes == {"chat", "loop", "planning"}
     assert spec.schema["required"] == ["path", "target_text", "replacement_text"]
 
 
@@ -251,7 +273,7 @@ def test_registry_exposes_ast_patch_tool() -> None:
 
     assert spec is not None
     assert spec.risk == "high"
-    assert spec.allowed_modes == {"chat", "loop"}
+    assert spec.allowed_modes == {"chat", "loop", "planning"}
     assert spec.schema["required"] == ["path", "language", "operation", "target"]
 
 

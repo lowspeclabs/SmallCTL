@@ -161,17 +161,17 @@ def handle_file_write_session(
         if (
             session.write_session_intent == "patch_existing"
             and not previous_sections
-            and strategy == "auto"
+            and strategy in {"auto", "append"}
         ):
             return fail(
                 "Patch-existing write sessions need an explicit first-chunk choice. "
                 "The target path is still the canonical destination, but the staged copy is the active read/verify source. "
                 "Use `file_patch` for a narrow exact edit inside the staged copy, or `ast_patch` for a narrow structural edit, "
-                "`replace_strategy='overwrite'` to replace the staged file, or "
-                "`replace_strategy='append'` to add a new tracked section. "
+                "or `file_write` with `replace_strategy='overwrite'` to replace the staged file. "
                 "If earlier chunks are not fully visible in local context, call "
                 f"`file_read(path='{path}')` first; during an active write session that reads from the staged copy. "
-                "Do not assume earlier chunks were lost or rewrite the whole staged file from memory.",
+                "No sections are committed yet, so do not send another implicit first-chunk `file_write`/`file_append` "
+                "with `replace_strategy='auto'` or `replace_strategy='append'`.",
                 metadata={
                     "path": str(target),
                     "staging_path": str(staging_path),
@@ -263,6 +263,8 @@ def handle_file_write_session(
         finalized=False,
         encoding=encoding,
     )
+    if final_chunk:
+        status_snapshot["finalized"] = "pending"
     status_block = format_write_session_status_block(status_snapshot)
 
     msg = f"Section `{normalized_section_name}` written to `{path}`."

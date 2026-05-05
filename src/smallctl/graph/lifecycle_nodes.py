@@ -188,7 +188,11 @@ async def resume_loop_run(
     human_input: str,
 ) -> None:
     harness = deps.harness
-    pending = harness.state.pending_interrupt
+    get_pending = getattr(harness, "get_pending_interrupt", None)
+    if callable(get_pending):
+        pending = get_pending() or {}
+    else:
+        pending = harness.state.pending_interrupt or {}
     if not isinstance(pending, dict) or not pending:
         graph_state.final_result = harness._failure(
             "No pending interrupt to resume.",
@@ -367,7 +371,11 @@ async def resume_planning_run(
     human_input: str,
 ) -> None:
     harness = deps.harness
-    pending = harness.state.pending_interrupt
+    get_pending = getattr(harness, "get_pending_interrupt", None)
+    if callable(get_pending):
+        pending = get_pending() or {}
+    else:
+        pending = harness.state.pending_interrupt or {}
     if not isinstance(pending, dict) or not pending:
         graph_state.final_result = harness._failure(
             "No pending planning interrupt to resume.",

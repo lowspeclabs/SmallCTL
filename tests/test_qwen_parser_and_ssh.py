@@ -806,6 +806,29 @@ def test_ssh_exec_retries_when_accept_new_is_rejected() -> None:
     assert "StrictHostKeyChecking=no" in second_command
 
 
+def test_ssh_exec_blocks_likely_foreground_service_command_before_launch() -> None:
+    state = LoopState(cwd="/tmp")
+    create_process = AsyncMock()
+
+    with patch.object(network, "create_process", create_process):
+        result = asyncio.run(
+            network.run_ssh_command(
+                host="192.168.1.89",
+                user="root",
+                command="caddy run /etc/caddy/Caddyfile",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "long_running_foreground_command"
+    assert result["metadata"]["host"] == "192.168.1.89"
+    assert result["metadata"]["foreground_detection"] == "service_foreground_subcommand"
+    assert "separate health check" in result["error"]
+    create_process.assert_not_awaited()
+
+
 def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
@@ -1413,3 +1436,254 @@ def test_parse_ssh_exec_args_from_shell_command_recovers_connection_probe() -> N
         "user": "root",
         "command": "whoami",
     }
+
+
+def test_normalize_tool_request_repairs_nested_ssh_exec_arguments() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and cleanup nginx'
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "arguments": {"arg": "#!/bin/bash\necho hello"},
+            "command": "#!/bin/bash\necho hello",
+            "name": "nginx_cleanup_script",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["command"] == "#!/bin/bash\necho hello"
+    assert args["host"] == "192.168.1.89"
+    assert args["user"] == "root"
+    assert args["password"] == "Temp@Pass"
+    assert "name" not in args
+    assert "arguments" not in args
+    assert metadata.get("repaired_ssh_exec_nested_args") is True
+    assert metadata.get("repaired_ssh_exec_hallucinated_name") is True
+
+
+def test_normalize_tool_request_recovers_host_from_task_context() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = 'ssh root@192.168.1.99 with password "Secret123" and install docker'
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {"command": "whoami"},
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["host"] == "192.168.1.99"
+    assert args["user"] == "root"
+    assert args["password"] == "Secret123"
+    assert metadata.get("recovered_ssh_host") == "192.168.1.99"
+
+
+def test_normalize_tool_request_recovers_host_from_at_host_task_context() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = "deploy to admin@10.0.0.5 via ssh"
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {"command": "uptime"},
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["host"] == "10.0.0.5"
+    assert args["user"] == "admin"
+
+
+def test_store_verifier_verdict_shows_missing_host_placeholder() -> None:
+    from smallctl.harness.tool_result_verification import _store_verifier_verdict
+    from smallctl.models.tool_result import ToolEnvelope
+
+    state = LoopState(cwd=".")
+    result = ToolEnvelope(
+        success=False,
+        error="SSH target requires either `target` or `host`.",
+        metadata={"command": "rm -rf /etc/nginx", "reason": "invalid_ssh_target"},
+    )
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"command": "rm -rf /etc/nginx"},
+    )
+
+    assert verdict is not None
+    assert verdict["target"] == "(missing host) :: rm -rf /etc/nginx"
+    assert verdict["command"] == "rm -rf /etc/nginx"
+
+
+def test_build_repair_recovery_message_includes_ssh_schema_hint() -> None:
+    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.state import ToolExecutionRecord
+    from smallctl.models.tool_result import ToolEnvelope
+
+    harness = SimpleNamespace(
+        state=LoopState(cwd="."),
+    )
+    harness.state.stagnation_counters = {"repeat_command": 2}
+    harness.state.repair_cycle_id = "rc-test"
+    record = ToolExecutionRecord(
+        operation_id="op1",
+        tool_name="ssh_exec",
+        args={"arguments": {"arg": "whoami"}, "command": "whoami", "name": "bad"},
+        tool_call_id="call_1",
+        result=ToolEnvelope(
+            success=False,
+            error="SSH target requires either `target` or `host`.",
+            metadata={"reason": "invalid_ssh_target"},
+        ),
+    )
+    message = _build_repair_recovery_message(harness, record)
+
+    assert "Repair loop stalled" in message
+    assert "ssh_exec" in message
+    assert "Required ssh_exec fields" in message
+    assert "target='root@192.168.1.89'" in message
+
+
+def test_build_repair_recovery_message_no_schema_hint_when_args_valid() -> None:
+    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.state import ToolExecutionRecord
+    from smallctl.models.tool_result import ToolEnvelope
+
+    harness = SimpleNamespace(
+        state=LoopState(cwd="."),
+    )
+    harness.state.stagnation_counters = {"repeat_command": 2}
+    record = ToolExecutionRecord(
+        operation_id="op1",
+        tool_name="ssh_exec",
+        args={"target": "root@192.168.1.89", "command": "whoami"},
+        tool_call_id="call_1",
+        result=ToolEnvelope(
+            success=False,
+            error="Permission denied",
+            metadata={},
+        ),
+    )
+    message = _build_repair_recovery_message(harness, record)
+
+    assert "Repair loop stalled" in message
+    assert "Required ssh_exec fields" not in message
+
+
+def test_normalize_tool_request_repairs_patch_argument_aliases() -> None:
+    state = LoopState(cwd=".")
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "file_patch",
+        {"path": "foo.py", "source": "old", "dest": "new"},
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "file_patch"
+    assert args["target_text"] == "old"
+    assert args["replacement_text"] == "new"
+    assert "source" not in args
+    assert "dest" not in args
+    assert metadata["argument_alias_repair"] == {"source": "target_text", "dest": "replacement_text"}
+
+
+def test_normalize_tool_request_does_not_clobber_canonical_patch_args() -> None:
+    state = LoopState(cwd=".")
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "file_patch",
+        {"path": "foo.py", "target_text": "old", "replacement_text": "new"},
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert args["target_text"] == "old"
+    assert args["replacement_text"] == "new"
+    assert "argument_alias_repair" not in metadata
+
+
+def test_parse_tool_calls_recovers_raw_parameter_tags_for_patch_tools() -> None:
+    stream = SimpleNamespace(
+        assistant_text=(
+            "<tool_call>\n"
+            "<function=file_patch>\n"
+            "<path>foo.py</path>\n"
+            "<source>old</source>\n"
+            "<dest>new</dest>\n"
+            "</function>\n"
+            "</tool_call>\n"
+        ),
+        thinking_text="",
+        tool_calls=[],
+    )
+    harness = SimpleNamespace(
+        registry=SimpleNamespace(names=lambda: {"file_patch", "task_complete"}),
+        state=LoopState(cwd="."),
+        client=SimpleNamespace(model="gemma-4-4b-it"),
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    parse_result = parse_tool_calls(
+        stream,
+        timeline=[],
+        graph_state=SimpleNamespace(run_mode="execute"),
+        deps=SimpleNamespace(harness=harness),
+        model_name="gemma-4-4b-it",
+    )
+
+    assert len(parse_result.pending_tool_calls) == 1
+    assert parse_result.pending_tool_calls[0].tool_name == "file_patch"
+    assert parse_result.pending_tool_calls[0].args["path"] == "foo.py"
+    assert parse_result.pending_tool_calls[0].args["target_text"] == "old"
+    assert parse_result.pending_tool_calls[0].args["replacement_text"] == "new"
+
+
+def test_tool_dispatcher_coerce_args_returns_dropped_keys() -> None:
+    from smallctl.tools.dispatcher import ToolDispatcher
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "target_text": {"type": "string"},
+        },
+        "required": ["path", "target_text"],
+        "additionalProperties": False,
+    }
+    args, dropped = ToolDispatcher._coerce_args(schema, {"path": "a", "target_text": "b", "source": "c"})
+
+    assert args == {"path": "a", "target_text": "b"}
+    assert dropped == ["source"]
+
+
+def test_tool_dispatcher_validation_includes_dropped_keys_when_required_missing() -> None:
+    from smallctl.tools.dispatcher import ToolDispatcher
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "target_text": {"type": "string"},
+        },
+        "required": ["path", "target_text"],
+        "additionalProperties": False,
+    }
+    error = ToolDispatcher._validate_args(schema, {"path": "a"})
+    assert error is not None
+    assert "target_text" in error

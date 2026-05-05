@@ -230,11 +230,11 @@ def _detect_patch_existing_stage_read_contract_violation(
 
     staging_path = str(contract.get("staging_path") or getattr(session, "write_staging_path", "") or "").strip()
     message = (
-        "Patch-existing recovery already reread the staged copy. "
-        "The next same-target write must choose one explicit repair shape: "
+        "Patch-existing recovery requires one explicit same-target repair shape before writing again. "
+        "No sections are committed yet; choose one of: "
         "`file_patch` for a narrow exact edit inside the staged copy, `ast_patch` for a narrow structural edit, or "
         "`file_write` with `replace_strategy='overwrite'` to replace the entire staged file. "
-        "Do not send another implicit first-chunk `file_write`/`file_append` with `replace_strategy='auto'`."
+        "Do not send another implicit first-chunk `file_write`/`file_append` with `replace_strategy='auto'` or `replace_strategy='append'`."
     )
     return message, {
         "tool_name": pending.tool_name,
@@ -251,10 +251,12 @@ def _detect_patch_existing_stage_read_contract_violation(
 
 def _record_tool_attempt(harness: Any, pending: PendingToolCall) -> None:
     history = _tool_attempt_history(harness)
+    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
     history.append(
         {
             "tool_name": pending.tool_name,
-            "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
+            "fingerprint": fingerprint,
+            "_recorded_fingerprint": fingerprint,
         }
     )
     harness.state.scratchpad["_tool_attempt_history"] = history[-_REPEATED_TOOL_HISTORY_LIMIT:]
@@ -262,6 +264,33 @@ def _record_tool_attempt(harness: Any, pending: PendingToolCall) -> None:
 
 def _clear_tool_attempt_history(harness: Any) -> None:
     harness.state.scratchpad.pop("_tool_attempt_history", None)
+
+
+def _undo_tool_attempt_if_cached(harness: Any, pending: PendingToolCall, result: ToolEnvelope) -> None:
+    if not isinstance(getattr(result, "metadata", None), dict):
+        return
+    if not result.metadata.get("cache_hit"):
+        return
+    state = getattr(harness, "state", None)
+    if state is None:
+        return
+    scratchpad = getattr(state, "scratchpad", {})
+    history = scratchpad.get("_tool_attempt_history", [])
+    if not isinstance(history, list) or not history:
+        return
+    last = history[-1]
+    if not isinstance(last, dict):
+        return
+    # Use the stored fingerprint to avoid mismatches caused by arg
+    # normalization that may happen between record and undo.
+    recorded_fingerprint = str(last.get("_recorded_fingerprint") or last.get("fingerprint", ""))
+    if (
+        str(last.get("tool_name", "")) == pending.tool_name
+        and recorded_fingerprint
+    ):
+        history.pop()
+        if not history:
+            scratchpad.pop("_tool_attempt_history", None)
 
 
 def _normalize_shell_command(command: str) -> str:

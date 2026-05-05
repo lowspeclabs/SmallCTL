@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from ..interrupt_replies import is_interrupt_response
+from ..harness.run_mode import _has_plan_execution_approval_context
+from ..interrupt_replies import is_interrupt_response, is_plan_approval_reply
 from .deps import GraphRuntimeDeps
 
 
@@ -27,6 +28,21 @@ class AutoGraphRuntime:
         from .runtime_specialized import PlanningGraphRuntime
 
         harness = self.deps.harness
+        # Defensive fallback: if the user is providing a short plan-approval reply
+        # but the harness has lost or failed to recognize the pending interrupt,
+        # still route to the planning resume path when plan-approval context exists.
+        if is_plan_approval_reply(task) and _has_plan_execution_approval_context(harness):
+            harness._runlog(
+                "runtime_route",
+                "routing task to interrupt resume (plan approval fallback)",
+                interrupt_kind="plan_execute_approval",
+                execution_path=self._execution_path(),
+            )
+            return await PlanningGraphRuntime.from_harness(
+                harness,
+                event_handler=self.deps.event_handler,
+            ).resume(task)
+
         if harness.has_pending_interrupt():
             pending = harness.get_pending_interrupt() or {}
             interrupt_kind = str(pending.get("kind") or "ask_human")

@@ -223,7 +223,26 @@ class MemoryService:
         scratchpad = self.harness.state.scratchpad
         previous_contract_phase = str(scratchpad.get("_last_contract_phase_seen", "") or "")
         current_contract_phase = str(self.harness.state.contract_phase() or "")
-        if previous_contract_phase and current_contract_phase and previous_contract_phase != current_contract_phase:
+
+        # Track repair entry and enforce phase-oscillation damping
+        if current_contract_phase == "repair" and previous_contract_phase != "repair":
+            scratchpad["_repair_phase_entered_step"] = self.harness.state.step_count
+            scratchpad["_phase_damped_to"] = "repair"
+
+        # Expire damping after minimum repair dwell
+        damped_to = str(scratchpad.get("_phase_damped_to") or "").strip()
+        if damped_to == "repair":
+            entered_step = int(scratchpad.get("_repair_phase_entered_step", 0) or 0)
+            min_repair_steps = 3
+            if self.harness.state.step_count - entered_step >= min_repair_steps:
+                scratchpad.pop("_phase_damped_to", None)
+                scratchpad.pop("_repair_phase_entered_step", None)
+
+        # Re-calculate in case damping expired
+        current_contract_phase = str(self.harness.state.contract_phase() or "")
+
+        phase_advanced = bool(previous_contract_phase and current_contract_phase and previous_contract_phase != current_contract_phase)
+        if phase_advanced:
             self._emit_context_invalidation(
                 reason="phase_advanced",
                 details={
@@ -237,14 +256,17 @@ class MemoryService:
         previous_environment = str(scratchpad.get("_last_environment_fingerprint", "") or "")
         current_environment = self._context_environment_fingerprint()
         if previous_environment and current_environment and previous_environment != current_environment:
-            self._emit_context_invalidation(
-                reason="environment_changed",
-                details={
-                    "from_environment": previous_environment,
-                    "to_environment": current_environment,
-                    "state_change": "Execution environment changed",
-                },
-            )
+            previous_env_without_phase = "|".join(previous_environment.split("|")[1:])
+            current_env_without_phase = "|".join(current_environment.split("|")[1:])
+            if not (phase_advanced and previous_env_without_phase == current_env_without_phase):
+                self._emit_context_invalidation(
+                    reason="environment_changed",
+                    details={
+                        "from_environment": previous_environment,
+                        "to_environment": current_environment,
+                        "state_change": "Execution environment changed",
+                    },
+                )
         scratchpad["_last_environment_fingerprint"] = current_environment
 
         previous_write_target = str(scratchpad.get("_last_write_session_target", "") or "")

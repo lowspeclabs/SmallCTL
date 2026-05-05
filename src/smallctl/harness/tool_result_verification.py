@@ -12,6 +12,7 @@ from ..docker_retry_normalization import (
     extract_docker_command_target,
 )
 from ..models.tool_result import ToolEnvelope
+from ..shell_utils import strip_benign_shell_redirections as _strip_benign_shell_redirections
 
 # Patterns that indicate the command is probing for a binary's presence.
 # These are the canonical "is X installed?" commands.
@@ -67,6 +68,14 @@ _NGINX_VERIFIER_FAILURE_RE = re.compile(
     r"\[\s*emerg\s*\].*?\bin\s+/etc/nginx/"
     r"|"
     r"unexpected\s+end\s+of\s*file,\s*expecting\s+[\"']?[;}]",
+    re.IGNORECASE | re.DOTALL,
+)
+_CURL_VERIFIER_FAILURE_RE = re.compile(
+    r"\bcurl:\s*\(\d+\)"
+    r"|"
+    r"\bfailed to connect\b"
+    r"|"
+    r"\bconnection refused\b",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -187,7 +196,7 @@ def _store_verifier_verdict(
         elif host:
             target = host
         elif remote_command:
-            target = remote_command
+            target = f"(missing host) :: {remote_command}"
 
     exit_code = output.get("exit_code") if isinstance(output, dict) else None
     stdout = _snip_text(output.get("stdout") if isinstance(output, dict) else "", limit=400)
@@ -270,6 +279,10 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
         match = _NGINX_VERIFIER_FAILURE_RE.search(combined)
         if match:
             return _snip_text(match.group(0), limit=240)
+    if "curl" in str(command or "").lower() or "curl:" in combined.lower():
+        match = _CURL_VERIFIER_FAILURE_RE.search(combined)
+        if match:
+            return _snip_text(match.group(0), limit=240)
     return ""
 
 
@@ -283,7 +296,8 @@ def assess_remote_mutation_verification(
     if tool_name != "ssh_exec" or not isinstance(requirement, dict) or not isinstance(arguments, dict):
         return {"is_verifier_attempt": False}
     command = str(arguments.get("command") or "").strip()
-    if not command or _REMOTE_MUTATING_COMMAND_RE.search(command):
+    mutation_command = _strip_benign_shell_redirections(command, preserve_newlines=True)
+    if not mutation_command or _REMOTE_MUTATING_COMMAND_RE.search(mutation_command):
         return {"is_verifier_attempt": False}
 
     output = result.output if isinstance(result.output, dict) else {}
@@ -303,6 +317,8 @@ def assess_remote_mutation_verification(
 
     guessed_paths = [str(item).strip() for item in requirement.get("guessed_paths", []) if str(item).strip()]
     path_match = any(path in command for path in guessed_paths) if guessed_paths else False
+    directory_checks = _remote_mutation_directory_empty_checks(requirement)
+    directory_check = _matched_directory_empty_check(command, directory_checks)
     profile = str(requirement.get("verification_profile") or "").strip().lower()
     patterns = requirement.get("verification_patterns")
     new_patterns = patterns.get("new_present", []) if isinstance(patterns, dict) else []
@@ -310,7 +326,7 @@ def assess_remote_mutation_verification(
 
     mentions_new = any(str(pattern) and str(pattern) in command for pattern in new_patterns)
     mentions_old = any(str(pattern) and str(pattern) in command for pattern in old_patterns)
-    is_verifier_attempt = path_match or mentions_new or mentions_old
+    is_verifier_attempt = path_match or directory_check is not None or mentions_new or mentions_old
     if not is_verifier_attempt:
         return {"is_verifier_attempt": False}
 
@@ -322,6 +338,29 @@ def assess_remote_mutation_verification(
         "path_match": path_match,
         "verification_profile": profile,
     }
+
+    if directory_check is not None:
+        check_path = str(directory_check.get("path") or "").strip().rstrip("/")
+        if result.success and exit_code in (0, None) and not stdout.strip():
+            assessment.update(
+                {
+                    "verification_strength": "strong",
+                    "clears_requirement": True,
+                    "reason": "directory_empty_check_passed",
+                    "verified_directory_empty_check": check_path,
+                }
+            )
+            return assessment
+        assessment.update(
+            {
+                "verification_strength": "strong",
+                "clears_requirement": False,
+                "reason": "directory_empty_check_failed",
+                "verified_directory_empty_check": check_path,
+                "message": _snip_text(stderr or stdout or "Directory-empty verifier did not return empty output.", limit=240),
+            }
+        )
+        return assessment
 
     if profile == "html_stylesheet_swap":
         command_lower = command.lower()
@@ -395,6 +434,41 @@ def assess_remote_mutation_verification(
         }
     )
     return assessment
+
+
+def _remote_mutation_directory_empty_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
+    raw_checks = requirement.get("directory_empty_checks")
+    if not isinstance(raw_checks, list):
+        return []
+    checks: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip().rstrip("/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        glob = str(item.get("glob") or "").strip()
+        checks.append({"path": path, "glob": glob})
+    return checks
+
+
+def _matched_directory_empty_check(command: str, checks: list[dict[str, str]]) -> dict[str, str] | None:
+    command_text = str(command or "")
+    if not command_text or not checks:
+        return None
+    lowered = command_text.lower()
+    if not any(marker in lowered for marker in ("find ", "ls ", "test ", "compgen ")):
+        return None
+    if not any(marker in lowered for marker in ("-mindepth", "-maxdepth", "-print", "-quit", "-a", "-z", "compgen")):
+        return None
+    for check in checks:
+        path = str(check.get("path") or "").strip().rstrip("/")
+        glob = str(check.get("glob") or "").strip()
+        if path and (path in command_text or glob and glob in command_text):
+            return check
+    return None
 
 
 def _annotate_verifier_artifact(

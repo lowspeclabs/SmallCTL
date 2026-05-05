@@ -127,6 +127,45 @@ async def file_write(
             expected_followup_verifier=expected_followup_verifier,
         )
 
+    # Fix 1: Intercept bare file_write to a session-owned canonical path.
+    # A model that omits write_session_id while a session is open gets a silent
+    # direct-write success, the FSM never advances, and task_complete is blocked
+    # later with no actionable context.  Block it here instead.
+    if state is not None:
+        _active_session = getattr(state, "write_session", None)
+        if (
+            _active_session is not None
+            and str(getattr(_active_session, "status", "") or "").strip().lower() not in {"complete"}
+            and _same_target_path(
+                str(getattr(_active_session, "write_target_path", "") or ""), path, cwd
+            )
+        ):
+            from .control import _write_session_resume_action
+            _ws_id = str(getattr(_active_session, "write_session_id", "") or "").strip()
+            _next_section = str(getattr(_active_session, "write_next_section", "") or "").strip() or "imports"
+            record_write_session_event(
+                state,
+                event="bare_write_intercepted",
+                session=_active_session,
+                details={"path": str(target), "reason": "write_session_id_missing"},
+            )
+            return fail(
+                f"file_write to `{path}` was rejected because Write Session `{_ws_id}` is "
+                f"still open for that path. You must continue the session: provide "
+                f"`write_session_id='{_ws_id}'` and `section_name='{_next_section}'` in this "
+                f"call. A bare file_write without `write_session_id` bypasses the session FSM "
+                f"and will leave the session permanently open. Use `loop_status` to see the "
+                f"current session state and the required next section.",
+                metadata={
+                    "path": str(target),
+                    "error_kind": "bare_write_to_session_owned_path",
+                    "write_session_id": _ws_id,
+                    "write_next_section": _next_section,
+                    "staged_only": False,
+                    "next_required_tool": _write_session_resume_action(state, None),
+                },
+            )
+
     if not _repair_cycle_allows_patch(state, target):
         _mark_repeat_patch(state)
         return fail(
@@ -163,12 +202,25 @@ async def file_write(
         return fail(f"Unable to write file: {exc}")
 
     # Keep active write-session staging file in sync so subsequent reads don't drift.
+    # Fix 2: emit a structured warning when this sync runs — it means a bare write landed on
+    # a session-owned path and bypassed the FSM.  This should never happen after Fix 1 is
+    # active, but log it defensively so it surfaces in harness.log if it ever does.
     if state is not None:
         session = getattr(state, "write_session", None)
         if session is not None and str(getattr(session, "status", "") or "").strip().lower() != "complete":
             try:
                 session_target = _resolve(str(getattr(session, "write_target_path", "") or ""), cwd)
                 if target == session_target:
+                    _ws_id_sync = str(getattr(session, "write_session_id", "") or "").strip()
+                    _parent_logger = getattr(state, "log", logging.getLogger("smallctl.tools.fs"))
+                    _parent_logger.warning(
+                        "write_session_stall bare_write_bypassed_fsm path=%s session_id=%s "
+                        "session_status=%s — staging synced but session state NOT advanced; "
+                        "session remains open and will block task_complete",
+                        str(target),
+                        _ws_id_sync,
+                        str(getattr(session, "status", "open") or "open"),
+                    )
                     staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
                     if staging_path:
                         _write_text_file(Path(staging_path), content, encoding=encoding)

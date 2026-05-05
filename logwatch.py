@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 
-# ANSI color codes for terminal output
 class Colors:
     """ANSI color codes for colored terminal output."""
+
     RESET = "\033[0m"
     RED = "\033[91m"
     GREEN = "\033[92m"
@@ -22,6 +23,7 @@ class Colors:
 
 def colorize(text: str, color: str) -> str:
     """Return text with ANSI color code applied."""
+
     return f"{color}{text}{Colors.RESET}"
 
 
@@ -37,42 +39,27 @@ def _resolve_log_path(args: argparse.Namespace) -> Path:
     if args.log_file:
         log_path = Path(str(args.log_file)).expanduser().resolve()
     elif args.run_dir:
-        log_path = (Path(str(args.run_dir)).expanduser().resolve() / "harness.log")
+        log_path = Path(str(args.run_dir)).expanduser().resolve() / "harness.log"
     else:
-        # Use default log directory from --log-dir argument or fallback to "logs"
-        if args.log_dir:
-            log_dir = Path(str(args.log_dir)).expanduser().resolve()
-        else:
-            log_dir = Path("logs").resolve()
+        log_dir = Path(str(args.log_dir)).expanduser().resolve() if args.log_dir else Path("logs").resolve()
         log_path = log_dir / "harness.log"
 
-    # Validate path exists before use
     if not log_path.exists():
-        logging.error(f"Log file does not exist: {log_path}")
+        logging.error("Log file does not exist: %s", log_path)
         raise FileNotFoundError(f"Log file not found: {log_path}")
 
     return log_path
 
 
 def _extract_json_payload(line: str) -> Any:
-    """Extract JSON payload from a log line.
-
-    Returns the parsed JSON object or None if parsing fails.
-    Raises specific exceptions for debugging purposes when called with context.
-    """
     start = line.find("{")
     if start < 0:
         return None
     payload = line[start:].strip()
     try:
         return json.loads(payload)
-    except json.JSONDecodeError as e:
-        # Log the specific JSON parsing error for debugging
-        logging.error(f"JSON decode error in log line: {e}")
-        return None
-    except FileNotFoundError as e:
-        # Handle file-related errors if applicable
-        logging.error(f"File not found during payload extraction: {e}")
+    except json.JSONDecodeError as exc:
+        logging.error("JSON decode error in log line: %s", exc)
         return None
 
 
@@ -103,22 +90,32 @@ def _line_has_error(line: str) -> bool:
     return _payload_has_error(payload)
 
 
+def _event_name(line: str) -> str:
+    parts = line.split(maxsplit=2)
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def _load_task_summary(log_path: Path) -> dict[str, Any]:
+    summary_path = log_path.with_name("task_summary.json")
+    if not summary_path.exists():
+        return {}
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def setup_logging(log_path: Path) -> logging.Logger:
-    """Configure logging with rotation."""
     logger = logging.getLogger("logwatch")
     logger.setLevel(logging.INFO)
-
-    # Clear existing handlers
     logger.handlers.clear()
 
-    # Create formatter
     formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
-
-    # File handler with rotation (max 5MB, backup count 3)
-    file_handler = logging.FileHandler(log_path.with_suffix('.logwatch.log'), mode='a')
+    file_handler = logging.FileHandler(log_path.with_suffix(".logwatch.log"), mode="a")
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
@@ -129,28 +126,47 @@ def setup_logging(log_path: Path) -> logging.Logger:
 def main() -> int:
     args = _parse_args()
     log_path = _resolve_log_path(args)
-
-    # Setup logging
     logger = setup_logging(log_path)
-    logger.info(f"Starting log analysis for {log_path}")
+    logger.info("Starting log analysis for %s", log_path)
 
     if not log_path.exists() or not log_path.is_file():
-        logger.error(f"Log file not found: {log_path}")
+        logger.error("Log file not found: %s", log_path)
         return 1
 
     parsed_records = 0
     errors = 0
+    events: Counter[str] = Counter()
     for raw_line in log_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line:
             continue
         parsed_records += 1
+        event = _event_name(line)
+        if event:
+            events[event] += 1
         if _line_has_error(line):
-            logger.warning(f"Error detected in line {parsed_records}: {line[:100]}")
+            logger.warning("Error detected in line %s: %s", parsed_records, line[:100])
             errors += 1
 
-    logger.info(f"Parsed records: {parsed_records}")
-    logger.info(f"Errors: {errors}")
+    logger.info("Parsed records: %s", parsed_records)
+    logger.info("Errors: %s", errors)
+    summary = _load_task_summary(log_path)
+    if summary:
+        logger.info("Canonical task_summary total_tool_calls: %s", summary.get("total_tool_calls", "unknown"))
+        logger.info("Canonical task_summary final_status: %s", summary.get("final_status", summary.get("status", "unknown")))
+    logger.info("RCA checklist: cross-reference task_summary.json for canonical metrics before citing tool-call counts.")
+    logger.info("RCA checklist: verify diagnosis claims against raw tool stdout, not model paraphrases.")
+    logger.info("RCA checklist: action_stall events: %s", events.get("action_stall", 0))
+    logger.info("RCA checklist: no_tool_recovery events: %s", events.get("no_tool_recovery", 0))
+    logger.info(
+        "RCA checklist: inline thinking tool recoveries: %s sanitized: %s",
+        events.get("inline_tool_call_recovered_from_thinking", 0),
+        events.get("thinking_tool_protocol_sanitized", 0),
+    )
+    logger.info(
+        "RCA checklist: harness auto-scheduled remote verifiers: %s",
+        events.get("task_complete_remote_mutation_verifier_autocontinue", 0),
+    )
     return 0
 
 

@@ -66,12 +66,19 @@ async def build_tool_result_message(
         inline=bool(artifact and artifact.inline_content is not None),
     )
 
+    msg_metadata: dict[str, Any] = {"artifact_id": artifact.artifact_id} if artifact else {}
+    if tool_name == "artifact_read" and result.success and isinstance(result.metadata, dict):
+        msg_metadata["truncated"] = result.metadata.get("truncated")
+        msg_metadata["total_lines"] = result.metadata.get("total_lines")
+        msg_metadata["line_start"] = result.metadata.get("line_start")
+        msg_metadata["line_end"] = result.metadata.get("line_end")
+
     message = ConversationMessage(
         role="tool",
         name=tool_name,
         tool_call_id=tool_call_id,
         content=compact_content,
-        metadata={"artifact_id": artifact.artifact_id} if artifact else {},
+        metadata=msg_metadata,
     )
 
     args_str = json.dumps(result.metadata.get("arguments", {}), sort_keys=True)

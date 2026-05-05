@@ -11,6 +11,7 @@ from ..guards import is_four_b_or_under_model_name
 from ..interrupt_replies import (
     is_interrupt_affirmative_response,
     is_interrupt_response,
+    is_plan_approval_reply,
 )
 from ..models.events import UIEvent, UIEventType
 from ..models.conversation import ConversationMessage
@@ -25,6 +26,7 @@ from .task_classifier import (
     is_smalltalk,
     looks_like_complex_task,
     looks_like_readonly_chat_request,
+    looks_like_shell_request,
     runtime_policy_for_intent,
 )
 
@@ -242,6 +244,19 @@ class ModeDecisionService:
             )
             return "loop"
 
+        # Defensive fallback: if the pending interrupt was lost or not recognized,
+        # but the user is clearly replying to a plan approval prompt, force loop mode
+        # so the runtime can resume the planning graph.
+        if is_plan_approval_reply(raw_task) and _has_plan_execution_approval_context(self.harness):
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="loop",
+                raw="plan_approval_fallback",
+                raw_task=raw_task,
+            )
+            return "loop"
+
         plan_request = self._extract_planning_request(task)
         if plan_request is not None:
             output_path, output_format = plan_request
@@ -311,8 +326,26 @@ class ModeDecisionService:
         )
         runtime_policy = runtime_policy_for_intent(runtime_intent)
         if runtime_policy.route_mode is not None:
-            # Auto-escalate complex execution tasks to planning mode
-            if runtime_policy.route_mode == "loop" and looks_like_complex_task(mode_task):
+            # Auto-escalate complex execution tasks to planning mode.
+            # Guard A: Check complexity against the user's raw request, not
+            #   the inherited effective_task (which concatenates prior task
+            #   context and inflates verb counts, causing false positives).
+            # Guard B: Never escalate direct execution/shell requests — even
+            #   if they have enough verb diversity to trigger the complexity
+            #   heuristic, users explicitly asking to "run/launch/debug"
+            #   want loop mode, not planning.
+            # Guard C: Never escalate when a chunked write session is already
+            #   prearmed on state — the task is a write task, not a planning
+            #   task, and escalating breaks file_write/file_patch exposure.
+            _raw_is_complex = looks_like_complex_task(raw_task)
+            _raw_is_direct_execution = (
+                looks_like_shell_request(raw_task)
+                and runtime_intent.label == "execute"
+            )
+            _write_session_prearmed = bool(
+                getattr(getattr(self.harness, "state", None), "write_session", None)
+            )
+            if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution and not _write_session_prearmed:
                 self.harness._runlog(
                     "mode_decision",
                     "selected run mode",

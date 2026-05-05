@@ -35,6 +35,17 @@ def test_fama_capsules_render_active_mitigation_lines() -> None:
     ]
 
 
+def test_fama_capsules_render_repeated_action_narrowing_line() -> None:
+    state = LoopState()
+    _activate(state, "tool_exposure_narrowing")
+
+    lines = render_fama_capsules(state, token_budget=180)
+
+    assert lines == [
+        "Do not repeat the same tool call; use prior output or switch to one different tool/action that can create new evidence."
+    ]
+
+
 def test_fama_capsules_respect_disabled_config() -> None:
     state = LoopState()
     state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}

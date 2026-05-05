@@ -55,3 +55,38 @@ def test_logwatch_accepts_log_file_input(tmp_path: Path) -> None:
     logwatch_output = log_path.with_suffix(".logwatch.log").read_text(encoding="utf-8")
     assert "Parsed records: 1" in logwatch_output
     assert "Errors: 1" in logwatch_output
+
+
+def test_logwatch_rca_checklist_uses_task_summary_and_counts_stalls(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "task_summary.json").write_text(
+        '{"total_tool_calls": 10, "final_status": "Completed"}',
+        encoding="utf-8",
+    )
+    (run_dir / "harness.log").write_text(
+        "\n".join(
+            [
+                "2026-05-05T14:13:58.000+00:00 action_stall improper tool format {}",
+                "2026-05-05T14:13:59.000+00:00 no_tool_recovery injected nudge {}",
+                "2026-05-05T14:14:00.000+00:00 inline_tool_call_recovered_from_thinking recovered {}",
+                "2026-05-05T14:14:01.000+00:00 thinking_tool_protocol_sanitized sanitized {}",
+                "2026-05-05T14:14:02.000+00:00 task_complete_remote_mutation_verifier_autocontinue scheduled {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(LOGWATCH), str(run_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    logwatch_output = (run_dir / "harness.logwatch.log").read_text(encoding="utf-8")
+    assert "Canonical task_summary total_tool_calls: 10" in logwatch_output
+    assert "RCA checklist: action_stall events: 1" in logwatch_output
+    assert "inline thinking tool recoveries: 1 sanitized: 1" in logwatch_output
+    assert "harness auto-scheduled remote verifiers: 1" in logwatch_output

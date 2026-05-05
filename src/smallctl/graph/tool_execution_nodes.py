@@ -34,6 +34,7 @@ from .tool_call_parser import (
     _detect_repeated_tool_loop,
     _extract_artifact_id_from_args,
     _record_tool_attempt,
+    _undo_tool_attempt_if_cached,
 )
 from .tool_execution_recovery import handle_repeated_tool_loop
 from .tool_execution_persistence import persist_tool_results
@@ -520,6 +521,51 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         metadata={"tool_name": pending.tool_name}
                     )
             except asyncio.CancelledError:
+                elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
+                cancelled_result = ToolEnvelope(
+                    success=False,
+                    status="cancelled",
+                    error=(
+                        f"Tool dispatch cancelled while waiting for `{pending.tool_name}` "
+                        f"after {elapsed_sec:.1f}s."
+                    ),
+                    metadata={
+                        "reason": "tool_dispatch_cancelled",
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                        "args": json_safe_value(pending.args),
+                        "elapsed_sec": round(elapsed_sec, 3),
+                        "cancellation_source": str(
+                            getattr(harness, "_cancel_source", "") or "cancel_requested"
+                        ),
+                    },
+                )
+                _store_tool_execution_record(
+                    harness,
+                    operation_id=operation_id,
+                    thread_id=graph_state.thread_id,
+                    step_count=harness.state.step_count,
+                    pending=pending,
+                    result=cancelled_result,
+                )
+                graph_state.last_tool_results.append(
+                    ToolExecutionRecord(
+                        operation_id=operation_id,
+                        tool_name=pending.tool_name,
+                        args=pending.args,
+                        tool_call_id=pending.tool_call_id,
+                        result=cancelled_result,
+                    )
+                )
+                harness.state.recent_errors.append(str(cancelled_result.error or "Tool dispatch cancelled."))
+                harness._runlog(
+                    "tool_dispatch_cancelled",
+                    "tool dispatch cancelled while awaiting tool result",
+                    tool_name=pending.tool_name,
+                    tool_call_id=pending.tool_call_id,
+                    elapsed_sec=round(elapsed_sec, 3),
+                    arguments=json_safe_value(pending.args),
+                )
                 await harness._emit(
                     deps.event_handler,
                     UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
@@ -536,6 +582,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 pending=pending,
                 result=result,
             )
+        _undo_tool_attempt_if_cached(harness, pending, result)
         log_kv(
             harness.log,
             logging.INFO,
@@ -581,14 +628,34 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
     duration = dispatch_end - dispatch_start
     graph_state.latency_metrics["tool_execution_duration_sec"] = round(duration, 3)
 
+    total_execution_sec = 0.0
+    total_approval_wait_sec = 0.0
+    for record in graph_state.last_tool_results:
+        if record.result and isinstance(record.result.metadata, dict):
+            total_execution_sec += record.result.metadata.get("execution_sec", 0.0) or 0.0
+            total_approval_wait_sec += record.result.metadata.get("approval_wait_sec", 0.0) or 0.0
+
+    if total_execution_sec > 0:
+        graph_state.latency_metrics["tool_actual_execution_sec"] = round(total_execution_sec, 3)
+    if total_approval_wait_sec > 0:
+        graph_state.latency_metrics["tool_approval_wait_sec"] = round(total_approval_wait_sec, 3)
+
     if duration > 0.05:
+        metrics_msg = f"Tool dispatch: {duration:.2f}s"
+        if total_execution_sec > 0:
+            metrics_msg += f" (execution: {total_execution_sec:.2f}s"
+            if total_approval_wait_sec > 0:
+                metrics_msg += f", approval wait: {total_approval_wait_sec:.2f}s"
+            metrics_msg += ")"
         await harness._emit(
             deps.event_handler,
             UIEvent(
                 event_type=UIEventType.METRICS,
-                content=f"Tool execution: {duration:.2f}s",
+                content=metrics_msg,
                 data={
                     "duration_sec": duration,
+                    "execution_sec": total_execution_sec if total_execution_sec > 0 else None,
+                    "approval_wait_sec": total_approval_wait_sec if total_approval_wait_sec > 0 else None,
                 }
             ),
         )

@@ -65,10 +65,39 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
             "then make one narrow patch or one narrow verification step."
         )
     if tool_name in {"shell_exec", "ssh_exec"}:
+        bits_str = " | ".join(bits)
+        schema_hint = ""
+        if tool_name == "ssh_exec":
+            record_args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+            missing_host = not (record_args.get("host") or record_args.get("target"))
+            has_extra = bool(
+                record_args
+                and any(
+                    k
+                    not in {
+                        "target",
+                        "host",
+                        "command",
+                        "user",
+                        "username",
+                        "port",
+                        "identity_file",
+                        "password",
+                        "timeout_sec",
+                    }
+                    for k in record_args.keys()
+                )
+            )
+            if missing_host or has_extra:
+                schema_hint = (
+                    " Required ssh_exec fields: command, and one of target or host."
+                    " Example: ssh_exec(target='root@192.168.1.89', command='whoami', password='secret')."
+                )
         return (
-            " | ".join(bits)
+            bits_str
             + ". Do not repeat the same command blindly. Read the smallest relevant evidence first, "
             "classify the failure, then run one narrow check or one narrow patch."
+            + schema_hint
         )
     return (
         " | ".join(bits)

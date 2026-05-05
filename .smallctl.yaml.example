@@ -45,3 +45,16 @@ loop_guard_similarity_threshold: 0.9
 loop_guard_cumulative_write_gate: true
 loop_guard_checkpoint_gate: true
 loop_guard_diff_gate: true
+fama_enabled: true
+fama_mode: lite
+fama_done_gate_on_failure: true
+fama_llm_judge_enabled: false
+reflexion_enabled: true
+reflexion_max_items: 5
+reflexion_inject_top_k: 3
+reflexion_persist_cross_task: false
+reflexion_min_failure_severity: warning
+subtask_ledger_enabled: true
+subtask_max_active: 1
+subtask_max_history: 12
+subtask_inject_completed_limit: 3

@@ -46,6 +46,47 @@ def test_staged_reasoning_flag_parses_from_cli_and_env(monkeypatch, tmp_path: Pa
     assert cli_config.staged_reasoning is False
 
 
+def test_recovery_knobs_parse_from_cli_and_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SMALLCTL_REFLEXION_ENABLED", "false")
+    monkeypatch.setenv("SMALLCTL_REFLEXION_MAX_ITEMS", "9")
+    monkeypatch.setenv("SMALLCTL_REFLEXION_INJECT_TOP_K", "2")
+    monkeypatch.setenv("SMALLCTL_REFLEXION_PERSIST_CROSS_TASK", "true")
+    monkeypatch.setenv("SMALLCTL_SUBTASK_LEDGER_ENABLED", "false")
+    monkeypatch.setenv("SMALLCTL_SUBTASK_MAX_HISTORY", "4")
+    monkeypatch.setenv("SMALLCTL_SUBTASK_INJECT_COMPLETED_LIMIT", "1")
+
+    env_config = resolve_config({})
+
+    assert env_config.reflexion_enabled is False
+    assert env_config.reflexion_max_items == 9
+    assert env_config.reflexion_inject_top_k == 2
+    assert env_config.reflexion_persist_cross_task is True
+    assert env_config.subtask_ledger_enabled is False
+    assert env_config.subtask_max_history == 4
+    assert env_config.subtask_inject_completed_limit == 1
+
+    cli_config = resolve_config(
+        {
+            "reflexion_enabled": "true",
+            "reflexion_max_items": "3",
+            "reflexion_inject_top_k": "1",
+            "reflexion_persist_cross_task": "false",
+            "subtask_ledger_enabled": "true",
+            "subtask_max_history": "6",
+            "subtask_inject_completed_limit": "2",
+        }
+    )
+
+    assert cli_config.reflexion_enabled is True
+    assert cli_config.reflexion_max_items == 3
+    assert cli_config.reflexion_inject_top_k == 1
+    assert cli_config.reflexion_persist_cross_task is False
+    assert cli_config.subtask_ledger_enabled is True
+    assert cli_config.subtask_max_history == 6
+    assert cli_config.subtask_inject_completed_limit == 2
+
+
 def test_unknown_preset_reports_compatibility_warning(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     cfg = resolve_config({"preset": "does-not-exist"})

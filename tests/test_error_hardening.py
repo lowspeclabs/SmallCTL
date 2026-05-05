@@ -209,6 +209,34 @@ def test_nginx_verifier_stdout_failure_overrides_masked_exit_zero() -> None:
     assert "unexpected end of file" in verdict["acceptance_delta"]["notes"][0]
 
 
+def test_curl_connection_refused_overrides_masked_pipeline_exit_zero() -> None:
+    state = LoopState()
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "stdout": (
+                    "* connect to 192.168.1.89 port 80 failed: Connection refused\n"
+                    "curl: (7) Failed to connect to 192.168.1.89 port 80\n"
+                ),
+                "stderr": "",
+                "exit_code": 0,
+            },
+        ),
+        arguments={
+            "host": "192.168.1.89",
+            "command": "curl -v http://192.168.1.89/test-site 2>&1 | head -30",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict["exit_code"] == 0
+    assert "Connection refused" in verdict["acceptance_delta"]["notes"][0]
+
+
 @pytest.mark.asyncio
 async def test_memory_update_rejects_verifier_success_fact_when_latest_verifier_fails() -> None:
     state = LoopState()

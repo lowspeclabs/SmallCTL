@@ -129,7 +129,7 @@ def test_large_prompt_budget_scales_inline_limits() -> None:
     policy.recalculate_quotas(32768)
 
     assert policy.tool_result_inline_token_limit == 624
-    assert policy.artifact_read_inline_token_limit == 1249
+    assert policy.artifact_read_inline_token_limit == 3000
 
 
 def test_recent_message_trimming_preserves_mission_anchor_and_latest_followup() -> None:

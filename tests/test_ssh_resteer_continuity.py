@@ -7,7 +7,7 @@ from smallctl.context.retrieval import LexicalRetriever, build_retrieval_query
 from smallctl.harness import Harness
 from smallctl.harness.task_boundary import TaskBoundaryService
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import ArtifactRecord, LoopState
+from smallctl.state import ArtifactRecord, ExecutionPlan, LoopState
 
 
 def _make_harness(state: LoopState) -> SimpleNamespace:
@@ -50,8 +50,8 @@ def test_remote_operational_followup_resolves_to_active_ssh_target() -> None:
         "User follow-up: launch the container and configure it to autolaunch on startup"
     )
     assert state.task_mode == "remote_execute"
-    assert state.run_brief.original_task == prior
-    assert state.working_memory.current_goal == prior
+    assert state.run_brief.original_task == resolved
+    assert state.working_memory.current_goal == resolved
     assert state.run_brief.current_phase_objective == f"execute: {resolved}"
 
 
@@ -291,8 +291,8 @@ def test_remote_nginx_config_followup_stays_scoped_to_active_ssh_target() -> Non
         "User follow-up: has the nginx config been update to reflect the new site structure?"
     )
     assert state.task_mode == "remote_execute"
-    assert state.run_brief.original_task == prior
-    assert state.working_memory.current_goal == prior
+    assert state.run_brief.original_task == resolved
+    assert state.working_memory.current_goal == resolved
     assert state.run_brief.current_phase_objective == f"execute: {resolved}"
 
 
@@ -327,8 +327,8 @@ def test_remote_nginx_followup_after_validated_ssh_file_read_session_stays_remot
         'User follow-up: is the "demo-site" enabled in the nginx config?'
     )
     assert state.task_mode == "remote_execute"
-    assert state.run_brief.original_task == prior
-    assert state.working_memory.current_goal == prior
+    assert state.run_brief.original_task == resolved
+    assert state.working_memory.current_goal == resolved
 
 
 def test_remote_theme_followup_with_matching_remote_page_names_stays_on_active_ssh_target() -> None:
@@ -426,8 +426,8 @@ def test_remote_branding_removal_followup_stays_on_active_site_target() -> None:
     Harness._activate_tool_profiles(harness, resolved)
 
     assert state.task_mode == "remote_execute"
-    assert state.run_brief.original_task == prior
-    assert state.working_memory.current_goal == prior
+    assert state.run_brief.original_task == resolved
+    assert state.working_memory.current_goal == resolved
     assert "network" in state.active_tool_profiles
 
 
@@ -492,6 +492,55 @@ def test_affirmative_remote_confirmation_resolves_to_remote_execution_continuati
     Harness._initialize_run_brief(harness, resolved, raw_task="yes")
 
     assert state.task_mode == "remote_execute"
+
+
+def test_affirmative_plan_approval_remote_followup_uses_approved_plan_goal() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    docker_task = (
+        "Continue remote task over SSH on root@192.168.1.89. "
+        "User follow-up: stop the docker container, uninstall docker, remove container volumes/configs"
+    )
+    state.run_brief.original_task = (
+        "on the remote host there is a html file, /var/www/14-b-network.html, "
+        "update the site to have a dynamic material design theme"
+    )
+    state.working_memory.current_goal = docker_task
+    state.active_plan = ExecutionPlan(
+        plan_id="plan-6ba37798",
+        goal=(
+            "Update /var/www/14-b-network.html on remote host to use dynamic "
+            "Material Design theme and content about network automation"
+        ),
+        summary="Retrieve current file, modify it, and verify the HTML update.",
+        inputs=["ssh_file_read path=/var/www/14-b-network.html"],
+        outputs=["ssh_file_write path=/var/www/14-b-network.html"],
+        status="awaiting_approval",
+    )
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {"host": "192.168.1.89", "user": "root", "confirmed": True}
+    }
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content="Plan ready. Execute it now?")
+    ]
+    harness = _make_harness(state)
+    Harness._store_task_handoff(harness, raw_task=docker_task, effective_task=docker_task)
+    plan_goal = state.active_plan.goal
+
+    resolved = Harness._resolve_followup_task(harness, "yes")
+
+    assert "execute approved plan plan-6ba37798" in resolved
+    assert "/var/www/14-b-network.html" in resolved
+    assert "network automation" in resolved
+    assert "docker-ce" not in resolved
+    assert state.scratchpad["_resolved_remote_followup"]["mission_task"] == plan_goal
+
+    Harness._maybe_reset_for_new_task(harness, resolved, raw_task="yes")
+    Harness._initialize_run_brief(harness, resolved, raw_task="yes")
+
+    assert state.task_mode == "remote_execute"
+    assert state.run_brief.original_task == plan_goal
+    assert state.working_memory.current_goal == plan_goal
+    assert state.scratchpad["_task_target_paths"] == ["/var/www/14-b-network.html"]
 
 
 def test_affirmative_remote_proposal_followup_preserves_remote_execution_context() -> None:
@@ -584,8 +633,8 @@ def test_remote_followup_preserves_original_mission_under_tight_prompt_window() 
     )
     rendered = "\n\n".join(str(message.get("content") or "") for message in assembly.messages)
 
-    assert state.run_brief.original_task == prior
-    assert state.working_memory.current_goal == prior
+    assert state.run_brief.original_task == resolved
+    assert state.working_memory.current_goal == resolved
     assert state.scratchpad["_resolved_remote_followup"]["mission_task"] == prior
     assert "darkmode" in rendered
     assert raw in rendered
@@ -660,7 +709,7 @@ def test_remote_correction_keeps_tail_and_prefers_fresh_ssh_evidence() -> None:
     assert reset_kwargs["preserve_recent_tail"] is True
     assert state.recent_messages[0].content == prior
     assert state.scratchpad["_session_ssh_targets"]["192.168.1.63"]["confirmed"] is True
-    assert state.run_brief.original_task == prior
+    assert state.run_brief.original_task == resolved
     assert state.working_memory.current_goal == prior
     assert state.run_brief.current_phase_objective == f"execute: {resolved}"
     assert state.task_mode == "remote_execute"
@@ -772,7 +821,7 @@ def test_remote_here_doc_cleanup_followup_soft_switches_and_stays_remote() -> No
     assert reset_kwargs["preserve_summaries"] is True
     assert reset_kwargs["preserve_recent_tail"] is True
     assert state.task_mode == "remote_execute"
-    assert state.run_brief.original_task == prior
+    assert state.run_brief.original_task == resolved
     assert state.working_memory.current_goal == prior
     assert state.run_brief.current_phase_objective == f"execute: {resolved}"
     assert state.working_memory.known_facts == ["The page was just written on the remote host over SSH."]

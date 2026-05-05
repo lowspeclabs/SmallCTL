@@ -228,25 +228,44 @@ async def resolve_model_stream_result(
             and pending.tool_name in {"file_write", "file_append"}
             and _detect_empty_file_write_payload(harness, pending) is not None
         ]
-        if write_calls_with_empty_payload and _should_attempt_empty_payload_text_fallback(
-            harness,
-            graph_state,
-            messages=messages,
-            tool_calls=stream.tool_calls,
-        ):
-            fallback_result = await _attempt_text_write_fallback(
-                graph_state,
-                deps,
-                messages=messages,
-                source_chunks=chunks,
-                partial_tool_calls=stream.tool_calls,
-                session=_active_text_write_fallback_session(harness),
-                reason="empty_payload",
-                start_time=start_time,
-                first_token_time=first_token_time,
-            )
-            if fallback_result is not None:
-                return fallback_result
+        if write_calls_with_empty_payload:
+            try:
+                should_fallback = _should_attempt_empty_payload_text_fallback(
+                    harness,
+                    messages=messages,
+                    tool_calls=stream.tool_calls,
+                )
+            except Exception as exc:
+                harness._runlog(
+                    "empty_payload_fallback_predicate_failed",
+                    "empty-payload fallback predicate raised an exception; continuing with normal stream resolution",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                should_fallback = False
+            if should_fallback:
+                try:
+                    fallback_result = await _attempt_text_write_fallback(
+                        graph_state,
+                        deps,
+                        messages=messages,
+                        source_chunks=chunks,
+                        partial_tool_calls=stream.tool_calls,
+                        session=_active_text_write_fallback_session(harness),
+                        reason="empty_payload",
+                        start_time=start_time,
+                        first_token_time=first_token_time,
+                    )
+                except Exception as exc:
+                    harness._runlog(
+                        "empty_payload_fallback_failed",
+                        "text-write fallback raised an exception; continuing with normal stream resolution",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    fallback_result = None
+                if fallback_result is not None:
+                    return fallback_result
         if echo_to_stdout and not harness.thinking_visibility and stream.assistant_text:
             print(stream.assistant_text)
         usage_payload = stream.usage

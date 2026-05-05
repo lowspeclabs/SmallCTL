@@ -40,13 +40,16 @@ class ArtifactPolicy:
         "yaml_read",
         "shell_exec",
         "find_files",
-        "ssh_file_read",
+        # Removed ssh_file_read from force_artifact_tools to allow small file reads to stay inline
+        # This prevents unnecessary artifact_read calls for small file contents
     )
 
     def should_externalize(self, *, tool_name: str, serialized_output: str) -> bool:
         if tool_name == "artifact_read":
             return False
-        return tool_name in self.force_artifact_tools or estimate_text_tokens(serialized_output) > self.inline_token_limit
+        # Previously force_artifact_tools were always externalized regardless of size.
+        # Now they only externalize when they actually exceed the inline limit.
+        return estimate_text_tokens(serialized_output) > self.inline_token_limit
 
 
 class ArtifactStore:

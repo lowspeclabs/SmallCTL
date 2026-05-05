@@ -74,6 +74,9 @@ def record_evidence(
     if artifact is not None:
         artifact.metadata.setdefault("evidence_id", evidence.evidence_id)
         artifact.metadata.setdefault("evidence_type", evidence.evidence_type)
+        artifact.metadata.setdefault("phase", evidence.phase)
+        artifact.metadata.setdefault("created_phase", evidence.phase)
+        artifact.metadata.setdefault("created_at_step", evidence.created_at_step)
         if operation_id:
             artifact.metadata.setdefault("operation_id", operation_id)
     return evidence

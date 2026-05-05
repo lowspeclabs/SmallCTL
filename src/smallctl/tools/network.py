@@ -13,6 +13,7 @@ from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .shell import create_process
 from .process_streams import read_stream_chunks
+from .shell_support import _foreground_command_guard
 from .ui_streaming import BufferedUIEventEmitter
 
 if TYPE_CHECKING:
@@ -486,13 +487,16 @@ async def ssh_exec(
                 "proof_bundle": risk_decision.proof_bundle,
             },
         )
+    approval_wait_sec = 0.0
     if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+        approval_start = time.monotonic()
         approved = await approval_fn(
             command=command,
             cwd=str(getattr(policy_state, "cwd", ".") or "."),
             timeout_sec=timeout_sec,
             proof_bundle=risk_decision.proof_bundle,
         )
+        approval_wait_sec = time.monotonic() - approval_start
         if not approved:
             denied = fail(
                 "SSH execution denied by user.",
@@ -507,7 +511,7 @@ async def ssh_exec(
             denied["status"] = "denied"
             return denied
 
-    return await run_ssh_command(
+    result = await run_ssh_command(
         host=host,
         command=command,
         user=user,
@@ -518,6 +522,10 @@ async def ssh_exec(
         state=state,
         harness=harness,
     )
+    if isinstance(result, dict) and isinstance(result.get("metadata"), dict):
+        if approval_wait_sec > 0:
+            result["metadata"]["approval_wait_sec"] = round(approval_wait_sec, 3)
+    return result
 
 
 async def run_ssh_command(
@@ -547,14 +555,6 @@ async def run_ssh_command(
     strict_host_key_mode = "accept-new"
     try:
         host, user = normalize_ssh_target(host=host, user=user)
-        full_cmd, env_overrides = _build_ssh_command(
-            host=host,
-            command=command,
-            user=user,
-            port=port,
-            identity_file=identity_file,
-            password=password,
-        )
     except ValueError as exc:
         return fail(
             str(exc),
@@ -564,6 +564,33 @@ async def run_ssh_command(
                 "user": user,
                 "reason": "invalid_ssh_target",
             },
+        )
+
+    foreground_guard = _foreground_command_guard(command, tool_name="ssh_exec")
+    if foreground_guard is not None:
+        metadata = dict(foreground_guard.get("metadata") or {})
+        metadata.update(
+            {
+                "host": host,
+                "user": user,
+                **_ssh_execution_debug_metadata(
+                    password=password,
+                    identity_file=identity_file,
+                    strict_host_key_checking=strict_host_key_mode,
+                ),
+            }
+        )
+        foreground_guard["metadata"] = metadata
+        return foreground_guard
+
+    try:
+        full_cmd, env_overrides = _build_ssh_command(
+            host=host,
+            command=command,
+            user=user,
+            port=port,
+            identity_file=identity_file,
+            password=password,
         )
     except FileNotFoundError as exc:
         if str(exc) == "sshpass":

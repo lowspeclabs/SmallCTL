@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable, Any
 
 from ..guards import is_four_b_or_under_model_name
 from ..remote_scope import has_any_session_ssh_target, remote_scope_is_active
+from ..recovery_metrics import increment_metric
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -38,6 +40,7 @@ _MUTATION_TOOL_NAMES = {
     "file_patch",
     "ast_patch",
 }
+_PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
 
 
 class PromptStateFrameCompiler:
@@ -63,11 +66,13 @@ class PromptStateFrameCompiler:
             if isinstance(state.scratchpad.get("_fama_config"), dict)
             else 180,
         )
+        recovery_guidance_lines = self.render_recovery_guidance(state)
         working_memory_text = self._render_working_memory(
             state=state,
             phase_lines=phase_lines,
             coding_anchor_lines=coding_anchor_lines,
             fama_capsule_lines=fama_capsule_lines,
+            recovery_guidance_lines=recovery_guidance_lines,
         )
 
         plan = state.active_plan or state.draft_plan
@@ -123,8 +128,16 @@ class PromptStateFrameCompiler:
             + ([state.last_failure_class] if state.last_failure_class else [])
             + [f"Invalidated: {item}" for item in invalidated_hints[:3]]
         )
+        remote_mutation_action = self._render_remote_mutation_next_action(state)
+        if remote_mutation_action:
+            current_blockers = self._dedupe(
+                current_blockers
+                + ["Remote mutation verification is pending before completion."]
+            )
         next_allowed_action = ""
-        if state.write_session is not None:
+        if remote_mutation_action:
+            next_allowed_action = remote_mutation_action
+        if not next_allowed_action and state.write_session is not None:
             next_allowed_action = self._render_write_session_next_action(state.write_session)
         if not next_allowed_action and state.working_memory.next_actions:
             next_allowed_action = state.working_memory.next_actions[-1]
@@ -154,6 +167,7 @@ class PromptStateFrameCompiler:
             run_brief_text=run_brief_text,
             working_memory_text=working_memory_text,
             fama_capsule_lines=fama_capsule_lines,
+            recovery_guidance_lines=recovery_guidance_lines,
         )
         frame = PromptStateFrame(
             spine=spine,
@@ -479,6 +493,42 @@ class PromptStateFrameCompiler:
                 return True
         return False
 
+    @staticmethod
+    def _path_tokens(text: str) -> list[str]:
+        paths: list[str] = []
+        for match in _PATH_TOKEN_RE.finditer(str(text or "")):
+            path = match.group(0).strip().strip("`'\".,:;")
+            if path and path not in paths:
+                paths.append(path)
+        return paths
+
+    @classmethod
+    def _verifier_failure_paths(cls, event: dict[str, Any]) -> list[str]:
+        candidates = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
+        details = event.get("details")
+        if isinstance(details, dict):
+            for key in ("command", "target"):
+                candidates.extend(cls._path_tokens(str(details.get(key) or "")))
+        normalized: list[str] = []
+        for path in candidates:
+            if path and path not in normalized:
+                normalized.append(path)
+        return normalized
+
+    @classmethod
+    def _verifier_failure_related_to_text(cls, text: str, event: dict[str, Any]) -> bool:
+        failure_paths = cls._verifier_failure_paths(event)
+        if not failure_paths:
+            return True
+        text_paths = cls._path_tokens(text)
+        if text_paths:
+            return any(cls._path_matches_any(path, failure_paths) for path in text_paths)
+        return any(cls._path_matches_any(text, [path]) for path in failure_paths)
+
+    @classmethod
+    def _optimistic_text_invalidated_by_verifier(cls, text: str, event: dict[str, Any]) -> bool:
+        return cls._is_optimistic_statement(text) and cls._verifier_failure_related_to_text(text, event)
+
     @classmethod
     def _bundle_invalidated(
         cls,
@@ -498,7 +548,7 @@ class PromptStateFrameCompiler:
                 if bundle.phase and str(bundle.phase).strip().lower() != current_phase:
                     return True
             if reason in {"verifier_failed", "fama_failure_detected"} and any(
-                cls._is_optimistic_statement(line) for line in bundle.summary_lines
+                cls._optimistic_text_invalidated_by_verifier(line, event) for line in bundle.summary_lines
             ):
                 return True
         return False
@@ -522,9 +572,9 @@ class PromptStateFrameCompiler:
                 if brief.current_phase and str(brief.current_phase).strip().lower() != current_phase:
                     return True
             if reason in {"verifier_failed", "fama_failure_detected"}:
-                if any(cls._is_optimistic_statement(line) for line in brief.key_discoveries):
+                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in brief.key_discoveries):
                     return True
-                if any(cls._is_optimistic_statement(line) for line in brief.new_facts):
+                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in brief.new_facts):
                     return True
         return False
 
@@ -544,9 +594,13 @@ class PromptStateFrameCompiler:
                 if any(cls._path_matches_any(path, paths) for path in summary.files_touched):
                     return True
             if reason in {"verifier_failed", "fama_failure_detected"}:
-                if any(cls._is_optimistic_statement(line) for line in summary.notes):
+                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in summary.notes):
                     return True
-                if failure_mode and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches):
+                if (
+                    failure_mode
+                    and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches)
+                    and not cls._verifier_failure_paths(event)
+                ):
                     return True
         return False
 
@@ -574,9 +628,13 @@ class PromptStateFrameCompiler:
                 if memory.phase and str(memory.phase).strip().lower() != current_phase:
                     return True
             if reason in {"verifier_failed", "fama_failure_detected"}:
-                if str(memory.outcome or "").strip().lower() == "success" and cls._is_optimistic_statement(notes):
+                if str(memory.outcome or "").strip().lower() == "success" and cls._optimistic_text_invalidated_by_verifier(notes, event):
                     return True
-                if failure_mode and str(memory.failure_mode or "").strip().lower() == failure_mode:
+                if (
+                    failure_mode
+                    and str(memory.failure_mode or "").strip().lower() == failure_mode
+                    and not cls._verifier_failure_paths(event)
+                ):
                     return True
         return False
 
@@ -605,9 +663,46 @@ class PromptStateFrameCompiler:
                     return True
             if reason in {"phase_advanced", "environment_changed"} and metadata_phase:
                 if metadata_phase != current_phase:
-                    return True
+                    if not cls._is_read_only_artifact(artifact):
+                        return True
             if reason in {"verifier_failed", "fama_failure_detected"} and verifier_verdict == "pass":
+                if not cls._verifier_failure_related_to_text(
+                    " ".join(
+                        str(part or "")
+                        for part in (
+                            getattr(artifact, "source", ""),
+                            getattr(artifact, "summary", ""),
+                            metadata.get("path", ""),
+                            metadata.get("command", ""),
+                            metadata.get("verifier_command", ""),
+                            metadata.get("verifier_target", ""),
+                        )
+                    ),
+                    event,
+                ):
+                    continue
                 return True
+        return False
+
+    @staticmethod
+    def _is_read_only_artifact(artifact: Any) -> bool:
+        if artifact is None:
+            return False
+        tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
+        read_only_tools = frozenset({"ssh_file_read", "file_read", "web_search", "artifact_read", "artifact_print", "find"})
+        if tool_name in read_only_tools:
+            return True
+        if tool_name in {"ssh_exec", "shell_exec"}:
+            metadata = getattr(artifact, "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                command = str(metadata.get("command") or "").strip()
+                if command:
+                    mutating_pattern = re.compile(
+                        r"\b(start|restart|stop|enable|disable|rm\b|mv\b|cp\b|sed\s+-i|tee\b|>>>?\s*/|cat\s*>\s*/|install\s+-m|truncate\b|chmod\s+\d|chown\s+\S+:\S+)\b",
+                        re.IGNORECASE,
+                    )
+                    if not mutating_pattern.search(command):
+                        return True
         return False
 
     @staticmethod
@@ -947,14 +1042,178 @@ class PromptStateFrameCompiler:
             )
 
     @staticmethod
+    def _render_remote_mutation_next_action(state: LoopState) -> str:
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        requirement = scratchpad.get("_remote_mutation_requires_verification")
+        if not isinstance(requirement, dict) or not requirement:
+            return ""
+
+        host = str(requirement.get("host") or "").strip()
+        user = str(requirement.get("user") or "").strip()
+        verified_paths = {
+            str(path).strip()
+            for path in requirement.get("verified_paths", [])
+            if str(path).strip()
+        }
+        guessed_paths = [
+            str(path).strip()
+            for path in requirement.get("guessed_paths", [])
+            if str(path).strip()
+        ]
+        pending_path = next((path for path in guessed_paths if path not in verified_paths), "")
+        if pending_path:
+            return "Run " + PromptStateFrameCompiler._render_ssh_tool_call(
+                "ssh_file_read",
+                host=host,
+                user=user,
+                path=pending_path,
+            )
+
+        verified_directories = {
+            str(path).strip().rstrip("/")
+            for path in requirement.get("verified_directory_empty_checks", [])
+            if str(path).strip()
+        }
+        for check in PromptStateFrameCompiler._remote_mutation_directory_checks(requirement):
+            directory_path = check["path"]
+            if directory_path in verified_directories:
+                continue
+            command = f"find {directory_path} -mindepth 1 -maxdepth 1 -print -quit"
+            return "Run " + PromptStateFrameCompiler._render_ssh_tool_call(
+                "ssh_exec",
+                host=host,
+                user=user,
+                command=command,
+            )
+        return ""
+
+    @staticmethod
+    def _render_ssh_tool_call(tool_name: str, *, host: str, user: str = "", path: str = "", command: str = "") -> str:
+        args: list[str] = []
+        if host:
+            args.append(f"host={host!r}")
+        if user:
+            args.append(f"user={user!r}")
+        if path:
+            args.append(f"path={path!r}")
+        if command:
+            args.append(f"command={command!r}")
+        return f"{tool_name}(" + ", ".join(args) + ")"
+
+    @staticmethod
+    def _remote_mutation_directory_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
+        raw_checks = requirement.get("directory_empty_checks")
+        if not isinstance(raw_checks, list):
+            return []
+        checks: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in raw_checks:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip().rstrip("/")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            glob = str(item.get("glob") or "").strip()
+            checks.append({"path": path, "glob": glob})
+        return checks
+
+    @staticmethod
+    def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[str]:
+        config = state.scratchpad.get("_recovery_config")
+        config = config if isinstance(config, dict) else {}
+        if not bool(config.get("reflexion_enabled", True)):
+            return []
+        active_subtask = None
+        ledger = state.subtask_ledger
+        if ledger is not None:
+            active_subtask = ledger.active()
+        latest_failure = state.failure_events[-1] if state.failure_events else None
+        if (
+            active_subtask is None
+            and latest_failure is None
+            and not state.reflexion_memory
+            and not state.last_failure_class
+            and state.write_session is None
+        ):
+            return []
+
+        lines: list[str] = []
+        if active_subtask is not None:
+            line = f"Active subtask {active_subtask.subtask_id} [{active_subtask.status}]: {active_subtask.title}"
+            if active_subtask.attempts:
+                line += f"; attempts={active_subtask.attempts}"
+            if active_subtask.next_action:
+                line += f"; next={active_subtask.next_action}"
+            lines.append(line)
+            if active_subtask.blockers:
+                lines.append("Latest blocker: " + active_subtask.blockers[-1])
+        if latest_failure is not None:
+            failure_line = f"Latest failure: {latest_failure.failure_class}"
+            if latest_failure.message:
+                failure_line += f" - {latest_failure.message}"
+            lines.append(failure_line)
+            if latest_failure.suggested_next_action:
+                lines.append("Next safe action: " + latest_failure.suggested_next_action)
+        elif state.last_failure_class:
+            lines.append("Latest failure class: " + state.last_failure_class)
+
+        active_subtask_id = str(getattr(active_subtask, "subtask_id", "") or "").strip()
+        top_k = max(0, int(config.get("reflexion_inject_top_k", 3) or 3))
+        reflections = [
+            item
+            for item in state.reflexion_memory
+            if not active_subtask_id or not item.subtask_id or item.subtask_id == active_subtask_id
+        ]
+        reflections.sort(
+            key=lambda item: (
+                float(getattr(item, "score", 0.0) or 0.0),
+                float(getattr(item, "timestamp", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
+        injected_reflections = reflections[:top_k]
+        for reflection in injected_reflections:
+            lines.append(
+                f"Lesson {reflection.failure_class}: {reflection.lesson} Avoid: {reflection.avoid} Next: {reflection.next_safe_action}"
+            )
+        if injected_reflections:
+            increment_metric(state, "reflections_injected", len(injected_reflections))
+            for reflection in injected_reflections:
+                reflection.used_count = int(getattr(reflection, "used_count", 0) or 0) + 1
+
+        completed_limit = max(0, int(config.get("subtask_inject_completed_limit", 3) or 3))
+        if ledger is not None and completed_limit:
+            completed = [task for task in ledger.subtasks if task.status == "done"][-completed_limit:]
+            for task in completed:
+                lines.append(f"Completed subtask {task.subtask_id}: {task.title}")
+
+        clipped: list[str] = []
+        budget_chars = max(80, int(token_budget or 500) * 4)
+        used = 0
+        for line in lines:
+            text = str(line or "").strip()
+            if not text:
+                continue
+            if len(text) > 240:
+                text = text[:239].rstrip() + "..."
+            if used + len(text) > budget_chars and clipped:
+                break
+            clipped.append(text)
+            used += len(text)
+        return clipped
+
+    @staticmethod
     def _render_working_memory(
         state: LoopState,
         *,
         phase_lines: list[str],
         coding_anchor_lines: list[str],
         fama_capsule_lines: list[str] | None = None,
+        recovery_guidance_lines: list[str] | None = None,
     ) -> str:
         fama_capsule_lines = list(fama_capsule_lines or [])
+        recovery_guidance_lines = list(recovery_guidance_lines or [])
         memory = state.working_memory
         plan = state.active_plan or state.draft_plan
         has_content = any(
@@ -975,6 +1234,7 @@ class PromptStateFrameCompiler:
                 bool(phase_lines),
                 bool(coding_anchor_lines),
                 bool(fama_capsule_lines),
+                bool(recovery_guidance_lines),
                 bool(PromptStateFrameCompiler._run_boundary_lines(state)),
             ]
         )
@@ -995,6 +1255,9 @@ class PromptStateFrameCompiler:
         if fama_capsule_lines:
             sections.append("FAMA mitigation:")
             sections.extend(f"  {line}" for line in fama_capsule_lines[:5])
+        if recovery_guidance_lines:
+            sections.append("Recovery guidance:")
+            sections.extend(f"  {line}" for line in recovery_guidance_lines[:8])
         current_goal = LexicalRetriever._effective_current_goal(state)
         if current_goal:
             sections.append("Current goal: " + current_goal)
@@ -1013,6 +1276,9 @@ class PromptStateFrameCompiler:
             sections.append("Known failures: " + " | ".join(memory.failures))
         if memory.next_actions:
             sections.append("Next actions: " + " | ".join(memory.next_actions))
+        remote_mutation_action = PromptStateFrameCompiler._render_remote_mutation_next_action(state)
+        if remote_mutation_action:
+            sections.append("Remote mutation verification pending: " + remote_mutation_action)
         continuation_anchor_lines = PromptStateFrameCompiler._continuation_anchor_lines(state)
         if continuation_anchor_lines:
             sections.append("Continuation anchor:")

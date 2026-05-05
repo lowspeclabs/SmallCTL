@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future as ConcurrentFuture
+import inspect
 import threading
 from typing import Any, Callable
 
@@ -103,8 +104,8 @@ class HarnessBridge:
     def set_shell_approval_session_default(self, enabled: bool) -> None:
         self._call_soon(self.harness.set_shell_approval_session_default, enabled)
 
-    def cancel(self) -> None:
-        self._call_soon(self.harness.cancel)
+    def cancel(self, source: str = "ui_stop_button") -> None:
+        self._call_soon(self._cancel_harness, source)
 
     def resolve_shell_approval(self, approval_id: str, approved: bool) -> None:
         self._call_soon(self.harness.resolve_shell_approval, approval_id, approved)
@@ -166,6 +167,27 @@ class HarnessBridge:
     def _call_soon(self, callback: Callable[..., Any], *args: Any) -> None:
         loop = self._require_loop()
         loop.call_soon_threadsafe(callback, *args)
+
+    def _cancel_harness(self, source: str) -> None:
+        cancel = self.harness.cancel
+        try:
+            signature = inspect.signature(cancel)
+        except (TypeError, ValueError):
+            try:
+                cancel(source)
+            except TypeError:
+                cancel()
+            return
+
+        parameters = list(signature.parameters.values())
+        accepts_source = any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters) or any(
+            param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+            for param in parameters
+        )
+        if accepts_source:
+            cancel(source)
+        else:
+            cancel()
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         self.start()

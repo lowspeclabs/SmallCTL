@@ -1088,7 +1088,9 @@ async def ssh_file_patch(
     )
     if precondition_metadata is not None and "resolved_expected_sha256" not in precondition_metadata:
         return fail(precondition_metadata["message"], metadata=precondition_metadata)
-    if whitespace_normalized and not (resolved_expected_sha256 or str(source_artifact_id or "").strip()):
+    if whitespace_normalized and not dry_run and not (
+        resolved_expected_sha256 or str(source_artifact_id or "").strip()
+    ):
         return fail(
             "whitespace_normalized mode requires `expected_sha256` or `source_artifact_id`. Prefer `dry_run=True` first to preview the matched region and planned hash.",
             metadata={"reason": "precondition_required_for_whitespace_normalized"},
@@ -1158,7 +1160,9 @@ async def ssh_file_replace_between(
     )
     if precondition_metadata is not None and "resolved_expected_sha256" not in precondition_metadata:
         return fail(precondition_metadata["message"], metadata=precondition_metadata)
-    if whitespace_normalized and not (resolved_expected_sha256 or str(source_artifact_id or "").strip()):
+    if whitespace_normalized and not dry_run and not (
+        resolved_expected_sha256 or str(source_artifact_id or "").strip()
+    ):
         return fail(
             "whitespace_normalized mode requires `expected_sha256` or `source_artifact_id`. Prefer `dry_run=True` first to preview the matched region and planned hash.",
             metadata={"reason": "precondition_required_for_whitespace_normalized"},

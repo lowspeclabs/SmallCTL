@@ -22,9 +22,9 @@ class SmallctlAppActionsMixin:
         self._dismiss_active_approval_prompt()
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
-            bridge.cancel()
+            bridge.cancel(source="ui_stop_button")
         elif self.harness is not None:
-            self.harness.cancel()
+            self.harness.cancel(source="ui_stop_button")
         if self.active_task and not self.active_task.done():
             self.active_task.cancel()
             log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")

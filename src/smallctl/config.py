@@ -149,6 +149,15 @@ class SmallctlConfig:
     fama_capsule_token_budget: int = 180
     fama_llm_judge_enabled: bool = False
     fama_llm_judge_min_severity: int = 3
+    reflexion_enabled: bool = True
+    reflexion_max_items: int = 5
+    reflexion_inject_top_k: int = 3
+    reflexion_persist_cross_task: bool = False
+    reflexion_min_failure_severity: str = "warning"
+    subtask_ledger_enabled: bool = True
+    subtask_max_active: int = 1
+    subtask_max_history: int = 12
+    subtask_inject_completed_limit: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -214,6 +223,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "fama_enabled",
         "fama_done_gate_on_failure",
         "fama_llm_judge_enabled",
+        "reflexion_enabled",
+        "reflexion_persist_cross_task",
+        "subtask_ledger_enabled",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -254,6 +266,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "fama_signal_window",
         "fama_capsule_token_budget",
         "fama_llm_judge_min_severity",
+        "reflexion_max_items",
+        "reflexion_inject_top_k",
+        "subtask_max_active",
+        "subtask_max_history",
+        "subtask_inject_completed_limit",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -298,7 +315,14 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["preset"] = preset_name
     if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
         merged["staged_execution_enabled"] = True
-    for key in ("fama_enabled", "fama_done_gate_on_failure", "fama_llm_judge_enabled"):
+    for key in (
+        "fama_enabled",
+        "fama_done_gate_on_failure",
+        "fama_llm_judge_enabled",
+        "reflexion_enabled",
+        "reflexion_persist_cross_task",
+        "subtask_ledger_enabled",
+    ):
         if key in merged:
             merged[key] = _to_bool(merged[key])
     for key in (
@@ -307,6 +331,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "fama_signal_window",
         "fama_capsule_token_budget",
         "fama_llm_judge_min_severity",
+        "reflexion_max_items",
+        "reflexion_inject_top_k",
+        "subtask_max_active",
+        "subtask_max_history",
+        "subtask_inject_completed_limit",
     ):
         if key in merged:
             parsed_limit = _to_int(merged[key])

@@ -10,6 +10,7 @@ from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop, _record_
 from smallctl.graph.progress_guard import (
     _update_progress_tracking,
     _check_progress_stagnation,
+    _build_progress_stagnation_nudge,
     _next_unread_artifact_line,
     _turn_has_actionable_progress,
 )
@@ -213,6 +214,28 @@ def test_sub4b_repeated_file_read_loop_includes_directive_hint() -> None:
     assert "Directive Hint:" in repeat_error
     assert "`file_patch` or `ast_patch`" in repeat_error
     assert "`shell_exec`" in repeat_error
+
+
+def test_ssh_file_read_not_found_blocks_same_missing_path_retry() -> None:
+    harness = _FakeHarness()
+    harness.state.scratchpad["_deterministic_read_failures"] = [
+        {
+            "tool_name": "ssh_file_read",
+            "host": "192.168.1.89",
+            "user": "root",
+            "path": "/var/lib/caddy/Caddyfile",
+        }
+    ]
+    pending = PendingToolCall(
+        tool_name="ssh_file_read",
+        args={"host": "192.168.1.89", "user": "root", "path": "/var/lib/caddy/Caddyfile"},
+    )
+
+    repeat_error = _detect_repeated_tool_loop(harness, pending)
+
+    assert repeat_error is not None
+    assert "deterministic missing remote file read" in repeat_error
+    assert "ssh_file_read" in repeat_error
 
 
 def test_repeated_artifact_grep_trips_after_three_identical_calls_with_intervening_tools() -> None:
@@ -640,6 +663,49 @@ def test_mutation_without_changed_does_not_count_as_progress() -> None:
     _update_progress_tracking(harness, graph_state)
 
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_patch_task_memory_update_does_not_count_as_actionable_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch /var/www/9-b-model.html without overwriting"
+
+    graph_state = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "memory_update",
+                {"section": "next_actions", "content": "Next action: apply ssh_file_patch"},
+            )
+        ],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_patch_task_artifact_grep_does_not_count_as_actionable_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch /var/www/9-b-model.html without overwriting"
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("artifact_grep", {"artifact_id": "A0006", "query": "<button|</div>|</p>"})],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_patch_task_stagnation_nudge_names_remote_patch_tools() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch /var/www/9-b-model.html without overwriting"
+
+    message = _build_progress_stagnation_nudge(harness)
+
+    assert "memory notes, artifact searches, and repeated reads are not progress" in message
+    assert "`ssh_file_patch`" in message
+    assert "`ssh_file_replace_between`" in message
 
 
 def test_new_verifier_verdict_counts_as_progress() -> None:

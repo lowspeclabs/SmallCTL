@@ -46,12 +46,12 @@ def _artifact_read_loop_exceeded_limit(
 ) -> bool:
     """
     Returns True if there have been `limit` or more artifact_read calls
-    on a stage artifact without an intervening write operation.
+    on the same artifact without an intervening write operation.
     """
     if pending.tool_name != "artifact_read":
         return False
     artifact_id = _extract_artifact_id_from_args(pending.args)
-    if not artifact_id or not artifact_id.endswith("__stage"):
+    if not artifact_id:
         return False
 
     from .tool_loop_guards import _tool_attempt_history

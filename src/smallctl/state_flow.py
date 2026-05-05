@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,39 @@ from .state_memory import (
 )
 from .state_schema import ExperienceMemory, MemoryEntry
 from .state_support import clip_string_list, normalize_intent_label
+
+
+_READ_ONLY_TOOLS = frozenset({"ssh_file_read", "file_read", "web_search", "artifact_read", "artifact_print", "find"})
+
+_MUTATING_COMMAND_RE = re.compile(
+    r"\b(start|restart|stop|enable|disable|rm\b|mv\b|cp\b|sed\s+-i|tee\b|>>>?\s*/|cat\s*>\s*/|install\s+-m|truncate\b|chmod\s+\d|chown\s+\S+:\S+)\b",
+    re.IGNORECASE,
+)
+_PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
+
+
+def _is_read_only_artifact(artifact: Any) -> bool:
+    if artifact is None:
+        return False
+    tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
+    if tool_name in _READ_ONLY_TOOLS:
+        return True
+    if tool_name in {"ssh_exec", "shell_exec"}:
+        metadata = getattr(artifact, "metadata", {}) or {}
+        if isinstance(metadata, dict):
+            command = str(metadata.get("command") or "").strip()
+            if command and not _MUTATING_COMMAND_RE.search(command):
+                return True
+    return False
+
+
+def _extract_path_tokens(text: str) -> list[str]:
+    paths: list[str] = []
+    for match in _PATH_TOKEN_RE.finditer(str(text or "")):
+        path = match.group(0).strip().strip("`'\".,:;")
+        if path and path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -290,6 +324,13 @@ class LoopStateFlowMixin:
         )
 
     def contract_phase(self) -> str:
+        damped = str(self.scratchpad.get("_phase_damped_to") or "").strip()
+        if damped:
+            if damped == "repair" and getattr(self, "acceptance_ready", None) and self.acceptance_ready():
+                self.scratchpad.pop("_phase_damped_to", None)
+                self.scratchpad.pop("_repair_phase_entered_step", None)
+            else:
+                return damped
         scratch_phase = str(self.scratchpad.get("_contract_phase") or "").strip()
         if scratch_phase:
             return scratch_phase
@@ -500,6 +541,41 @@ class LoopStateFlowMixin:
             return True
         return False
 
+    def _is_recent_context_step(self, created_at_step: int | None) -> bool:
+        try:
+            step = int(created_at_step or 0)
+        except (TypeError, ValueError):
+            step = 0
+        current_step = int(self.step_count or 0)
+        return bool(current_step > 0 and step and step <= current_step and step >= max(0, current_step - 1))
+
+    def _verifier_failure_paths(self, detail_payload: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for key in ("command", "target"):
+            candidates.extend(_extract_path_tokens(str(detail_payload.get(key) or "")))
+        for path in self._normalize_paths(candidates):
+            if path not in candidates:
+                candidates.append(path)
+        return [path for path in candidates if path]
+
+    def _verifier_failure_related_to_text(self, text: str, detail_payload: dict[str, Any]) -> bool:
+        failure_paths = self._verifier_failure_paths(detail_payload)
+        if not failure_paths:
+            return True
+        text_paths = _extract_path_tokens(text)
+        if text_paths:
+            return any(self._text_matches_any_path(path, failure_paths) for path in text_paths)
+        return any(self._text_matches_any_path(text, [path]) for path in failure_paths)
+
+    def _verifier_failure_should_invalidate_optimistic(
+        self,
+        text: str,
+        detail_payload: dict[str, Any],
+    ) -> bool:
+        if not self._is_optimistic_statement(text):
+            return False
+        return self._verifier_failure_related_to_text(text, detail_payload)
+
     def invalidate_context(
         self,
         *,
@@ -510,6 +586,8 @@ class LoopStateFlowMixin:
         reason_label = str(reason or "").strip().lower() or "unspecified"
         path_hints = self._normalize_paths(paths)
         detail_payload = dict(details or {})
+        if reason_label == "verifier_failed" and not path_hints:
+            path_hints = self._normalize_paths(self._verifier_failure_paths(detail_payload))
         invalidated_facts: list[str] = []
         invalidated_memory_ids: list[str] = []
 
@@ -528,11 +606,14 @@ class LoopStateFlowMixin:
                 should_invalidate = self._text_matches_any_path(content, path_hints)
             elif reason_label == "phase_advanced":
                 should_invalidate = str(entry.created_phase or "").strip() != str(self.current_phase or "").strip()
+                if should_invalidate and self._is_recent_context_step(entry.created_at_step):
+                    should_invalidate = False
             elif reason_label == "verifier_failed":
-                lowered = str(content or "").lower()
-                should_invalidate = any(token in lowered for token in ("pass", "verified", "success", "fixed"))
+                should_invalidate = self._verifier_failure_should_invalidate_optimistic(content, detail_payload)
             elif reason_label == "environment_changed":
                 should_invalidate = bool(entry.created_phase and entry.created_phase != self.current_phase)
+                if should_invalidate and self._is_recent_context_step(entry.created_at_step):
+                    should_invalidate = False
             if should_invalidate:
                 _maybe_invalidate_entry(entry, content)
                 known_entries[idx] = entry
@@ -550,13 +631,28 @@ class LoopStateFlowMixin:
             if reason_label in {"file_changed", "write_session_target_changed"} and path_hints:
                 should_downgrade = self._text_matches_any_path(memory.notes, path_hints)
             elif reason_label == "verifier_failed":
-                should_downgrade = memory.outcome == "success"
+                should_downgrade = memory.outcome == "success" and self._verifier_failure_should_invalidate_optimistic(
+                    memory.notes,
+                    detail_payload,
+                )
             elif reason_label == "phase_advanced":
                 should_downgrade = bool(memory.phase and memory.phase != self.current_phase)
+                if (
+                    should_downgrade
+                    and memory.outcome == "success"
+                    and str(memory.tool_name or "").strip().lower() in _READ_ONLY_TOOLS
+                ):
+                    should_downgrade = False
             elif reason_label == "environment_changed":
                 phase_tag = f"phase_{self.current_phase}".lower()
                 env_tags = {str(tag).strip().lower() for tag in (memory.environment_tags or []) if str(tag).strip()}
                 should_downgrade = bool(env_tags) and phase_tag not in env_tags
+                if (
+                    should_downgrade
+                    and memory.outcome == "success"
+                    and str(memory.tool_name or "").strip().lower() in _READ_ONLY_TOOLS
+                ):
+                    should_downgrade = False
             if not should_downgrade:
                 continue
             memory.confidence = max(0.0, min(1.0, float(memory.confidence or 0.0) - 0.2))
@@ -586,9 +682,13 @@ class LoopStateFlowMixin:
                     str(getattr(bundle, "phase", "") or "").strip()
                     and str(getattr(bundle, "phase", "") or "").strip() != str(self.current_phase or "").strip()
                 )
+                step_range = getattr(bundle, "step_range", ()) or ()
+                recent_step = max([int(step or 0) for step in step_range] or [0])
+                if should_mark_stale and self._is_recent_context_step(recent_step):
+                    should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = any(
-                    self._is_optimistic_statement(str(line))
+                    self._verifier_failure_should_invalidate_optimistic(str(line), detail_payload)
                     for line in (getattr(bundle, "summary_lines", []) or [])
                 )
             if should_mark_stale:
@@ -616,9 +716,13 @@ class LoopStateFlowMixin:
                     str(getattr(brief, "current_phase", "") or "").strip()
                     and str(getattr(brief, "current_phase", "") or "").strip() != str(self.current_phase or "").strip()
                 )
+                step_range = getattr(brief, "step_range", ()) or ()
+                recent_step = max([int(step or 0) for step in step_range] or [0])
+                if should_mark_stale and self._is_recent_context_step(recent_step):
+                    should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = any(
-                    self._is_optimistic_statement(str(line))
+                    self._verifier_failure_should_invalidate_optimistic(str(line), detail_payload)
                     for line in ((getattr(brief, "key_discoveries", []) or []) + (getattr(brief, "new_facts", []) or []))
                 )
             if should_mark_stale:
@@ -645,8 +749,15 @@ class LoopStateFlowMixin:
             elif reason_label == "verifier_failed":
                 notes = [str(line) for line in (getattr(summary, "notes", []) or [])]
                 failed_lines = [str(line).strip().lower() for line in (getattr(summary, "failed_approaches", []) or [])]
-                should_mark_stale = any(self._is_optimistic_statement(line) for line in notes)
-                if failure_mode and any(failure_mode in line for line in failed_lines):
+                should_mark_stale = any(
+                    self._verifier_failure_should_invalidate_optimistic(line, detail_payload)
+                    for line in notes
+                )
+                if (
+                    failure_mode
+                    and any(failure_mode in line for line in failed_lines)
+                    and not self._verifier_failure_paths(detail_payload)
+                ):
                     should_mark_stale = True
             if should_mark_stale:
                 invalidated_summary_ids.append(summary_id)
@@ -683,8 +794,29 @@ class LoopStateFlowMixin:
             elif reason_label in {"phase_advanced", "environment_changed"}:
                 metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip()
                 should_mark_stale = bool(metadata_phase and metadata_phase != str(self.current_phase or "").strip())
+                if should_mark_stale and (
+                    _is_read_only_artifact(artifact)
+                    or self._is_recent_context_step(metadata.get("created_at_step"))
+                ):
+                    should_mark_stale = False
             elif reason_label == "verifier_failed":
-                should_mark_stale = str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                should_mark_stale = (
+                    str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                    and self._verifier_failure_related_to_text(
+                        " ".join(
+                            str(part or "")
+                            for part in (
+                                getattr(artifact, "source", ""),
+                                getattr(artifact, "summary", ""),
+                                metadata.get("path", ""),
+                                metadata.get("command", ""),
+                                metadata.get("verifier_command", ""),
+                                metadata.get("verifier_target", ""),
+                            )
+                        ),
+                        detail_payload,
+                    )
+                )
             if should_mark_stale:
                 invalidated_artifact_ids.append(normalized_artifact_id)
                 self._mark_lane_stale(
@@ -720,8 +852,22 @@ class LoopStateFlowMixin:
                         should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = (
-                    str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
-                    or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
+                    (
+                        str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                        or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
+                    )
+                    and self._verifier_failure_related_to_text(
+                        " ".join(
+                            str(part or "")
+                            for part in (
+                                getattr(evidence, "statement", ""),
+                                getattr(evidence, "source", ""),
+                                metadata.get("path", ""),
+                                metadata.get("command", ""),
+                            )
+                        ),
+                        detail_payload,
+                    )
                 )
             if should_mark_stale:
                 invalidated_observation_ids.append(evidence_id)

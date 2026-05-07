@@ -10,6 +10,7 @@ from .state import active_mitigations, expire_mitigations
 CAPSULE_TEXT: dict[str, str] = {
     "done_gate": "Before task_complete, satisfy the latest verifier/acceptance evidence or call task_fail with the blocker.",
     "acceptance_checklist_capsule": "Use the acceptance checklist and latest verifier result as the finish gate.",
+    "zero_test_recovery_capsule": "Latest test evidence discovered 0 tests; add real test classes/functions and rerun that test command before finishing.",
     "remote_scope_capsule": "Remote scope is active; use SSH tools for remote paths and verify remotely before finishing.",
     "micro_plan_capsule": "Break the next move into one concrete action, expected evidence, and stop condition.",
     "evidence_reuse_capsule": "Use visible evidence before repeating the same read or command.",

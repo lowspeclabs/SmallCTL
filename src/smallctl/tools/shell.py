@@ -351,8 +351,18 @@ async def shell_exec(
     command = str(command or "").strip()
     if state is None:
         return fail("Shell execution requires state context.", metadata={"reason": "missing_state"})
-    if poll_job_id:
+    if poll_job_id and not command:
         return await shell_job_status(job_id=poll_job_id, state=state, harness=harness)
+    if poll_job_id and command and not background:
+        return fail(
+            "`job_id` is only for polling background shell jobs. For foreground execution, omit `job_id`; "
+            "to launch a background job, set `background=true` and provide `command`.",
+            metadata={
+                "reason": "invalid_shell_exec_job_id_with_foreground_command",
+                "job_id": poll_job_id,
+                "command": command,
+            },
+        )
     if not command:
         return fail("Shell execution requires a command or a job_id to poll.", metadata={"reason": "missing_command"})
     artifact_delete_guard = _shell_write_session_artifact_delete_guard(state, command)

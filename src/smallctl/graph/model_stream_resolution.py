@@ -26,6 +26,11 @@ _STREAM_CHUNK_ERROR_AUTO_RESUME_SIGNATURE = "_stream_chunk_error_auto_resume_sig
 
 def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
     details = details if isinstance(details, dict) else {}
+    if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
+        provider = str(details.get("provider_profile") or "provider").strip() or "provider"
+        model = str(details.get("model") or "").strip()
+        suffix = f" for {model}" if model else ""
+        return f"{provider} model is unloaded{suffix}"
     if int(details.get("status_code", 0) or 0) == 400:
         provider = str(details.get("provider_profile") or "provider").strip() or "provider"
         upstream = str(details.get("upstream_provider") or "").strip()
@@ -40,6 +45,8 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
 
 def _chunk_error_failure_type(details: dict[str, Any] | None) -> str:
     details = details if isinstance(details, dict) else {}
+    if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
+        return "provider"
     if int(details.get("status_code", 0) or 0) == 400:
         return "provider"
     return "stream"

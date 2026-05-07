@@ -62,7 +62,6 @@ class ConsolePane(VerticalScroll):
                 await self._append_assistant(event.content)
             return
         if event.event_type == UIEventType.THINKING:
-            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
             if event.data.get("kind") == "replace":
                 await self._replace_thinking(event.content)
@@ -70,12 +69,10 @@ class ConsolePane(VerticalScroll):
                 await self._append_thinking(event.content)
             return
         if event.event_type == UIEventType.SHELL_STREAM:
-            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
             await self._append_shell_stream(event.content)
             return
         if event.event_type == UIEventType.TOOL_CALL:
-            self._maybe_roll_assistant_turn_for_meta_event(event.event_type)
             await self._ensure_assistant_turn(speaker=speaker)
             await self._append_tool_call(
                 str(event.data.get("display_text") or event.content),
@@ -84,16 +81,18 @@ class ConsolePane(VerticalScroll):
             )
             return
         if event.event_type == UIEventType.TOOL_RESULT:
-            await self._ensure_assistant_turn(speaker=speaker)
-            nested = await self._append_tool_result(
-                str(event.data.get("display_text") or event.content),
-                tool_name=_coerce_str(event.data.get("tool_name")),
-                tool_call_id=_coerce_str(event.data.get("tool_call_id")),
-                data=event.data,
-            )
-            if nested:
-                self._schedule_autoscroll()
-                return
+            if self._active_assistant_turn is not None:
+                if speaker:
+                    self._active_assistant_turn.set_speaker(speaker)
+                nested = await self._append_tool_result(
+                    str(event.data.get("display_text") or event.content),
+                    tool_name=_coerce_str(event.data.get("tool_name")),
+                    tool_call_id=_coerce_str(event.data.get("tool_call_id")),
+                    data=event.data,
+                )
+                if nested:
+                    self._schedule_autoscroll()
+                    return
 
         kind_map = {
             UIEventType.USER: "user",
@@ -103,7 +102,14 @@ class ConsolePane(VerticalScroll):
             UIEventType.ALERT: "alert",
         }
         kind = kind_map.get(event.event_type, "system")
-        if event.event_type == UIEventType.USER:
+        if event.event_type in {
+            UIEventType.USER,
+            UIEventType.TOOL_RESULT,
+            UIEventType.ERROR,
+            UIEventType.SYSTEM,
+            UIEventType.METRICS,
+            UIEventType.ALERT,
+        }:
             self._active_assistant_turn = None
         text = str(event.data.get("display_text") or event.content)
         await self._add_bubble(kind, text)
@@ -189,16 +195,6 @@ class ConsolePane(VerticalScroll):
         elif speaker:
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
-
-    def _maybe_roll_assistant_turn_for_meta_event(self, event_type: UIEventType) -> None:
-        turn = self._active_assistant_turn
-        if turn is None or not turn.has_assistant_text():
-            return
-        if event_type == UIEventType.THINKING:
-            self._active_assistant_turn = None
-            return
-        if event_type in {UIEventType.TOOL_CALL, UIEventType.SHELL_STREAM} and turn.has_meta_content():
-            self._active_assistant_turn = None
 
     def _schedule_autoscroll(self) -> None:
         """

@@ -46,6 +46,17 @@ def test_fama_capsules_render_repeated_action_narrowing_line() -> None:
     ]
 
 
+def test_fama_capsules_render_zero_test_recovery_line() -> None:
+    state = LoopState()
+    _activate(state, "zero_test_recovery_capsule")
+
+    lines = render_fama_capsules(state, token_budget=180)
+
+    assert lines == [
+        "Latest test evidence discovered 0 tests; add real test classes/functions and rerun that test command before finishing."
+    ]
+
+
 def test_fama_capsules_respect_disabled_config() -> None:
     state = LoopState()
     state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}

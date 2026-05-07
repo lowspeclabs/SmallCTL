@@ -9,6 +9,8 @@ from smallctl.harness.tool_visibility import resolve_turn_tool_exposure
 from smallctl.harness.tool_dispatch import chat_mode_tools
 from smallctl.harness.memory import assess_write_task_complexity
 from smallctl.harness.run_mode import ModeDecisionService
+from smallctl.client.request_budget import RequestEstimator, build_request_budget
+from smallctl.client.tool_budgeting import fit_tools_to_context_budget
 from smallctl.models.conversation import ConversationMessage
 from smallctl.state import LoopState
 from smallctl.state_schema import ExecutionPlan
@@ -177,6 +179,27 @@ def test_chat_mode_tools_hides_index_queries_until_an_index_exists(tmp_path) -> 
     exposure = resolve_turn_tool_exposure(harness, "chat")
     assert exposure["schemas"] == tools
     assert exposure["names"] == ["file_read"]
+
+
+def test_budget_reducer_does_not_add_runtime_hidden_tools() -> None:
+    tools = [_tool_schema("file_read")]
+    payload = {
+        "model": "demo",
+        "messages": [{"role": "user", "content": "read a file " + ("x" * 1000)}],
+        "stream": True,
+        "tools": tools,
+    }
+
+    result = fit_tools_to_context_budget(
+        payload=payload,
+        tools=tools,
+        budget=build_request_budget(2048),
+        requested_tool_name="index_query_symbol",
+        estimator=RequestEstimator(),
+    )
+
+    assert set(result.kept_tool_names) <= {"file_read"}
+    assert "index_query_symbol" not in result.kept_tool_names
 
 
 def test_complex_write_chat_exposes_write_tools_for_four_b_models(tmp_path) -> None:
@@ -387,12 +410,12 @@ def test_chat_mode_tools_expose_real_tools_for_mode_queries_too(tmp_path) -> Non
     assert "_chat_tools_suppressed_reason" not in state.scratchpad
 
 
-def test_chat_mode_tools_keep_terminal_tools_for_non_lookup_chat(tmp_path) -> None:
+def test_chat_mode_tools_suppress_all_tools_for_smalltalk(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
     state.active_tool_profiles = ["core"]
     harness = SimpleNamespace(
-        client=SimpleNamespace(model="gemma-4-e2b-it"),
+        client=SimpleNamespace(model="qwen3.5:4b"),
         state=state,
         _current_user_task=lambda: "hello",
         _runlog=lambda *args, **kwargs: None,
@@ -408,12 +431,12 @@ def test_chat_mode_tools_keep_terminal_tools_for_non_lookup_chat(tmp_path) -> No
 
     tools = chat_mode_tools(harness)
 
-    assert _tool_names(tools) == ["task_complete", "task_fail"]
-    assert state.scratchpad["_chat_tools_exposed"] is True
-    assert state.scratchpad["_chat_tools_suppressed_reason"] == "non_lookup_chat_terminal_only"
+    assert tools == []
+    assert state.scratchpad["_chat_tools_exposed"] is False
+    assert state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"
     exposure = resolve_turn_tool_exposure(harness, "chat")
     assert exposure["schemas"] == tools
-    assert exposure["names"] == ["task_complete", "task_fail"]
+    assert exposure["names"] == []
 
 
 def test_chat_mode_tools_logs_structured_diagnostic_when_selection_fails(tmp_path) -> None:

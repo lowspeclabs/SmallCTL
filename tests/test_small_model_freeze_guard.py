@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from smallctl.guards import GuardConfig, check_guards
 from smallctl.graph.recovery_context import build_goal_recap
+from smallctl.graph.chat_progress import should_pause_repeated_tool_loop, build_repeated_tool_loop_interrupt_payload
 from smallctl.graph.nodes import LoopRoute, interpret_model_output
 from smallctl.graph.state import PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop, _record_tool_attempt
@@ -27,6 +28,17 @@ class _FakeState:
         self.working_memory = SimpleNamespace(known_facts=[])
         self.planning_mode_enabled = False
         self.run_brief = SimpleNamespace(original_task="")
+        self.stagnation_counters: dict[str, int] = {}
+        self.artifacts: dict[str, object] = {}
+        self.last_verifier_verdict: dict[str, object] | None = None
+        self.active_tool_profiles: list[str] = ["core"]
+
+    def current_verifier_verdict(self) -> dict[str, object] | None:
+        verdict = self.last_verifier_verdict
+        if isinstance(verdict, dict) and verdict:
+            return verdict
+        scratch_verdict = self.scratchpad.get("_last_verifier_verdict")
+        return scratch_verdict if isinstance(scratch_verdict, dict) and scratch_verdict else None
 
     def append_message(self, message: object) -> None:
         self.recent_messages.append(message)
@@ -303,6 +315,33 @@ def test_repeated_artifact_read_past_eof_stops_early(tmp_path: Path) -> None:
 
     assert repeat_error is not None
     assert "artifact_read EOF overread" in repeat_error
+
+
+def test_repeated_loop_status_pauses_with_verifier_guidance() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "Fix temp/env_sanitizer.py"
+    harness.state.last_verifier_verdict = {"verdict": "fail", "command": "python3 temp/env_sanitizer.py"}
+    harness.state.scratchpad["_last_verifier_stale_after_mutation"] = {
+        "reason": "file_changed_after_verifier",
+        "tool_name": "file_patch",
+        "paths": ["temp/env_sanitizer.py"],
+    }
+    pending = PendingToolCall(tool_name="loop_status", args={})
+    graph_state = SimpleNamespace(thread_id="thread-1")
+
+    assert should_pause_repeated_tool_loop(harness, pending) is True
+
+    payload = build_repeated_tool_loop_interrupt_payload(
+        harness=harness,
+        graph_state=graph_state,
+        pending=pending,
+        repeat_error="Guard tripped: repeated tool call loop",
+    )
+
+    assert payload["guard"] == "repeated_tool_loop"
+    assert "Repeated loop_status detected" in payload["guidance"]
+    assert "last verifier verdict is stale" in payload["guidance"]
+    assert "rerun the focused verifier" in payload["guidance"]
 
 
 def test_artifact_read_new_ranges_still_count_as_progress() -> None:
@@ -642,6 +681,34 @@ def test_explore_phase_uses_higher_stagnation_thresholds() -> None:
     assert "no actionable progress made in 7 steps" in guard
 
 
+def test_remote_scope_uses_remote_aware_stagnation_thresholds() -> None:
+    harness = _FakeHarness()
+    harness.state.current_phase = "author"
+    harness.state.active_intent = "requested_ssh_exec"
+    harness.state.stagnation_counters = {"no_actionable_progress": 6}
+    graph_state = _make_graph_state()
+
+    guard = _check_progress_stagnation(harness, graph_state)
+
+    assert guard is None
+    assert not harness.state.recent_messages
+
+    harness.state.stagnation_counters = {"no_actionable_progress": 7}
+    guard = _check_progress_stagnation(harness, graph_state)
+
+    assert guard is None
+    assert harness.state.recent_messages
+    last_msg = harness.state.recent_messages[-1]
+    assert last_msg.metadata.get("cycle_count") == 7
+
+    harness.state.recent_messages.clear()
+    harness.state.stagnation_counters = {"no_actionable_progress": 10}
+    guard = _check_progress_stagnation(harness, graph_state)
+
+    assert guard is not None
+    assert "no actionable progress made in 10 steps" in guard
+
+
 def test_successful_mutation_with_changed_resets_counter() -> None:
     harness = _FakeHarness()
     harness.state.stagnation_counters = {"no_actionable_progress": 2}
@@ -721,6 +788,36 @@ def test_new_verifier_verdict_counts_as_progress() -> None:
     assert harness.state.scratchpad.get("_progress_prior_verdict") == "pass"
 
 
+def test_shell_exec_state_verifier_verdict_counts_as_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.scratchpad["_progress_prior_verdict"] = "fail"
+    harness.state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "command": "pytest -q",
+        "verdict": "pass",
+    }
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("shell_exec", {"command": "pytest -q"})],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+    assert harness.state.scratchpad.get("_progress_prior_verdict") == "pass"
+
+
+def test_successful_non_read_shell_exec_counts_as_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.stagnation_counters = {"no_actionable_progress": 2}
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("shell_exec", {"command": "npm install"})],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+
+
 def test_same_verifier_verdict_does_not_count_as_progress() -> None:
     harness = _FakeHarness()
     harness.state.scratchpad["_progress_prior_verdict"] = "fail"
@@ -731,6 +828,21 @@ def test_same_verifier_verdict_does_not_count_as_progress() -> None:
     _update_progress_tracking(harness, graph_state)
 
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_mutation_after_verifier_marks_verdict_stale() -> None:
+    harness = _FakeHarness()
+    harness.state.last_verifier_verdict = {"verdict": "fail", "command": "pytest"}
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("file_patch", {"path": "src/app.py"}, changed=True)],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    stale = harness.state.scratchpad.get("_last_verifier_stale_after_mutation")
+    assert isinstance(stale, dict)
+    assert stale["tool_name"] == "file_patch"
+    assert stale["paths"] == ["src/app.py"]
 
 
 def test_task_complete_counts_as_progress() -> None:

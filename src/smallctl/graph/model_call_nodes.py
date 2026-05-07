@@ -168,12 +168,21 @@ async def model_call(
 
     if int(harness.state.scratchpad.get("_consecutive_idle", 0)) >= 2:
         nudge = (
-            "\n[SYSTEM NUDGE]: You have provided 2 consecutive turns without any tool actions. "
+            "[HARNESS NOTICE]: You have provided 2 consecutive turns without any tool actions. "
             "Please focus on making concrete progress towards the goal (explore/execute) "
             "rather than providing high-level summaries or explanation. "
             "If you are finished, use the task_complete tool."
         )
-        harness.state.append_message(ConversationMessage(role="system", content=nudge))
+        harness.state.append_message(
+            ConversationMessage(
+                role="user",
+                content=nudge,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "consecutive_idle",
+                },
+            )
+        )
         harness.state.scratchpad["_consecutive_idle"] = 1
 
     if parse_result.final_assistant_text:

@@ -5,7 +5,17 @@ from typing import Any, Literal
 
 import re
 
-from .chunk_parser import extract_content_fragments, extract_thinking_from_tags, format_tool_call_text, maybe_parse_tool_args, merge_reasoning_text
+from .chunk_parser import (
+    extract_content_fragments,
+    extract_thinking_from_tags,
+    find_protocol_control_marker,
+    format_tool_call_text,
+    max_thinking_tag_alias_length,
+    maybe_parse_tool_args,
+    merge_reasoning_text,
+    normalize_thinking_tag_aliases,
+    strip_protocol_control_markers,
+)
 
 _REASONING_HALLUCINATION_PATTERNS = [
     re.compile(r"<tool_call\b[^>]*>"),
@@ -156,6 +166,10 @@ class _TimelineCollector:
         self._tool_entry_index: dict[int, int] = {}
         self._tag_pending = ""
         self._inside_thinking_tag = False
+        self._max_tag_length = max_thinking_tag_alias_length(
+            thinking_start_tag=thinking_start_tag,
+            thinking_end_tag=thinking_end_tag,
+        )
         self._auto_prefers_field = False
         self._auto_used_tag_thinking = False
 
@@ -237,14 +251,27 @@ class _TimelineCollector:
         self._feed_tagged_content(text)
 
     def _feed_tagged_content(self, text: str) -> None:
-        pending = self._tag_pending + text
+        pending = normalize_thinking_tag_aliases(
+            self._tag_pending + text,
+            thinking_start_tag=self.thinking_start_tag,
+            thinking_end_tag=self.thinking_end_tag,
+        )
         self._tag_pending = ""
         cursor = 0
         while cursor < len(pending):
             if self._inside_thinking_tag:
                 end = pending.find(self.thinking_end_tag, cursor)
+                control_marker = find_protocol_control_marker(pending, cursor)
+                if control_marker is not None and (end == -1 or control_marker[0] < end):
+                    control_start, control_length = control_marker
+                    if control_start > cursor:
+                        self._append_text("thinking", pending[cursor:control_start])
+                        self._auto_used_tag_thinking = True
+                    cursor = control_start + control_length
+                    self._inside_thinking_tag = False
+                    continue
                 if end == -1:
-                    safe_end = max(cursor, len(pending) - max(0, len(self.thinking_end_tag) - 1))
+                    safe_end = max(cursor, len(pending) - max(0, self._max_tag_length - 1))
                     if safe_end > cursor:
                         self._append_text("thinking", pending[cursor:safe_end])
                         self._auto_used_tag_thinking = True
@@ -260,7 +287,7 @@ class _TimelineCollector:
 
             start = pending.find(self.thinking_start_tag, cursor)
             if start == -1:
-                safe_end = max(cursor, len(pending) - max(0, len(self.thinking_start_tag) - 1))
+                safe_end = max(cursor, len(pending) - max(0, self._max_tag_length - 1))
                 if safe_end > cursor:
                     self._append_text("assistant", pending[cursor:safe_end])
                     cursor = safe_end
@@ -274,6 +301,10 @@ class _TimelineCollector:
     def _append_text(self, kind: Literal["assistant", "thinking"], text: str) -> None:
         if not text:
             return
+        if kind == "assistant":
+            text = strip_protocol_control_markers(text)
+            if not text:
+                return
         if self.entries and self.entries[-1].kind == kind:
             self.entries[-1].content += text
             return
@@ -307,7 +338,7 @@ class _TimelineCollector:
         if not self._tag_pending:
             return
         kind = "thinking" if self._inside_thinking_tag and self.reasoning_mode != "off" else "assistant"
-        self._append_text(kind, self._tag_pending)
+        self._append_text(kind, strip_protocol_control_markers(self._tag_pending))
         if kind == "thinking":
             self._auto_used_tag_thinking = True
         self._tag_pending = ""

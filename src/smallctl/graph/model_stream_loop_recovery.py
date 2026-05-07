@@ -62,11 +62,36 @@ def _should_add_incomplete_tool_call_recovery_nudge(
 ) -> bool:
     if str(details.get("type") or "").strip() == "provider_input_validation":
         return False
+    if str(details.get("type") or "").strip() == "malformed_tool_call_json":
+        return True
     if str(details.get("reason") or "").strip() == "tool_call_continuation_timeout":
         return True
     if partial_stream.tool_calls:
         return True
     return bool(str(partial_stream.assistant_text or "").strip())
+
+
+def _inject_synthetic_partial_tool_call_for_malformed_json(
+    *,
+    details: dict[str, Any],
+    partial_stream: StreamResult,
+) -> None:
+    if partial_stream.tool_calls:
+        return
+    if str(details.get("type") or "").strip() != "malformed_tool_call_json":
+        return
+    tool_name = str(details.get("tool_name_hint") or "file_write").strip() or "file_write"
+    raw_arguments = str(details.get("partial_tool_call_arguments_preview") or "").strip()
+    partial_stream.tool_calls.append(
+        {
+            "id": "call-llamacpp-malformed-tool-json",
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": raw_arguments,
+            },
+        }
+    )
 
 
 async def handle_model_stream_chunk_error(
@@ -91,6 +116,10 @@ async def handle_model_stream_chunk_error(
         reasoning_mode=harness.reasoning_mode,
         thinking_start_tag=harness.thinking_start_tag,
         thinking_end_tag=harness.thinking_end_tag,
+    )
+    _inject_synthetic_partial_tool_call_for_malformed_json(
+        details=details,
+        partial_stream=partial_stream,
     )
     salvage_partial_stream = partial_stream
     if timeout_recovery_nudges < 2 and _should_add_incomplete_tool_call_recovery_nudge(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from smallctl.client.request_budget import RequestEstimator, build_request_budget
+from smallctl.client.tool_budgeting import fit_tools_to_context_budget
 from smallctl.context import ContextPolicy, PromptAssembler
 from smallctl.harness import Harness
 from smallctl.harness.context_limits import apply_server_context_limit
@@ -61,6 +63,46 @@ def test_runtime_probe_preserves_explicit_max_prompt_tokens_for_partitioning() -
     assert harness.context_policy.hot_message_limit == 32
     assert harness.context_policy.recent_message_limit == 32
     assert harness.state.recent_message_limit == 32
+
+
+def test_transport_budget_can_respect_runtime_limit_when_prompt_budget_is_explicit() -> None:
+    harness = _make_harness(max_prompt_tokens=32768)
+    harness.server_context_limit = 8192
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "x" * 2400,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "description": "y" * 2400},
+                    },
+                },
+            },
+        }
+        for name in ["artifact_read", "web_search", "ssh_exec", "ssh_file_read", "task_complete", "task_fail"]
+    ]
+    payload = {
+        "model": "demo",
+        "messages": [{"role": "user", "content": "inspect the remote host"}],
+        "stream": True,
+        "tools": tools,
+    }
+
+    result = fit_tools_to_context_budget(
+        payload=payload,
+        tools=tools,
+        budget=build_request_budget(harness.server_context_limit),
+        estimator=RequestEstimator(),
+    )
+
+    assert harness.context_policy.max_prompt_tokens == 32768
+    assert result.action == "reduced_tools"
+    assert set(result.dropped_tool_names) <= {"artifact_read", "web_search"}
+    assert result.dropped_tool_names
+    assert {"ssh_exec", "ssh_file_read", "task_complete", "task_fail"} <= set(result.kept_tool_names)
 
 
 def test_small_lmstudio_model_uses_tighter_hot_window() -> None:

@@ -10,6 +10,15 @@ from .state import active_mitigation_names
 
 _LOCAL_MUTATING_TOOLS = {"shell_exec", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 _READ_LOOP_TOOLS = {"artifact_read", "file_read", "dir_list", "ssh_file_read", "web_fetch"}
+_REPAIR_TOOLS = _LOCAL_MUTATING_TOOLS | _READ_LOOP_TOOLS | {
+    "grep",
+    "find_files",
+    "finalize_write_session",
+    "ssh_exec",
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
 
 
 def apply_fama_tool_exposure(
@@ -41,6 +50,8 @@ def fama_hidden_tools_for_exposure(
     hidden_tools: set[str] = set()
     if "done_gate" in active and "task_complete" in exported:
         hidden_tools.add("task_complete")
+    if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
+        hidden_tools.add("task_fail")
     if "remote_tool_exposure_guard" in active:
         hidden_tools.update(_LOCAL_MUTATING_TOOLS & exported)
     if "tool_exposure_narrowing" in active:

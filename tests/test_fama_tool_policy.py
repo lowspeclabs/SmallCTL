@@ -48,14 +48,29 @@ def test_fama_done_gate_hides_task_complete_from_loop_exposure() -> None:
     _activate_done_gate(state)
 
     schemas = apply_fama_tool_exposure(
-        [_schema("task_complete"), _schema("task_fail"), _schema("file_read")],
+        [_schema("task_complete"), _schema("task_fail")],
         state=state,
         mode="loop",
         config=_Config(),
     )
 
     names = [entry["function"]["name"] for entry in schemas]
-    assert names == ["task_fail", "file_read"]
+    assert names == ["task_fail"]
+
+
+def test_fama_done_gate_hides_task_fail_when_repair_tools_are_available() -> None:
+    state = LoopState()
+    _activate_done_gate(state)
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail"), _schema("file_read"), _schema("file_patch")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = [entry["function"]["name"] for entry in schemas]
+    assert names == ["file_read", "file_patch"]
 
 
 def test_fama_done_gate_dispatch_blocks_hidden_task_complete() -> None:

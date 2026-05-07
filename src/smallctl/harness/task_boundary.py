@@ -395,6 +395,14 @@ _REMOTE_SITE_MUTATION_TARGET_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_REMOTE_PERMISSION_FOLLOWUP_RE = re.compile(
+    r"\b(?:perm|perms|permission|chmod|owner|mode|right\s+perms)\b",
+    re.IGNORECASE,
+)
+_REMOTE_SCRIPT_HINT_RE = re.compile(
+    r"\b(?:script|js|javascript|jave\s+script|java\s+script)\b",
+    re.IGNORECASE,
+)
 _SEMANTIC_RECENT_TAIL_TOKEN_CAP = 320
 
 
@@ -1145,6 +1153,22 @@ class TaskBoundaryService:
             has_residue_marker or bool(referenced_remote_paths)
         )
 
+    def _looks_like_remote_permission_followup(
+        self,
+        task: str,
+        handoff: dict[str, Any],
+    ) -> bool:
+        text = str(task or "").strip().lower()
+        if not text:
+            return False
+        if not self._handoff_has_remote_context(handoff):
+            return False
+        if not bool(self._confirmed_session_ssh_targets()):
+            return False
+        has_permission_hint = _REMOTE_PERMISSION_FOLLOWUP_RE.search(text) is not None
+        has_script_hint = _REMOTE_SCRIPT_HINT_RE.search(text) is not None
+        return has_permission_hint and has_script_hint
+
     def _looks_like_remote_contextual_site_followup(
         self,
         task: str,
@@ -1225,6 +1249,7 @@ class TaskBoundaryService:
         is_artifact_cleanup_followup = self._looks_like_remote_artifact_cleanup_followup(text, handoff)
         is_contextual_site_followup = self._looks_like_remote_contextual_site_followup(text, handoff)
         is_site_mutation_followup = self._looks_like_remote_site_mutation_followup(text, handoff)
+        is_permission_followup = self._looks_like_remote_permission_followup(text, handoff)
         if not (
             is_operational_followup
             or is_clarification_followup
@@ -1233,6 +1258,7 @@ class TaskBoundaryService:
             or is_artifact_cleanup_followup
             or is_contextual_site_followup
             or is_site_mutation_followup
+            or is_permission_followup
         ):
             return None
         if not handoff_supports_remote_continuation(self.harness.state):
@@ -1251,6 +1277,7 @@ class TaskBoundaryService:
                 or is_artifact_cleanup_followup
                 or is_contextual_site_followup
                 or is_site_mutation_followup
+                or is_permission_followup
             )
             and not explicit_targets
             and not (chosen_targets or self._confirmed_session_ssh_targets())
@@ -1268,10 +1295,15 @@ class TaskBoundaryService:
         session_labels = [_format_remote_target(target) for target in session_targets]
         session_labels = [label for label in session_labels if label]
 
+        recent_remote_paths = self._recent_remote_target_paths(handoff=handoff)
+        active_path_hint = ""
+        if is_permission_followup and recent_remote_paths:
+            active_path_hint = f" for {recent_remote_paths[-1]}"
+
         if len(chosen_targets) == 1:
             target = chosen_targets[0]
             label = _format_remote_target(target)
-            effective_task = f"Continue remote task over SSH on {label}. User follow-up: {text}"
+            effective_task = f"Continue remote task over SSH on {label}{active_path_hint}. User follow-up: {text}"
             return {
                 "effective_task": effective_task,
                 "mission_task": mission_task,
@@ -1284,7 +1316,7 @@ class TaskBoundaryService:
         if len(session_targets) == 1:
             target = session_targets[0]
             label = _format_remote_target(target)
-            effective_task = f"Continue remote task over SSH on {label}. User follow-up: {text}"
+            effective_task = f"Continue remote task over SSH on {label}{active_path_hint}. User follow-up: {text}"
             return {
                 "effective_task": effective_task,
                 "mission_task": mission_task,

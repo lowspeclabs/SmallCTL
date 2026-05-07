@@ -367,7 +367,7 @@ def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> 
 
 
 def should_pause_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> bool:
-    if pending.tool_name in {"dir_list", "artifact_read", "artifact_print", "artifact_grep", "file_read"}:
+    if pending.tool_name in {"dir_list", "artifact_read", "artifact_print", "artifact_grep", "file_read", "loop_status"}:
         return True
     return artifact_prefers_summary_synthesis(harness, pending)
 
@@ -413,6 +413,21 @@ def build_repeated_tool_loop_interrupt_payload(
             "so trust the visible listing if the target is present. "
             "Move to a targeted next step or a different path instead of repeating dir_list "
             "on the same directory. Do NOT switch tasks."
+        )
+    elif pending.tool_name == "loop_status":
+        stale = ""
+        scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+        if isinstance(scratchpad, dict) and isinstance(scratchpad.get("_last_verifier_stale_after_mutation"), dict):
+            stale = (
+                " The last verifier verdict is stale because a file changed after it was recorded; "
+                "do not wait for it to update by polling."
+            )
+        guidance = (
+            f"{base_guidance}"
+            "Repeated loop_status detected."
+            f"{stale} "
+            "Do not call `loop_status` again. REQUIRED NEXT ACTION: rerun the focused verifier, "
+            "make a different specific patch/write, or call `task_complete` only if the task is already proven."
         )
     if artifact_evidence_is_unavailable(harness, pending):
         guidance = build_artifact_evidence_unavailable_message(harness, artifact_id=artifact_id)

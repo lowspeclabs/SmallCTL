@@ -87,6 +87,49 @@ def test_fama_records_early_stop_from_task_complete_verifier_failure(monkeypatch
     assert state.scratchpad["_context_invalidations"][-1]["reason"] == "fama_failure_detected"
 
 
+def test_fama_zero_test_verifier_routes_targeted_recovery_capsule(monkeypatch) -> None:
+    state = LoopState(step_count=5)
+    service = SimpleNamespace(harness=_harness(state))
+    message = ConversationMessage(role="tool", name="shell_exec", content="0 tests")
+
+    async def _persist(*args, **kwargs):
+        return message
+
+    monkeypatch.setattr(tool_result_flow, "_persist_artifact_result", _persist)
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "stdout": "1s\n",
+            "stderr": "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n",
+            "exit_code": 0,
+        },
+        metadata={
+            "last_verifier_verdict": {
+                "verdict": "fail",
+                "command": "python3 ./temp/uptime_formatter.py 1",
+                "key_stderr": "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n",
+            }
+        },
+    )
+
+    asyncio.run(
+        tool_result_flow.record_result(
+            service,
+            tool_name="shell_exec",
+            tool_call_id="call-zero-tests",
+            result=result,
+            operation_id="op-zero-tests",
+        )
+    )
+
+    payload = state.scratchpad["_fama"]
+    assert payload["signals"][-1]["failure_class"] == "zero_tests_discovered"
+    assert {
+        "done_gate",
+        "zero_test_recovery_capsule",
+    } <= active_mitigation_names(state)
+
+
 def test_fama_observe_runs_for_reused_result_path(monkeypatch) -> None:
     state = LoopState(step_count=1)
     service = SimpleNamespace(harness=_harness(state))

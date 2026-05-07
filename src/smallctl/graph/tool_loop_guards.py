@@ -600,6 +600,34 @@ def _ssh_file_read_repeats_deterministic_not_found(harness: Any, pending: Pendin
     return False
 
 
+def _repair_phase_mutation_tool_repeat_is_loop(harness: Any, pending: PendingToolCall) -> bool:
+    phase = str(getattr(getattr(harness, "state", None), "current_phase", "") or "").strip().lower()
+    if phase != "repair":
+        return False
+    tool_name = str(getattr(pending, "tool_name", "") or "").strip()
+    if tool_name not in {
+        "ssh_file_replace_between",
+        "ssh_file_patch",
+        "ssh_file_write",
+        "file_patch",
+        "ast_patch",
+        "file_write",
+    }:
+        return False
+    history = _tool_attempt_history(harness)
+    if len(history) < 1:
+        return False
+    candidate = {
+        "tool_name": pending.tool_name,
+        "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
+    }
+    last = history[-1]
+    return (
+        str(last.get("tool_name", "")) == candidate["tool_name"]
+        and str(last.get("fingerprint", "")) == candidate["fingerprint"]
+    )
+
+
 def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | None:
     if pending.tool_name in {"task_complete", "task_fail", "ask_human"}:
         _clear_tool_attempt_history(harness)
@@ -614,6 +642,12 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return exhausted_docker_error
     if _consume_repeat_guard_one_shot_allowance(harness, pending):
         return None
+    if _repair_phase_mutation_tool_repeat_is_loop(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            f"Guard tripped: repeated {pending.tool_name} in repair phase with identical arguments",
+        )
     if _ssh_file_read_repeats_deterministic_not_found(harness, pending):
         return _format_repeated_tool_loop_message(
             harness,

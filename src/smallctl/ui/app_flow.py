@@ -298,8 +298,11 @@ class SmallctlAppFlowMixin:
                 console = self._get_console()
                 skip_promotion = False
                 if name == "task_complete" and console:
-                    active_text = console.get_active_assistant_text().lower()
-                    skip_promotion = check_duplicate_promotion(promote_text.lower(), active_text)
+                    active_text = console.get_active_assistant_text().strip()
+                    skip_promotion = bool(active_text) or check_duplicate_promotion(
+                        promote_text.lower(),
+                        active_text.lower(),
+                    )
 
                 if not skip_promotion:
                     await self.on_harness_event(
@@ -606,6 +609,8 @@ class SmallctlAppFlowMixin:
         if console is None:
             return
         active_text = console.get_active_assistant_text().strip()
+        if status == "chat_completed" and active_text:
+            return
         if active_text and check_duplicate_promotion(final_text.lower(), active_text.lower()):
             return
         await console.append_event(

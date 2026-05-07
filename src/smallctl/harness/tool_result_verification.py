@@ -249,6 +249,7 @@ def _store_verifier_verdict(
         normalized.update(docker_retry)
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
+    state.scratchpad.pop("_last_verifier_stale_after_mutation", None)
     state.last_failure_class = failure_class
     state.scratchpad["_last_failure_class"] = failure_class
     _update_acceptance_ledger(state, verdict=verdict)

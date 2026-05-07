@@ -90,6 +90,41 @@ def test_prompt_includes_dependency_evidence() -> None:
     assert "src/a.py" in rendered
 
 
+def test_prompt_merges_dependency_evidence_into_single_leading_system_message() -> None:
+    state = LoopState(active_step_run_id="run-2")
+    state.active_plan = ExecutionPlan(
+        plan_id="plan-1",
+        goal="goal",
+        steps=[
+            PlanStep(step_id="S1", title="First"),
+            PlanStep(step_id="S2", title="Second", depends_on=["S1"]),
+        ],
+    )
+    state.active_step_id = "S2"
+    state.step_evidence["S1"] = StepEvidenceArtifact(
+        step_id="S1",
+        step_run_id="run-1",
+        summary="first done",
+        artifact_ids=["art-1"],
+    )
+    state.artifacts["art-1"] = ArtifactRecord(
+        artifact_id="art-1",
+        kind="notes",
+        source="test",
+        created_at="2024-01-01T00:00:00",
+        size_bytes=0,
+        summary="notes",
+        preview_text="artifact detail",
+    )
+
+    prompt = build_step_sandbox_prompt(_harness(state), state.active_plan.find_step("S2"))
+
+    assert prompt[0]["role"] == "system"
+    assert [message["role"] for message in prompt].count("system") == 1
+    assert "Dependency evidence:" in str(prompt[0]["content"])
+    assert "Referenced artifacts:" in str(prompt[0]["content"])
+
+
 def test_prompt_excludes_non_dependency_step_text() -> None:
     state = LoopState(active_step_run_id="run-1")
     state.active_plan = ExecutionPlan(

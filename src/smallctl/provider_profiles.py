@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
@@ -90,8 +91,23 @@ def resolve_provider_profile(
             "OpenRouter endpoint detected; overriding provider_profile to 'openrouter' so OpenRouter adapter sanitation is always applied."
         )
         resolved = "openrouter"
+    if detected_endpoint == "llamacpp" and resolved == "generic":
+        warnings.append(
+            "llama.cpp endpoint/model detected; overriding provider_profile to 'llamacpp' so strict local-server message sanitation is applied."
+        )
+        resolved = "llamacpp"
 
     return resolved, warnings
+
+
+def _is_local_or_private_host(host: str) -> bool:
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local")
+    return bool(address.is_loopback or address.is_private or address.is_link_local)
 
 
 def detect_provider_profile(
@@ -120,6 +136,8 @@ def detect_provider_profile(
     if "ollama" in blob or port == 11434:
         return "ollama"
     if "llamacpp" in blob or "llama.cpp" in blob or "llama-cpp" in blob:
+        return "llamacpp"
+    if "gguf" in model_name and _is_local_or_private_host(host):
         return "llamacpp"
     if port == 1234 and host in {"localhost", "127.0.0.1", "::1"}:
         return "lmstudio"

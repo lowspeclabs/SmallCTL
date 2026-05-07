@@ -16,6 +16,26 @@ def _normalized_verifier_verdict(state: LoopState) -> dict[str, Any] | None:
     verdict = state.current_verifier_verdict()
     if not isinstance(verdict, dict) or not verdict:
         return None
+    stale = state.scratchpad.get("_last_verifier_stale_after_mutation")
+    if isinstance(stale, dict) and stale:
+        verdict = dict(verdict)
+        raw_paths = stale.get("paths", [])
+        if not isinstance(raw_paths, list):
+            raw_paths = [raw_paths]
+        paths = [str(path).strip() for path in raw_paths if str(path).strip()]
+        verdict["stale"] = True
+        verdict["stale_reason"] = str(stale.get("reason") or "file_changed_after_verifier")
+        verdict["stale_after_tool"] = str(stale.get("tool_name") or "")
+        if paths:
+            verdict["stale_after_paths"] = paths
+        command = str(verdict.get("command") or verdict.get("target") or "").strip()
+        note = "Rerun the focused verifier after the latest file change."
+        if command:
+            note = f"Rerun the focused verifier after the latest file change: `{command}`."
+        verdict["next_required_action"] = {
+            "tool_name": "shell_exec",
+            "notes": [note, "Do not poll `loop_status` waiting for a stale verifier verdict to change."],
+        }
     return verdict
 
 

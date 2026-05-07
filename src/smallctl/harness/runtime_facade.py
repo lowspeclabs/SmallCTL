@@ -111,6 +111,37 @@ def _close_process_transports(proc: Any) -> None:
             pass
 
 
+def _approved_plan_matches_interrupt(self: Any, interrupt: dict[str, Any]) -> bool:
+    if str(interrupt.get("kind") or "") != "plan_execute_approval":
+        return False
+    plan_id = str(interrupt.get("plan_id") or "").strip()
+    state = getattr(self, "state", None)
+    if state is None:
+        return False
+    for plan in (getattr(state, "active_plan", None), getattr(state, "draft_plan", None)):
+        if plan is None or getattr(plan, "approved", False) is not True:
+            continue
+        if not plan_id or str(getattr(plan, "plan_id", "") or "").strip() == plan_id:
+            return True
+    return False
+
+
+def _planner_interrupt_payload(self: Any) -> dict[str, Any] | None:
+    planner_interrupt = getattr(getattr(self, "state", None), "planner_interrupt", None)
+    if planner_interrupt is None:
+        return None
+    payload = {
+        "kind": getattr(planner_interrupt, "kind", "plan_execute_approval"),
+        "question": getattr(planner_interrupt, "question", ""),
+        "plan_id": getattr(planner_interrupt, "plan_id", ""),
+        "approved": getattr(planner_interrupt, "approved", False),
+        "response_mode": getattr(planner_interrupt, "response_mode", "yes/no/revise"),
+    }
+    if _approved_plan_matches_interrupt(self, payload):
+        return None
+    return payload
+
+
 async def _run_teardown(self: Any) -> None:
     shutdown_reason = str(getattr(self, "_pending_task_shutdown_reason", "") or "").strip()
     if shutdown_reason:
@@ -466,25 +497,21 @@ async def resume_task_with_events(
 
 
 def has_pending_interrupt(self: Any) -> bool:
-    if isinstance(self.state.pending_interrupt, dict) and bool(self.state.pending_interrupt):
+    pending = getattr(self.state, "pending_interrupt", None)
+    if isinstance(pending, dict) and bool(pending):
+        if _approved_plan_matches_interrupt(self, pending):
+            return False
         return True
-    planner_interrupt = getattr(self.state, "planner_interrupt", None)
-    return planner_interrupt is not None
+    return _planner_interrupt_payload(self) is not None
 
 
 def get_pending_interrupt(self: Any) -> dict[str, Any] | None:
-    if isinstance(self.state.pending_interrupt, dict) and self.state.pending_interrupt:
-        return dict(self.state.pending_interrupt)
-    planner_interrupt = getattr(self.state, "planner_interrupt", None)
-    if planner_interrupt is not None:
-        return {
-            "kind": getattr(planner_interrupt, "kind", "plan_execute_approval"),
-            "question": getattr(planner_interrupt, "question", ""),
-            "plan_id": getattr(planner_interrupt, "plan_id", ""),
-            "approved": getattr(planner_interrupt, "approved", False),
-            "response_mode": getattr(planner_interrupt, "response_mode", "yes/no/revise"),
-        }
-    return None
+    pending = getattr(self.state, "pending_interrupt", None)
+    if isinstance(pending, dict) and pending:
+        if _approved_plan_matches_interrupt(self, pending):
+            return None
+        return dict(pending)
+    return _planner_interrupt_payload(self)
 
 
 async def _maybe_resume_pending_interrupt(
@@ -517,6 +544,7 @@ def bind_runtime_facade(cls: type[Any]) -> None:
     cls._schedule_background_persistence = _schedule_background_persistence
     cls._drain_background_persistence_tasks = _drain_background_persistence_tasks
     cls._autosave_chat_session_state = _autosave_chat_session_state
+    cls._approved_plan_matches_interrupt = _approved_plan_matches_interrupt
     cls.decide_run_mode = decide_run_mode
     cls._set_planning_request = _set_planning_request
     cls._extract_planning_request = _extract_planning_request

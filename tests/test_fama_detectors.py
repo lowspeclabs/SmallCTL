@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from smallctl.fama.detectors import detect_early_stop_from_result
+from smallctl.fama.detectors import detect_early_stop_from_result, detect_verifier_failure_from_result
 from smallctl.fama.signals import FamaFailureKind
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
@@ -59,3 +59,35 @@ def test_detect_early_stop_uses_pending_acceptance_metadata() -> None:
 
     assert signal is not None
     assert signal.kind is FamaFailureKind.EARLY_STOP
+
+
+def test_detect_verifier_failure_classifies_zero_discovered_tests() -> None:
+    state = LoopState(step_count=2)
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "stdout": "1s\n",
+            "stderr": "\n----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nNO TESTS RAN\n",
+            "exit_code": 0,
+        },
+        metadata={
+            "last_verifier_verdict": {
+                "verdict": "fail",
+                "command": "python3 ./temp/uptime_formatter.py 1",
+                "key_stdout": "1s\n",
+                "key_stderr": "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n",
+            }
+        },
+    )
+
+    signal = detect_verifier_failure_from_result(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        operation_id="op-zero-tests",
+    )
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.EARLY_STOP
+    assert signal.failure_class == "zero_tests_discovered"
+    assert "zero tests discovered" in signal.evidence

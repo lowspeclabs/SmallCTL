@@ -51,6 +51,14 @@ _CHAT_SYNTHETIC_TERMINAL_TOOLS = {"task_complete", "task_fail"}
 
 # Strings in known_facts that indicate the goal was already met.
 _COMPLETION_FACT_MARKERS = ("[COMPLETED]", "[DONE]", "[SUCCESS]", "task complete", "successfully removed", "successfully uninstalled")
+_TERMINAL_PROSE_STRONG_MARKERS = (
+    "task complete",
+    "task completed",
+    "the task is complete",
+    "final summary",
+    "final answer",
+    "completed successfully",
+)
 
 
 def _working_memory_signals_completion(harness: Any) -> bool:
@@ -98,6 +106,93 @@ def _extract_completion_message(harness: Any, hidden_tool_calls: list[PendingToo
         if isinstance(facts, list) and facts:
             last_text = str(facts[-1]).strip()
     return last_text[:500] if last_text else "Task completed (force-finalized after repeated task_complete blocks)."
+
+
+def _latest_verifier_allows_terminal_recovery(harness: Any) -> bool:
+    verdict_fn = getattr(harness.state, "current_verifier_verdict", None)
+    verdict = verdict_fn() if callable(verdict_fn) else getattr(harness.state, "last_verifier_verdict", None)
+    if not isinstance(verdict, dict):
+        return True
+    return str(verdict.get("verdict", "") or "").strip().lower() in {"", "pass"}
+
+
+def _terminal_prose_completion_message(
+    assistant_text: str,
+    *,
+    harness: Any,
+    nudge_count: int,
+) -> str:
+    text = str(assistant_text or "").strip()
+    if not text:
+        return ""
+
+    lowered = re.sub(r"\s+", " ", text.lower()).strip()
+    has_strong_marker = any(marker in lowered for marker in _TERMINAL_PROSE_STRONG_MARKERS)
+    looks_like_completion = has_strong_marker or lowered.endswith("**task complete**") or lowered.endswith("task complete")
+    if not looks_like_completion:
+        return ""
+    if not has_strong_marker and nudge_count < 1:
+        return ""
+
+    has_recent_tool_evidence = any(
+        message.role == "tool"
+        for message in getattr(harness.state, "recent_messages", [])[-12:]
+    )
+    has_working_memory_evidence = bool(getattr(getattr(harness.state, "working_memory", None), "known_facts", None))
+    if not (has_recent_tool_evidence or has_working_memory_evidence):
+        return ""
+
+    if getattr(harness.state, "plan_execution_mode", False) and str(getattr(harness.state, "active_step_id", "") or ""):
+        return ""
+    session = getattr(harness.state, "write_session", None)
+    if session is not None and str(getattr(session, "status", "") or "").strip().lower() != "complete":
+        return ""
+    acceptance_ready = getattr(harness.state, "acceptance_ready", None)
+    if callable(acceptance_ready) and not acceptance_ready():
+        return ""
+    if not _latest_verifier_allows_terminal_recovery(harness):
+        return ""
+
+    return text[:4000]
+
+
+def _maybe_promote_terminal_prose_task_complete(
+    graph_state: GraphRunState,
+    harness: Any,
+    *,
+    nudge_count: int,
+) -> bool:
+    message = _terminal_prose_completion_message(
+        graph_state.last_assistant_text,
+        harness=harness,
+        nudge_count=nudge_count,
+    )
+    if not message:
+        return False
+
+    raw_arguments = json.dumps({"message": message}, ensure_ascii=True)
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="task_complete",
+            args={"message": message},
+            tool_call_id=f"synthetic-terminal-prose-{harness.state.step_count + 1}",
+            raw_arguments=raw_arguments,
+            source="system",
+        )
+    ]
+    harness.state.scratchpad["_terminal_prose_task_complete_autopromoted"] = {
+        "recovery_kind": "terminal_prose_task_complete",
+        "message_preview": message[:500],
+        "nudge_count": nudge_count,
+    }
+    harness._runlog(
+        "terminal_prose_task_complete_autopromoted",
+        "promoted terminal prose into task_complete tool call",
+        recovery_kind="terminal_prose_task_complete",
+        nudge_count=nudge_count,
+        message_preview=message[:240],
+    )
+    return True
 
 
 def _format_allowed_tool_summary(names: list[str], *, limit: int = 8) -> str:
@@ -958,6 +1053,14 @@ async def interpret_model_output(
                 retry_count=blank_nudges + 1,
             )
             return LoopRoute.NEXT_STEP
+
+    if assistant_text and not graph_state.pending_tool_calls and not stream_halted:
+        if _maybe_promote_terminal_prose_task_complete(
+            graph_state,
+            harness,
+            nudge_count=nudges,
+        ):
+            return LoopRoute.DISPATCH_TOOLS
 
     if nudges < 4 and assistant_text and not stream_halted:
         harness.state.scratchpad["_no_tool_nudges"] = nudges + 1

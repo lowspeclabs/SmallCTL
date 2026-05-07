@@ -236,7 +236,17 @@ def check_duplicate_promotion(
 
     shared = promote_tokens & active_tokens
     overlap = len(shared) / min(len(promote_tokens), len(active_tokens))
-    return len(shared) >= 4 and overlap >= 0.7
+    if len(shared) >= 4 and overlap >= 0.7:
+        return True
+
+    # For short texts (≤10 salient tokens), be more aggressive:
+    # semantically equivalent smalltalk often shares most tokens but
+    # falls just below the default 0.7 overlap threshold.
+    min_tokens = min(len(promote_tokens), len(active_tokens))
+    if min_tokens <= 10 and len(shared) >= 4 and overlap >= 0.5:
+        return True
+
+    return False
 
 
 def _normalize_duplicate_text(text: str) -> str:

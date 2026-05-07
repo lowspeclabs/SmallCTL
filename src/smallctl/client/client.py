@@ -153,6 +153,10 @@ class OpenAICompatClient:
                 return float(self.LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
             return float(self.LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
 
+        adapter_timeout = float(self.adapter.stream_policy.tool_call_continuation_timeout_sec)
+        if self.adapter.name != "generic" and adapter_timeout > 0:
+            return adapter_timeout
+
         timeout = float(self.STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
         if self.is_small_model:
             return min(timeout, float(self.SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC))

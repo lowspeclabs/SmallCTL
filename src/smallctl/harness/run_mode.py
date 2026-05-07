@@ -334,18 +334,12 @@ class ModeDecisionService:
             #   if they have enough verb diversity to trigger the complexity
             #   heuristic, users explicitly asking to "run/launch/debug"
             #   want loop mode, not planning.
-            # Guard C: Never escalate when a chunked write session is already
-            #   prearmed on state — the task is a write task, not a planning
-            #   task, and escalating breaks file_write/file_patch exposure.
             _raw_is_complex = looks_like_complex_task(raw_task)
             _raw_is_direct_execution = (
                 looks_like_shell_request(raw_task)
                 and runtime_intent.label == "execute"
             )
-            _write_session_prearmed = bool(
-                getattr(getattr(self.harness, "state", None), "write_session", None)
-            )
-            if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution and not _write_session_prearmed:
+            if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution:
                 self.harness._runlog(
                     "mode_decision",
                     "selected run mode",

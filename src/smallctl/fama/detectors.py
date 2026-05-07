@@ -43,6 +43,13 @@ _TEST_FAILURE_MARKERS = (
     "pytest",
     "test failed",
 )
+_ZERO_TEST_MARKERS = (
+    "ran 0 tests",
+    "no tests ran",
+    "collected 0 items",
+    "0 tests collected",
+    "no tests collected",
+)
 
 
 def detect_early_stop_from_result(
@@ -168,6 +175,8 @@ def detect_wrong_path(
     if str(metadata.get("reason") or "").strip() in _REMOTE_CONFUSION_REASONS:
         return None
     combined = _result_text(result, metadata=metadata).lower()
+    if _is_patch_target_miss(tool_name, combined):
+        return None
     marker = next((item for item in WRONG_PATH_MARKERS if item in combined), "")
     if not marker:
         return None
@@ -186,6 +195,23 @@ def detect_wrong_path(
         failure_class="wrong_path",
         next_safe_action="Run a narrow directory/file check in the correct scope, then retry with the verified path.",
     )
+
+
+def _is_patch_target_miss(tool_name: str, combined_result_text: str) -> bool:
+    tool = str(tool_name or "").strip()
+    if tool not in {"file_patch", "ast_patch", "ssh_file_patch"}:
+        return False
+    text = str(combined_result_text or "").lower()
+    patch_miss_markers = (
+        "patch target text was not found",
+        "target text was not found",
+        "replacement bounds were not found",
+        "bounded region was not found",
+        "class `",
+        "function `",
+        "method `",
+    )
+    return any(marker in text for marker in patch_miss_markers)
 
 
 def detect_write_session_stall(state: Any, *, threshold: int = 3) -> FamaSignal | None:
@@ -316,6 +342,8 @@ def detect_test_failure_from_verdict(verdict: Any) -> str | None:
         str(verdict.get(key) or "").lower()
         for key in ("key_stdout", "key_stderr", "failure_mode")
     )
+    if _looks_like_zero_tests(output):
+        return "zero_tests_discovered"
     if "pytest" in command or "test" in command:
         return "test_failed"
     if any(marker in output for marker in _TEST_FAILURE_MARKERS) and "test" in output:
@@ -611,9 +639,19 @@ def _verdict_is_pass(value: Any) -> bool:
 def _verifier_evidence(verifier: dict[str, Any]) -> str:
     verdict = str(verifier.get("verdict") or "unknown").strip()
     target = str(verifier.get("command") or verifier.get("target") or "").strip()
+    output = " ".join(
+        str(verifier.get(key) or "").lower()
+        for key in ("key_stdout", "key_stderr", "failure_mode")
+    )
+    qualifier = "; zero tests discovered" if _looks_like_zero_tests(output) else ""
     if target:
-        return f"task_complete rejected with verifier verdict {verdict}: {target}"
-    return f"task_complete rejected with verifier verdict {verdict}"
+        return f"task_complete rejected with verifier verdict {verdict}: {target}{qualifier}"
+    return f"task_complete rejected with verifier verdict {verdict}{qualifier}"
+
+
+def _looks_like_zero_tests(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _ZERO_TEST_MARKERS)
 
 
 def _checklist_has_pending(checklist: Any) -> bool:

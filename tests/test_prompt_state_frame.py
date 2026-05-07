@@ -375,6 +375,28 @@ def test_prompt_assembler_latest_visible_user_skips_recovery_nudges() -> None:
     assert latest_user.content == "Find the vikunja docker compose file."
 
 
+def test_prompt_assembler_repairs_late_system_messages_as_user_notices() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Continue the deployment repair."
+    state.recent_messages = [
+        ConversationMessage(role="user", content="Continue the deployment repair."),
+        ConversationMessage(role="system", content="Use loop_status before retrying the same command."),
+    ]
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    roles = [message["role"] for message in assembly.messages]
+    assert roles.count("system") == 1
+    assert roles[0] == "system"
+    assert roles[1] == "user"
+    assert "[HARNESS NOTICE]: Use loop_status before retrying the same command." in str(
+        assembly.messages[1]["content"]
+    )
+
+
 def test_build_retrieval_query_ignores_recovery_nudge_messages() -> None:
     state = LoopState(cwd="/tmp")
     state.run_brief.original_task = "Find the vikunja docker compose file."

@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from smallctl.client import OpenAICompatClient
 from smallctl.client import client_transport
+
+
+class _RunLogger:
+    def __init__(self) -> None:
+        self.entries: list[dict[str, object]] = []
+
+    def log(self, channel: str, event: str, message: str, **data) -> None:
+        self.entries.append(
+            {
+                "channel": channel,
+                "event": event,
+                "message": message,
+                "data": data,
+            }
+        )
 
 
 def _http_status_error(
@@ -18,6 +36,732 @@ def _http_status_error(
     request = httpx.Request("POST", url)
     response = httpx.Response(status_code, request=request, headers=headers, text=text)
     return httpx.HTTPStatusError(f"http {status_code}", request=request, response=response)
+
+
+def test_llamacpp_transport_guard_repairs_late_system_messages() -> None:
+    client = SimpleNamespace(
+        provider_profile="llamacpp",
+        log=logging.getLogger("test"),
+        run_logger=None,
+    )
+    messages = [
+        {"role": "user", "content": "Continue the task."},
+        {"role": "System", "content": "Recovery nudge."},
+    ]
+
+    repaired = client_transport._repair_llamacpp_system_messages_for_transport(client, messages)
+
+    assert repaired == [
+        {"role": "system", "content": "Recovery nudge."},
+        {"role": "user", "content": "Continue the task."},
+    ]
+
+
+def test_llamacpp_transport_guard_normalizes_leading_system_role_case() -> None:
+    client = SimpleNamespace(
+        provider_profile="llamacpp",
+        log=logging.getLogger("test"),
+        run_logger=None,
+    )
+    messages = [
+        {"role": "System", "content": "Base prompt."},
+        {"role": "user", "content": "Continue the task."},
+    ]
+
+    repaired = client_transport._repair_llamacpp_system_messages_for_transport(client, messages)
+
+    assert repaired == [
+        {"role": "system", "content": "Base prompt."},
+        {"role": "user", "content": "Continue the task."},
+    ]
+
+
+def test_stream_chat_llamacpp_omits_stream_options_and_uses_local_timeouts(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    payloads: list[dict[str, object]] = []
+    streamer_kwargs: dict[str, object] = {}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            streamer_kwargs.update(kwargs)
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    assert "stream_options" not in payloads[0]
+    assert streamer_kwargs["first_token_timeout_sec"] == 60.0
+    assert streamer_kwargs["tool_call_continuation_timeout_sec"] == 90.0
+
+
+def test_stream_chat_llamacpp_repairs_system_messages_before_first_request(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    payloads: list[dict[str, object]] = []
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[
+                {"role": "System", "content": "Base prompt."},
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": "Late recovery nudge."},
+            ],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    messages = payloads[0]["messages"]
+    assert isinstance(messages, list)
+    assert [message["role"] for message in messages].count("system") == 1
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == "Base prompt.\n\nLate recovery nudge."
+    assert all(message["role"] != "system" for message in messages[1:])
+
+
+def test_stream_chat_llamacpp_500_jinja_system_message_retries_once(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    payloads: list[dict[str, object]] = []
+    attempts = {"count": 0}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers
+            attempts["count"] += 1
+            payloads.append(dict(payload))
+            if attempts["count"] == 1:
+                raise _http_status_error(
+                    url,
+                    status_code=500,
+                    text="Jinja Exception: System message must be at the beginning",
+                )
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[
+                {"role": "system", "content": "Base prompt."},
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": "Late nudge."},
+            ],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    assert attempts["count"] == 2
+    assert [message["role"] for message in payloads[1]["messages"]].count("system") == 1
+    assert payloads[1]["messages"][0]["role"] == "system"
+    assert payloads[1]["messages"][0]["content"] == "Base prompt.\n\nLate nudge."
+
+
+def test_stream_chat_llamacpp_500_malformed_tool_json_becomes_recoverable_chunk_error(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="Qwen3.5-4B.Q3_K_M.gguf",
+        provider_profile="llamacpp",
+    )
+
+    def _tool(name: str) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+    malformed_body = (
+        '{"error":{"code":500,"message":"Failed to parse tool call arguments as JSON: '
+        '[json.exception.parse_error.101] parse error at line 1, column 9698: syntax error '
+        'while parsing value - invalid string: missing closing quote; last read: '
+        '\'\\"import sys\\\\nclass CronMatcher:\\\\n    pass\\\\n    dt\'","type":"server_error"}}'
+    )
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers, payload
+            raise _http_status_error(url, status_code=500, text=malformed_body)
+            yield {}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "write temp/cron_matcher.py"}],
+            tools=[_tool("file_write"), _tool("file_read")],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk_error"]
+    details = events[0]["details"]
+    assert details["type"] == "malformed_tool_call_json"
+    assert details["reason"] == "tool_call_continuation_timeout"
+    assert details["recoverable"] is True
+    assert details["tool_name_hint"] == "file_write"
+    assert "CronMatcher" in details["partial_tool_call_arguments_preview"]
+
+
+def test_stream_chat_llamacpp_400_retries_with_reduced_tools(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    payloads: list[dict[str, object]] = []
+    attempts = {"count": 0}
+
+    def _tool(name: str) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers
+            attempts["count"] += 1
+            payloads.append(dict(payload))
+            if attempts["count"] == 1:
+                raise _http_status_error(url, status_code=400)
+            yield {"type": "chunk", "data": {"choices": [{"delta": {"content": "ok"}}]}}
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    tools = [
+        _tool(name)
+        for name in [
+            "artifact_grep",
+            "artifact_print",
+            "artifact_read",
+            "ask_human",
+            "ast_patch",
+            "dir_list",
+            "file_download",
+            "file_patch",
+            "file_read",
+            "file_write",
+            "find_files",
+            "grep",
+            "http_get",
+            "http_post",
+            "log_note",
+            "loop_status",
+            "memory_update",
+            "shell_exec",
+            "ssh_exec",
+            "ssh_file_patch",
+            "ssh_file_read",
+            "ssh_file_replace_between",
+            "ssh_file_write",
+            "step_complete",
+            "step_fail",
+            "task_complete",
+            "task_fail",
+        ]
+    ]
+    original_names = [
+        item["function"]["name"]
+        for item in tools
+        if isinstance(item, dict) and isinstance(item.get("function"), dict)
+    ]
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "inspect remote host"}],
+            tools=tools,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk", "done"]
+    assert attempts["count"] == 2
+    assert len(payloads[0]["tools"]) == 27
+    reduced_names = [
+        item["function"]["name"]
+        for item in payloads[1]["tools"]
+        if isinstance(item, dict) and isinstance(item.get("function"), dict)
+    ]
+    assert reduced_names == [
+        "ask_human",
+        "log_note",
+        "loop_status",
+        "memory_update",
+        "ssh_exec",
+        "ssh_file_read",
+        "step_complete",
+        "step_fail",
+        "task_complete",
+        "task_fail",
+    ]
+    assert "stream_options" not in payloads[1]
+
+
+def test_stream_chat_llamacpp_model_unloaded_recovers_and_reuses_reduced_payload(monkeypatch) -> None:
+    run_logger = _RunLogger()
+    recovery_calls: list[dict[str, object]] = []
+
+    async def _recover(payload: dict[str, object]) -> dict[str, object]:
+        recovery_calls.append(payload)
+        return {"status": "recovered", "action": "restart_command"}
+
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+        run_logger=run_logger,
+        backend_recovery_handler=_recover,
+    )
+    payloads: list[dict[str, object]] = []
+    attempts = {"count": 0}
+
+    def _tool(name: str) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers
+            attempts["count"] += 1
+            payloads.append(dict(payload))
+            if attempts["count"] == 1:
+                raise _http_status_error(url, status_code=400)
+            if attempts["count"] == 2:
+                yield {
+                    "type": "chunk_error",
+                    "error": "Model is unloaded.",
+                    "details": {"message": "Model is unloaded."},
+                }
+                return
+            yield {"type": "chunk", "data": {"choices": [{"delta": {"content": "ok"}}]}}
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    tools = [
+        _tool(name)
+        for name in [
+            "artifact_grep",
+            "artifact_print",
+            "artifact_read",
+            "ask_human",
+            "ast_patch",
+            "dir_list",
+            "file_download",
+            "file_patch",
+            "file_read",
+            "file_write",
+            "find_files",
+            "grep",
+            "http_get",
+            "http_post",
+            "log_note",
+            "loop_status",
+            "memory_update",
+            "shell_exec",
+            "ssh_exec",
+            "ssh_file_patch",
+            "ssh_file_read",
+            "ssh_file_replace_between",
+            "ssh_file_write",
+            "step_complete",
+            "step_fail",
+            "task_complete",
+            "task_fail",
+        ]
+    ]
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "inspect remote host"}],
+            tools=tools,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk", "done"]
+    assert attempts["count"] == 3
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["details"]["reason"] == "model_unloaded"
+    assert len(payloads[0]["tools"]) == 27
+    assert len(payloads[1]["tools"]) == len(payloads[2]["tools"])
+    assert payloads[1]["tools"] == payloads[2]["tools"]
+
+    retry_budget_entries = [
+        entry
+        for entry in run_logger.entries
+        if entry["event"] == "payload_preflight_budget"
+        and entry["data"]["stage"] == "http_400_reduced_tools_retry"
+    ]
+    assert retry_budget_entries
+    assert retry_budget_entries[-1]["data"]["context_limit"] is None
+    assert retry_budget_entries[-1]["data"]["context_limit_source"] == "unknown"
+    assert retry_budget_entries[-1]["data"]["reduction_reason"] == "http_400_recovery"
+
+
+def test_stream_chat_llamacpp_model_unloaded_yields_provider_chunk_error(monkeypatch) -> None:
+    async def _recover(payload: dict[str, object]) -> dict[str, object]:
+        del payload
+        return {"status": "unrecovered", "action": "none"}
+
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+        backend_recovery_handler=_recover,
+    )
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            yield {
+                "type": "chunk_error",
+                "error": "Model is unloaded.",
+                "details": {"message": "Model is unloaded."},
+            }
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk_error"]
+    assert events[0]["error"] == "llama.cpp model is unloaded"
+    assert events[0]["details"]["type"] == "model_unloaded"
+    assert events[0]["details"]["reason"] == "model_unloaded"
+    assert events[0]["details"]["recovery"]["status"] == "unrecovered"
+
+
+def test_stream_chat_llamacpp_preflight_reduces_before_first_request(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    client.runtime_context_limit = 8192
+    payloads: list[dict[str, object]] = []
+
+    def _tool(name: str) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool " + ("x" * 700),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "description": "y" * 700},
+                    },
+                },
+            },
+        }
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    tools = [
+        _tool(name)
+        for name in [
+            "artifact_grep",
+            "artifact_print",
+            "artifact_read",
+            "ask_human",
+            "ast_patch",
+            "dir_list",
+            "file_patch",
+            "file_read",
+            "file_write",
+            "http_get",
+            "http_post",
+            "log_note",
+            "loop_status",
+            "memory_update",
+            "shell_exec",
+            "ssh_exec",
+            "ssh_file_patch",
+            "ssh_file_read",
+            "ssh_file_replace_between",
+            "ssh_file_write",
+            "step_complete",
+            "step_fail",
+            "task_complete",
+            "task_fail",
+            "web_fetch",
+            "web_search",
+            "process_kill",
+        ]
+    ]
+    original_names = [
+        item["function"]["name"]
+        for item in tools
+        if isinstance(item, dict) and isinstance(item.get("function"), dict)
+    ]
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "inspect remote host"}],
+            tools=tools,
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    sent_names = [
+        item["function"]["name"]
+        for item in payloads[0]["tools"]
+        if isinstance(item, dict) and isinstance(item.get("function"), dict)
+    ]
+    assert len(sent_names) < 27
+    assert {"ssh_exec", "ssh_file_read", "task_complete", "task_fail"} <= set(sent_names)
+    assert {"web_search", "web_fetch", "process_kill"} & (set(original_names) - set(sent_names))
+
+
+def test_llamacpp_400_diagnostics_parse_context_overflow_body() -> None:
+    summary = client_transport._summarize_http_error_body(
+        "request (9214 tokens) exceeds the available context size (8192 tokens), try increasing it"
+    )
+
+    assert summary["provider_error"] == "Context overflow"
+    assert summary["context_overflow"] is True
+    assert summary["request_tokens"] == 9214
+    assert summary["context_limit"] == 8192
+    assert summary["context_overflow_tokens"] == 1022
+
+
+def test_llamacpp_400_payload_diagnostics_include_context_pressure_estimate() -> None:
+    payload = {
+        "model": "demo-model",
+        "messages": [{"role": "user", "content": "x" * 40000}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ssh_exec",
+                    "description": "Run SSH command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    }
+
+    diagnostics = client_transport._summarize_400_payload(payload, context_limit=8192)
+
+    assert diagnostics["known_context_limit"] == 8192
+    assert diagnostics["estimated_payload_tokens"] > 8192
+    assert diagnostics["estimated_context_tokens_remaining"] < 0
+    assert diagnostics["likely_provider_rejection"] == "context_overflow"
+    assert diagnostics["estimated_tool_schema_tokens"] > 0
+
+
+def test_stream_chat_logs_transport_exhaustion_with_endpoint_details(monkeypatch, caplog) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    client.STREAM_RETRY_ATTEMPTS = 1
+    request = httpx.Request("POST", "http://127.0.0.1:8080/v1/chat/completions")
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise httpx.ConnectError("connection refused", request=request)
+            yield {}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise httpx.ConnectError("connection refused", request=request)
+            yield {}
+
+    async def _fake_reset(_client: object) -> None:
+        return None
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+    monkeypatch.setattr(client_transport, "_reset_async_client", _fake_reset)
+
+    async def _run() -> None:
+        async for _event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            pass
+
+    with caplog.at_level(logging.ERROR, logger="smallctl.client"):
+        with pytest.raises(httpx.ConnectError):
+            asyncio.run(_run())
+
+    exhausted_records = [
+        record for record in caplog.records if "chat_transport_exhausted" in record.getMessage()
+    ]
+    assert exhausted_records
+    message = exhausted_records[-1].getMessage()
+    assert '"url": "http://127.0.0.1:8080/v1/chat/completions"' in message
+    assert '"provider_profile": "llamacpp"' in message
+    assert '"exception_type": "ConnectError"' in message
 
 
 def test_stream_chat_retries_http_429(monkeypatch) -> None:

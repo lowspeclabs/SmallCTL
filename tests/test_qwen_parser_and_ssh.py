@@ -11,6 +11,7 @@ from smallctl.graph.model_stream_fallback import StreamProcessingResult
 from smallctl.graph.model_stream_loop_rendering import StreamTagState, flush_model_stream_buffer, handle_model_stream_chunk
 from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.graph.tool_call_parser import parse_tool_calls
+from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
 from smallctl.models.events import UIEventType
 from smallctl.state import ArtifactRecord, LoopState, WriteSession
 from smallctl.tools.base import ToolSpec
@@ -128,6 +129,64 @@ def test_recovered_inline_tool_calls_are_materialized_for_conversation_history()
     ]
 
 
+def test_inline_json_tool_call_preserves_stripped_top_level_session_id_metadata() -> None:
+    cleaned, calls = _extract_inline_tool_calls(
+        '{"session_id":"2d3ac862","name":"task_complete","arguments":{"message":"ok"}}'
+    )
+
+    assert cleaned == ""
+    assert len(calls) == 1
+    assert calls[0].tool_name == "task_complete"
+    assert calls[0].args == {"message": "ok"}
+    assert calls[0].parser_metadata["inline_json_extra_fields"] == {
+        "session_id": "2d3ac862"
+    }
+
+
+def test_plain_json_without_tool_name_is_not_removed_by_inline_parser() -> None:
+    text = '{"session_id":"2d3ac862","status":"debug"}'
+
+    cleaned, calls = _extract_inline_tool_calls(text)
+
+    assert cleaned == text
+    assert calls == []
+
+
+def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
+    runlog_events = []
+    stream = SimpleNamespace(
+        assistant_text='{"session_id":"2d3ac862","name":"task_complete","arguments":{"message":"ok"}}',
+        thinking_text="",
+        tool_calls=[],
+    )
+    harness = SimpleNamespace(
+        registry=_Registry(),
+        state=LoopState(cwd="."),
+        client=SimpleNamespace(model="gemma-4-e4b-it"),
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+    )
+
+    parse_result = parse_tool_calls(
+        stream,
+        timeline=[],
+        graph_state=SimpleNamespace(run_mode="chat"),
+        deps=SimpleNamespace(harness=harness),
+        model_name="gemma-4-e4b-it",
+    )
+
+    assert len(parse_result.pending_tool_calls) == 1
+    assert runlog_events == [
+        (
+            "inline_tool_metadata_stripped",
+            "inline tool JSON contained non-argument top-level fields",
+            {
+                "tool_name": "task_complete",
+                "extra_fields": {"session_id": "2d3ac862"},
+            },
+        )
+    ]
+
+
 def test_qwen_response_wrapper_is_unwrapped_into_assistant_text() -> None:
     chunks = [
         {
@@ -175,6 +234,105 @@ def test_collect_stream_tags_mode_keeps_field_reasoning() -> None:
 
     assert stream.assistant_text == ""
     assert "Thinking Process: hello." in stream.thinking_text
+
+
+def test_gemma_channel_marker_does_not_make_prior_prose_thinking() -> None:
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "I will patch the function and then run the verifier."
+                                "<channel|>"
+                            ),
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+
+    stream = OpenAICompatClient.collect_stream(chunks, reasoning_mode="auto")
+
+    assert stream.assistant_text == "I will patch the function and then run the verifier."
+    assert stream.thinking_text == ""
+
+
+def test_gemma_thought_tags_are_extracted_as_thinking() -> None:
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "<thought>Inspect the previous failure.</thought>"
+                                "I will patch the function."
+                            ),
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+
+    stream = OpenAICompatClient.collect_stream(chunks, reasoning_mode="auto")
+
+    assert stream.assistant_text == "I will patch the function."
+    assert stream.thinking_text == "Inspect the previous failure."
+
+
+def test_gemma_unclosed_thought_ends_at_channel_marker() -> None:
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "<thought>Inspect the previous failure."
+                                "<channel|>I will patch the function."
+                            ),
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+
+    stream = OpenAICompatClient.collect_stream(chunks, reasoning_mode="auto")
+
+    assert stream.assistant_text == "I will patch the function."
+    assert stream.thinking_text == "Inspect the previous failure."
+
+
+def test_gemma_thought_aliases_survive_stream_chunk_boundaries_in_timeline() -> None:
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {"choices": [{"delta": {"content": "<tho"}}]},
+        },
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {"delta": {"content": "ught>Think it through.</thought>Done.<channel|>"}}
+                ]
+            },
+        },
+    ]
+
+    timeline = OpenAICompatClient.collect_timeline(chunks, reasoning_mode="auto")
+
+    assert [(entry.kind, entry.content) for entry in timeline] == [
+        ("thinking", "Think it through."),
+        ("assistant", "Done."),
+    ]
 
 
 def test_parse_tool_calls_recovers_qwen_response_wrapper_from_reasoning_trace() -> None:

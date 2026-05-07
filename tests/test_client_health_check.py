@@ -41,6 +41,26 @@ def test_client_forces_openrouter_profile_for_openrouter_endpoint() -> None:
     assert client.adapter.name == "openrouter"
 
 
+def test_client_forces_llamacpp_profile_for_local_gguf_model() -> None:
+    client = OpenAICompatClient(
+        base_url="http://192.168.1.9:8080/v1",
+        model="Qwen3.5-Coder-4B-Instruct-GGUF",
+        provider_profile="generic",
+    )
+    assert client.provider_profile == "llamacpp"
+    assert client.adapter.name == "llamacpp"
+
+
+def test_client_does_not_treat_remote_gguf_model_as_llamacpp() -> None:
+    client = OpenAICompatClient(
+        base_url="https://api.example.com/v1",
+        model="vendor/model-gguf-test",
+        provider_profile="generic",
+    )
+    assert client.provider_profile == "generic"
+    assert client.adapter.name == "generic"
+
+
 def test_prompt_builder_skips_context_probe_when_runtime_probe_disabled() -> None:
     async def fail_fetch_model_context_limit() -> int | None:
         raise AssertionError("fetch_model_context_limit should not run when runtime_context_probe is disabled")

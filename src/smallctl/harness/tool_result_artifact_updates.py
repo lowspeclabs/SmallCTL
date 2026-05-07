@@ -82,6 +82,7 @@ _SYMBOL_LINE_PATTERNS = (
 )
 _SYMBOL_CAPTURE_LIMIT = 24
 _REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
+_STALE_VERIFIER_KEY = "_last_verifier_stale_after_mutation"
 _SSH_FILE_VERIFIER_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
 _REMOTE_MUTATING_COMMAND_RE = re.compile(
     r"\bsed\s+-i\b"
@@ -186,6 +187,29 @@ def _maybe_emit_artifact_read_eof_overread_nudge(
         requested_start_line=requested_start,
         artifact_total_lines=total_lines,
     )
+
+
+def _mark_verifier_stale_after_file_change(
+    service: Any,
+    *,
+    tool_name: str,
+    paths: list[str],
+) -> None:
+    state = getattr(service.harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if state is None or not isinstance(scratchpad, dict):
+        return
+    current_verifier = getattr(state, "current_verifier_verdict", None)
+    verifier = current_verifier() if callable(current_verifier) else getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verifier, dict) or not verifier:
+        return
+    clean_paths = [str(path).strip() for path in paths if str(path).strip()]
+    scratchpad[_STALE_VERIFIER_KEY] = {
+        "reason": "file_changed_after_verifier",
+        "tool_name": tool_name,
+        "paths": clean_paths,
+        "prior_verdict": dict(verifier),
+    }
 
 
 def _remember_session_ssh_target(
@@ -1243,6 +1267,17 @@ def _update_subtask_ledger_from_verifier(service: Any, verifier_verdict: dict[st
         return
 
 
+def _is_dry_run_invariant_violation(tool_name: str, result: ToolEnvelope) -> bool:
+    if not result.success:
+        return False
+    if tool_name not in SSH_FILE_MUTATING_TOOLS:
+        return False
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    dry_run = bool(metadata.get("dry_run"))
+    changed = metadata.get("changed")
+    return dry_run and bool(changed)
+
+
 def apply_artifact_success_outcome(
     service: Any,
     *,
@@ -1254,6 +1289,17 @@ def apply_artifact_success_outcome(
 ) -> Any:
     service.harness.state.artifacts[artifact.artifact_id] = artifact
     service.harness.state.retrieval_cache = [artifact.artifact_id]
+    if _is_dry_run_invariant_violation(tool_name, result):
+        result.success = False
+        result.status = "failed"
+        if not result.error:
+            result.error = "Tool returned contradictory metadata: dry_run=true with changed=yes. This is an invariant violation."
+        result.metadata = {**(result.metadata if isinstance(result.metadata, dict) else {}), "dry_run_invariant_violation": True}
+        service.harness._runlog(
+            "dry_run_invariant_violation",
+            "SSH mutating tool returned dry_run=true and changed=yes; treating as failure",
+            tool_name=tool_name,
+        )
     if tool_name in {"shell_exec", "ssh_exec"}:
         _consolidate_shell_attempt_family(state=service.harness.state, artifact_id=artifact.artifact_id, result=result)
     if tool_name == "ssh_exec":
@@ -1385,6 +1431,11 @@ def apply_artifact_success_outcome(
                         "state_change": f"File changed: {mutated_path}",
                     },
                 )
+                _mark_verifier_stale_after_file_change(
+                    service,
+                    tool_name=tool_name,
+                    paths=[mutated_path],
+                )
             _record_touched_symbols_from_mutation(
                 service,
                 tool_name=tool_name,
@@ -1421,6 +1472,11 @@ def apply_artifact_success_outcome(
                         "tool_name": tool_name,
                         "state_change": f"Remote file changed: {host}:{mutated_path}",
                     },
+                )
+                _mark_verifier_stale_after_file_change(
+                    service,
+                    tool_name=tool_name,
+                    paths=[f"{host}:{mutated_path}"],
                 )
                 from ..graph.tool_call_parser import allow_repeated_tool_call_once
 

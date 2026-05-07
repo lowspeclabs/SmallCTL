@@ -56,6 +56,7 @@ class PendingToolCall:
     tool_call_id: str | None = None
     raw_arguments: str = ""
     source: str = "model"
+    parser_metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: Any) -> "PendingToolCall | None":

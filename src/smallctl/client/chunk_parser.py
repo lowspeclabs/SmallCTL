@@ -8,6 +8,9 @@ from typing import Any, Literal
 
 _REASONING_WRAPPER_TAGS = ("analysis", "plan")
 _ASSISTANT_WRAPPER_TAGS = ("execution", "response")
+_THINKING_START_TAG_ALIASES = ("<thinking>", "<thought>", "<|thought|>")
+_THINKING_END_TAG_ALIASES = ("</thinking>", "</thought>", "</|thought|>")
+_PROTOCOL_CONTROL_MARKERS = ("<channel|>", "<|channel|>")
 
 
 def _normalize_thinking_tag_aliases(
@@ -18,10 +21,62 @@ def _normalize_thinking_tag_aliases(
 ) -> str:
     normalized = str(text or "")
     if thinking_start_tag == "<think>":
-        normalized = normalized.replace("<thinking>", thinking_start_tag)
+        for alias in _THINKING_START_TAG_ALIASES:
+            normalized = normalized.replace(alias, thinking_start_tag)
     if thinking_end_tag == "</think>":
-        normalized = normalized.replace("</thinking>", thinking_end_tag)
+        for alias in _THINKING_END_TAG_ALIASES:
+            normalized = normalized.replace(alias, thinking_end_tag)
     return normalized
+
+
+def normalize_thinking_tag_aliases(
+    text: str,
+    *,
+    thinking_start_tag: str,
+    thinking_end_tag: str,
+) -> str:
+    """Normalize supported reasoning tag aliases to the configured tags."""
+    return _normalize_thinking_tag_aliases(
+        text,
+        thinking_start_tag=thinking_start_tag,
+        thinking_end_tag=thinking_end_tag,
+    )
+
+
+def max_thinking_tag_alias_length(
+    *,
+    thinking_start_tag: str,
+    thinking_end_tag: str,
+) -> int:
+    """Return the longest known reasoning tag/control marker length."""
+    return max(
+        len(thinking_start_tag),
+        len(thinking_end_tag),
+        *[len(alias) for alias in _THINKING_START_TAG_ALIASES],
+        *[len(alias) for alias in _THINKING_END_TAG_ALIASES],
+        *[len(marker) for marker in _PROTOCOL_CONTROL_MARKERS],
+    )
+
+
+def strip_protocol_control_markers(text: str) -> str:
+    """Remove model protocol transition markers from visible text."""
+    cleaned = str(text or "")
+    for marker in _PROTOCOL_CONTROL_MARKERS:
+        cleaned = cleaned.replace(marker, "")
+    return cleaned
+
+
+def find_protocol_control_marker(text: str, start: int = 0) -> tuple[int, int] | None:
+    """Find the earliest protocol control marker at or after start."""
+    earliest: tuple[int, int] | None = None
+    for marker in _PROTOCOL_CONTROL_MARKERS:
+        index = str(text or "").find(marker, start)
+        if index == -1:
+            continue
+        candidate = (index, len(marker))
+        if earliest is None or candidate[0] < earliest[0]:
+            earliest = candidate
+    return earliest
 
 
 def _extract_reasoning_wrapper_blocks(text: str) -> tuple[str, str]:
@@ -92,7 +147,7 @@ def extract_thinking_from_tags(
     )
     normalized, wrapped_reasoning = _extract_reasoning_wrapper_blocks(normalized)
     if not normalized or thinking_start_tag not in normalized:
-        return normalized, wrapped_reasoning
+        return strip_protocol_control_markers(normalized), wrapped_reasoning
 
     assistant_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -107,12 +162,24 @@ def extract_thinking_from_tags(
         content_start = start + len(thinking_start_tag)
         end = normalized.find(thinking_end_tag, content_start)
         if end == -1:
-            thinking_parts.append(normalized[content_start:])
-            break
+            control_marker = find_protocol_control_marker(normalized, content_start)
+            if control_marker is None:
+                thinking_parts.append(normalized[content_start:])
+                break
+            control_start, control_length = control_marker
+            thinking_parts.append(normalized[content_start:control_start])
+            cursor = control_start + control_length
+            continue
+        control_marker = find_protocol_control_marker(normalized, content_start)
+        if control_marker is not None and control_marker[0] < end:
+            control_start, control_length = control_marker
+            thinking_parts.append(normalized[content_start:control_start])
+            cursor = control_start + control_length
+            continue
         thinking_parts.append(normalized[content_start:end])
         cursor = end + len(thinking_end_tag)
 
-    return "".join(assistant_parts), merge_reasoning_text(wrapped_reasoning, "".join(thinking_parts))
+    return strip_protocol_control_markers("".join(assistant_parts)), merge_reasoning_text(wrapped_reasoning, "".join(thinking_parts))
 
 
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:

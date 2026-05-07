@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator
@@ -14,10 +15,23 @@ except Exception:  # pragma: no cover
     httpx = None
 
 from ..logging_utils import log_kv
+from .adapters.common import merge_system_messages_for_single_system_providers
 from .chunk_parser import chunk_contains_tool_call_delta
 from .provider_adapters import sanitize_messages_for_openrouter
+from .request_budget import RequestEstimator
+from .request_budget import approx_token_count as _budget_approx_token_count
+from .request_budget import build_request_budget
+from .request_budget import client_context_limit as _budget_client_context_limit
+from .request_budget import json_size_bytes as _budget_json_size_bytes
 from .streaming import SSEStreamer
+from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
 from .usage import extract_context_limit, extract_runtime_context_limit
+
+_LLAMACPP_CONTEXT_OVERFLOW_RE = re.compile(
+    r"request\s*\((?P<request_tokens>\d+)\s+tokens?\)\s+exceeds\s+the\s+available\s+context\s+size\s*\((?P<context_tokens>\d+)\s+tokens?\)",
+    re.IGNORECASE,
+)
+_UNSET = object()
 
 
 def _client_key(client: Any) -> tuple[str, str]:
@@ -68,6 +82,51 @@ def _is_tool_call_continuation_timeout(exc: Exception) -> bool:
     return "tool call continuation" in str(exc).lower()
 
 
+def _is_llamacpp_model_unloaded_chunk_error(client: Any, event: dict[str, Any]) -> bool:
+    if client.provider_profile != "llamacpp" or event.get("type") != "chunk_error":
+        return False
+    message = str(event.get("error") or "").strip().lower()
+    details = event.get("details")
+    detail_message = ""
+    if isinstance(details, dict):
+        detail_message = str(
+            details.get("message")
+            or details.get("error")
+            or details.get("detail")
+            or ""
+        ).strip().lower()
+    return "model is unloaded" in message or "model is unloaded" in detail_message
+
+
+def _llamacpp_model_unloaded_details(
+    client: Any,
+    event: dict[str, Any],
+    *,
+    attempt: int,
+    recovery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    details = event.get("details")
+    normalized = dict(details) if isinstance(details, dict) else {}
+    normalized.update(
+        {
+            "type": "model_unloaded",
+            "reason": "model_unloaded",
+            "provider_profile": client.provider_profile,
+            "model": client.model,
+            "attempt": attempt,
+            "message": str(
+                normalized.get("message")
+                or normalized.get("error")
+                or event.get("error")
+                or "Model is unloaded."
+            ),
+        }
+    )
+    if recovery:
+        normalized["recovery"] = recovery
+    return normalized
+
+
 def _log_http_error(client: Any, event: str, exc: "httpx.HTTPStatusError") -> None:
     try:
         body = exc.response.text[:1000]
@@ -87,6 +146,52 @@ def _log_http_error(client: Any, event: str, exc: "httpx.HTTPStatusError") -> No
             "chat http error",
             status=exc.response.status_code,
             body=body,
+        )
+
+
+def _transport_error_details(
+    client: Any,
+    exc: Exception,
+    *,
+    url: str,
+    attempt: int,
+    phase: str,
+) -> dict[str, Any]:
+    return {
+        "url": url,
+        "attempt": attempt,
+        "phase": phase,
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "exception_type": type(exc).__name__,
+        "error": str(exc),
+    }
+
+
+def _log_transport_error(
+    client: Any,
+    event: str,
+    exc: Exception,
+    *,
+    url: str,
+    attempt: int,
+    phase: str,
+    level: int = logging.WARNING,
+) -> None:
+    details = _transport_error_details(
+        client,
+        exc,
+        url=url,
+        attempt=attempt,
+        phase=phase,
+    )
+    log_kv(client.log, level, event, **details)
+    if client.run_logger:
+        client.run_logger.log(
+            "chat",
+            event,
+            "chat transport error",
+            **details,
         )
 
 
@@ -116,6 +221,73 @@ def _parse_retry_after_seconds(response: Any) -> float | None:
     return max(0.0, delta)
 
 
+def _repair_llamacpp_system_messages_for_transport(
+    client: Any,
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if client.provider_profile != "llamacpp":
+        return messages
+
+    system_positions = [
+        index
+        for index, message in enumerate(messages)
+        if str(message.get("role") or "").strip().lower() == "system"
+    ]
+    if not system_positions:
+        return messages
+    if (
+        system_positions == [0]
+        and str(messages[0].get("role") or "").strip() == "system"
+    ):
+        return messages
+
+    repaired = merge_system_messages_for_single_system_providers(messages)
+    log_kv(
+        client.log,
+        logging.WARNING,
+        "llamacpp_system_messages_repaired",
+        system_count=len(system_positions),
+        system_positions=system_positions,
+    )
+    if client.run_logger:
+        client.run_logger.log(
+            "chat",
+            "llamacpp_system_messages_repaired",
+            "repaired llama.cpp system message order before transport",
+            system_count=len(system_positions),
+            system_positions=system_positions,
+        )
+    return repaired
+
+
+def _is_llamacpp_jinja_system_message_error(client: Any, exc: Any) -> bool:
+    if client.provider_profile != "llamacpp":
+        return False
+    try:
+        if int(exc.response.status_code) != 500:
+            return False
+    except Exception:
+        return False
+    body = _http_error_body(exc).lower()
+    return "jinja" in body and "system message" in body
+
+
+def _is_llamacpp_malformed_tool_call_json_error(client: Any, exc: Any) -> bool:
+    if client.provider_profile != "llamacpp":
+        return False
+    try:
+        if int(exc.response.status_code) != 500:
+            return False
+    except Exception:
+        return False
+    body = _http_error_body(exc, limit=12000).lower()
+    return (
+        "failed to parse tool call arguments as json" in body
+        and "json.exception.parse_error" in body
+        and ("missing closing quote" in body or "invalid string" in body)
+    )
+
+
 def _extract_available_tool_names(tools: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for tool in tools:
@@ -130,11 +302,117 @@ def _extract_available_tool_names(tools: list[dict[str, Any]]) -> set[str]:
     return names
 
 
+def _tool_name(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return ""
+    return str(function.get("name") or "").strip()
+
+
+def _json_size_bytes(value: Any) -> int:
+    return _budget_json_size_bytes(value)
+
+
+def _approx_token_count(value: Any) -> int:
+    return _budget_approx_token_count(value)
+
+
+def _client_context_limit(client: Any) -> int | None:
+    return _budget_client_context_limit(client)
+
+
+def _context_pressure_diagnostics(payload: dict[str, Any], *, context_limit: int | None) -> dict[str, Any]:
+    estimated_payload_tokens = _approx_token_count(payload)
+    estimated_tool_schema_tokens = _approx_token_count(payload.get("tools", []))
+    diagnostics: dict[str, Any] = {
+        "estimated_payload_tokens": estimated_payload_tokens,
+        "estimated_tool_schema_tokens": estimated_tool_schema_tokens,
+    }
+    if context_limit is not None:
+        diagnostics["known_context_limit"] = context_limit
+        diagnostics["estimated_context_tokens_remaining"] = context_limit - estimated_payload_tokens
+        if estimated_payload_tokens >= context_limit:
+            diagnostics["likely_provider_rejection"] = "context_overflow"
+    return diagnostics
+
+
+def _remember_context_limit(client: Any, limit: int | None) -> int | None:
+    if limit is None:
+        return None
+    try:
+        normalized = int(limit)
+    except Exception:
+        return None
+    if normalized <= 0:
+        return None
+    try:
+        client.runtime_context_limit = normalized
+    except Exception:
+        pass
+    return normalized
+
+
 def _http_error_body(exc: Any, *, limit: int = 1000) -> str:
     try:
         return str(exc.response.text or "")[:limit]
     except Exception:
         return ""
+
+
+def _choose_write_tool_hint(payload: dict[str, Any]) -> str:
+    tool_names = [_tool_name(tool) for tool in payload.get("tools", []) if _tool_name(tool)]
+    for preferred in (
+        "file_write",
+        "ssh_file_write",
+        "file_append",
+        "file_patch",
+        "ssh_file_patch",
+        "ssh_file_replace_between",
+        "ast_patch",
+    ):
+        if preferred in tool_names:
+            return preferred
+    return tool_names[0] if tool_names else "file_write"
+
+
+def _extract_llamacpp_last_read_preview(body: str, *, limit: int = 2000) -> str:
+    marker = "last read:"
+    lower = str(body or "").lower()
+    index = lower.rfind(marker)
+    if index < 0:
+        return ""
+    preview = str(body)[index + len(marker) :].strip()
+    if len(preview) > limit:
+        preview = preview[:limit].rstrip() + "..."
+    return preview
+
+
+def _llamacpp_malformed_tool_call_chunk_error_details(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    exc: Any,
+    attempt: int,
+) -> dict[str, Any]:
+    body = _http_error_body(exc, limit=12000)
+    body_summary = _summarize_http_error_body(body)
+    return {
+        "type": "malformed_tool_call_json",
+        # Reuse the existing incomplete-tool-call recovery path: the server saw
+        # an unfinished JSON argument string even if the stream had already ended.
+        "reason": "tool_call_continuation_timeout",
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "status_code": 500,
+        "recoverable": True,
+        "attempt": attempt,
+        "tool_name_hint": _choose_write_tool_hint(payload),
+        "partial_tool_call_arguments_preview": _extract_llamacpp_last_read_preview(body),
+        **_summarize_400_payload(payload, context_limit=_client_context_limit(client)),
+        **body_summary,
+    }
 
 
 def _summarize_http_error_body(body: str) -> dict[str, Any]:
@@ -147,10 +425,23 @@ def _summarize_http_error_body(body: str) -> dict[str, Any]:
         summary["upstream_provider"] = "OpenRouter"
     if "input validation error" in lower:
         summary["provider_error"] = "Input validation error"
+    context_match = _LLAMACPP_CONTEXT_OVERFLOW_RE.search(snippet)
+    if context_match:
+        request_tokens = int(context_match.group("request_tokens"))
+        context_tokens = int(context_match.group("context_tokens"))
+        summary.update(
+            {
+                "provider_error": "Context overflow",
+                "context_overflow": True,
+                "request_tokens": request_tokens,
+                "context_limit": context_tokens,
+                "context_overflow_tokens": request_tokens - context_tokens,
+            }
+        )
     return summary
 
 
-def _tool_schema_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+def _tool_schema_diagnostics(payload: dict[str, Any], *, context_limit: int | None = None) -> dict[str, Any]:
     raw_tools = payload.get("tools")
     tool_list = raw_tools if isinstance(raw_tools, list) else []
     invalid_count = 0
@@ -163,7 +454,7 @@ def _tool_schema_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(function, dict):
             invalid_count += 1
             continue
-        name = str(function.get("name") or "").strip()
+        name = _tool_name(tool)
         if not name:
             invalid_count += 1
             continue
@@ -173,12 +464,14 @@ def _tool_schema_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
             invalid_count += 1
     return {
         "tool_schema_count": len(tool_list),
+        "tool_schema_bytes": _json_size_bytes(tool_list),
         "invalid_tool_schema_count": invalid_count,
-        "tool_names": names[:25],
+        "tool_names": names,
+        **_context_pressure_diagnostics(payload, context_limit=context_limit),
     }
 
 
-def _summarize_400_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _summarize_400_payload(payload: dict[str, Any], *, context_limit: int | None = None) -> dict[str, Any]:
     messages = payload.get("messages")
     message_list = messages if isinstance(messages, list) else []
     role_counts: dict[str, int] = {}
@@ -205,13 +498,14 @@ def _summarize_400_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "model": str(payload.get("model") or ""),
+        "payload_bytes": _json_size_bytes(payload),
         "has_stream_options": "stream_options" in payload,
         "message_count": len(message_list),
         "role_counts": role_counts,
         "assistant_with_tool_calls_count": assistant_with_tool_calls_count,
         "tool_message_count": tool_message_count,
         "assistant_content_and_tool_calls_coexist": assistant_content_tool_calls_coexist,
-        **_tool_schema_diagnostics(payload),
+        **_tool_schema_diagnostics(payload, context_limit=context_limit),
     }
 
 
@@ -372,7 +666,7 @@ def _preflight_openrouter_payload(client: Any, payload: dict[str, Any], *, stage
             "stage": stage,
             "provider_profile": client.provider_profile,
             "issues": issues[:25],
-            **_summarize_400_payload(repaired),
+            **_summarize_400_payload(repaired, context_limit=_client_context_limit(client)),
         }
         log_kv(
             client.log,
@@ -405,7 +699,7 @@ def _provider_400_chunk_error_details(
         "provider_profile": client.provider_profile,
         "status_code": 400,
         "recovery_stages_attempted": recovery_stages_attempted,
-        **_summarize_400_payload(payload),
+        **_summarize_400_payload(payload, context_limit=_client_context_limit(client)),
         **_summarize_http_error_body(body),
     }
 
@@ -450,6 +744,165 @@ def _build_openrouter_recovery_payload(
         payload.pop("tools", None)
         payload.pop("stream_options", None)
     return payload
+
+
+def _log_llamacpp_budget_preflight(
+    client: Any,
+    *,
+    stage: str,
+    action: str,
+    result: ToolBudgetResult | None,
+    context_limit: int | None,
+    budget_context_limit: int | None = None,
+    context_limit_source: str = "observed",
+    reduction_reason: str = "",
+) -> None:
+    details: dict[str, Any] = {
+        "stage": stage,
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "context_limit": context_limit,
+        "context_limit_source": context_limit_source,
+        "budget_action": action,
+    }
+    if reduction_reason:
+        details["reduction_reason"] = reduction_reason
+    if result is not None:
+        budget_limit = context_limit if budget_context_limit is None else budget_context_limit
+        budget = (
+            build_request_budget(result.footprint.estimated_payload_tokens)
+            if budget_limit is None
+            else build_request_budget(budget_limit)
+        )
+        details.update(
+            {
+                "effective_prompt_budget": budget.effective_prompt_budget,
+                "reserve_completion_tokens": budget.reserve_completion_tokens,
+                "safety_margin_tokens": budget.safety_margin_tokens,
+                "estimated_payload_tokens": result.footprint.estimated_payload_tokens,
+                "estimated_message_tokens": result.footprint.estimated_message_tokens,
+                "estimated_tool_tokens": result.footprint.estimated_tool_tokens,
+                "tool_count_before": result.tool_count_before,
+                "tool_count_after": result.tool_count_after,
+                "dropped_tool_names": list(result.dropped_tool_names),
+                "kept_tool_names": list(result.kept_tool_names),
+                "over_budget_tokens": result.footprint.over_budget_tokens,
+            }
+        )
+    log_kv(client.log, logging.DEBUG, "chat_payload_preflight_budget", **details)
+    if client.run_logger:
+        client.run_logger.log(
+            "chat",
+            "payload_preflight_budget",
+            "chat payload budget preflight",
+            **details,
+        )
+
+
+def _llamacpp_budget_preflight(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    stage: str,
+    context_limit: int | None = None,
+    context_limit_source: str = "observed",
+    reduction_reason: str = "",
+    log_context_limit: Any = _UNSET,
+) -> ToolBudgetResult | None:
+    if client.provider_profile != "llamacpp":
+        return None
+    limit = context_limit or _client_context_limit(client)
+    raw_tools = payload.get("tools")
+    tools = raw_tools if isinstance(raw_tools, list) else []
+    if limit is None:
+        estimator = RequestEstimator()
+        footprint = estimator.footprint(payload)
+        log_kv(
+            client.log,
+            logging.DEBUG,
+            "chat_payload_preflight_budget",
+            stage=stage,
+            provider_profile=client.provider_profile,
+            model=client.model,
+            context_limit=None,
+            budget_action="skipped_unknown_limit",
+            estimated_payload_tokens=footprint.estimated_payload_tokens,
+            estimated_message_tokens=footprint.estimated_message_tokens,
+            estimated_tool_tokens=footprint.estimated_tool_tokens,
+            tool_count_before=footprint.tool_count,
+            tool_count_after=footprint.tool_count,
+            dropped_tool_names=[],
+            kept_tool_names=[_tool_name(tool) for tool in tools if _tool_name(tool)],
+            over_budget_tokens=0,
+        )
+        if client.run_logger:
+            client.run_logger.log(
+                "chat",
+                "payload_preflight_budget",
+                "chat payload budget preflight",
+                stage=stage,
+                provider_profile=client.provider_profile,
+                model=client.model,
+                context_limit=None,
+                budget_action="skipped_unknown_limit",
+                estimated_payload_tokens=footprint.estimated_payload_tokens,
+                estimated_message_tokens=footprint.estimated_message_tokens,
+                estimated_tool_tokens=footprint.estimated_tool_tokens,
+                tool_count_before=footprint.tool_count,
+                tool_count_after=footprint.tool_count,
+                dropped_tool_names=[],
+                kept_tool_names=[_tool_name(tool) for tool in tools if _tool_name(tool)],
+                over_budget_tokens=0,
+            )
+        return None
+
+    budget = build_request_budget(limit)
+    result = fit_tools_to_context_budget(
+        payload=payload,
+        tools=tools,
+        budget=budget,
+        estimator=RequestEstimator(),
+    )
+    displayed_context_limit = limit if log_context_limit is _UNSET else log_context_limit
+    _log_llamacpp_budget_preflight(
+        client,
+        stage=stage,
+        action=result.action,
+        result=result,
+        context_limit=displayed_context_limit,
+        budget_context_limit=limit,
+        context_limit_source=context_limit_source,
+        reduction_reason=reduction_reason,
+    )
+    return result
+
+
+def _build_llamacpp_reduced_tools_payload(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    tools = payload.get("tools")
+    if not isinstance(tools, list) or len(tools) < 12:
+        return None
+    limit = _client_context_limit(client)
+    limit_was_observed = limit is not None
+    if limit is None:
+        limit = 1
+    result = _llamacpp_budget_preflight(
+        client,
+        payload=payload,
+        stage="http_400_reduced_tools_retry",
+        context_limit=limit,
+        context_limit_source="unknown",
+        reduction_reason="http_400_recovery",
+        log_context_limit=None if not limit_was_observed else limit,
+    )
+    if result is None or result.tool_count_after >= result.tool_count_before:
+        return None
+    if result.action == "exceeded" and limit_was_observed:
+        return None
+    return client.adapter.mutate_payload(result.payload)
 
 
 def _build_minimal_context_payload(
@@ -505,6 +958,7 @@ async def stream_chat(
     original_messages = [dict(message) for message in messages]
     original_tools = [dict(tool) for tool in tools]
     messages = client.adapter.sanitize_messages(messages)
+    messages = _repair_llamacpp_system_messages_for_transport(client, messages)
 
     url = f"{client.base_url}{client.chat_endpoint}"
     headers = {
@@ -524,6 +978,38 @@ async def stream_chat(
         payload["stream_options"] = {"include_usage": True}
     payload = client.adapter.mutate_payload(payload)
     payload = _preflight_openrouter_payload(client, payload, stage="initial")
+    initial_llamacpp_budget = _llamacpp_budget_preflight(
+        client,
+        payload=payload,
+        stage="initial",
+    )
+    if initial_llamacpp_budget is not None:
+        if initial_llamacpp_budget.action == "exceeded":
+            known_limit = _client_context_limit(client)
+            budget = build_request_budget(known_limit) if known_limit is not None else None
+            yield {
+                "type": "chunk_error",
+                "error": "llamacpp context budget exceeded before request",
+                "details": {
+                    "type": "context_budget_exceeded",
+                    "provider_profile": client.provider_profile,
+                    "model": client.model,
+                    "context_limit": known_limit,
+                    "effective_prompt_budget": budget.effective_prompt_budget if budget else None,
+                    "reserve_completion_tokens": budget.reserve_completion_tokens if budget else None,
+                    "safety_margin_tokens": budget.safety_margin_tokens if budget else None,
+                    "estimated_payload_tokens": initial_llamacpp_budget.footprint.estimated_payload_tokens,
+                    "estimated_message_tokens": initial_llamacpp_budget.footprint.estimated_message_tokens,
+                    "estimated_tool_tokens": initial_llamacpp_budget.footprint.estimated_tool_tokens,
+                    "tool_count_before": initial_llamacpp_budget.tool_count_before,
+                    "tool_count_after": initial_llamacpp_budget.tool_count_after,
+                    "dropped_tool_names": list(initial_llamacpp_budget.dropped_tool_names),
+                    "kept_tool_names": list(initial_llamacpp_budget.kept_tool_names),
+                    "over_budget_tokens": initial_llamacpp_budget.footprint.over_budget_tokens,
+                },
+            }
+            return
+        payload = initial_llamacpp_budget.payload
 
     log_kv(
         client.log,
@@ -559,6 +1045,8 @@ async def stream_chat(
     openrouter_400_recovery_stage = 0
     openrouter_nonstream_fallback_attempted = False
     openrouter_minimal_context_attempted = False
+    llamacpp_reduced_tools_attempted = False
+    llamacpp_jinja_repair_attempted = False
     async_client = _get_async_client(client)
     request_first_token_timeout_sec = _request_first_token_timeout_sec(client, tools)
     streamer = SSEStreamer(
@@ -643,6 +1131,71 @@ async def stream_chat(
                     saw_chunk = True
                     if chunk_contains_tool_call_delta(event.get("data", {})):
                         saw_tool_call_chunk = True
+                if _is_llamacpp_model_unloaded_chunk_error(client, event):
+                    details = _llamacpp_model_unloaded_details(client, event, attempt=attempt)
+                    log_kv(
+                        client.log,
+                        logging.WARNING,
+                        "chat_stream_llamacpp_model_unloaded",
+                        attempt=attempt,
+                        provider_profile=client.provider_profile,
+                        model=client.model,
+                    )
+                    if client.run_logger:
+                        client.run_logger.log(
+                            "chat",
+                            "stream_llamacpp_model_unloaded",
+                            "llama.cpp reported the model is unloaded",
+                            attempt=attempt,
+                            provider_profile=client.provider_profile,
+                            model=client.model,
+                        )
+                    recovery: dict[str, Any] | None = None
+                    if client.backend_recovery_handler is not None:
+                        recovery = await client.backend_recovery_handler(
+                            {
+                                "attempt": attempt,
+                                "provider_profile": client.provider_profile,
+                                "base_url": client.base_url,
+                                "model": client.model,
+                                "details": details,
+                            }
+                        )
+                    if isinstance(recovery, dict) and recovery.get("status") == "recovered":
+                        retry_after_backend_recovery = True
+                        log_kv(
+                            client.log,
+                            logging.WARNING,
+                            "chat_backend_recovery_succeeded",
+                            attempt=attempt,
+                            provider_profile=client.provider_profile,
+                            action=recovery.get("action"),
+                            reason="model_unloaded",
+                        )
+                        if client.run_logger:
+                            client.run_logger.log(
+                                "chat",
+                                "backend_recovery_succeeded",
+                                "backend recovery succeeded after llama.cpp model-unloaded error",
+                                attempt=attempt,
+                                provider_profile=client.provider_profile,
+                                action=recovery.get("action"),
+                                reason="model_unloaded",
+                            )
+                        await _reset_async_client(client)
+                        async_client = _get_async_client(client)
+                        break
+                    yield {
+                        "type": "chunk_error",
+                        "error": "llama.cpp model is unloaded",
+                        "details": _llamacpp_model_unloaded_details(
+                            client,
+                            event,
+                            attempt=attempt,
+                            recovery=recovery if isinstance(recovery, dict) else None,
+                        ),
+                    }
+                    return
                 yield event
             if retry_after_backend_recovery:
                 continue
@@ -650,10 +1203,79 @@ async def stream_chat(
         except httpx.HTTPStatusError as exc:
             _log_http_error(client, "chat_stream_http_error", exc)
             status_code = int(exc.response.status_code)
+            if (
+                _is_llamacpp_jinja_system_message_error(client, exc)
+                and not llamacpp_jinja_repair_attempted
+            ):
+                llamacpp_jinja_repair_attempted = True
+                current_payload = dict(current_payload)
+                current_payload["messages"] = _repair_llamacpp_system_messages_for_transport(
+                    client,
+                    list(current_payload.get("messages") or []),
+                )
+                log_kv(
+                    client.log,
+                    logging.WARNING,
+                    "chat_stream_500_llamacpp_jinja_retry",
+                    attempt=attempt,
+                    strategy="repair_system_messages",
+                )
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "stream_500_llamacpp_jinja_retry",
+                        "retrying llama.cpp stream after Jinja system-message error",
+                        attempt=attempt,
+                        strategy="repair_system_messages",
+                    )
+                await _reset_async_client(client)
+                async_client = _get_async_client(client)
+                continue
+            if _is_llamacpp_malformed_tool_call_json_error(client, exc):
+                details = _llamacpp_malformed_tool_call_chunk_error_details(
+                    client,
+                    payload=current_payload,
+                    exc=exc,
+                    attempt=attempt,
+                )
+                log_kv(
+                    client.log,
+                    logging.WARNING,
+                    "chat_stream_500_llamacpp_malformed_tool_call",
+                    attempt=attempt,
+                    provider_profile=client.provider_profile,
+                    tool_name_hint=details.get("tool_name_hint"),
+                    estimated_payload_tokens=details.get("estimated_payload_tokens"),
+                    estimated_context_tokens_remaining=details.get("estimated_context_tokens_remaining"),
+                )
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "stream_500_llamacpp_malformed_tool_call",
+                        "recovering from malformed llama.cpp tool-call JSON",
+                        attempt=attempt,
+                        provider_profile=client.provider_profile,
+                        tool_name_hint=details.get("tool_name_hint"),
+                        estimated_payload_tokens=details.get("estimated_payload_tokens"),
+                        estimated_context_tokens_remaining=details.get("estimated_context_tokens_remaining"),
+                    )
+                yield {
+                    "type": "chunk_error",
+                    "error": "llama.cpp returned malformed tool-call JSON",
+                    "details": details,
+                }
+                return
             if status_code == 400:
+                body_summary = _summarize_http_error_body(_http_error_body(exc))
+                observed_context_limit = body_summary.get("context_limit")
+                if client.provider_profile == "llamacpp":
+                    _remember_context_limit(
+                        client,
+                        observed_context_limit if isinstance(observed_context_limit, int) else None,
+                    )
                 diagnostics = {
-                    **_summarize_400_payload(current_payload),
-                    **_summarize_http_error_body(_http_error_body(exc)),
+                    **_summarize_400_payload(current_payload, context_limit=_client_context_limit(client)),
+                    **body_summary,
                     "status_code": status_code,
                 }
                 log_kv(
@@ -821,6 +1443,84 @@ async def stream_chat(
                         "details": exhausted_details,
                     }
                     return
+                if client.provider_profile == "llamacpp" and not llamacpp_reduced_tools_attempted:
+                    fallback_limit = _client_context_limit(client)
+                    fallback_limit_was_observed = fallback_limit is not None
+                    if fallback_limit is None:
+                        fallback_limit = 1
+                    budget_result = _llamacpp_budget_preflight(
+                        client,
+                        payload=current_payload,
+                        stage="http_400_reduced_tools_retry",
+                        context_limit=fallback_limit,
+                        context_limit_source="observed" if fallback_limit_was_observed else "unknown",
+                        reduction_reason="http_400_recovery",
+                        log_context_limit=None if not fallback_limit_was_observed else fallback_limit,
+                    )
+                    if (
+                        budget_result is not None
+                        and budget_result.action == "exceeded"
+                        and fallback_limit_was_observed
+                    ):
+                        yield {
+                            "type": "chunk_error",
+                            "error": "llamacpp context budget exceeded before request",
+                            "details": {
+                                "type": "context_budget_exceeded",
+                                "provider_profile": client.provider_profile,
+                                "model": client.model,
+                                "context_limit": fallback_limit,
+                                "effective_prompt_budget": build_request_budget(
+                                    fallback_limit
+                                ).effective_prompt_budget,
+                                "estimated_payload_tokens": budget_result.footprint.estimated_payload_tokens,
+                                "estimated_message_tokens": budget_result.footprint.estimated_message_tokens,
+                                "estimated_tool_tokens": budget_result.footprint.estimated_tool_tokens,
+                                "tool_count_before": budget_result.tool_count_before,
+                                "tool_count_after": budget_result.tool_count_after,
+                                "dropped_tool_names": list(budget_result.dropped_tool_names),
+                                "kept_tool_names": list(budget_result.kept_tool_names),
+                                "over_budget_tokens": budget_result.footprint.over_budget_tokens,
+                            },
+                        }
+                        return
+                    if (
+                        budget_result is not None
+                        and budget_result.tool_count_after < budget_result.tool_count_before
+                    ):
+                        previous_tool_count = int(diagnostics.get("tool_schema_count") or 0)
+                        current_payload = client.adapter.mutate_payload(budget_result.payload)
+                        llamacpp_reduced_tools_attempted = True
+                        reduced_diagnostics = _summarize_400_payload(
+                            current_payload,
+                            context_limit=_client_context_limit(client),
+                        )
+                        log_kv(
+                            client.log,
+                            logging.WARNING,
+                            "chat_stream_400_llamacpp_retry",
+                            attempt=attempt,
+                            strategy="reduced_tools_retry",
+                            previous_tool_count=previous_tool_count,
+                            reduced_tool_count=reduced_diagnostics["tool_schema_count"],
+                            reduced_tool_names=reduced_diagnostics["tool_names"],
+                            reduced_tool_schema_bytes=reduced_diagnostics["tool_schema_bytes"],
+                            reduced_payload_bytes=reduced_diagnostics["payload_bytes"],
+                        )
+                        if client.run_logger:
+                            client.run_logger.log(
+                                "chat",
+                                "stream_400_llamacpp_retry",
+                                "retrying llama.cpp stream with reduced tool schemas",
+                                attempt=attempt,
+                                strategy="reduced_tools_retry",
+                                previous_tool_count=previous_tool_count,
+                                reduced_tool_count=reduced_diagnostics["tool_schema_count"],
+                                reduced_tool_names=reduced_diagnostics["tool_names"],
+                                reduced_tool_schema_bytes=reduced_diagnostics["tool_schema_bytes"],
+                                reduced_payload_bytes=reduced_diagnostics["payload_bytes"],
+                            )
+                        continue
 
             if status_code == 429:
                 retry_after_seconds = _parse_retry_after_seconds(exc.response)
@@ -923,27 +1623,28 @@ async def stream_chat(
                     return
                 raise
             last_error = exc
-            log_kv(
-                client.log,
-                logging.WARNING,
+            _log_transport_error(
+                client,
                 "chat_stream_transport_retry_nonstream",
-                error=str(exc),
+                exc,
+                url=url,
                 attempt=attempt,
+                phase="stream",
             )
-            if client.run_logger:
-                client.run_logger.log(
-                    "chat",
-                    "stream_transport_retry_nonstream",
-                    "retrying as non-stream chat request",
-                    error=str(exc),
-                    attempt=attempt,
-                )
             try:
                 async for event in streamer.nonstream_chat(async_client, url, headers, current_payload):
                     yield event
                 return
             except (httpx.TimeoutException, httpx.TransportError) as fallback_exc:
                 last_error = fallback_exc
+                _log_transport_error(
+                    client,
+                    "chat_nonstream_transport_error",
+                    fallback_exc,
+                    url=url,
+                    attempt=attempt,
+                    phase="nonstream_fallback",
+                )
                 await _reset_async_client(client)
                 async_client = _get_async_client(client)
         if attempt < client.STREAM_RETRY_ATTEMPTS:
@@ -977,6 +1678,16 @@ async def stream_chat(
                 "details": exhausted_details,
             }
             return
+        if isinstance(last_error, (httpx.TimeoutException, httpx.TransportError)):
+            _log_transport_error(
+                client,
+                "chat_transport_exhausted",
+                last_error,
+                url=url,
+                attempt=client.STREAM_RETRY_ATTEMPTS,
+                phase="exhausted",
+                level=logging.ERROR,
+            )
         raise last_error
 
 
@@ -1003,7 +1714,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
                 runtime_limit = extract_runtime_context_limit(runtime_payload)
                 if runtime_limit:
                     log_kv(client.log, logging.INFO, "context_probe_success", source="runtime", limit=runtime_limit)
-                    return runtime_limit
+                    return _remember_context_limit(client, runtime_limit)
         except Exception:
             pass
     try:
@@ -1013,7 +1724,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
             limit = extract_context_limit(payload)
             if limit:
                 log_kv(client.log, logging.INFO, "context_probe_success", source="model_metadata", limit=limit)
-                return limit
+                return _remember_context_limit(client, limit)
     except Exception:
         pass
     try:
@@ -1026,7 +1737,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
-        return extract_context_limit(payload)
+        return _remember_context_limit(client, extract_context_limit(payload))
 
     selected: dict[str, Any] | None = None
     for item in data:
@@ -1039,5 +1750,5 @@ async def fetch_model_context_limit(client: Any) -> int | None:
                 selected = item
                 break
     if selected is not None:
-        return extract_context_limit(selected)
-    return extract_context_limit(payload)
+        return _remember_context_limit(client, extract_context_limit(selected))
+    return _remember_context_limit(client, extract_context_limit(payload))

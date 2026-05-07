@@ -616,7 +616,35 @@ async def run_ssh_command(
         strict_host_key_checking=strict_host_key_mode,
     )
 
+    last_process_output: dict[str, Any] | None = None
+
+    def _build_process_output(
+        *,
+        stdout: str,
+        stderr: str,
+        exit_code: int | None,
+        elapsed: float,
+    ) -> dict[str, Any]:
+        max_final_result = 256 * 1024
+        final_stdout = stdout
+        final_stderr = stderr
+        if len(final_stdout) > max_final_result:
+            final_stdout = final_stdout[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
+        if len(final_stderr) > max_final_result:
+            final_stderr = final_stderr[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
+        return {
+            "stdout": final_stdout,
+            "stderr": final_stderr,
+            "exit_code": exit_code,
+            "metrics": {
+                "duration_sec": round(elapsed, 3) if isinstance(elapsed, (int, float)) else 0.0,
+                "host": host,
+                "user": user,
+            },
+        }
+
     async def _run_ssh_process(command_text: str, stdin_payload: str | None = None) -> tuple[dict[str, Any], asyncio.subprocess.Process | None]:
+        nonlocal last_process_output
         start_time = time.time()
         proc = await create_process(
             command=command_text,
@@ -653,28 +681,16 @@ async def run_ssh_command(
                 timeout=timeout_sec,
             )
         finally:
+            elapsed = time.time() - start_time
+            last_process_output = _build_process_output(
+                stdout="".join(stdout_data),
+                stderr="".join(stderr_data),
+                exit_code=proc.returncode,
+                elapsed=elapsed,
+            )
             await stream_emitter.flush()
 
-        elapsed = time.time() - start_time
-        final_stdout = "".join(stdout_data)
-        final_stderr = "".join(stderr_data)
-
-        max_final_result = 256 * 1024
-        if len(final_stdout) > max_final_result:
-            final_stdout = final_stdout[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
-        if len(final_stderr) > max_final_result:
-            final_stderr = final_stderr[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
-
-        return {
-            "stdout": final_stdout,
-            "stderr": final_stderr,
-            "exit_code": proc.returncode,
-            "metrics": {
-                "duration_sec": round(elapsed, 3) if isinstance(elapsed, (int, float)) else 0.0,
-                "host": host,
-                "user": user,
-            },
-        }, proc
+        return last_process_output, proc
 
     proc = None
     try:
@@ -734,6 +750,10 @@ async def run_ssh_command(
                 error_msg,
                 metadata={
                     "output": output,
+                    "output_received": bool(
+                        str(output.get("stdout") or "").strip()
+                        or str(output.get("stderr") or "").strip()
+                    ),
                     "hints": hints,
                     "failure_kind": failure_kind,
                     "ssh_error_class": ssh_error_class,
@@ -756,15 +776,30 @@ async def run_ssh_command(
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except asyncio.TimeoutError:
                     pass
-        for pipe in (proc.stdout, proc.stderr, proc.stdin):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except Exception:
-                    pass
+        if proc is not None:
+            for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+        output = last_process_output if isinstance(last_process_output, dict) else {}
         return fail(
             f"SSH command timed out after {timeout_sec}s",
-            metadata=execution_debug_metadata,
+            metadata={
+                "output": output,
+                "output_received": bool(
+                    str(output.get("stdout") or "").strip()
+                    or str(output.get("stderr") or "").strip()
+                ),
+                "failure_kind": "timeout",
+                "ssh_error_class": "command_timeout",
+                "ssh_transport_succeeded": bool(
+                    str(output.get("stdout") or "").strip()
+                    or str(output.get("stderr") or "").strip()
+                ),
+                **execution_debug_metadata,
+            },
         )
     except Exception as exc:
         return fail(

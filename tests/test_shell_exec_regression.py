@@ -159,6 +159,25 @@ def test_shell_exec_blocks_likely_foreground_service_without_launching() -> None
     assert "background=True" in result["error"]
 
 
+def test_shell_exec_rejects_foreground_command_with_job_id_before_polling() -> None:
+    state = LoopState(cwd="/tmp")
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command="python3 ./temp/cron_matcher.py",
+            job_id="verify_cron_001",
+            background=False,
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "invalid_shell_exec_job_id_with_foreground_command"
+    assert "omit `job_id`" in result["error"]
+    assert "Unknown job id" not in result["error"]
+
+
 def test_dispatch_cancellation_records_synthetic_tool_result() -> None:
     state = LoopState(cwd="/tmp")
     state.step_count = 3

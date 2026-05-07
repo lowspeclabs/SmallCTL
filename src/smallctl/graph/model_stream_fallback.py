@@ -162,7 +162,7 @@ async def _attempt_remote_write_fallback(
     task_text = _fallback_task_text(harness, messages)
     if task_text:
         prompt_lines.extend(["", "User task:", task_text.strip()])
-    fallback_messages = list(messages) + [{"role": "system", "content": "\n".join(prompt_lines)}]
+    fallback_messages = list(messages) + [{"role": "user", "content": "\n".join(prompt_lines)}]
 
     graph_state.latency_metrics["remote_write_fallback_attempt_count"] = (
         int(graph_state.latency_metrics.get("remote_write_fallback_attempt_count", 0) or 0) + 1
@@ -338,7 +338,7 @@ async def _attempt_text_write_fallback(
     )
     fallback_messages = list(messages) + [
         {
-            "role": "system",
+            "role": "user",
             "content": fallback_prompt,
         }
     ]

@@ -6,7 +6,13 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical, VerticalScroll
 
 from smallctl.models.events import UIEvent, UIEventType
-from smallctl.ui.bubbles import AssistantDetailWidget, TextBlockWidget, ToolCallDetailWidget, ToolCallsContainerWidget
+from smallctl.ui.bubbles import (
+    AssistantDetailWidget,
+    BubbleWidget,
+    TextBlockWidget,
+    ToolCallDetailWidget,
+    ToolCallsContainerWidget,
+)
 from smallctl.ui.console import ConsolePane
 
 
@@ -15,7 +21,7 @@ class _ConsoleApp(App[None]):
         yield ConsolePane()
 
 
-def test_thinking_after_visible_assistant_starts_a_new_turn() -> None:
+def test_thinking_after_visible_assistant_stays_in_one_turn() -> None:
     async def _run() -> None:
         app = _ConsoleApp()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -35,26 +41,27 @@ def test_thinking_after_visible_assistant_starts_a_new_turn() -> None:
 
             stack = console.query_one("#bubble-stack", Vertical)
             turns = list(stack.children)
-            assert len(turns) == 2
+            assert len(turns) == 1
 
-            first_turn, second_turn = turns
-            assert isinstance(first_turn, type(console._active_assistant_turn))
-            assert isinstance(second_turn, type(console._active_assistant_turn))
+            turn = turns[0]
+            assert isinstance(turn, type(console._active_assistant_turn))
 
-            assert first_turn.get_assistant_text() == "Visible summary up top."
-            assert second_turn.get_assistant_text() == "Final user-facing status."
+            assert turn.get_assistant_text() == "Visible summary up top.\nFinal user-facing status."
 
-            second_body = second_turn.query_one(".assistant-turn-body", Vertical)
-            second_main = second_turn.query_one(".assistant-turn-main", Vertical)
-            second_meta = second_turn.query_one(".assistant-turn-meta", Vertical)
+            body = turn.query_one(".assistant-turn-body", Vertical)
+            main = turn.query_one(".assistant-turn-main", Vertical)
+            meta = turn.query_one(".assistant-turn-meta", Vertical)
 
-            assert list(second_body.children) == [second_meta, second_main]
+            assert list(body.children) == [meta, main]
 
-            main_children = list(second_main.children)
-            assert [type(child) for child in main_children] == [TextBlockWidget]
-            assert [child.text for child in main_children] == ["Final user-facing status."]
+            main_children = list(main.children)
+            assert [type(child) for child in main_children] == [TextBlockWidget, TextBlockWidget]
+            assert [child.text for child in main_children] == [
+                "Visible summary up top.",
+                "Final user-facing status.",
+            ]
 
-            meta_children = list(second_meta.children)
+            meta_children = list(meta.children)
             assert [type(child) for child in meta_children] == [
                 AssistantDetailWidget,
                 ToolCallsContainerWidget,
@@ -183,7 +190,7 @@ def test_assistant_text_drops_leading_blank_lines_after_thinking() -> None:
     asyncio.run(_run())
 
 
-def test_tool_call_after_meta_and_assistant_starts_a_new_turn() -> None:
+def test_tool_call_after_meta_and_assistant_stays_in_one_turn() -> None:
     async def _run() -> None:
         app = _ConsoleApp()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -210,19 +217,136 @@ def test_tool_call_after_meta_and_assistant_starts_a_new_turn() -> None:
 
             stack = console.query_one("#bubble-stack", Vertical)
             turns = list(stack.children)
-            assert len(turns) == 2
+            assert len(turns) == 1
 
-            first_turn, second_turn = turns
-            assert first_turn.get_assistant_text() == "First fetch is complete."
-            assert second_turn.get_assistant_text() == "Second step is underway."
+            turn = turns[0]
+            assert turn.get_assistant_text() == "First fetch is complete.\nSecond step is underway."
 
-            second_meta = second_turn.query_one(".assistant-turn-meta", Vertical)
-            meta_children = list(second_meta.children)
-            assert [type(child) for child in meta_children] == [ToolCallsContainerWidget]
+            meta = turn.query_one(".assistant-turn-meta", Vertical)
+            meta_children = list(meta.children)
+            assert [type(child) for child in meta_children] == [
+                AssistantDetailWidget,
+                ToolCallsContainerWidget,
+            ]
 
-            tool_group = meta_children[0]
+            assert meta_children[0].text == "Inspect the first result."
+            tool_group = meta_children[1]
             assert isinstance(tool_group, ToolCallsContainerWidget)
             tool_children = list(tool_group.query_one(".tool-calls-scroll-container", VerticalScroll).children)
-            assert [child.text for child in tool_children] == ["shell_exec(command='ssh host')"]
+            assert [child.text for child in tool_children] == [
+                "web_fetch(result_id='r1')",
+                "shell_exec(command='ssh host')",
+            ]
+
+    asyncio.run(_run())
+
+
+def test_user_event_breaks_active_assistant_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "First response."))
+            await console.append_event(UIEvent(UIEventType.USER, "Next request."))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Second response."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert [type(child) for child in children] == [
+                type(console._active_assistant_turn),
+                BubbleWidget,
+                type(console._active_assistant_turn),
+            ]
+            assert children[0].get_assistant_text() == "First response."
+            assert children[2].get_assistant_text() == "Second response."
+
+    asyncio.run(_run())
+
+
+def test_system_event_breaks_active_assistant_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before system."))
+            await console.append_event(UIEvent(UIEventType.SYSTEM, "System notice."))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "After system."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert [type(child) for child in children] == [
+                type(console._active_assistant_turn),
+                BubbleWidget,
+                type(console._active_assistant_turn),
+            ]
+            assert children[0].get_assistant_text() == "Before system."
+            assert children[2].get_assistant_text() == "After system."
+
+    asyncio.run(_run())
+
+
+def test_matched_tool_result_keeps_active_assistant_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "shell_exec",
+                    data={"display_text": "shell_exec(command='pwd')", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "ok",
+                    data={"tool_name": "shell_exec", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Done."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert len(children) == 1
+            assert children[0] is console._active_assistant_turn
+            assert children[0].get_assistant_text() == "Done."
+
+    asyncio.run(_run())
+
+
+def test_unmatched_tool_result_breaks_active_assistant_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before result."))
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "orphan output",
+                    data={"tool_name": "shell_exec", "tool_call_id": "missing"},
+                )
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert [type(child) for child in children] == [
+                type(console._active_assistant_turn),
+                BubbleWidget,
+                type(console._active_assistant_turn),
+            ]
+            assert children[0].get_assistant_text() == "Before result."
+            assert children[1].kind == "tool_result"
+            assert children[2].get_assistant_text() == "After result."
 
     asyncio.run(_run())

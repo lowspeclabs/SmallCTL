@@ -84,6 +84,37 @@ def _tool_call_stream(*, tool_name: str, args: dict[str, object], tool_call_id: 
     ]
 
 
+def _assistant_text_stream(text: str) -> list[dict[str, object]]:
+    return [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "role": "assistant",
+                            "content": text,
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+        },
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        },
+        {"type": "done"},
+    ]
+
+
 def test_loop_runtime_continues_after_successful_tool_dispatch(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "visible.txt").write_text("hello\n", encoding="utf-8")
@@ -196,6 +227,109 @@ def test_loop_runtime_uses_task_complete_message_as_assistant_fallback(tmp_path:
     assert result["assistant"] == "Jacksonville is 85F today."
 
 
+def test_loop_runtime_promotes_terminal_prose_task_complete_after_tool_evidence(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "visible.txt").write_text("hello\n", encoding="utf-8")
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled",
+        provider_profile="llamacpp",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    final_answer = (
+        "## Final Summary\n\n"
+        "- visible.txt exists in the directory.\n\n"
+        "**Task Complete**"
+    )
+    stream_sequences = [
+        _tool_call_stream(
+            tool_name="dir_list",
+            args={"path": str(tmp_path)},
+            tool_call_id="tool-list-before-terminal-prose",
+        ),
+        _assistant_text_stream(final_answer),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del messages, tools
+        if not stream_sequences:
+            raise AssertionError("unexpected extra model call")
+        for event in stream_sequences.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = LoopGraphRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("list files and summarize the findings"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["assistant"] == final_answer
+    assert stream_sequences == []
+    assert harness.state.scratchpad["_terminal_prose_task_complete_autopromoted"]["recovery_kind"] == (
+        "terminal_prose_task_complete"
+    )
+
+
+def test_loop_runtime_does_not_promote_plain_nonterminal_summary(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled",
+        provider_profile="llamacpp",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    stream_sequences = [
+        _assistant_text_stream("I found the directory has several files and can inspect them next."),
+        _tool_call_stream(
+            tool_name="task_complete",
+            args={"message": "Finished after the recovery nudge."},
+            tool_call_id="tool-complete-after-nudge",
+        ),
+    ]
+    observed_prompts: list[list[dict[str, object]]] = []
+
+    async def fake_stream_chat(*, messages, tools):
+        del tools
+        observed_prompts.append(messages)
+        if not stream_sequences:
+            raise AssertionError("unexpected extra model call")
+        for event in stream_sequences.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = LoopGraphRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("inspect the directory"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert stream_sequences == []
+    assert "_terminal_prose_task_complete_autopromoted" not in harness.state.scratchpad
+    assert any(
+        message.get("metadata", {}).get("recovery_kind") == "missing_task_complete"
+        for message in observed_prompts[-1]
+    )
+
+
 def test_auto_runtime_capability_query_routes_without_mode_model_fallback(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
@@ -298,3 +432,46 @@ def test_chat_runtime_capability_query_keeps_real_tools_when_forced_to_chat(
     )
     assert "Available tools on this turn:" in system_prompt
     assert "file_read" in system_prompt
+
+
+def test_auto_chat_smalltalk_sends_no_tools_to_qwen35(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="qwen3.5:4b",
+        provider_profile="lmstudio",
+        phase="explore",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    stream_calls: list[tuple[list[dict[str, object]], list[dict[str, object]]]] = []
+
+    async def fake_stream_chat(*, messages, tools):
+        stream_calls.append((messages, tools))
+        yield {
+            "type": "chunk",
+            "data": {"choices": [{"delta": {"content": "Hello! How can I help?"}}]},
+        }
+        yield {"type": "done"}
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            AutoGraphRuntime.from_harness(harness).run("hello"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "chat_completed"
+    assert result["assistant"] == "Hello! How can I help?"
+    assert len(stream_calls) == 1
+    assert stream_calls[0][1] == []
+    assert harness.state.scratchpad["_chat_runtime_intent"] == "smalltalk"
+    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"

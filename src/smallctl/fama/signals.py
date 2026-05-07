@@ -31,6 +31,7 @@ FAILURE_CLASSES = {
     "repeated_action": "Same or near-same tool call repeated without new evidence.",
     "verifier_failed": "Verifier/test/check says acceptance criteria are not met.",
     "test_failed": "Unit/integration command failed.",
+    "zero_tests_discovered": "A test command ran successfully but discovered zero tests.",
     "context_missing": "Model needs evidence it has not actually retrieved.",
     "hallucinated_assumption": "Model asserted something unsupported by tool output.",
     "human_resteer": "User corrected direction or clarified after model drift.",

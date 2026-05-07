@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
 from ..models.conversation import ConversationMessage
+from ..remote_scope import remote_scope_is_active
 from ..shell_utils import is_read_only_shell_evidence_action as _is_read_only_shell_evidence_action
 from ..state import json_safe_value
 from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
@@ -38,8 +40,17 @@ _PATCH_META_TOOLS = {
 _REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
 _ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
 _DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
+_STALE_VERIFIER_KEY = "_last_verifier_stale_after_mutation"
 
 def _is_ssh_exec_read_command(record: Any) -> bool:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return False
+    return _is_read_only_shell_evidence_action(command)
+
+
+def _is_shell_exec_read_command(record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
     command = str(args.get("command") or "").strip()
     if not command:
@@ -102,8 +113,7 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
     # 4. Successful verifier with a new verdict
     for record in last_tool_results:
         if record.tool_name in {"shell_exec", "ssh_exec"}:
-            metadata = record.result.metadata or {}
-            verdict = str(metadata.get("verdict") or metadata.get("status") or "").strip()
+            verdict = _record_verifier_verdict(harness, record)
             if verdict:
                 prior = _prior_turn_verdict(harness)
                 if verdict != prior:
@@ -113,6 +123,12 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
     for record in last_tool_results:
         if record.tool_name == "ssh_exec" and _ssh_exec_has_novel_remote_observation(harness, record):
             return True
+
+    # 4c. Partial remote output on failure/timeout is still useful once.
+    for record in last_tool_results:
+        if record.tool_name == "ssh_exec" and not record.result.success:
+            if _ssh_exec_has_novel_partial_output(harness, record):
+                return True
 
     # 5. Successful read of a new artifact/ssh_file range or ssh_exec read command
     for record in last_tool_results:
@@ -131,6 +147,9 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
                 if _ssh_exec_read_is_new(harness, record):
                     return True
             else:
+                return True
+        if record.tool_name == "shell_exec" and record.result.success:
+            if not _is_shell_exec_read_command(record):
                 return True
 
     # 6. Any other successful non-read, non-mutation, non-exec tool
@@ -175,6 +194,60 @@ def _prior_turn_verdict(harness: Any) -> str:
     if state is None:
         return ""
     return str(getattr(state, "scratchpad", {}).get("_progress_prior_verdict", "") or "").strip()
+
+
+def _record_command(record: Any) -> str:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    return str(args.get("command") or "").strip()
+
+
+def _current_verifier_payload(state: Any) -> dict[str, Any] | None:
+    current_verifier = getattr(state, "current_verifier_verdict", None)
+    verifier = current_verifier() if callable(current_verifier) else getattr(state, "last_verifier_verdict", None)
+    return verifier if isinstance(verifier, dict) and verifier else None
+
+
+def _record_verifier_verdict(harness: Any, record: Any) -> str:
+    metadata = record.result.metadata or {}
+    verdict = str(metadata.get("verdict") or metadata.get("status") or "").strip()
+    if verdict:
+        return verdict
+
+    state = getattr(harness, "state", None)
+    if state is None:
+        return ""
+    verifier = _current_verifier_payload(state)
+    if verifier is None:
+        return ""
+    if str(verifier.get("tool") or "").strip() != str(getattr(record, "tool_name", "") or "").strip():
+        return ""
+    verifier_command = str(verifier.get("command") or "").strip()
+    record_command = _record_command(record)
+    if verifier_command and record_command and verifier_command != record_command:
+        return ""
+    return str(verifier.get("verdict") or verifier.get("status") or "").strip()
+
+
+def _mark_verifier_stale_after_mutation(state: Any, record: Any) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    verifier = _current_verifier_payload(state)
+    if verifier is None:
+        return
+    metadata = getattr(getattr(record, "result", None), "metadata", {}) or {}
+    args = getattr(record, "args", {}) if isinstance(getattr(record, "args", None), dict) else {}
+    paths = []
+    for value in (metadata.get("path"), args.get("path")):
+        text = str(value or "").strip()
+        if text and text not in paths:
+            paths.append(text)
+    scratchpad[_STALE_VERIFIER_KEY] = {
+        "reason": "file_changed_after_verifier",
+        "tool_name": str(getattr(record, "tool_name", "") or "").strip(),
+        "paths": paths,
+        "prior_verdict": json_safe_value(verifier),
+    }
 
 
 def _artifact_read_result_is_new_range(harness: Any, record: Any) -> bool:
@@ -448,6 +521,24 @@ def _ssh_exec_remote_paths(record: Any) -> list[str]:
     return paths[:8]
 
 
+def _ssh_exec_output_fingerprint(record: Any) -> str:
+    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    output = metadata.get("output")
+    if not isinstance(output, dict):
+        output = {}
+    text = "\n".join(
+        str(output.get(key) or "").strip()
+        for key in ("stdout", "stderr")
+        if str(output.get(key) or "").strip()
+    )
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized[:4096].encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
 def _ssh_exec_observation_entries(harness: Any) -> list[dict[str, Any]]:
     state = getattr(harness, "state", None)
     if state is None:
@@ -455,6 +546,32 @@ def _ssh_exec_observation_entries(harness: Any) -> list[dict[str, Any]]:
     scratchpad = getattr(state, "scratchpad", {})
     history = scratchpad.get("_progress_ssh_observation_history", [])
     return history if isinstance(history, list) else []
+
+
+def _ssh_exec_has_novel_partial_output(harness: Any, record: Any) -> bool:
+    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if not bool(metadata.get("output_received")):
+        return False
+    fingerprint = _ssh_exec_output_fingerprint(record)
+    if not fingerprint:
+        return False
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    host = str(args.get("host") or metadata.get("host") or "").strip().lower()
+    command = str(args.get("command") or metadata.get("command") or "").strip()
+    if not host or not command:
+        return False
+    for item in _ssh_exec_observation_entries(harness):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("host") or "").strip().lower() != host:
+            continue
+        if str(item.get("command") or "").strip() != command:
+            continue
+        if str(item.get("output_fingerprint") or "").strip() == fingerprint:
+            return False
+    return True
 
 
 def _ssh_exec_has_novel_remote_observation(harness: Any, record: Any) -> bool:
@@ -522,9 +639,11 @@ def _record_ssh_exec_observation(harness: Any, record: Any) -> None:
     history.append(
         {
             "host": str(args.get("host") or metadata.get("host") or "").strip().lower(),
+            "command": str(args.get("command") or metadata.get("command") or "").strip(),
             "failure_class": str(metadata.get("ssh_error_class") or metadata.get("failure_kind") or "").strip(),
             "paths": _ssh_exec_remote_paths(record),
             "auth_mode": str(metadata.get("ssh_auth_mode") or "").strip(),
+            "output_fingerprint": _ssh_exec_output_fingerprint(record),
             "reached_remote_host": (
                 bool(getattr(record.result, "success", False))
                 or bool(metadata.get("ssh_transport_succeeded"))
@@ -649,6 +768,9 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     is_progress = _turn_has_actionable_progress(harness, graph_state)
 
     scratchpad = getattr(state, "scratchpad", {})
+    for record in getattr(graph_state, "last_tool_results", []) or []:
+        if record.tool_name in _MUTATION_TOOLS and record.result.success and (record.result.metadata or {}).get("changed") is True:
+            _mark_verifier_stale_after_mutation(state, record)
     if is_progress:
         counters["no_actionable_progress"] = 0
         # Update prior-state snapshots for next comparison
@@ -661,6 +783,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
                     v = str(meta.get("verdict") or meta.get("status") or "").strip()
                     if v:
                         verdict = v
+                        scratchpad.pop(_STALE_VERIFIER_KEY, None)
             if not verdict:
                 current_verifier = getattr(state, "current_verifier_verdict", None)
                 verifier = current_verifier() if callable(current_verifier) else None
@@ -743,6 +866,8 @@ def _stagnation_thresholds_for_phase(harness: Any) -> tuple[int, int]:
     state = getattr(harness, "state", None)
     if state is None:
         return 3, 5
+    if remote_scope_is_active(state):
+        return 7, 10
     phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     if phase in {"explore", "repair"}:
         return 5, 7

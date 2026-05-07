@@ -331,6 +331,7 @@ def test_stalled_file_write_stream_uses_no_tools_fallback_without_session() -> N
     assert tool_call["function"]["name"] == "file_write"
     assert "print('recovered')" in tool_call["function"]["arguments"]
     assert harness.client.calls[0]["tools"] == []
+    assert harness.client.calls[0]["messages"][-1]["role"] == "user"
     assert state.scratchpad["_last_text_write_fallback"]["target_path"] == "temp/logwatch.py"
 
 
@@ -393,4 +394,5 @@ def test_stalled_ssh_file_write_stream_uses_remote_write_fallback() -> None:
     assert "/var/www/html/index.html" in tool_call["function"]["arguments"]
     assert "Recovered" in tool_call["function"]["arguments"]
     assert harness.client.calls[0]["tools"] == []
+    assert harness.client.calls[0]["messages"][-1]["role"] == "user"
     assert state.scratchpad["_last_remote_write_fallback"]["target_path"] == "/var/www/html/index.html"

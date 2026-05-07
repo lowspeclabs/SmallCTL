@@ -97,6 +97,35 @@ def test_shell_exec_failure_message_caps_long_error_text() -> None:
     assert len(message) < 1900
 
 
+def test_artifact_grep_rejects_regex_looking_query_in_literal_mode(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="host one up\nhost two down\n")
+
+    result = artifact_grep(state, artifact_id="A0001", query="host|server")
+
+    assert result["success"] is False
+    assert "looks like a regex" in result["error"]
+    assert "regex=True" in result["error"]
+    assert result["metadata"]["hint"] == "Use regex=True if you intended a regex search."
+
+
+def test_artifact_grep_regex_mode_matches_pattern(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="host one up\nhost two down\nserver ready\n")
+
+    result = artifact_grep(state, artifact_id="A0001", query=r"host|server", regex=True)
+
+    assert result["success"] is True
+    assert "Found 3 matches" in result["output"]
+
+
+def test_artifact_grep_literal_mode_allows_normal_queries(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="const x = (a + b) * 2;\n")
+
+    result = artifact_grep(state, artifact_id="A0001", query="(a + b)")
+
+    assert result["success"] is True
+    assert "Found 1 matches" in result["output"]
+
+
 def test_record_result_compacts_ssh_file_write_arguments_in_artifact_json(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.thread_id = "thread-test"

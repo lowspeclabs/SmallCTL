@@ -71,6 +71,17 @@ async def artifact_print(
     return ok(f"Artifact {artifact_id} contents printed to user interface. (Model context preserved)")
 
 
+def _looks_like_regex(query: str) -> bool:
+    """Heuristic to detect queries that are likely regex rather than literal substrings."""
+    if "|" in query:
+        return True
+    if query.startswith("^") or query.endswith("$"):
+        return True
+    if re.search(r"\\[wdDsSbBZzArntf.*+?{}\[\]|^$()0-9]", query):
+        return True
+    return False
+
+
 def artifact_grep(
     state: LoopState,
     *,
@@ -78,9 +89,11 @@ def artifact_grep(
     query: str,
     case_insensitive: bool = True,
     max_results: int = 20,
+    regex: bool = False,
 ) -> dict[str, Any]:
     """
-    Search for a pattern within an artifact and return matching lines with context.
+    Search for a substring or regex pattern within an artifact and return matching
+    lines with context. By default uses literal substring matching (not regex).
     Use this to find specific information within large artifacts (logs, command output)
     without reading the entire content.
     """
@@ -101,21 +114,48 @@ def artifact_grep(
         if not content:
             return fail(f"Artifact {artifact_id} has no content to search.")
 
+        canonical_artifact_id = str(getattr(artifact, "artifact_id", "") or artifact_id).strip() or artifact_id
+
+        if not regex and _looks_like_regex(query):
+            return fail(
+                f"Query '{query}' looks like a regex, but artifact_grep uses literal "
+                "substring matching by default. Either break the query into separate literal "
+                "searches, or set regex=True to use regex mode.",
+                metadata={
+                    "artifact_id": canonical_artifact_id,
+                    "query": query,
+                    "hint": "Use regex=True if you intended a regex search.",
+                },
+            )
+
         lines = content.splitlines()
         matches = []
-        pattern = query.lower() if case_insensitive else query
 
-        for i, line in enumerate(lines):
-            target = line.lower() if case_insensitive else line
-            if pattern in target:
-                matches.append({
-                    "line": i + 1,
-                    "content": line.strip()
-                })
-                if len(matches) >= max_results:
-                    break
-
-        canonical_artifact_id = str(getattr(artifact, "artifact_id", "") or artifact_id).strip() or artifact_id
+        if regex:
+            flags = re.IGNORECASE if case_insensitive else 0
+            try:
+                compiled = re.compile(query, flags)
+            except re.error as exc:
+                return fail(
+                    f"Invalid regex pattern: {exc}",
+                    metadata={"query": query, "error_kind": "invalid_regex"},
+                )
+            for i, line in enumerate(lines):
+                if compiled.search(line):
+                    matches.append({"line": i + 1, "content": line.strip()})
+                    if len(matches) >= max_results:
+                        break
+        else:
+            pattern = query.lower() if case_insensitive else query
+            for i, line in enumerate(lines):
+                target = line.lower() if case_insensitive else line
+                if pattern in target:
+                    matches.append({
+                        "line": i + 1,
+                        "content": line.strip()
+                    })
+                    if len(matches) >= max_results:
+                        break
 
         if not matches:
             return ok(f"No matches found for '{query}' in artifact {canonical_artifact_id}")

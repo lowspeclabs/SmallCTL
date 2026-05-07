@@ -121,7 +121,7 @@ def build_step_sandbox_prompt(harness: Any, step: PlanStep) -> list[dict[str, An
     if step.failure_reasons:
         system_lines.append("Recent step failures: " + " | ".join(step.failure_reasons[-3:]))
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": "\n".join(system_lines)}]
+    system_blocks = ["\n".join(system_lines)]
     if dependency_evidence:
         evidence_lines = []
         for item in dependency_evidence:
@@ -129,10 +129,12 @@ def build_step_sandbox_prompt(harness: Any, step: PlanStep) -> list[dict[str, An
                 f"- {item.step_id} run={item.step_run_id} summary={item.summary} "
                 f"artifacts={','.join(item.artifact_ids)} files={','.join(item.files_touched)}"
             )
-        messages.append({"role": "system", "content": "Dependency evidence:\n" + "\n".join(evidence_lines)})
+        system_blocks.append("Dependency evidence:\n" + "\n".join(evidence_lines))
     if snippets:
         snippet_lines = [f"[{snippet.artifact_id}] {snippet.text}" for snippet in snippets]
-        messages.append({"role": "system", "content": "Referenced artifacts:\n" + "\n\n".join(snippet_lines)})
+        system_blocks.append("Referenced artifacts:\n" + "\n\n".join(snippet_lines))
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "\n\n".join(system_blocks)}]
 
     for message in getattr(state, "step_sandbox_history", []) or []:
         if isinstance(message, ConversationMessage):

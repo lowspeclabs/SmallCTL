@@ -19,7 +19,9 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
 
 
 def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveMitigation]:
-    names = MITIGATION_RULES.get(signal.kind, [])
+    names = list(MITIGATION_RULES.get(signal.kind, []))
+    if signal.failure_class == "zero_tests_discovered" and "zero_test_recovery_capsule" not in names:
+        names.append("zero_test_recovery_capsule")
     if not names:
         return []
     step = current_step(state)

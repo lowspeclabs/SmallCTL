@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from .base import ProviderAdapter, StreamPolicy
 from .generic import GenericAdapter
+from .llamacpp import LlamaCppAdapter
 from .lmstudio import LMStudioAdapter
 from .openrouter import OpenRouterAdapter
 
 _GENERIC_ADAPTER = GenericAdapter()
 _REGISTRY: dict[str, ProviderAdapter] = {
     "generic": _GENERIC_ADAPTER,
+    "llamacpp": LlamaCppAdapter(),
     "lmstudio": LMStudioAdapter(),
     "openrouter": OpenRouterAdapter(),
 }

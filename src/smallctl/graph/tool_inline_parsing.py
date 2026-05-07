@@ -4,8 +4,32 @@ import json
 import re
 from typing import Any
 
+from ..state import json_safe_value
 from .state import PendingToolCall
 from .tool_model_rules import _parse_raw_function_call, _strip_exact_small_gemma_4_protocol_noise
+
+
+_INLINE_TOOL_SCHEMA_KEYS = {
+    "function",
+    "name",
+    "tool_name",
+    "tool",
+    "action",
+    "arguments",
+    "args",
+    "params",
+    "parameters",
+}
+
+
+def _inline_json_extra_fields(data: dict[str, Any]) -> dict[str, Any]:
+    extras = {
+        str(key): value
+        for key, value in data.items()
+        if str(key) not in _INLINE_TOOL_SCHEMA_KEYS
+    }
+    safe = json_safe_value(extras)
+    return safe if isinstance(safe, dict) else {}
 
 
 def _extract_orphan_parameter_payload(text: str) -> dict[str, str]:
@@ -179,6 +203,9 @@ def _extract_inline_tool_calls(
         if isinstance(data.get("function"), dict):
             pending = PendingToolCall.from_payload(data)
             if pending is not None:
+                extra_fields = _inline_json_extra_fields(data)
+                if extra_fields:
+                    pending.parser_metadata["inline_json_extra_fields"] = extra_fields
                 return pending
         name = str(data.get("name", data.get("tool_name", data.get("tool", data.get("action", ""))))).strip()
         if not name:
@@ -196,7 +223,12 @@ def _extract_inline_tool_calls(
                 "arguments": raw_arguments,
             }
         }
-        return PendingToolCall.from_payload(payload)
+        pending = PendingToolCall.from_payload(payload)
+        if pending is not None:
+            extra_fields = _inline_json_extra_fields(data)
+            if extra_fields:
+                pending.parser_metadata["inline_json_extra_fields"] = extra_fields
+        return pending
 
     xml_patterns = [
         r"<tool_code>(.*?)</tool_code>",

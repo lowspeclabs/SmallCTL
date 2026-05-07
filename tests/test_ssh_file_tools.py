@@ -1166,9 +1166,9 @@ def test_ssh_file_patch_whitespace_normalized_write_with_expected_sha256_succeed
             "path": "/etc/nginx/sites-enabled/default",
             "actual_occurrences": 1,
             "expected_occurrences": 1,
-            "old_sha256": "abc123",
-            "new_sha256": "def456",
-            "readback_sha256": "def456",
+            "old_sha256": "a" * 64,
+            "new_sha256": "d" * 64,
+            "readback_sha256": "d" * 64,
             "changed": True,
             "match_mode": "whitespace_normalized",
             "verification": {"readback_sha256_matches": True},
@@ -1190,12 +1190,12 @@ def test_ssh_file_patch_whitespace_normalized_write_with_expected_sha256_succeed
             replacement_text="root /srv/www/demo-site;",
             whitespace_normalized=True,
             dry_run=False,
-            expected_sha256="abc123",
+            expected_sha256="a" * 64,
         )
     )
 
     assert result["success"] is True
-    assert result["metadata"]["new_sha256"] == "def456"
+    assert result["metadata"]["new_sha256"] == "d" * 64
 
 
 def test_ssh_file_replace_between_whitespace_normalized_dry_run_without_precondition(monkeypatch) -> None:
@@ -1264,9 +1264,9 @@ def test_ssh_file_replace_between_whitespace_normalized_write_with_expected_sha2
             "path": "/etc/nginx/sites-enabled/default",
             "actual_occurrences": 1,
             "expected_occurrences": 1,
-            "old_sha256": "abc123",
-            "new_sha256": "def456",
-            "readback_sha256": "def456",
+            "old_sha256": "a" * 64,
+            "new_sha256": "d" * 64,
+            "readback_sha256": "d" * 64,
             "changed": True,
             "match_mode": "whitespace_normalized",
             "verification": {"readback_sha256_matches": True},
@@ -1289,9 +1289,141 @@ def test_ssh_file_replace_between_whitespace_normalized_write_with_expected_sha2
             replacement_text="server {\n\troot /srv/www/demo-site;\n}",
             whitespace_normalized=True,
             dry_run=False,
-            expected_sha256="abc123",
+            expected_sha256="a" * 64,
         )
     )
 
     assert result["success"] is True
-    assert result["metadata"]["new_sha256"] == "def456"
+    assert result["metadata"]["new_sha256"] == "d" * 64
+
+
+def test_ssh_file_patch_rejects_bogus_expected_sha256_before_ssh(monkeypatch) -> None:
+    ssh_called = False
+
+    async def _fake_run_ssh_command(**kwargs):
+        nonlocal ssh_called
+        ssh_called = True
+        return {"success": True, "output": {}, "error": None, "metadata": {}}
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_patch(
+            target="root@192.168.1.63",
+            path="/var/www/html/index.html",
+            target_text="old",
+            replacement_text="new",
+            expected_sha256="EXPECTED_SHA_FROM_ARTIFACT_A0002_LINE_179_184",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "invalid_expected_sha256_syntax"
+    assert "64-character hex SHA-256" in result["error"]
+    assert "source_artifact_id" in result["error"]
+    assert ssh_called is False
+
+
+def test_ssh_file_write_rejects_bogus_expected_sha256_before_ssh(monkeypatch) -> None:
+    ssh_called = False
+
+    async def _fake_run_ssh_command(**kwargs):
+        nonlocal ssh_called
+        ssh_called = True
+        return {"success": True, "output": {}, "error": None, "metadata": {}}
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_write(
+            target="root@192.168.1.63",
+            path="/var/www/html/index.html",
+            content="hello",
+            expected_sha256="BOGUS_SHA",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "invalid_expected_sha256_syntax"
+    assert ssh_called is False
+
+
+def test_ssh_file_replace_between_rejects_bogus_expected_sha256_before_ssh(monkeypatch) -> None:
+    ssh_called = False
+
+    async def _fake_run_ssh_command(**kwargs):
+        nonlocal ssh_called
+        ssh_called = True
+        return {"success": True, "output": {}, "error": None, "metadata": {}}
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_replace_between(
+            target="root@192.168.1.63",
+            path="/var/www/html/index.html",
+            start_text="<!-- START -->",
+            end_text="<!-- END -->",
+            replacement_text="new",
+            expected_sha256="INVALID",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "invalid_expected_sha256_syntax"
+    assert ssh_called is False
+
+
+def test_replace_between_missing_bounds_includes_recovery_metadata() -> None:
+    content = "alpha\nbeta\ngamma\n"
+
+    success, updated, metadata = ssh_files.apply_replace_between_content(
+        content,
+        start_text="missing_start",
+        end_text="missing_end",
+        replacement_text="new",
+    )
+
+    assert success is False
+    assert metadata["error_kind"] == "bounded_region_not_found"
+    assert metadata["start_text_found"] is False
+    assert metadata["end_text_found"] is False
+    assert "similarity" in metadata["start_text_best_match"]
+    assert "similarity" in metadata["end_text_best_match"]
+    assert "Neither start_text nor end_text were found" in metadata["ambiguity_hint"]
+
+
+def test_replace_between_missing_end_includes_recovery_metadata() -> None:
+    content = "alpha\nstart here\ngamma\n"
+
+    success, updated, metadata = ssh_files.apply_replace_between_content(
+        content,
+        start_text="start here",
+        end_text="missing_end",
+        replacement_text="new",
+    )
+
+    assert success is False
+    assert metadata["error_kind"] == "bounded_region_not_found"
+    assert metadata["start_text_found"] is True
+    assert metadata["end_text_found"] is False
+    assert "end_text_best_match" in metadata
+    assert "start_text was found but end_text was not found" in metadata["ambiguity_hint"]
+
+
+def test_replace_between_missing_start_includes_recovery_metadata() -> None:
+    content = "alpha\nend here\ngamma\n"
+
+    success, updated, metadata = ssh_files.apply_replace_between_content(
+        content,
+        start_text="missing_start",
+        end_text="end here",
+        replacement_text="new",
+    )
+
+    assert success is False
+    assert metadata["error_kind"] == "bounded_region_not_found"
+    assert metadata["start_text_found"] is False
+    assert metadata["end_text_found"] is True
+    assert "start_text_best_match" in metadata
+    assert "end_text was found but start_text was not found" in metadata["ambiguity_hint"]

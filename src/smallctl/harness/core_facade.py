@@ -130,11 +130,25 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
         try:
+            postmortem_summary = ""
+            if isinstance(result, dict):
+                postmortem_summary = str(result.get("reason") or "").strip()
+                if not postmortem_summary:
+                    interrupt = result.get("interrupt")
+                    if isinstance(interrupt, dict):
+                        postmortem_summary = str(interrupt.get("question") or "").strip()
+                if not postmortem_summary:
+                    message = result.get("message")
+                    if isinstance(message, dict):
+                        postmortem_summary = str(message.get("question") or message.get("message") or "").strip()
+                    elif isinstance(message, str):
+                        postmortem_summary = message.strip()
+            postmortem_summary = postmortem_summary or "No reason provided"
             summary_payload = {
                 "final_task_status": result.get("status", "unknown"),
                 "total_tool_calls": self.state.step_count,
                 "guard_trips": sum(1 for e in (getattr(self.state, "recent_errors", []) or []) if "Guard tripped" in str(e)),
-                "postmortem_summary": result.get("reason") or "No reason provided",
+                "postmortem_summary": postmortem_summary,
             }
             summary_path = self.run_logger.run_dir / "task_summary.json"
             schedule = getattr(self, "_schedule_background_persistence", None)

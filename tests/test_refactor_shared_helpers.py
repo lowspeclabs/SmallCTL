@@ -546,6 +546,51 @@ def test_timeout_recovery_payload_records_tool_call_diagnostics() -> None:
     assert diagnostics[0]["raw_arguments_preview"].startswith("{\"path\"")
 
 
+def test_malformed_llamacpp_tool_json_seeds_synthetic_partial_write_call() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = SimpleNamespace(
+        state=state,
+        registry=None,
+        client=SimpleNamespace(model="Qwen3.5-4B.Q3_K_M.gguf"),
+        reasoning_mode="off",
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+        _runlog=lambda *args, **kwargs: None,
+    )
+    messages: list[dict[str, object]] = []
+
+    result = asyncio.run(
+        handle_model_stream_chunk_error(
+            harness=harness,
+            deps=SimpleNamespace(event_handler=None),
+            graph_state=SimpleNamespace(),
+            messages=messages,
+            chunks=[],
+            err_msg="llama.cpp returned malformed tool-call JSON",
+            details={
+                "type": "malformed_tool_call_json",
+                "reason": "tool_call_continuation_timeout",
+                "provider_profile": "llamacpp",
+                "tool_name_hint": "file_write",
+                "partial_tool_call_arguments_preview": '"import sys\\nclass CronMatcher:\\n    pass\\n    dt',
+            },
+            model_attempt=0,
+            chunk_error_max_retries=0,
+            timeout_recovery_nudges=0,
+            trigger_early_4b_fallback=False,
+            salvage_partial_stream=None,
+        )
+    )
+
+    assert result["retrying"] is False
+    partial_stream = result["salvage_partial_stream"]
+    assert partial_stream.tool_calls[0]["function"]["name"] == "file_write"
+    payload = state.scratchpad["_last_incomplete_tool_call"]
+    assert payload["partial_tool_calls_raw"][0]["function"]["name"] == "file_write"
+    assert payload["tool_call_diagnostics"][0]["raw_arguments_preview"].startswith('"import sys')
+    assert messages[-1]["role"] == "system"
+
+
 def test_shell_outcomes_helpers_share_retry_state() -> None:
     harness = SimpleNamespace(state=SimpleNamespace(scratchpad={}))
     record = SimpleNamespace(

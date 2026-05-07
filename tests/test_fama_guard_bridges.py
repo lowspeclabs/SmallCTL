@@ -8,6 +8,7 @@ from smallctl.fama.detectors import (
     detect_remote_local_confusion,
     detect_repeated_tool_loop,
     detect_write_session_stall,
+    detect_wrong_path,
 )
 from smallctl.fama.runtime import expire_for_turn, observe_tool_result
 from smallctl.fama.state import active_mitigation_names
@@ -114,6 +115,39 @@ def test_fama_remote_local_confusion_hides_local_mutation_and_renders_capsule() 
     assert render_fama_capsules(state, token_budget=180) == [
         "Remote scope is active; use SSH tools for remote paths and verify remotely before finishing."
     ]
+
+
+def test_fama_local_patch_target_miss_does_not_hide_local_repair_tools() -> None:
+    state = LoopState(step_count=7)
+    result = ToolEnvelope(
+        success=False,
+        error=(
+            "Patch target text was not found in "
+            "`./temp/cron_matcher.py`. This tool requires an exact character-for-character match; "
+            "it does not use regex."
+        ),
+        metadata={"path": "/home/stephen/Scripts/Harness-Redo/temp/cron_matcher.py"},
+    )
+
+    assert detect_wrong_path(state, tool_name="file_patch", result=result, operation_id="op-patch") is None
+
+    asyncio.run(
+        observe_tool_result(
+            SimpleNamespace(harness=_harness(state)),
+            tool_name="file_patch",
+            result=result,
+            operation_id="op-patch",
+        )
+    )
+
+    assert "remote_tool_exposure_guard" not in active_mitigation_names(state)
+    schemas = apply_fama_tool_exposure(
+        [_schema("file_patch"), _schema("file_write"), _schema("shell_exec"), _schema("task_fail")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+    assert _names(schemas) == ["file_patch", "file_write", "shell_exec", "task_fail"]
 
 
 def test_fama_write_session_stall_capsule_without_blocking_finalize() -> None:

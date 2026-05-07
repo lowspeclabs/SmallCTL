@@ -14,7 +14,12 @@ from smallctl.harness.task_classifier import (
     classify_runtime_intent,
     runtime_policy_for_intent,
 )
-from smallctl.harness.runtime_facade import run_auto_with_events, run_task_with_events
+from smallctl.harness.runtime_facade import (
+    get_pending_interrupt,
+    has_pending_interrupt,
+    run_auto_with_events,
+    run_task_with_events,
+)
 from smallctl.harness.run_mode import (
     ModeDecisionService,
     is_contextual_affirmative_execution_continuation,
@@ -426,6 +431,196 @@ class TestInterruptApprovalFixes:
             resolved_task="revise",
         )
         assert result is False
+
+    def test_approved_plan_ignores_stale_planner_interrupt(self):
+        """A leftover planner_interrupt must not keep an approved plan waiting forever."""
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = None
+        mock_harness.state.active_plan = ExecutionPlan(
+            plan_id="plan-approved",
+            goal="do the thing",
+            status="approved",
+            approved=True,
+        )
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planner_interrupt = Mock(
+            kind="plan_execute_approval",
+            question="Plan ready. Execute it now?",
+            plan_id="plan-approved",
+            approved=False,
+            response_mode="yes/no/revise",
+        )
+
+        assert has_pending_interrupt(mock_harness) is False
+        assert get_pending_interrupt(mock_harness) is None
+
+    def test_approved_plan_ignores_stale_pending_interrupt(self):
+        """A serialized pending approval should be stale once the same plan is approved."""
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = {
+            "kind": "plan_execute_approval",
+            "question": "Plan ready. Execute it now?",
+            "plan_id": "plan-approved",
+            "approved": False,
+            "response_mode": "yes/no/revise",
+        }
+        mock_harness.state.active_plan = ExecutionPlan(
+            plan_id="plan-approved",
+            goal="do the thing",
+            status="approved",
+            approved=True,
+        )
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planner_interrupt = None
+
+        assert has_pending_interrupt(mock_harness) is False
+        assert get_pending_interrupt(mock_harness) is None
+
+    def test_unapproved_plan_still_exposes_planner_interrupt(self):
+        """The stale guard should not hide a real unapproved plan approval prompt."""
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = None
+        mock_harness.state.active_plan = ExecutionPlan(
+            plan_id="plan-draft",
+            goal="do the thing",
+            status="draft",
+            approved=False,
+        )
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planner_interrupt = Mock(
+            kind="plan_execute_approval",
+            question="Plan ready. Execute it now?",
+            plan_id="plan-draft",
+            approved=False,
+            response_mode="yes/no/revise",
+        )
+
+        assert has_pending_interrupt(mock_harness) is True
+        assert get_pending_interrupt(mock_harness)["plan_id"] == "plan-draft"
+
+    def test_vague_planning_prose_does_not_synthesize_empty_plan(self):
+        """Approval prompts require an extractable plan, not just text mentioning a plan."""
+        from smallctl.graph.planning_support import synthesize_plan_from_text
+        from types import SimpleNamespace
+
+        harness = SimpleNamespace(
+            state=SimpleNamespace(
+                run_brief=SimpleNamespace(original_task="Build a script"),
+            )
+        )
+
+        text = (
+            "Let's first explore the workspace to understand the context, then I will propose a plan.\n\n"
+            "I'll explore the project structure, then list related files."
+        )
+
+        assert synthesize_plan_from_text(harness, text) is None
+
+
+    def test_task_summary_postmortem_includes_interrupt_question(self, tmp_path) -> None:
+        """task_summary.json for needs_human should include the interrupt question, not 'No reason provided'."""
+        from smallctl.harness.core_facade import _finalize
+        from types import SimpleNamespace
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        class MockHarness:
+            def __init__(self):
+                self.run_logger = SimpleNamespace(run_dir=run_dir)
+                self.state = SimpleNamespace(
+                    step_count=3,
+                    inactive_steps=0,
+                    token_usage={},
+                    recent_errors=[],
+                )
+                self.checkpoint_on_exit = False
+                self._cancel_requested = False
+                self._active_dispatch_task = None
+
+            def _finalize_task_scope(self, **kwargs):
+                return None
+
+            def _record_terminal_experience(self, result):
+                pass
+
+            def _rewrite_active_plan_export(self):
+                pass
+
+            def _persist_checkpoint(self, result):
+                pass
+
+            def _runlog(self, *args, **kwargs):
+                pass
+
+        harness = MockHarness()
+        result = {
+            "status": "needs_human",
+            "message": "Plan ready. Execute it now?",
+            "interrupt": {
+                "kind": "plan_execute_approval",
+                "question": "Plan ready. Execute it now?",
+                "plan_id": "plan-test",
+            },
+        }
+        _finalize(harness, result)
+
+        summary_path = run_dir / "task_summary.json"
+        assert summary_path.exists()
+        import json
+        payload = json.loads(summary_path.read_text())
+        assert payload["postmortem_summary"] == "Plan ready. Execute it now?"
+
+    def test_task_summary_postmortem_includes_message_dict_question(self, tmp_path) -> None:
+        """task_summary.json should derive postmortem from message dict question when interrupt is absent."""
+        from smallctl.harness.core_facade import _finalize
+        from types import SimpleNamespace
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+
+        class MockHarness:
+            def __init__(self):
+                self.run_logger = SimpleNamespace(run_dir=run_dir)
+                self.state = SimpleNamespace(
+                    step_count=1,
+                    inactive_steps=0,
+                    token_usage={},
+                    recent_errors=[],
+                )
+                self.checkpoint_on_exit = False
+                self._cancel_requested = False
+                self._active_dispatch_task = None
+
+            def _finalize_task_scope(self, **kwargs):
+                return None
+
+            def _record_terminal_experience(self, result):
+                pass
+
+            def _rewrite_active_plan_export(self):
+                pass
+
+            def _persist_checkpoint(self, result):
+                pass
+
+            def _runlog(self, *args, **kwargs):
+                pass
+
+        harness = MockHarness()
+        result = {
+            "status": "needs_human",
+            "message": {"question": "Approve this change?", "status": "pending"},
+        }
+        _finalize(harness, result)
+
+        summary_path = run_dir / "task_summary.json"
+        import json
+        payload = json.loads(summary_path.read_text())
+        assert payload["postmortem_summary"] == "Approve this change?"
 
 
 if __name__ == "__main__":

@@ -568,6 +568,82 @@ def test_run_harness_task_backfills_terminal_result_into_assistant_transcript() 
     ]
 
 
+def test_task_complete_message_is_not_promoted_over_streamed_assistant_text() -> None:
+    rendered: list[tuple[UIEventType, str, dict[str, object]]] = []
+
+    class _Console:
+        def get_active_assistant_text(self) -> str:
+            return "Hello! How can I help you today?"
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content, dict(event.data)))
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._pending_user_echo = None
+            self._show_system_messages = False
+            self._show_tool_calls = False
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+        def _update_activity_for_event(self, event: UIEvent) -> None:
+            return None
+
+        async def on_harness_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content, dict(event.data)))
+
+    flow = _Flow()
+
+    asyncio.run(
+        flow._handle_harness_event(
+            UIEvent(
+                event_type=UIEventType.TOOL_CALL,
+                content="task_complete",
+                data={
+                    "args": {"message": "Hello! I'm ready to help with whatever you need."},
+                    "tool_name": "task_complete",
+                },
+            )
+        )
+    )
+
+    assert rendered == []
+
+
+def test_chat_completed_terminal_result_does_not_append_over_streamed_assistant_text() -> None:
+    rendered: list[tuple[UIEventType, str, dict[str, object]]] = []
+
+    class _Console:
+        def get_active_assistant_text(self) -> str:
+            return "Hello! How can I help you today?"
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content, dict(event.data)))
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+
+    asyncio.run(
+        flow._maybe_render_terminal_result(
+            {
+                "status": "chat_completed",
+                "message": "Hello! I'm ready to help with whatever you need.",
+                "assistant": "Hello! How can I help you today?",
+            }
+        )
+    )
+
+    assert rendered == []
+
+
 def test_handle_approval_prompt_prefers_bridge_resolution_after_thread_split() -> None:
     class _Bridge:
         def __init__(self) -> None:

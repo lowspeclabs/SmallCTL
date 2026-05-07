@@ -8,6 +8,7 @@ from smallctl.client.provider_adapters import sanitize_messages_for_openrouter
 def test_adapter_registry_returns_profile_specific_adapter() -> None:
     assert get_provider_adapter("lmstudio").name == "lmstudio"
     assert get_provider_adapter("openrouter").name == "openrouter"
+    assert get_provider_adapter("llamacpp").name == "llamacpp"
 
 
 def test_adapter_registry_falls_back_to_generic() -> None:
@@ -16,9 +17,89 @@ def test_adapter_registry_falls_back_to_generic() -> None:
     assert adapter.stream_policy.supports_stream_options is True
 
 
-def test_provider_policy_disables_stream_options_for_lmstudio_and_openrouter() -> None:
+def test_provider_policy_disables_stream_options_for_local_and_proxy_profiles() -> None:
     assert get_provider_adapter("lmstudio").stream_policy.supports_stream_options is False
     assert get_provider_adapter("openrouter").stream_policy.supports_stream_options is False
+    assert get_provider_adapter("llamacpp").stream_policy.supports_stream_options is False
+
+
+def test_llamacpp_policy_uses_local_inference_timeouts() -> None:
+    adapter = get_provider_adapter("llamacpp")
+
+    assert adapter.stream_policy.first_token_timeout_sec == 60.0
+    assert adapter.stream_policy.tool_call_continuation_timeout_sec == 90.0
+
+
+def test_llamacpp_sanitizer_merges_system_messages_before_tool_cleanup() -> None:
+    adapter = get_provider_adapter("llamacpp")
+    messages = [
+        {"role": "system", "content": "Base prompt."},
+        {"role": "user", "content": "continue the write"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "ssh_file_write", "arguments": "{\"path\":\"/tmp/a\"}"},
+                }
+            ],
+        },
+        {"role": "system", "content": "Recovery nudge."},
+        {"role": "tool", "name": "ssh_file_write", "tool_call_id": "call_1", "content": "ok"},
+        {"role": "user", "content": "Continue after the recovered remote write."},
+    ]
+
+    sanitized = adapter.sanitize_messages(messages)
+
+    assert [message["role"] for message in sanitized] == ["system", "user", "assistant", "tool", "user"]
+    assert sanitized[0]["content"] == "Base prompt.\n\nRecovery nudge."
+    assert sanitized[2]["tool_calls"][0]["id"] == "call_1"
+    assert sanitized[3]["tool_call_id"] == "call_1"
+
+
+def test_llamacpp_sanitizer_normalizes_mixed_case_system_messages() -> None:
+    adapter = get_provider_adapter("llamacpp")
+    messages = [
+        {"role": "System", "content": "Base prompt."},
+        {"role": "user", "content": "Continue after the recovered remote write."},
+        {"role": "SYSTEM", "content": "   "},
+        {"role": "sYsTeM", "content": "Recovery nudge."},
+    ]
+
+    sanitized = adapter.sanitize_messages(messages)
+
+    assert [message["role"] for message in sanitized] == ["system", "user"]
+    assert sanitized[0]["content"] == "Base prompt.\n\nRecovery nudge."
+
+
+def test_lmstudio_sanitizer_merges_system_messages_before_tool_cleanup() -> None:
+    messages = [
+        {"role": "system", "content": "Base prompt."},
+        {"role": "user", "content": "continue the write"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "file_write", "arguments": "{\"path\":\"a.py\"}"},
+                }
+            ],
+        },
+        {"role": "system", "content": "Fallback instructions."},
+        {"role": "tool", "name": "file_write", "tool_call_id": "call_1", "content": "ok"},
+        {"role": "user", "content": "Continue after the recovered local write."},
+    ]
+
+    sanitized = sanitize_messages_for_lmstudio(messages)
+
+    assert [message["role"] for message in sanitized] == ["system", "user", "assistant", "tool", "user"]
+    assert sanitized[0]["content"] == "Base prompt.\n\nFallback instructions."
+    assert sanitized[2]["tool_calls"][0]["id"] == "call_1"
+    assert sanitized[3]["tool_call_id"] == "call_1"
 
 
 def test_openrouter_sanitizer_rewrites_orphan_tool_messages() -> None:

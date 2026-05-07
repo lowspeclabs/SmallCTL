@@ -6,6 +6,7 @@ from smallctl.graph.progress_guard import (
     _is_ssh_exec_read_command,
     _ssh_exec_has_novel_remote_observation,
     _ssh_exec_read_is_new,
+    _record_ssh_exec_observation,
     _record_progress_read,
     _turn_has_actionable_progress,
 )
@@ -221,3 +222,31 @@ def test_turn_has_actionable_progress_counts_successful_auth_mode_change_for_rep
     )
 
     assert _turn_has_actionable_progress(harness, graph_state) is True
+
+
+def test_turn_has_actionable_progress_counts_novel_partial_ssh_output_once() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = SimpleNamespace(state=state)
+    record = SimpleNamespace(
+        tool_name="ssh_exec",
+        args={"host": "192.168.1.63", "command": "journalctl -u nginx -n 200"},
+        result=SimpleNamespace(
+            success=False,
+            metadata={
+                "failure_kind": "timeout",
+                "output_received": True,
+                "output": {
+                    "stdout": "nginx started\nnginx worker online\n",
+                    "stderr": "",
+                    "exit_code": None,
+                },
+            },
+        ),
+    )
+    graph_state = SimpleNamespace(last_tool_results=[record], last_assistant_text="")
+
+    assert _turn_has_actionable_progress(harness, graph_state) is True
+
+    _record_ssh_exec_observation(harness, record)
+
+    assert _turn_has_actionable_progress(harness, graph_state) is False

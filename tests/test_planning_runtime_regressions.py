@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from types import SimpleNamespace
 
@@ -162,6 +163,54 @@ def test_auto_runtime_plan_approval_reply_replays_as_resume_not_new_task(tmp_pat
     assert state.active_tool_profiles == ["core", "network"]
 
 
+def test_auto_runtime_plan_approval_reply_uses_planner_interrupt_fallback(tmp_path, monkeypatch) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.pending_interrupt = None
+    state.planner_interrupt = SimpleNamespace(
+        kind="plan_execute_approval",
+        question="Plan ready. Execute it now?",
+        plan_id="plan-test",
+        approved=False,
+        response_mode="yes/no/revise",
+    )
+    resumes: list[str] = []
+    decisions: list[str] = []
+
+    async def _decide_run_mode(task: str) -> str:
+        decisions.append(task)
+        return "chat"
+
+    class _StubPlanningRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            resumes.append(human_input)
+            return {"status": "resumed", "message": "plan approved"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_specialized.PlanningGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubPlanningRuntime()),
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        has_pending_interrupt=lambda: state.planner_interrupt is not None,
+        get_pending_interrupt=lambda: {
+            "kind": state.planner_interrupt.kind,
+            "question": state.planner_interrupt.question,
+            "plan_id": state.planner_interrupt.plan_id,
+            "approved": state.planner_interrupt.approved,
+            "response_mode": state.planner_interrupt.response_mode,
+        },
+        decide_run_mode=_decide_run_mode,
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(AutoGraphRuntime.from_harness(harness).run("yes"))
+
+    assert result == {"status": "resumed", "message": "plan approved"}
+    assert resumes == ["yes"]
+    assert decisions == []
+
+
 def test_apply_planning_tool_outcomes_finalizes_successful_task_complete_without_plan_approval() -> None:
     emitted: list[object] = []
 
@@ -211,3 +260,215 @@ def test_apply_planning_tool_outcomes_finalizes_successful_task_complete_without
     assert graph_state.final_result["status"] == "completed"
     assert state.planning_mode_enabled is False
     assert emitted
+
+
+def test_planning_runtime_resume_approval_starts_execution_runtime(monkeypatch) -> None:
+    from smallctl.graph.runtime_planning import PlanningGraphRuntime
+    from smallctl.state import ExecutionPlan, RunBrief
+
+    executions: list[str] = []
+    persistence_calls: list[str] = []
+
+    class _StubLoopRuntime:
+        async def run(self, task: str) -> dict[str, object]:
+            executions.append(task)
+            return {"status": "ok", "message": "executed"}
+
+    async def _drain_persistence() -> None:
+        persistence_calls.append("drain")
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubLoopRuntime()),
+    )
+
+    state = SimpleNamespace(
+        active_plan=ExecutionPlan(plan_id="plan-test", goal="do the thing"),
+        draft_plan=None,
+        pending_interrupt=_plan_approval_interrupt(),
+        planner_interrupt=SimpleNamespace(kind="plan_execute_approval"),
+        run_brief=RunBrief(original_task="original"),
+        thread_id="t1",
+        artifacts={},
+        planning_mode_enabled=True,
+        current_phase="plan",
+        sync_plan_mirror=lambda: None,
+        touch=lambda: None,
+        step_count=0,
+        inactive_steps=0,
+        token_usage={},
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        get_pending_interrupt=_plan_approval_interrupt,
+        conversation_id="c1",
+        config=SimpleNamespace(staged_execution_enabled=False),
+        _runlog=lambda *args, **kwargs: None,
+        _autosave_chat_session_state=lambda: persistence_calls.append("autosave"),
+        _drain_background_persistence_tasks=_drain_persistence,
+        _failure=lambda message, error_type="runtime", details=None: {
+            "status": "failed",
+            "reason": message,
+            "error": {"type": error_type, "message": message, "details": details or {}},
+        },
+    )
+
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    runtime = PlanningGraphRuntime(deps)
+
+    async def _mock_resume_planning_run(graph_state, deps, *, human_input):
+        state.pending_interrupt = None
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_planning.resume_planning_run",
+        _mock_resume_planning_run,
+    )
+
+    result = asyncio.run(runtime.resume("yes"))
+
+    assert result == {"status": "ok", "message": "executed"}
+    assert executions == ["do the thing"]
+    assert state.planning_mode_enabled is False
+    assert state.current_phase == "execute"
+    assert state.pending_interrupt is None
+    assert state.planner_interrupt is None
+    assert state.active_plan.approved is True
+    assert persistence_calls == ["autosave", "drain"]
+
+
+def test_planning_runtime_resume_missing_plan_returns_failure(monkeypatch) -> None:
+    from smallctl.graph.runtime_planning import PlanningGraphRuntime
+
+    state = SimpleNamespace(
+        active_plan=None,
+        draft_plan=None,
+        pending_interrupt=_plan_approval_interrupt(),
+        run_brief=SimpleNamespace(original_task="original"),
+        thread_id="t1",
+        artifacts={},
+        planning_mode_enabled=True,
+        current_phase="plan",
+        sync_plan_mirror=lambda: None,
+        touch=lambda: None,
+        step_count=0,
+        inactive_steps=0,
+        token_usage={},
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        get_pending_interrupt=_plan_approval_interrupt,
+        conversation_id="c1",
+        config=SimpleNamespace(staged_execution_enabled=False),
+        _runlog=lambda *args, **kwargs: None,
+        _failure=lambda message, error_type="runtime", details=None: {
+            "status": "failed",
+            "reason": message,
+            "error": {"type": error_type, "message": message, "details": details or {}},
+        },
+    )
+
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    runtime = PlanningGraphRuntime(deps)
+
+    async def _mock_resume_planning_run(graph_state, deps, *, human_input):
+        state.pending_interrupt = None
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_planning.resume_planning_run",
+        _mock_resume_planning_run,
+    )
+
+    result = asyncio.run(runtime.resume("yes"))
+
+    assert result["status"] == "failed"
+    assert result["error"]["type"] == "interrupt"
+    assert result["error"]["details"]["reason"] == "approved_plan_missing"
+
+
+def test_planning_runtime_resume_rehydrates_plan_from_artifact(monkeypatch) -> None:
+    from smallctl.graph.runtime_planning import PlanningGraphRuntime
+    from smallctl.state_schema import ArtifactRecord
+
+    executions: list[str] = []
+
+    class _StubLoopRuntime:
+        async def run(self, task: str) -> dict[str, object]:
+            executions.append(task)
+            return {"status": "ok", "message": "executed"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubLoopRuntime()),
+    )
+
+    artifact = ArtifactRecord(
+        artifact_id="A0001",
+        kind="plan_playbook",
+        source="do the thing",
+        created_at="2024-01-01T00:00:00",
+        size_bytes=100,
+        summary="plan summary",
+        metadata={"plan_id": "plan-test", "plan_status": "draft"},
+        inline_content=json.dumps(
+            {
+                "status": "plan_set",
+                "plan": {
+                    "plan_id": "plan-test",
+                    "goal": "do the thing",
+                    "status": "draft",
+                    "implementation_plan": ["execute the thing"],
+                },
+            }
+        ),
+    )
+
+    state = SimpleNamespace(
+        active_plan=None,
+        draft_plan=None,
+        pending_interrupt=_plan_approval_interrupt(),
+        run_brief=SimpleNamespace(original_task="original"),
+        thread_id="t1",
+        artifacts={"A0001": artifact},
+        planning_mode_enabled=True,
+        current_phase="plan",
+        sync_plan_mirror=lambda: None,
+        touch=lambda: None,
+        step_count=0,
+        inactive_steps=0,
+        token_usage={},
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        get_pending_interrupt=_plan_approval_interrupt,
+        conversation_id="c1",
+        config=SimpleNamespace(staged_execution_enabled=False),
+        _runlog=lambda *args, **kwargs: None,
+        _failure=lambda message, error_type="runtime", details=None: {
+            "status": "failed",
+            "reason": message,
+            "error": {"type": error_type, "message": message, "details": details or {}},
+        },
+    )
+
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    runtime = PlanningGraphRuntime(deps)
+
+    async def _mock_resume_planning_run(graph_state, deps, *, human_input):
+        state.pending_interrupt = None
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_planning.resume_planning_run",
+        _mock_resume_planning_run,
+    )
+
+    result = asyncio.run(runtime.resume("yes"))
+
+    assert result == {"status": "ok", "message": "executed"}
+    assert executions == ["do the thing"]
+    assert state.active_plan is not None
+    assert state.active_plan.plan_id == "plan-test"
+    assert state.active_plan.implementation_plan == ["execute the thing"]
+    assert state.active_plan.approved is True

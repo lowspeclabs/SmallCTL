@@ -54,7 +54,8 @@ def merge_system_messages_for_single_system_providers(
     non_system_messages: list[dict[str, Any]] = []
     for message in messages:
         role = str(message.get("role", "user")).strip() or "user"
-        if role == "system":
+        role_key = role.lower()
+        if role_key == "system":
             content = message.get("content")
             text = "" if content is None else str(content).strip()
             if text:
@@ -274,7 +275,9 @@ def _collapse_completed_task_complete_pairs_for_lmstudio(
 
 
 def sanitize_messages_for_lmstudio(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    sanitized = sanitize_messages_with_pending_tool_cleanup(messages)
+    sanitized = sanitize_messages_with_pending_tool_cleanup(
+        merge_system_messages_for_single_system_providers(messages)
+    )
     sanitized = _collapse_completed_task_complete_pairs_for_lmstudio(sanitized)
     if sanitized:
         last_message = sanitized[-1]

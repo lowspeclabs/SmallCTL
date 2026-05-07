@@ -225,6 +225,18 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
         task = harness._current_user_task()
         runtime_intent_label, task_mode = _refresh_runtime_intent(harness, task)
         selection_phase = "requires_tools"
+        if runtime_intent_label == "smalltalk":
+            _scratchpad(harness)["_chat_tools_exposed"] = False
+            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_no_tools"
+            harness._runlog(
+                "chat_tool_selection",
+                "chat tool exposure suppressed for smalltalk",
+                task=task,
+                reason="smalltalk_no_tools",
+                tool_names=[],
+                runtime_intent=runtime_intent_label,
+            )
+            return []
         if not chat_mode_requires_tools(harness, task):
             terminal_tools = _chat_terminal_tools(harness)
             _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)

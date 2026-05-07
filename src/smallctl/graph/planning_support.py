@@ -55,7 +55,7 @@ def synthesize_plan_from_text(harness: Any, text: str) -> ExecutionPlan | None:
     goal = str(harness.state.run_brief.original_task or "").strip() or assistant_text.splitlines()[0].strip()
     steps = extract_plan_steps_from_text(assistant_text)
     if not steps:
-        steps = [PlanStep(step_id="P1", title="Review proposed plan")]
+        return None
     return ExecutionPlan(
         plan_id=f"plan-{uuid.uuid4().hex[:8]}",
         goal=goal,

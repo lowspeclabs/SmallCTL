@@ -908,6 +908,8 @@ class PromptAssembler:
                 continue
             if normalized.metadata.get("is_recovery_nudge") is True:
                 continue
+            if normalized.metadata.get("role_repaired_from") == "system":
+                continue
             if str(normalized.content or "").strip():
                 return normalized
         return None
@@ -945,6 +947,22 @@ class PromptAssembler:
             and str(message.content or "").lstrip().startswith("### SYSTEM ALERT")
         ):
             return None
+        role_key = str(message.role or "").strip().lower()
+        if role_key == "system":
+            content = str(message.content or "").strip()
+            if not content:
+                return None
+            metadata = dict(message.metadata)
+            metadata["role_repaired_from"] = "system"
+            return ConversationMessage(
+                role="user",
+                content=f"[HARNESS NOTICE]: {content}",
+                name=message.name,
+                tool_call_id=message.tool_call_id,
+                tool_calls=message.tool_calls,
+                metadata=metadata,
+                retrieval_safe_text=message.retrieval_safe_text,
+            )
         # Reasoning Pruning implementation
         if message.role == "assistant" and "thinking_insight" in message.metadata:
              content = message.content or ""
@@ -960,7 +978,6 @@ class PromptAssembler:
                   new_content = re.sub(pattern, f"{start_tag}[Insight: {insight}]{end_tag}", content, flags=re.DOTALL)
                   
                   # Create a pruned clone to avoid mutating state
-                  from ..models.conversation import ConversationMessage
                   return ConversationMessage(
                       role=message.role,
                       content=new_content,

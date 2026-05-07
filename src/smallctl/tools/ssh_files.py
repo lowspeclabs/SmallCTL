@@ -21,6 +21,8 @@ REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
 # piping it through the SSH process's stdin.
 _MAX_ARGV_PAYLOAD_SIZE = 128 * 1024
 
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
 
 def _preview_text(value: str, *, limit: int = 160) -> dict[str, Any]:
     text = str(value or "")
@@ -283,11 +285,41 @@ def apply_replace_between_content(
     }
     if actual == 0:
         metadata["error_kind"] = "bounded_region_not_found"
-        metadata["ambiguity_hint"] = (
-            "Read the remote file and verify both start_text and end_text exist in order."
-            if not whitespace_normalized
-            else "No whitespace-normalized bounded region matched. Read the remote file and run a dry-run first."
-        )
+        if whitespace_normalized:
+            norm_content, _ = _normalize_whitespace_with_spans(content)
+            norm_start, _ = _normalize_whitespace_with_spans(start_text)
+            norm_end, _ = _normalize_whitespace_with_spans(end_text)
+            start_found = norm_start in norm_content if norm_start else False
+            end_found = norm_end in norm_content if norm_end else False
+        else:
+            start_found = start_text in content if start_text else False
+            end_found = end_text in content if end_text else False
+        metadata["start_text_found"] = start_found
+        metadata["end_text_found"] = end_found
+        if not start_found:
+            metadata["start_text_best_match"] = _best_patch_match(content, start_text)
+        if not end_found:
+            metadata["end_text_best_match"] = _best_patch_match(content, end_text)
+        if start_found and not end_found:
+            metadata["ambiguity_hint"] = (
+                "start_text was found but end_text was not found after it. "
+                "Check the exact text between them and verify end_text exists in the file."
+            )
+        elif not start_found and end_found:
+            metadata["ambiguity_hint"] = (
+                "end_text was found but start_text was not found before it. "
+                "Check the exact text before end_text and verify start_text exists in the file."
+            )
+        elif not start_found and not end_found:
+            metadata["ambiguity_hint"] = (
+                "Neither start_text nor end_text were found. "
+                "Read the remote file and copy the exact bounds, including whitespace."
+            )
+        else:
+            metadata["ambiguity_hint"] = (
+                "Both start_text and end_text exist but not in the expected order. "
+                "Verify the bounds appear in order in the file."
+            )
         return False, content, metadata
     if actual != expected_occurrences:
         metadata["error_kind"] = "patch_occurrence_mismatch"
@@ -635,16 +667,47 @@ def apply_replace_between_content(content, payload):
         "match_mode": "whitespace_normalized" if whitespace_normalized else "exact",
     }
     if actual == 0:
+        if whitespace_normalized:
+            norm_content, _ = normalize_whitespace_with_spans(content)
+            norm_start, _ = normalize_whitespace_with_spans(start_text)
+            norm_end, _ = normalize_whitespace_with_spans(end_text)
+            start_found = norm_start in norm_content if norm_start else False
+            end_found = norm_end in norm_content if norm_end else False
+        else:
+            start_found = start_text in content if start_text else False
+            end_found = end_text in content if end_text else False
+        if start_found and not end_found:
+            ambiguity_hint = (
+                "start_text was found but end_text was not found after it. "
+                "Check the exact text between them and verify end_text exists in the file."
+            )
+        elif not start_found and end_found:
+            ambiguity_hint = (
+                "end_text was found but start_text was not found before it. "
+                "Check the exact text before end_text and verify start_text exists in the file."
+            )
+        elif not start_found and not end_found:
+            ambiguity_hint = (
+                "Neither start_text nor end_text were found. "
+                "Read the remote file and copy the exact bounds, including whitespace."
+            )
+        else:
+            ambiguity_hint = (
+                "Both start_text and end_text exist but not in the expected order. "
+                "Verify the bounds appear in order in the file."
+            )
         meta.update({
             "ok": False,
             "error_kind": "bounded_region_not_found",
             "message": "Remote bounded region was not found.",
-            "ambiguity_hint": (
-                "Verify both start_text and end_text exist in order."
-                if not whitespace_normalized
-                else "No whitespace-normalized bounded region matched. Read the remote file and run a dry-run first."
-            ),
+            "ambiguity_hint": ambiguity_hint,
+            "start_text_found": start_found,
+            "end_text_found": end_found,
         })
+        if not start_found:
+            meta["start_text_best_match"] = best_patch_match(content, start_text)
+        if not end_found:
+            meta["end_text_best_match"] = best_patch_match(content, end_text)
         return content, meta
     if actual != expected:
         meta.update({"ok": False, "error_kind": "patch_occurrence_mismatch", "message": "Remote bounded region count did not match expected_occurrences.", "ambiguity_hint": "Use more specific bounds or update expected_occurrences."})
@@ -1016,6 +1079,15 @@ async def ssh_file_write(
     harness: Any = None,
 ) -> dict[str, Any]:
     intended_sha = _sha256_text(content, encoding)
+    if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
+        return fail(
+            "expected_sha256 is not a valid 64-character hex SHA-256 hash. "
+            "Omit expected_sha256 and use source_artifact_id from the most recent ssh_file_read artifact to derive the hash automatically.",
+            metadata={
+                "reason": "invalid_expected_sha256_syntax",
+                "expected_sha256_preview": str(expected_sha256)[:40],
+            },
+        )
     resolved_expected_sha256, precondition_metadata = _resolve_expected_sha_precondition(
         path=path,
         expected_sha256=expected_sha256,
@@ -1080,6 +1152,15 @@ async def ssh_file_patch(
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
+    if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
+        return fail(
+            "expected_sha256 is not a valid 64-character hex SHA-256 hash. "
+            "Omit expected_sha256 and use source_artifact_id from the most recent ssh_file_read artifact to derive the hash automatically.",
+            metadata={
+                "reason": "invalid_expected_sha256_syntax",
+                "expected_sha256_preview": str(expected_sha256)[:40],
+            },
+        )
     resolved_expected_sha256, precondition_metadata = _resolve_expected_sha_precondition(
         path=path,
         expected_sha256=expected_sha256,
@@ -1152,6 +1233,15 @@ async def ssh_file_replace_between(
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
+    if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
+        return fail(
+            "expected_sha256 is not a valid 64-character hex SHA-256 hash. "
+            "Omit expected_sha256 and use source_artifact_id from the most recent ssh_file_read artifact to derive the hash automatically.",
+            metadata={
+                "reason": "invalid_expected_sha256_syntax",
+                "expected_sha256_preview": str(expected_sha256)[:40],
+            },
+        )
     resolved_expected_sha256, precondition_metadata = _resolve_expected_sha_precondition(
         path=path,
         expected_sha256=expected_sha256,

@@ -170,6 +170,23 @@ def _strip_tool_protocol_payloads(text: str) -> str:
     return stripped.strip()
 
 
+def _log_inline_tool_metadata_stripped(harness: Any, calls: list[PendingToolCall]) -> None:
+    runlog = getattr(harness, "_runlog", None)
+    if not callable(runlog):
+        return
+    for call in calls:
+        metadata = getattr(call, "parser_metadata", {}) or {}
+        extra_fields = metadata.get("inline_json_extra_fields") if isinstance(metadata, dict) else None
+        if not extra_fields:
+            continue
+        runlog(
+            "inline_tool_metadata_stripped",
+            "inline tool JSON contained non-argument top-level fields",
+            tool_name=call.tool_name,
+            extra_fields=json_safe_value(extra_fields),
+        )
+
+
 def parse_tool_calls(
     stream: Any,
     timeline: list[Any],
@@ -212,6 +229,7 @@ def parse_tool_calls(
         model_name=active_model_name,
         allowed_raw_function_names=allowed_raw_function_names,
     )
+    _log_inline_tool_metadata_stripped(harness, inline_calls)
     if _should_discard_qwen_25_structured_inline_tools(
         harness,
         graph_state,
@@ -245,6 +263,7 @@ def parse_tool_calls(
                 final_thinking_text = stripped_thinking_text
         if not native_calls and not inline_calls and thinking_inline_calls:
             inline_calls.extend(thinking_inline_calls)
+            _log_inline_tool_metadata_stripped(harness, thinking_inline_calls)
             harness._runlog(
                 "inline_tool_call_recovered_from_thinking",
                 "recovered inline tool call(s) from thinking text",

@@ -137,6 +137,35 @@ def test_plan_set_creates_a_playbook_artifact(tmp_path: Path) -> None:
     assert result["output"]["artifact_id"] == state.plan_artifact_id
 
 
+def test_plan_set_rejects_incomplete_plan_before_approval(tmp_path: Path) -> None:
+    state = _make_state()
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path, "run-1"),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+    )
+
+    result = asyncio.run(
+        planning.plan_set(
+            goal="Create a small CLI script",
+            summary="I will explore, then propose a plan.",
+            state=state,
+            harness=harness,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "incomplete_plan"
+    assert set(result["metadata"]["missing_fields"]) == {
+        "outputs",
+        "acceptance_criteria",
+        "implementation_plan",
+        "steps",
+    }
+    assert state.draft_plan is None
+    assert state.active_plan is None
+
+
 def test_system_prompt_surfaces_playbook_guidance() -> None:
     state = _make_state()
     state.run_brief.original_task = "Write a script"

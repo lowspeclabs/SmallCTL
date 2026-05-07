@@ -618,6 +618,14 @@ def normalize_tool_request(
                 ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
                 ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
+            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
+                normalized_arguments,
+                state=state,
+                normalization_metadata=normalization_metadata,
+            )
+            normalization_metadata.update(pin_metadata)
+            if pin_block is not None:
+                return tool_name, normalized_arguments, pin_block, normalization_metadata
             return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
             return (
@@ -657,6 +665,14 @@ def normalize_tool_request(
                 ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
                 ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
+            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
+                normalized_arguments,
+                state=state,
+                normalization_metadata=normalization_metadata,
+            )
+            normalization_metadata.update(pin_metadata)
+            if pin_block is not None:
+                return tool_name, normalized_arguments, pin_block, normalization_metadata
             auth_recovery_error, auth_recovery_metadata = _guard_ssh_auth_recovery(
                 normalized_arguments,
                 state=state,
@@ -875,8 +891,9 @@ def _guard_ssh_auth_recovery(
         required_arguments["user"] = user
     error = (
         "SSH authentication previously failed for this target. Next step must be exactly one of: "
-        "retry `ssh_exec` with a corrected `password`, call `ask_human` for corrected credentials, "
-        "or stop with `task_fail`. Do not retry key-only auth and do not use raw `shell_exec` SSH."
+        "retry `ssh_exec` with a corrected `password` using a safe command like `whoami`, "
+        "call `ask_human` for corrected credentials, or stop with `task_fail`. "
+        "Do not retry key-only auth, do not use raw `shell_exec` SSH, and do not use SSH file mutation tools as an auth probe."
     )
     return ToolEnvelope(
         success=False,
@@ -1402,6 +1419,94 @@ def _infer_ssh_password_from_session_memory(
     if target_user and session_user and target_user != session_user:
         return ""
     return str(target.get("password") or "").strip()
+
+
+def _pin_and_guard_ssh_credentials(
+    arguments: dict[str, Any],
+    *,
+    state: Any | None,
+    normalization_metadata: dict[str, Any],
+) -> tuple[dict[str, Any], ToolEnvelope | None, dict[str, Any]]:
+    """Pin confirmed SSH credentials and block dispatch when the model contradicts them."""
+    if not isinstance(arguments, dict) or state is None:
+        return arguments, None, {}
+
+    host = str(arguments.get("host") or "").strip().lower()
+    if not host:
+        return arguments, None, {}
+
+    target = _session_ssh_target_record(host, state=state)
+    if not isinstance(target, dict) or not bool(target.get("confirmed")):
+        return arguments, None, {}
+
+    confirmed_user = str(target.get("user") or "").strip()
+    confirmed_password = str(target.get("password") or "").strip()
+    confirmed_port = target.get("port")
+    confirmed_identity = str(target.get("identity_file") or "").strip()
+
+    user = str(arguments.get("user") or "").strip()
+    password = str(arguments.get("password") or "").strip()
+
+    password_origin = str(normalization_metadata.get("ssh_password_origin") or "").strip()
+    user_was_recovered = str(normalization_metadata.get("recovered_ssh_user_source") or "").strip() != ""
+
+    metadata: dict[str, Any] = {}
+    repaired = dict(arguments)
+
+    if not user and confirmed_user:
+        repaired["user"] = confirmed_user
+        metadata["pinned_ssh_user"] = confirmed_user
+        user = confirmed_user
+
+    if not password and confirmed_password:
+        repaired["password"] = confirmed_password
+        metadata["pinned_ssh_password"] = True
+        password = confirmed_password
+
+    if "port" not in repaired and isinstance(confirmed_port, int):
+        repaired["port"] = confirmed_port
+        metadata["pinned_ssh_port"] = confirmed_port
+
+    if not str(repaired.get("identity_file") or "").strip() and confirmed_identity:
+        repaired["identity_file"] = confirmed_identity
+        metadata["pinned_ssh_identity_file"] = confirmed_identity
+
+    if user and confirmed_user and user != confirmed_user and not user_was_recovered:
+        metadata["ssh_credential_block_reason"] = "user_mismatch"
+        error = (
+            f"SSH user mismatch for {host}: the confirmed session user is `{confirmed_user}`, "
+            f"but the request uses `{user}`. Use the confirmed credentials or ask the user for new ones."
+        )
+        return repaired, ToolEnvelope(
+            success=False,
+            error=error,
+            metadata={
+                "reason": "ssh_credential_pinning_blocked",
+                "block_reason": "user_mismatch",
+                "expected_user": confirmed_user,
+                "provided_user": user,
+            },
+        ), metadata
+
+    if password and confirmed_password and password_origin == "explicit":
+        current_fp = _password_fingerprint(password)
+        confirmed_fp = _password_fingerprint(confirmed_password)
+        if current_fp != confirmed_fp:
+            metadata["ssh_credential_block_reason"] = "password_mismatch"
+            error = (
+                f"SSH password mismatch for {user}@{host}. "
+                "Use the confirmed session credentials or ask the user for new credentials."
+            )
+            return repaired, ToolEnvelope(
+                success=False,
+                error=error,
+                metadata={
+                    "reason": "ssh_credential_pinning_blocked",
+                    "block_reason": "password_mismatch",
+                },
+            ), metadata
+
+    return repaired, None, metadata
 
 
 def _session_ssh_target_record(host: str, *, state: Any | None = None) -> dict[str, Any]:
@@ -1990,5 +2095,18 @@ def _coerce_value(expected: str | None, value: Any) -> Any:
         if isinstance(value, bool):
             return "true" if value else "false"
         return str(value)
+
+    if expected == "integer" and isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lstrip("-").isdigit():
+            return int(stripped)
+        return value
+
+    if expected == "number" and isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return float(stripped)
+        except ValueError:
+            return value
 
     return value

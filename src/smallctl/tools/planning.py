@@ -8,7 +8,7 @@ from ..plans import render_plan_playbook, resolve_plan_export_target, write_plan
 from ..state import ExecutionPlan, PlanInterrupt, PlanStep, LoopState
 from ..state_records import _coerce_step_output_spec, _coerce_step_verifier_spec
 from ..state_support import _coerce_int
-from .common import needs_human, ok
+from .common import fail, needs_human, ok
 
 
 def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> PlanStep | None:
@@ -261,6 +261,25 @@ async def plan_set(
         requested_output_format=normalized_output_format,
         approved=False,
     )
+    missing_required_fields: list[str] = []
+    if not plan.goal:
+        missing_required_fields.append("goal")
+    if not plan.outputs:
+        missing_required_fields.append("outputs")
+    if not plan.acceptance_criteria:
+        missing_required_fields.append("acceptance_criteria")
+    if not plan.implementation_plan:
+        missing_required_fields.append("implementation_plan")
+    if not plan.steps:
+        missing_required_fields.append("steps")
+    if missing_required_fields:
+        return fail(
+            "Plan is incomplete; provide goal, outputs, acceptance_criteria, implementation_plan, and steps before requesting approval.",
+            metadata={
+                "reason": "incomplete_plan",
+                "missing_fields": missing_required_fields,
+            },
+        )
     state.draft_plan = plan
     if state.active_plan is not None and state.active_plan.approved:
         state.active_plan = plan

@@ -16,7 +16,7 @@ from .fs_sessions import (
     _normalize_section_name,
     _repair_cycle_session_id_failure,
     _repair_cycle_allows_patch,
-    _repair_cycle_reads,
+    _repair_cycle_read_required_metadata,
     _record_file_change,
     _record_repair_cycle_read,
     _same_target_path,
@@ -110,6 +110,25 @@ async def file_write(
             "If you forgot the content, please retry with the full content payload."
         )
     
+    if write_session_id and state is not None:
+        _terminal_session = getattr(state, "write_session", None)
+        if (
+            _terminal_session is not None
+            and str(getattr(_terminal_session, "status", "") or "").strip().lower() == "complete"
+            and str(getattr(_terminal_session, "write_session_id", "") or "").strip() == str(write_session_id).strip()
+            and _same_target_path(
+                str(getattr(_terminal_session, "write_target_path", "") or ""), path, cwd
+            )
+            and _normalize_replace_strategy(replace_strategy) == "overwrite"
+        ):
+            record_write_session_event(
+                state,
+                event="terminal_session_direct_overwrite_repaired",
+                session=_terminal_session,
+                details={"path": str(target), "reason": "replace_strategy_overwrite"},
+            )
+            write_session_id = None
+
     if write_session_id:
         return handle_file_write_session(
             path=path,
@@ -170,11 +189,7 @@ async def file_write(
         _mark_repeat_patch(state)
         return fail(
             "Repair cycle requires reading the target file before patching it again.",
-            metadata={
-                "path": str(target),
-                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
-                "required_read_paths": _repair_cycle_reads(state),
-            },
+            metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
     risk_decision = evaluate_risk_policy(
         state if state is not None else LoopState(cwd=str(Path.cwd())),

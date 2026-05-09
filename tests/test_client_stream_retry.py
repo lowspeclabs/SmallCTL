@@ -170,6 +170,113 @@ def test_stream_chat_llamacpp_repairs_system_messages_before_first_request(monke
     assert all(message["role"] != "system" for message in messages[1:])
 
 
+def test_stream_chat_openrouter_auth_preflight_returns_actionable_chunk_error(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.6-35b-a3b",
+        provider_profile="openrouter",
+        api_key="bad-key",
+    )
+
+    class _Response:
+        status_code = 401
+        text = '{"error":{"message":"User not found.","code":401}}'
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers):
+            assert url == "https://openrouter.ai/api/v1/credits"
+            assert headers["Authorization"] == "Bearer bad-key"
+            return _Response()
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            raise AssertionError("streamer should not be constructed after auth preflight failure")
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert len(events) == 1
+    assert events[0]["type"] == "chunk_error"
+    assert "OpenRouter authentication failed" in str(events[0]["error"])
+    details = events[0]["details"]
+    assert isinstance(details, dict)
+    assert details["reason"] == "openrouter_authentication_failed"
+    assert details["provider_error"] == "User not found."
+    assert details["recoverable"] is False
+
+
+def test_stream_chat_openrouter_401_chat_error_returns_actionable_chunk_error(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.6-35b-a3b",
+        provider_profile="openrouter",
+        api_key="bad-key",
+    )
+
+    class _AuthResponse:
+        status_code = 200
+        text = '{"data":{"total_credits":1}}'
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers):
+            del url, headers
+            return _AuthResponse()
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers, payload
+            raise _http_status_error(
+                url,
+                status_code=401,
+                text='{"error":{"message":"User not found.","code":401}}',
+            )
+            yield {}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run for auth failures")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert len(events) == 1
+    assert events[0]["type"] == "chunk_error"
+    assert "Update SMALLCTL_API_KEY" in str(events[0]["error"])
+    details = events[0]["details"]
+    assert isinstance(details, dict)
+    assert details["phase"] == "chat_completion"
+    assert details["provider_error"] == "User not found."
+
+
 def test_stream_chat_llamacpp_500_jinja_system_message_retries_once(monkeypatch) -> None:
     client = OpenAICompatClient(
         base_url="http://127.0.0.1:8080/v1",

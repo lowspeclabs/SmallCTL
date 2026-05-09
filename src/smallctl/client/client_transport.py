@@ -361,6 +361,114 @@ def _http_error_body(exc: Any, *, limit: int = 1000) -> str:
         return ""
 
 
+def _provider_root(base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized[: -len("/v1")]
+    return normalized
+
+
+def _openrouter_error_message_from_body(body: str) -> str:
+    try:
+        payload = json.loads(str(body or ""))
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            if message:
+                return message
+        message = str(payload.get("message") or "").strip()
+        if message:
+            return message
+    return str(body or "").strip()
+
+
+def _openrouter_auth_failure_details(
+    client: Any,
+    *,
+    status_code: int,
+    body: str,
+    phase: str,
+) -> dict[str, Any]:
+    provider_error = _openrouter_error_message_from_body(body)
+    return {
+        "type": "provider_authentication",
+        "reason": "openrouter_authentication_failed",
+        "provider_profile": "openrouter",
+        "model": client.model,
+        "status_code": int(status_code),
+        "provider_error": provider_error,
+        "body": str(body or "")[:1000],
+        "phase": phase,
+        "recoverable": False,
+        "hint": "Update SMALLCTL_API_KEY with a valid OpenRouter API key from the correct account.",
+    }
+
+
+def _openrouter_auth_failure_message(details: dict[str, Any]) -> str:
+    provider_error = str(details.get("provider_error") or "").strip()
+    suffix = f" ({provider_error})" if provider_error else ""
+    return (
+        "OpenRouter authentication failed: API key is invalid, revoked, "
+        f"or belongs to a missing account{suffix}. Update SMALLCTL_API_KEY."
+    )
+
+
+async def _preflight_openrouter_auth(client: Any, async_client: Any) -> dict[str, Any] | None:
+    if client.provider_profile != "openrouter":
+        return None
+    normalized_base = str(client.base_url or "").strip().rstrip("/")
+    if normalized_base.endswith("/api/v1"):
+        credits_url = f"{normalized_base}/credits"
+    else:
+        credits_url = f"{_provider_root(normalized_base)}/api/v1/credits"
+    headers = client.adapter.mutate_headers(
+        {
+            "Authorization": f"Bearer {client.api_key}",
+            "Content-Type": "application/json",
+        }
+    )
+    try:
+        response = await async_client.get(credits_url, headers=headers)
+    except Exception as exc:
+        log_kv(
+            client.log,
+            logging.WARNING,
+            "openrouter_auth_preflight_error",
+            error=str(exc),
+            url=credits_url,
+        )
+        if client.run_logger:
+            client.run_logger.log(
+                "chat",
+                "openrouter_auth_preflight_error",
+                "OpenRouter auth preflight could not be completed",
+                error=str(exc),
+                url=credits_url,
+            )
+        return None
+    if int(response.status_code) != 401:
+        return None
+    body = str(getattr(response, "text", "") or "")[:1000]
+    details = _openrouter_auth_failure_details(
+        client,
+        status_code=401,
+        body=body,
+        phase="auth_preflight",
+    )
+    log_kv(client.log, logging.ERROR, "openrouter_auth_failed", **details)
+    if client.run_logger:
+        client.run_logger.log(
+            "chat",
+            "openrouter_auth_failed",
+            "OpenRouter authentication failed during preflight",
+            **details,
+        )
+    return details
+
+
 def _choose_write_tool_hint(payload: dict[str, Any]) -> str:
     tool_names = [_tool_name(tool) for tool in payload.get("tools", []) if _tool_name(tool)]
     for preferred in (
@@ -1048,6 +1156,14 @@ async def stream_chat(
     llamacpp_reduced_tools_attempted = False
     llamacpp_jinja_repair_attempted = False
     async_client = _get_async_client(client)
+    openrouter_auth_failure = await _preflight_openrouter_auth(client, async_client)
+    if openrouter_auth_failure is not None:
+        yield {
+            "type": "chunk_error",
+            "error": _openrouter_auth_failure_message(openrouter_auth_failure),
+            "details": openrouter_auth_failure,
+        }
+        return
     request_first_token_timeout_sec = _request_first_token_timeout_sec(client, tools)
     streamer = SSEStreamer(
         provider_profile=client.provider_profile,
@@ -1203,6 +1319,27 @@ async def stream_chat(
         except httpx.HTTPStatusError as exc:
             _log_http_error(client, "chat_stream_http_error", exc)
             status_code = int(exc.response.status_code)
+            if client.provider_profile == "openrouter" and status_code == 401:
+                details = _openrouter_auth_failure_details(
+                    client,
+                    status_code=status_code,
+                    body=_http_error_body(exc),
+                    phase="chat_completion",
+                )
+                log_kv(client.log, logging.ERROR, "openrouter_auth_failed", **details)
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "openrouter_auth_failed",
+                        "OpenRouter authentication failed during chat completion",
+                        **details,
+                    )
+                yield {
+                    "type": "chunk_error",
+                    "error": _openrouter_auth_failure_message(details),
+                    "details": details,
+                }
+                return
             if (
                 _is_llamacpp_jinja_system_message_error(client, exc)
                 and not llamacpp_jinja_repair_attempted

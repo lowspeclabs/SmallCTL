@@ -37,6 +37,7 @@ from .tool_execution_recovery_helpers import (
 from . import write_session_outcomes as _write_session_outcomes
 
 _CHUNK_WRITE_LOOP_GUARD_TOOLS = {"file_write", "file_append"}
+_TERMINAL_WRITE_SESSION_REPAIR_KEY = "_terminal_write_session_repair_signatures"
 
 
 def _artifact_read_loop_exceeded_limit(
@@ -74,6 +75,52 @@ def _artifact_read_loop_exceeded_limit(
                 if read_count >= limit:
                     return True
     return False
+
+
+def _maybe_emit_terminal_write_session_reuse_nudge(harness: Any, record: ToolExecutionRecord) -> bool:
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "write_session_already_terminal":
+        return False
+    write_session_id = str(metadata.get("write_session_id") or record.args.get("write_session_id") or "").strip()
+    if not write_session_id:
+        return False
+    path = str(record.args.get("path") or metadata.get("target_path") or metadata.get("path") or "").strip()
+    signature = "|".join([record.tool_name, write_session_id, path])
+    seen = harness.state.scratchpad.setdefault(_TERMINAL_WRITE_SESSION_REPAIR_KEY, [])
+    if not isinstance(seen, list):
+        seen = []
+    if signature in seen:
+        return False
+    seen.append(signature)
+    harness.state.scratchpad[_TERMINAL_WRITE_SESSION_REPAIR_KEY] = seen[-20:]
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Write Session `{write_session_id}` is terminal and cannot be reused. "
+                f"Do not reuse write_session_id={write_session_id}; omit `write_session_id` "
+                "for direct overwrite or start a fresh session. If this is a narrow repair, "
+                "prefer `file_patch`/`ast_patch` without the stale write_session_id."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "terminal_write_session_reuse",
+                "write_session_id": write_session_id,
+                "target_path": path,
+                "tool_name": record.tool_name,
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "terminal_write_session_reuse_nudge",
+            "nudged model away from reusing terminal write_session_id",
+            tool_name=record.tool_name,
+            write_session_id=write_session_id,
+            target_path=path,
+        )
+    return True
 
 
 def _maybe_schedule_chunked_write_loop_guard_read(
@@ -606,6 +653,7 @@ async def handle_failed_file_write_outcome(
     if await _maybe_finalize_chunked_write_loop_guard_abort(graph_state, harness, deps, record):
         return
 
+    _maybe_emit_terminal_write_session_reuse_nudge(harness, record)
     _maybe_emit_repair_recovery_nudge(harness, record, deps)
     _write_session_outcomes._maybe_emit_write_session_target_path_redirect_nudge(harness, record)
     scheduled_stage_read = _write_session_outcomes._maybe_schedule_patch_existing_stage_read_recovery(

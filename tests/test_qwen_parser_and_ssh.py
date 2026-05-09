@@ -689,6 +689,7 @@ def test_parse_tool_calls_reasoning_only_trace_uses_safe_non_silent_fallback() -
 def test_streaming_qwen_wrappers_hide_analysis_and_keep_response_visible() -> None:
     events: list[object] = []
     printed: list[str] = []
+    runlog: list[tuple[str, str, dict[str, object]]] = []
 
     async def _emit(_handler: object, event: object) -> None:
         events.append(event)
@@ -697,7 +698,7 @@ def test_streaming_qwen_wrappers_hide_analysis_and_keep_response_visible() -> No
         thinking_visibility=True,
         state=SimpleNamespace(planning_mode_enabled=False),
         _emit=_emit,
-        _runlog=lambda *args, **kwargs: None,
+        _runlog=lambda event, message, **kwargs: runlog.append((event, message, kwargs)),
         _stream_print=lambda text: printed.append(text),
     )
     deps = SimpleNamespace(event_handler=object())
@@ -765,6 +766,12 @@ def test_streaming_qwen_wrappers_hide_analysis_and_keep_response_visible() -> No
     assert "<analysis>" not in assistant_text
     assert "<response>" not in assistant_text
     assert printed == ["\n", "Hello!"]
+    thinking_tokens = [
+        kwargs["token"]
+        for event, message, kwargs in runlog
+        if event == "model_token" and message == "thinking token"
+    ]
+    assert thinking_tokens == ["Reason through the greeting.\n"]
 
 
 def test_model_call_emits_thinking_replace_after_qwen_tool_recovery() -> None:

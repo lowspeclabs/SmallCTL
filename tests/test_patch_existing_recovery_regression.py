@@ -19,6 +19,7 @@ from smallctl.graph.write_session_patch_recovery import _maybe_schedule_patch_ex
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState, WriteSession
 from smallctl.tools.fs_sessions import infer_write_session_intent
+from smallctl.write_session_fsm import archive_interrupted_write_session, new_write_session
 
 
 def _make_state() -> LoopState:
@@ -143,6 +144,60 @@ def test_patch_existing_session_keeps_patch_existing_for_non_write_task(tmp_path
     session = _ensure_chunk_write_session(harness, str(target))
     assert session is not None
     assert session.write_session_intent == "patch_existing"
+
+
+def test_chunk_mode_prearm_migrates_interrupted_stage_for_same_target(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "task_queue.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.run_brief.original_task = "save the file"
+    state.scratchpad["_force_chunk_mode_targets"] = [str(target)]
+
+    old_session = new_write_session(
+        session_id="ws_old",
+        target_path=str(target),
+        intent="replace_file",
+        next_section="helpers",
+    )
+    old_stage = tmp_path / ".smallctl" / "write_sessions" / "ws_old__task_queue__stage.py"
+    old_stage.parent.mkdir(parents=True, exist_ok=True)
+    old_stage.write_text(
+        "import heapq\n\nclass TaskQueue:\n    pass\n",
+        encoding="utf-8",
+    )
+    old_session.write_staging_path = str(old_stage)
+    old_session.write_sections_completed = ["imports", "types_interfaces"]
+    old_session.write_section_ranges = {
+        "imports": {"start": 0, "end": 13},
+        "types_interfaces": {"start": 14, "end": 39},
+    }
+    state.write_session = old_session
+    archive_interrupted_write_session(state, reason="task_switch_abandoned")
+    state.write_session = None
+
+    from smallctl.graph.tool_write_session_policy import _ensure_chunk_write_session
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        registry=None,
+        client=SimpleNamespace(model="small-model"),
+        config=SimpleNamespace(staged_execution_enabled=True),
+    )
+
+    session = _ensure_chunk_write_session(harness, str(target))
+
+    assert session is not None
+    assert session.write_session_id != "ws_old"
+    assert session.write_staging_path
+    assert Path(session.write_staging_path).read_text(encoding="utf-8") == old_stage.read_text(encoding="utf-8")
+    assert session.write_sections_completed == ["imports", "types_interfaces"]
+    assert session.write_section_ranges == old_session.write_section_ranges
+    assert session.write_next_section == "helpers"
+    assert any(event == "write_session_stage_migrated" for event, _message, _data in runlog_events)
 
 
 def test_recovered_intent_injects_overwrite_for_patch_existing_first_write() -> None:

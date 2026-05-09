@@ -6,7 +6,13 @@ from typing import Any
 from ..state import LoopState
 from ..risk_policy import evaluate_risk_policy
 from .common import fail, ok
-from .fs_sessions import _mark_repeat_patch, _repair_cycle_allows_patch, _repair_cycle_reads, _record_file_change, _normalize_section_name
+from .fs_sessions import (
+    _mark_repeat_patch,
+    _normalize_section_name,
+    _repair_cycle_allows_patch,
+    _repair_cycle_read_required_metadata,
+    _record_file_change,
+)
 from .fs_write_session_policy import _guard_suspicious_temp_root_path, _guard_write_session_staging_mutation
 from .fs_write_sessions import _resolve
 
@@ -65,11 +71,7 @@ async def file_append(
         _mark_repeat_patch(state)
         return fail(
             "Repair cycle requires reading the target file before patching it again.",
-            metadata={
-                "path": str(target),
-                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
-                "required_read_paths": _repair_cycle_reads(state),
-            },
+            metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
     risk_decision = evaluate_risk_policy(
         state if state is not None else LoopState(cwd=str(Path.cwd())),
@@ -123,11 +125,7 @@ async def file_delete(
         _mark_repeat_patch(state)
         return fail(
             "Repair cycle requires reading the target file before patching it again.",
-            metadata={
-                "path": str(target),
-                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
-                "required_read_paths": _repair_cycle_reads(state),
-            },
+            metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
     risk_decision = evaluate_risk_policy(
         state if state is not None else LoopState(cwd=str(Path.cwd())),

@@ -23,6 +23,19 @@ class PromptBuilderService:
     def _dynamic_recent_message_limit(self) -> int:
         base_limit = max(1, int(getattr(self.harness.context_policy, "recent_message_limit", 1) or 1))
         state = self.harness.state
+        if self._llamacpp_small_repair_pressure():
+            adjusted_limit = min(base_limit, 3)
+            self.harness._runlog(
+                "recent_message_limit_tuned",
+                "reduced recent message window for llamacpp small-model repair pressure",
+                task_mode=state.task_mode,
+                active_phase=state.current_phase,
+                base_limit=base_limit,
+                adjusted_limit=adjusted_limit,
+                reasons=["llamacpp_small_repair_pressure"],
+                recent_messages=len(getattr(state, "recent_messages", []) or []),
+            )
+            return max(2, adjusted_limit)
         if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
             return base_limit
 
@@ -71,6 +84,24 @@ class PromptBuilderService:
         )
         return adjusted_limit
 
+    def _llamacpp_small_repair_pressure(self) -> bool:
+        state = self.harness.state
+        provider_profile = str(getattr(self.harness, "provider_profile", "") or "").strip().lower()
+        if provider_profile != "llamacpp":
+            return False
+        scratchpad = getattr(state, "scratchpad", {}) or {}
+        if not bool(scratchpad.get("_model_is_small")):
+            return False
+        if str(getattr(state, "current_phase", "") or "").strip().lower() not in {"repair", "verify", "author"}:
+            return False
+        if scratchpad.get("_stream_chunk_error_auto_resume_signature"):
+            return True
+        if scratchpad.get("_terminal_write_session_repair_signatures"):
+            return True
+        if scratchpad.get("_last_write_session_schema_failure"):
+            return True
+        return False
+
     async def build_messages(
         self,
         system_prompt: str,
@@ -93,11 +124,12 @@ class PromptBuilderService:
         fresh_run_active = self.harness.fresh_run and self.harness._fresh_run_turns_remaining > 0
         cold_store = None if fresh_run_active else self.harness.cold_memory_store
         
+        suppress_llamacpp_repair_experiences = self._llamacpp_small_repair_pressure()
         retrieval_bundle = self.harness.retriever.retrieve_bundle(
             state=self.harness.state,
             query=query,
             cold_store=cold_store,
-            include_experiences=not fresh_run_active,
+            include_experiences=not fresh_run_active and not suppress_llamacpp_repair_experiences,
         )
         def _stale_count(key: str) -> int:
             payload = self.harness.state.scratchpad.get(key)
@@ -119,7 +151,7 @@ class PromptBuilderService:
         
         summaries = retrieval_bundle.summaries
         artifacts = retrieval_bundle.artifacts
-        experiences = [] if fresh_run_active else retrieval_bundle.experiences
+        experiences = [] if fresh_run_active or suppress_llamacpp_repair_experiences else retrieval_bundle.experiences
         
         self.harness._runlog(
             "retrieval_selected",

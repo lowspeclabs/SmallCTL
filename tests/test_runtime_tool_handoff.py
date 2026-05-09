@@ -472,6 +472,10 @@ def test_auto_chat_smalltalk_sends_no_tools_to_qwen35(
     assert result["status"] == "chat_completed"
     assert result["assistant"] == "Hello! How can I help?"
     assert len(stream_calls) == 1
-    assert stream_calls[0][1] == []
+    assert [
+        tool["function"]["name"]
+        for tool in stream_calls[0][1]
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    ] == ["task_complete", "task_fail"]
     assert harness.state.scratchpad["_chat_runtime_intent"] == "smalltalk"
-    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"
+    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_terminal_only"

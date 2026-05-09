@@ -25,6 +25,40 @@ def _write_session_can_finalize(session: Any) -> bool:
     return mode in {"chunked_author", "local_repair", "stub_and_fill"}
 
 
+def _section_name_allows_full_file_finalization(section_name: str) -> bool:
+    normalized = str(section_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in {
+        "final_content",
+        "full_file",
+        "complete_file",
+        "entire_file",
+        "full_script",
+        "final_file",
+    }
+
+
+def _looks_like_full_script_content(content: str, section_name: str) -> bool:
+    normalized_section = str(section_name or "").strip().lower()
+    if normalized_section not in {"imports", "helpers", "helper", "utils", "utilities", "constants", "types"}:
+        return False
+    text = str(content or "")
+    if len(text) < 300 and text.count("\n") < 12:
+        return False
+    markers = 0
+    lowered = text.lower()
+    for token in ("\nclass ", "\ndef ", "\nasync def ", "\nif __name__", "\nunittest.", "\npytest", "\nfrom ", "\nimport "):
+        if token in lowered:
+            markers += 1
+    top_level_defs = sum(
+        1
+        for line in text.splitlines()
+        if line.startswith(("def ", "async def ", "class "))
+    )
+    if top_level_defs >= 2:
+        markers += 1
+    return markers >= 3
+
+
 def _append_unique_section(completed_sections: list[str], section_name: str) -> bool:
     normalized = str(section_name or "").strip()
     if not normalized or normalized in completed_sections:
@@ -99,6 +133,38 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
     reads = set(_repair_cycle_reads(state))
     normalized = str(path.resolve()) if hasattr(path, "resolve") else str(path)
     return normalized in reads
+
+
+def _repair_cycle_read_required_metadata(
+    state: LoopState | None,
+    path: Path,
+    *,
+    requested_path: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_path = str(path.resolve()) if hasattr(path, "resolve") else str(path)
+    repair_cycle_id = str(getattr(state, "repair_cycle_id", "") or "").strip()
+    metadata: dict[str, Any] = {
+        "path": normalized_path,
+        "system_repair_cycle_id": repair_cycle_id,
+        "required_read_paths": _repair_cycle_reads(state),
+        "error_kind": "repair_cycle_read_required",
+        "recovery_hint": (
+            "This is a new repair-cycle read requirement. Prior file_read artifacts do not satisfy "
+            "the current repair cycle; call file_read on this path to refresh the disk snapshot."
+        ),
+        "next_required_tool": {
+            "tool_name": "file_read",
+            "required_arguments": {"path": requested_path or normalized_path},
+            "reason": "new_repair_cycle_requires_fresh_disk_snapshot",
+            "system_repair_cycle_id": repair_cycle_id,
+        },
+    }
+    if requested_path is not None:
+        metadata["requested_path"] = requested_path
+    if extra:
+        metadata.update(extra)
+    return metadata
 
 
 def _mark_repeat_patch(state: LoopState | None) -> None:

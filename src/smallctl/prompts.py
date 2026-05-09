@@ -343,6 +343,8 @@ def build_system_prompt(
             "SMALL MODEL GUARD: If you seem frozen, hung, or stuck, continue from the last concrete step instead of restarting. "
             "The harness may nudge you to continue, so emit the next tool call or a short progress update immediately. "
             "When writing code, keep each chunk under 50 lines and finish one logical section before starting the next. "
+            "For new scripts, prefer a deterministic skeleton, then function/class sections, then tests and verification; do not repeatedly rewrite a whole script. "
+            "If a verifier reports a narrow error such as a missing import or NameError in an existing script, patch that exact error instead of starting a full rewrite. "
             "For existing-file follow-ups, use `file_patch` or `ast_patch` for narrow edits instead of streaming a full `file_write` payload. "
             "Use tool names exactly as listed and never invent aliases like `use_shell_exec`."
         )

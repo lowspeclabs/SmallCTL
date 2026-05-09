@@ -322,7 +322,7 @@ def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str |
         return (
             f"Reused Artifact {artifact.artifact_id}: {summary}{path_note}. "
             "You already have the full file evidence in context. "
-            "Do not call `file_read` again on the same path. "
+            "Do not call `file_read` again on the same path in this repair cycle unless a new repair-cycle gate explicitly requires it. "
             "Work from this artifact, patch the file, or use `artifact_read` if you need paging."
         )
     return f"Reused Artifact {artifact.artifact_id}: {summary}"
@@ -546,8 +546,11 @@ def _file_read_followup_hint(
         line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "the full file"
         path = str(metadata.get("path") or artifact.source or artifact.content_path or "").strip()
         path_note = f" from `{path}`" if path else ""
+        repair_cycle_id = str(metadata.get("system_repair_cycle_id") or "").strip()
+        cycle_note = f" during repair cycle `{repair_cycle_id}`" if repair_cycle_id else " in this repair cycle"
         return (
-            f"You now have {line_label}{path_note}. Do not call `file_read` on the same path again. "
+            f"You now have {line_label}{path_note}. Do not call `file_read` on the same path again{cycle_note} "
+            "unless a new repair-cycle gate explicitly requires a fresh disk snapshot. "
             f"Next, patch the file, run focused verification, or call `task_complete`. "
             f"If you need line-level detail later, use `artifact_read(artifact_id='{artifact.artifact_id}')`."
         )

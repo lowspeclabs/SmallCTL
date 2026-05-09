@@ -81,13 +81,12 @@ async def _emit_stream_text(
         return
     if kind == "assistant" and echo_to_stdout:
         harness._stream_print(text)
+    if kind == "thinking" and suppress_duplicate_thinking:
+        return
     if kind == "thinking":
         harness._runlog("model_token", "thinking token", token=text)
     else:
         harness._runlog("model_token", "assistant token", token=text)
-    if kind == "thinking":
-        if suppress_duplicate_thinking:
-            return
     batch = stream_state.batch
     if batch.kind is not None and batch.kind != kind:
         await _flush_stream_batch(harness=harness, deps=deps, stream_state=stream_state)

@@ -110,6 +110,8 @@ async def handle_model_stream_chunk_error(
     salvage_partial_stream: StreamResult | None,
 ) -> dict[str, Any]:
     retrying = model_attempt < chunk_error_max_retries
+    if details.get("recoverable") is False:
+        retrying = False
 
     partial_stream = OpenAICompatClient.collect_stream(
         chunks,

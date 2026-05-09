@@ -26,6 +26,7 @@ from ..write_session_fsm import new_write_session, record_write_session_event
 from .display import format_tool_result_display
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
 from . import nodes as _nodes
+from .autocontinue import clear_durable_autocontinue_for_pending
 from .tool_call_parser import (
     _artifact_read_synthesis_hint,
     _detect_timeout_recovered_incomplete_tool_call,
@@ -439,6 +440,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             deps.event_handler,
             UIEvent(event_type=UIEventType.SYSTEM, content=f"Invoking {pending.tool_name}..."),
         )
+        clear_durable_autocontinue_for_pending(harness, pending)
         operation_id = build_operation_id(
             thread_id=graph_state.thread_id,
             step_count=harness.state.step_count,

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import shutil
 from pathlib import Path
 from typing import Any
 
 from ..state import WriteSession
-from ..write_session_fsm import new_write_session, record_write_session_event
+from ..write_session_fsm import _ARCHIVED_WRITE_SESSIONS_KEY, new_write_session, record_write_session_event
 from .state import PendingToolCall
 
 
@@ -77,6 +79,106 @@ def _active_write_session_for_target(harness: Any, target_path: str) -> WriteSes
     return None
 
 
+def _same_resolved_path(harness: Any, left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    from ..tools.fs import _resolve
+
+    try:
+        return _resolve(left, getattr(harness.state, "cwd", None)) == _resolve(right, getattr(harness.state, "cwd", None))
+    except Exception:
+        return str(left).strip() == str(right).strip()
+
+
+def _short_content_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except Exception:
+        return ""
+
+
+def _latest_archived_stage_for_target(harness: Any, target_path: str) -> dict[str, Any] | None:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    archived = scratchpad.get(_ARCHIVED_WRITE_SESSIONS_KEY)
+    if not isinstance(archived, list):
+        return None
+    for item in reversed(archived):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status == "complete":
+            continue
+        if not _same_resolved_path(harness, str(item.get("write_target_path") or ""), target_path):
+            continue
+        stage_path = Path(str(item.get("write_staging_path") or ""))
+        if not stage_path.exists() or not stage_path.is_file():
+            continue
+        try:
+            if stage_path.stat().st_size <= 0:
+                continue
+        except Exception:
+            continue
+        return item
+    return None
+
+
+def _migrate_archived_stage_into_session(harness: Any, session: WriteSession, target_path: str) -> dict[str, Any] | None:
+    archived = _latest_archived_stage_for_target(harness, target_path)
+    if archived is None:
+        return None
+
+    from ..tools.fs import _resolve
+    from ..tools.fs_write_sessions import _session_stage_path
+
+    old_stage = Path(str(archived.get("write_staging_path") or ""))
+    try:
+        target = _resolve(target_path, getattr(harness.state, "cwd", None))
+        new_stage = _session_stage_path(session.write_session_id, target, getattr(harness.state, "cwd", None))
+        new_stage.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_stage, new_stage)
+    except Exception as exc:
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "write_session_stage_migration_failed",
+                "failed to migrate archived write-session stage",
+                source_session_id=str(archived.get("write_session_id") or ""),
+                target_session_id=session.write_session_id,
+                target_path=target_path,
+                error=str(exc),
+            )
+        return None
+
+    session.write_staging_path = str(new_stage)
+    session.write_session_intent = str(archived.get("write_session_intent") or session.write_session_intent or "replace_file")
+    session.write_original_snapshot_path = str(archived.get("write_original_snapshot_path") or "")
+    session.write_target_existed_at_start = bool(archived.get("write_target_existed_at_start", False))
+    session.write_section_ranges = dict(archived.get("write_section_ranges") or {})
+    session.write_last_attempt_snapshot_path = str(archived.get("write_last_attempt_snapshot_path") or "")
+    session.write_last_attempt_sections = list(archived.get("write_last_attempt_sections") or [])
+    session.write_last_attempt_ranges = dict(archived.get("write_last_attempt_ranges") or {})
+    session.write_sections_completed = list(archived.get("write_sections_completed") or [])
+    session.write_current_section = str(archived.get("write_current_section") or "")
+    session.write_next_section = str(archived.get("write_next_section") or session.write_next_section or "")
+    session.write_pending_finalize = bool(archived.get("write_pending_finalize", False))
+    session.write_last_staged_hash = str(archived.get("write_last_staged_hash") or "") or _short_content_hash(new_stage)
+    if not session.suggested_sections:
+        session.suggested_sections = list(archived.get("suggested_sections") or [])
+
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "write_session_stage_migrated",
+            "migrated archived write-session stage into prearmed session",
+            source_session_id=str(archived.get("write_session_id") or ""),
+            target_session_id=session.write_session_id,
+            target_path=target_path,
+            stage_path=str(new_stage),
+            bytes=new_stage.stat().st_size,
+        )
+    return archived
+
+
 def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession | None:
     target = str(target_path or "").strip()
     if not target:
@@ -117,11 +219,12 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
         next_section=suggestions[0] if suggestions else "",
     )
     harness.state.write_session = session
+    migrated_archived_stage = _migrate_archived_stage_into_session(harness, session, target)
 
     stage_path = str(getattr(session, "write_staging_path", "") or "").strip()
     if stage_path and Path(stage_path).exists():
         task_description = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
-        if not is_staged_artifact_recoverable(stage_path, task_description):
+        if migrated_archived_stage is None and not is_staged_artifact_recoverable(stage_path, task_description):
             required = extract_symbols_from_task(task_description)
             try:
                 content = Path(stage_path).read_text(encoding="utf-8")
@@ -161,7 +264,8 @@ def _should_enter_chunk_mode(harness: Any, pending: PendingToolCall) -> bool:
     if pending.tool_name != "file_write":
         return False
 
-    if getattr(harness.state, "write_session", None):
+    active_session = getattr(harness.state, "write_session", None)
+    if active_session and str(getattr(active_session, "status", "") or "").strip().lower() != "complete":
         return False
 
     from ..guards import is_small_model_name

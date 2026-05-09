@@ -6,6 +6,7 @@ from typing import Any
 
 from ..models.conversation import ConversationMessage
 from ..state import WriteSession
+from .autocontinue import store_durable_autocontinue
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 
 
@@ -215,14 +216,25 @@ def _maybe_schedule_patch_existing_stage_read_recovery(
         return False
     harness.state.scratchpad["_patch_existing_stage_read_autocontinue"] = signature
 
-    graph_state.pending_tool_calls = [
-        PendingToolCall(
-            tool_name="file_read",
-            args={"path": target_path},
-            raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
-            source="system",
-        )
-    ]
+    pending = PendingToolCall(
+        tool_name="file_read",
+        args={"path": target_path},
+        raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
+        source="system",
+    )
+    graph_state.pending_tool_calls = [pending]
+    store_durable_autocontinue(
+        harness,
+        pending,
+        recovery_kind="patch_existing_stage_read_autocontinue",
+        signature=signature,
+        reason="patch_existing first-choice failure scheduled a staged read",
+        metadata={
+            "session_id": recovery_session_id,
+            "target_path": target_path,
+            "staging_path": recovery_staging_path,
+        },
+    )
     harness.state.scratchpad["_patch_existing_stage_read_contract"] = {
         "session_id": recovery_session_id,
         "target_path": target_path,
@@ -371,14 +383,27 @@ def _maybe_schedule_file_patch_read_recovery(
         return False
     harness.state.scratchpad["_file_patch_read_autocontinue"] = signature
 
-    graph_state.pending_tool_calls = [
-        PendingToolCall(
-            tool_name="file_read",
-            args={"path": target_path},
-            raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
-            source="system",
-        )
-    ]
+    pending = PendingToolCall(
+        tool_name="file_read",
+        args={"path": target_path},
+        raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
+        source="system",
+    )
+    graph_state.pending_tool_calls = [pending]
+    store_durable_autocontinue(
+        harness,
+        pending,
+        recovery_kind="file_patch_read_autocontinue",
+        signature=signature,
+        reason="file_patch mismatch scheduled a recovery file read",
+        metadata={
+            "target_path": target_path,
+            "error_kind": error_kind,
+            "recovery_count": recovery_count,
+            "operation_id": record.operation_id,
+            "tool_call_id": record.tool_call_id,
+        },
+    )
     from .tool_call_parser import allow_repeated_tool_call_once
 
     allow_repeated_tool_call_once(harness, "file_read", {"path": target_path})

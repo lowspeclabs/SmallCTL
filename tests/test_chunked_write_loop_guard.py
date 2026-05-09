@@ -73,6 +73,95 @@ def test_file_patch_blocks_identical_repeat_when_replacement_keeps_target(tmp_pa
     assert target.read_text(encoding="utf-8").count("task_id: str") == 1
 
 
+def test_file_patch_reports_already_landed_replacement_before_repair_read_gate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "imports.py"
+    target.write_text("from typing import List\n", encoding="utf-8")
+
+    first = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="from typing import List",
+            replacement_text="from typing import List, Optional",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+    assert first["success"] is True
+
+    state.repair_cycle_id = "repair-new"
+    state.scratchpad["_repair_cycle_reads"] = []
+    second = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="from typing import List",
+            replacement_text="from typing import List, Optional",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert second["success"] is False
+    assert second["metadata"]["error_kind"] == "repeat_sensitive_patch_already_applied"
+    assert second["metadata"]["next_required_tool"]["tool_name"] == "file_read"
+    assert second["metadata"]["next_required_tool"]["reason"] == "already_applied_patch_requires_current_file_snapshot"
+    assert "already landed" in second["error"]
+
+
+def test_repeated_already_landed_patch_points_at_live_verifier_traceback(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "cron_matcher.py"
+    target.write_text(
+        "def parse(field):\n"
+        "    parts = field.split(',')\n"
+        "    for part in parts.strip():\n"
+        "        print(part)\n"
+        "\n"
+        "def match(ts):\n"
+        "    return weekday(ts.weekday())\n",
+        encoding="utf-8",
+    )
+
+    first = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="    return weekday(ts.weekday())",
+            replacement_text="    return ts.weekday()",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+    assert first["success"] is True
+
+    state.repair_cycle_id = "repair-live"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "key_stdout": (
+            "Traceback (most recent call last):\n"
+            f"  File \"{target}\", line 3, in parse\n"
+            "    for part in parts.strip():\n"
+            "AttributeError: 'list' object has no attribute 'strip'\n"
+        ),
+    }
+    second = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="    return weekday(ts.weekday())",
+            replacement_text="    return ts.weekday()",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert second["success"] is False
+    metadata = second["metadata"]
+    assert metadata["error_kind"] == "repeat_sensitive_patch_already_applied"
+    assert metadata["verifier_traceback_focus"]["traceback_line"] == 3
+    assert metadata["next_required_tool"]["reason"] == "live_verifier_traceback_requires_current_slice"
+    assert metadata["next_required_tool"]["required_arguments"]["start_line"] == 1
+    assert metadata["next_required_tool"]["required_arguments"]["end_line"] == 8
+
+
 def test_completed_write_session_rejects_late_file_write_without_mutating_stage(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
     target = tmp_path / "guarded_complete.py"
@@ -101,6 +190,102 @@ def test_completed_write_session_rejects_late_file_write_without_mutating_stage(
     assert result["metadata"]["error_kind"] == "write_session_already_terminal"
     assert result["metadata"]["write_session_status"] == "complete"
     assert stage.read_text(encoding="utf-8") == "print('promoted')\n"
+
+
+def test_completed_write_session_overwrite_repairs_to_direct_write(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "guarded_complete.py"
+    target.write_text("print('old')\n", encoding="utf-8")
+
+    _attach_write_session(state, target, session_id="ws-done")
+    assert state.write_session is not None
+    state.write_session.status = "complete"
+    state.write_session.write_sections_completed = ["full_file"]
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="print('fresh')\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-done",
+            section_name="full_file",
+            replace_strategy="overwrite",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"].get("write_session_id") is None
+    assert target.read_text(encoding="utf-8") == "print('fresh')\n"
+
+
+def test_full_script_under_imports_requires_explicit_finalization(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "task_queue.py"
+    _attach_write_session(state, target)
+    full_script = (
+        "import sys\n"
+        "import unittest\n\n"
+        "class Task:\n"
+        "    pass\n\n"
+        "class Queue:\n"
+        "    pass\n\n"
+        "def main():\n"
+        "    return Queue()\n\n"
+        "class TestQueue(unittest.TestCase):\n"
+        "    def test_main(self):\n"
+        "        self.assertIsNotNone(main())\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n"
+    )
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=full_script,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="imports",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "ambiguous_full_script_section_finalization"
+    assert "section_name='full_file'" in result["error"]
+
+
+def test_full_script_under_full_file_can_finalize_candidate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "task_queue.py"
+    _attach_write_session(state, target)
+    full_script = (
+        "import sys\n"
+        "import unittest\n\n"
+        "class Task:\n"
+        "    pass\n\n"
+        "def main():\n"
+        "    return Task()\n\n"
+        "class TestTask(unittest.TestCase):\n"
+        "    def test_main(self):\n"
+        "        self.assertIsNotNone(main())\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n"
+    )
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=full_script,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="full_file",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
 
 
 def _seed_outline_mode(state: LoopState, target: Path, *, pending_read: bool = False) -> str:
@@ -489,6 +674,66 @@ def test_failed_chunked_file_append_loop_guard_schedules_file_read_recovery(tmp_
     assert pending.args == {"path": str(tmp_path / "guarded.py")}
     assert state.recent_messages
     assert state.recent_messages[-1].metadata["recovery_kind"] == "chunked_write_loop_guard"
+
+
+def test_terminal_write_session_reuse_emits_one_recovery_nudge(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+
+    async def _emit(*args, **kwargs) -> None:
+        del args, kwargs
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=_emit,
+    )
+    deps = SimpleNamespace(event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-terminal-reuse",
+        run_mode="execute",
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-terminal-reuse",
+        tool_name="file_write",
+        args={"path": str(tmp_path / "guarded.py"), "write_session_id": "ws-done"},
+        tool_call_id="tool-terminal-reuse",
+        result=ToolEnvelope(
+            success=False,
+            error="Write Session `ws-done` is already `complete`.",
+            metadata={
+                "path": str(tmp_path / "guarded.py"),
+                "error_kind": "write_session_already_terminal",
+                "write_session_id": "ws-done",
+                "write_session_status": "complete",
+            },
+        ),
+    )
+
+    asyncio.run(
+        handle_failed_file_write_outcome(
+            graph_state=graph_state,
+            harness=harness,
+            deps=deps,
+            record=record,
+        )
+    )
+    asyncio.run(
+        handle_failed_file_write_outcome(
+            graph_state=graph_state,
+            harness=harness,
+            deps=deps,
+            record=record,
+        )
+    )
+
+    nudges = [
+        message
+        for message in state.recent_messages
+        if message.metadata.get("recovery_kind") == "terminal_write_session_reuse"
+    ]
+    assert len(nudges) == 1
+    assert "Do not reuse write_session_id=ws-done" in nudges[0].content
 
 
 def test_chunked_write_loop_guard_recovery_read_can_be_scheduled_again_after_verification_read(tmp_path: Path) -> None:

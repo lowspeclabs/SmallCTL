@@ -31,6 +31,13 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
         model = str(details.get("model") or "").strip()
         suffix = f" for {model}" if model else ""
         return f"{provider} model is unloaded{suffix}"
+    if details.get("reason") == "openrouter_authentication_failed":
+        provider_error = str(details.get("provider_error") or "").strip()
+        suffix = f" ({provider_error})" if provider_error else ""
+        return (
+            "OpenRouter authentication failed: API key is invalid, revoked, "
+            f"or belongs to a missing account{suffix}. Update SMALLCTL_API_KEY."
+        )
     if int(details.get("status_code", 0) or 0) == 400:
         provider = str(details.get("provider_profile") or "provider").strip() or "provider"
         upstream = str(details.get("upstream_provider") or "").strip()
@@ -46,6 +53,8 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
 def _chunk_error_failure_type(details: dict[str, Any] | None) -> str:
     details = details if isinstance(details, dict) else {}
     if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
+        return "provider"
+    if details.get("reason") == "openrouter_authentication_failed":
         return "provider"
     if int(details.get("status_code", 0) or 0) == 400:
         return "provider"

@@ -18,12 +18,13 @@ from ..task_targets import primary_task_target_path
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.fs_loop_guard import clear_loop_guard_outline_requirement
 from ..tools.planning import _refresh_plan_playbook_artifact
-from ..write_session_fsm import new_write_session, record_write_session_event
+from ..write_session_fsm import archive_terminal_write_session, new_write_session, record_write_session_event
 from ..tools.fs import infer_write_session_intent, new_write_session_id
 from . import node_support as _nodes
 from .deps import GraphRuntimeDeps
 from .routing import LoopRoute
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
+from .autocontinue import drain_durable_autocontinue
 from .chat_progress import _chat_progress_guard_failure
 from .recovery_context import build_goal_recap
 from .progress_guard import _check_completion_confabulation, _check_progress_stagnation
@@ -127,15 +128,21 @@ async def initialize_loop_run(
     is_continue_check = getattr(harness, "_is_continue_like_followup", None)
     is_continue_task = callable(is_continue_check) and is_continue_check(task)
     if is_continue_task:
-        # "continue" means continue the current task — preserve all state
-        # (recent_messages, working_memory, tool results) so the model sees
-        # prior tool call context and can decide what to do next.
+        archived_session = archive_terminal_write_session(
+            harness.state,
+            reason="continue_like_task",
+        )
+        # "continue" means continue the current task: preserve the usable
+        # context, while clearing terminal active handles that cannot be reused.
         harness._runlog(
             "task_continue",
             "continuing current task, skipping state reset",
             raw_task=task,
             resolved_task=resolved_task[:80] if resolved_task else "",
             old_step_count=harness.state.step_count,
+            archived_write_session_id=(
+                archived_session.get("write_session_id") if archived_session else ""
+            ),
         )
         harness.state.step_count = 0
         harness.state.inactive_steps = 0
@@ -469,6 +476,8 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             )
             graph_state.error = graph_state.final_result["error"]
             return
+
+    drain_durable_autocontinue(graph_state, harness)
 
     # Safety-net: directly finalize any session that is still stranded.
     if graph_state.final_result is None:

@@ -279,6 +279,7 @@ async def file_read(
             "complete_file": complete_file,
             "truncated": truncated,
             "read_from_staging": source != target,
+            "system_repair_cycle_id": str(getattr(state, "repair_cycle_id", "") or ""),
         },
     )
 

@@ -18,7 +18,9 @@ from .fs_sessions import (
     _same_target_path,
     _mark_repeat_patch,
     _write_session_can_finalize,
+    _looks_like_full_script_content,
     _record_file_change,
+    _section_name_allows_full_file_finalization,
 )
 from .fs_write_sessions import (
     _content_hash,
@@ -190,6 +192,50 @@ def handle_file_write_session(
             "end": start + len(content),
         }
         effective_strategy = "append"
+
+    full_script_needs_explicit_finalization = (
+        not normalized_next_section
+        and strategy != "overwrite"
+        and not _section_name_allows_full_file_finalization(normalized_section_name)
+        and _looks_like_full_script_content(content, normalized_section_name)
+    )
+    if full_script_needs_explicit_finalization:
+        record_write_session_event(
+            state,
+            event="ambiguous_full_script_section_rejected",
+            session=session,
+            details={
+                "path": str(target),
+                "section_name": normalized_section_name,
+                "replace_strategy": strategy,
+            },
+        )
+        return fail(
+            "This `file_write` looks like a full script, but it was sent as "
+            f"section `{normalized_section_name}` with no `next_section_name`. "
+            "To finalize a one-shot full file, retry with `section_name='full_file'` "
+            "or `section_name='final_content'`, or set `replace_strategy='overwrite'`. "
+            "For ordinary chunked authoring, keep the current section small and provide "
+            "`next_section_name` for the next logical section.",
+            metadata={
+                "path": str(target),
+                "error_kind": "ambiguous_full_script_section_finalization",
+                "write_session_id": write_session_id,
+                "section_name": normalized_section_name,
+                "replace_strategy": strategy,
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "required_arguments": {"path": path},
+                    "required_fields": ["path", "content", "section_name"],
+                    "notes": [
+                        "Use section_name='full_file' or section_name='final_content' for a complete one-shot script.",
+                        "Or use replace_strategy='overwrite' when intentionally replacing the staged file.",
+                        "Otherwise provide next_section_name and send only the current logical section.",
+                    ],
+                },
+                "staged_only": True,
+            },
+        )
 
     final_chunk = not normalized_next_section and _write_session_can_finalize(session)
 

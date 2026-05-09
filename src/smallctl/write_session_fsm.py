@@ -24,6 +24,13 @@ WRITE_SESSION_ALLOWED_TRANSITIONS = {
     "complete": {"complete"},
 }
 _WRITE_SESSION_EVENTS_KEY = "_write_session_events"
+WRITE_SESSION_TERMINAL_STATUSES = {"complete"}
+_ARCHIVED_WRITE_SESSIONS_KEY = "_archived_write_sessions"
+
+
+def is_terminal_write_session(session: Any) -> bool:
+    status = str(getattr(session, "status", "") or "").strip().lower()
+    return status in WRITE_SESSION_TERMINAL_STATUSES
 
 
 def new_write_session(
@@ -115,6 +122,87 @@ def record_write_session_event(
         events = []
     events.append(payload)
     state.scratchpad[_WRITE_SESSION_EVENTS_KEY] = events[-40:]
+
+
+def _write_session_archive_payload(session: WriteSession, *, reason: str) -> dict[str, Any]:
+    return {
+        "write_session_id": str(getattr(session, "write_session_id", "") or ""),
+        "write_target_path": str(getattr(session, "write_target_path", "") or ""),
+        "write_session_intent": str(getattr(session, "write_session_intent", "") or ""),
+        "write_session_mode": str(getattr(session, "write_session_mode", "") or ""),
+        "status": str(getattr(session, "status", "") or ""),
+        "write_staging_path": str(getattr(session, "write_staging_path", "") or ""),
+        "write_original_snapshot_path": str(getattr(session, "write_original_snapshot_path", "") or ""),
+        "write_target_existed_at_start": bool(getattr(session, "write_target_existed_at_start", False)),
+        "write_section_ranges": dict(getattr(session, "write_section_ranges", {}) or {}),
+        "write_last_attempt_snapshot_path": str(getattr(session, "write_last_attempt_snapshot_path", "") or ""),
+        "write_last_attempt_sections": list(getattr(session, "write_last_attempt_sections", []) or []),
+        "write_last_attempt_ranges": dict(getattr(session, "write_last_attempt_ranges", {}) or {}),
+        "write_last_staged_hash": str(getattr(session, "write_last_staged_hash", "") or ""),
+        "write_sections_completed": list(getattr(session, "write_sections_completed", []) or []),
+        "write_current_section": str(getattr(session, "write_current_section", "") or ""),
+        "write_next_section": str(getattr(session, "write_next_section", "") or ""),
+        "write_pending_finalize": bool(getattr(session, "write_pending_finalize", False)),
+        "suggested_sections": list(getattr(session, "suggested_sections", []) or []),
+        "archived_at": time.time(),
+        "reason": str(reason or "").strip(),
+    }
+
+
+def _append_archived_write_session(state: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    archived = state.scratchpad.setdefault(_ARCHIVED_WRITE_SESSIONS_KEY, [])
+    if not isinstance(archived, list):
+        archived = []
+    archived.append(payload)
+    state.scratchpad[_ARCHIVED_WRITE_SESSIONS_KEY] = archived[-12:]
+    return payload
+
+
+def archive_terminal_write_session(
+    state: Any,
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    session = getattr(state, "write_session", None)
+    if session is None or not is_terminal_write_session(session):
+        return None
+    payload = _append_archived_write_session(
+        state,
+        _write_session_archive_payload(session, reason=reason),
+    )
+    record_write_session_event(
+        state,
+        event="terminal_write_session_cleared_on_continue",
+        session=session,
+        details={"reason": payload["reason"]},
+    )
+    state.write_session = None
+    return payload
+
+
+def archive_interrupted_write_session(
+    state: Any,
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    session = getattr(state, "write_session", None)
+    if session is None or is_terminal_write_session(session):
+        return None
+    payload = _append_archived_write_session(
+        state,
+        _write_session_archive_payload(session, reason=reason),
+    )
+    record_write_session_event(
+        state,
+        event="interrupted_write_session_archived",
+        session=session,
+        details={"reason": payload["reason"]},
+    )
+    return payload
 
 
 def recent_write_session_events(state: Any, *, limit: int = 10) -> list[dict[str, Any]]:

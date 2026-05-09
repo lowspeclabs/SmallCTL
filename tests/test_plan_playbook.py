@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from smallctl.graph.deps import GraphRuntimeDeps
+from smallctl.graph.autocontinue import _DURABLE_AUTOCONTINUE_KEY, drain_durable_autocontinue
 from smallctl.graph.lifecycle_nodes import resume_loop_run
 from smallctl.graph.nodes import (
     LoopRoute,
@@ -37,6 +38,7 @@ from smallctl.graph.tool_outcomes import _maybe_emit_repair_recovery_nudge, appl
 from smallctl.graph.tool_outcomes import _shell_workspace_relative_retry_hint
 from smallctl.graph.state import ToolExecutionRecord
 from smallctl.harness import Harness
+from smallctl.harness.tool_visibility import hidden_tool_reason
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.config import resolve_config
 from smallctl.ui.display import StatusState
@@ -365,6 +367,13 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
     assert blocked["success"] is False
     assert "reading the target file before patching" in blocked["error"]
     assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
+    assert blocked["metadata"]["recovery_hint"].startswith("This is a new repair-cycle read requirement")
+    assert blocked["metadata"]["next_required_tool"] == {
+        "tool_name": "file_read",
+        "required_arguments": {"path": str(target)},
+        "reason": "new_repair_cycle_requires_fresh_disk_snapshot",
+        "system_repair_cycle_id": "repair-1",
+    }
 
     read_back = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
     assert read_back["success"] is True
@@ -611,6 +620,38 @@ def test_file_patch_uses_active_write_session_staging_and_leaves_target_untouche
     assert result["metadata"]["occurrence_count"] == 1
     assert target.exists() is False
     assert Path(session.write_staging_path).read_text(encoding="utf-8") == "alpha gamma gamma\n"
+
+
+def test_patch_existing_file_patch_completes_first_section_for_finalization(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "task_queue.py"
+    target.write_text("import logging\n", encoding="utf-8")
+    session = _make_open_write_session(target, intent="patch_existing")
+    session.write_next_section = "imports"
+    state.write_session = session
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="import logging",
+            replacement_text="import heapq\nimport logging",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["staged_only"] is True
+    assert result["metadata"]["section_added"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_sections_completed"] == ["imports"]
+    assert result["metadata"]["write_next_section"] == ""
+    assert session.write_sections_completed == ["imports"]
+    assert session.write_next_section == ""
+    assert session.write_pending_finalize is True
+    assert hidden_tool_reason("finalize_write_session", state=state, mode="chat") is None
+    assert target.read_text(encoding="utf-8") == "import logging\n"
+    assert Path(session.write_staging_path).read_text(encoding="utf-8") == "import heapq\nimport logging\n"
 
 
 def test_file_patch_rejects_session_id_mismatch(tmp_path: Path) -> None:
@@ -3270,11 +3311,78 @@ def test_file_patch_mismatch_autocontinues_with_file_read(tmp_path: Path) -> Non
     assert pending.tool_name == "file_read"
     assert pending.args == {"path": str(target)}
     assert state.scratchpad["_repeat_guard_one_shot_fingerprints"]
+    durable_queue = state.scratchpad.get(_DURABLE_AUTOCONTINUE_KEY)
+    assert isinstance(durable_queue, list)
+    assert durable_queue[-1]["recovery_kind"] == "file_patch_read_autocontinue"
+    assert durable_queue[-1]["tool_name"] == "file_read"
+    assert durable_queue[-1]["args"] == {"path": str(target)}
     assert any(
         getattr(message, "metadata", {}).get("recovery_kind") == "file_patch_read_autocontinue"
         for message in state.recent_messages
     )
     assert any(event == "file_patch_read_autocontinue" for event, _message, _data in runlog_events)
+
+
+def test_file_patch_mismatch_durable_autocontinue_drains_next_turn(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "example.py"
+    target.write_text("print('hello')\n", encoding="utf-8")
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-durable",
+            tool_name="file_patch",
+            args={
+                "path": str(target),
+                "target_text": "return False",
+                "replacement_text": "return True",
+            },
+            tool_call_id="tool-durable",
+            result=ToolEnvelope(
+                success=False,
+                error="Patch target text was not found.",
+                metadata={
+                    "path": str(target),
+                    "requested_path": str(target),
+                    "error_kind": "patch_target_not_found",
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert any(event == "file_patch_read_autocontinue" for event, _message, _data in runlog_events)
+    assert state.scratchpad.get(_DURABLE_AUTOCONTINUE_KEY)
+
+    resumed_graph_state = GraphRunState(
+        loop_state=LoopState.from_dict(state.to_dict()),
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    harness.state = resumed_graph_state.loop_state
+
+    assert drain_durable_autocontinue(resumed_graph_state, harness) is True
+    assert len(resumed_graph_state.pending_tool_calls) == 1
+    assert resumed_graph_state.pending_tool_calls[0].tool_name == "file_read"
+    assert resumed_graph_state.pending_tool_calls[0].args == {"path": str(target)}
+    assert _DURABLE_AUTOCONTINUE_KEY not in harness.state.scratchpad
+    assert any(event == "durable_autocontinue_recovered" for event, _message, _data in runlog_events)
 
 
 def test_repeated_structural_file_patch_misses_nudge_toward_ast_patch(tmp_path: Path) -> None:

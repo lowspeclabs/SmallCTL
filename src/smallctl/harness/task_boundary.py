@@ -158,6 +158,7 @@ _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS = (
     "_chunk_write_loop_guard",
     "_chunk_write_loop_guard_config",
     "_chunk_write_loop_guard_read_scheduled",
+    "_durable_autocontinue_recoveries",
 )
 _ACTION_CONFIRMATION_PROMPTS = (
     "would you like me to",
@@ -1741,7 +1742,13 @@ class TaskBoundaryService:
                 status=self.harness.state.write_session.status,
             )
             from ..graph.tool_outcomes import _register_write_session_stage_artifact
+            from ..write_session_fsm import archive_interrupted_write_session
+
             _register_write_session_stage_artifact(self.harness, self.harness.state.write_session)
+            archive_interrupted_write_session(
+                self.harness.state,
+                reason="task_switch_abandoned",
+            )
             self.harness.state.write_session = None
         self.harness.state.episodic_summaries = preserved_summaries if preserve_summaries else []
         self.harness.state.context_briefs = preserved_context_briefs if preserve_summaries else []

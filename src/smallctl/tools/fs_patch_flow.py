@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,10 @@ from .fs_patching import (
     _count_exact_occurrences,
 )
 from .fs_sessions import (
+    _append_unique_section,
     _clone_section_ranges,
     _repair_cycle_allows_patch,
-    _repair_cycle_reads,
+    _repair_cycle_read_required_metadata,
     _record_file_change,
 )
 from .fs_write_sessions import (
@@ -62,6 +64,58 @@ def _repeat_sensitive_patch_records(state: LoopState | None) -> dict[str, dict[s
     return records
 
 
+def _verifier_traceback_focus(
+    state: LoopState | None,
+    *,
+    source_path: Path,
+    requested_path: str,
+) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    verdict_fn = getattr(state, "current_verifier_verdict", None)
+    verifier = verdict_fn() if callable(verdict_fn) else getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verifier, dict):
+        return None
+    text = "\n".join(
+        str(verifier.get(key) or "")
+        for key in ("key_stderr", "key_stdout")
+        if str(verifier.get(key) or "").strip()
+    )
+    if not text:
+        return None
+
+    source_resolved = source_path.resolve()
+    matches = re.findall(r'File "([^"]+)", line (\d+)', text)
+    for filename, line_text in reversed(matches):
+        try:
+            traceback_path = Path(filename).resolve()
+        except OSError:
+            continue
+        if traceback_path != source_resolved:
+            continue
+        line = int(line_text)
+        start_line = max(1, line - 5)
+        end_line = line + 5
+        return {
+            "traceback_path": str(traceback_path),
+            "traceback_line": line,
+            "next_required_tool": {
+                "tool_name": "file_read",
+                "required_arguments": {
+                    "path": requested_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
+                "reason": "live_verifier_traceback_requires_current_slice",
+            },
+            "recovery_hint": (
+                "Do not retry the prior patch; the current verifier traceback names this line. "
+                "Read that slice and patch the live failure."
+            ),
+        }
+    return None
+
+
 async def handle_file_patch(
     *,
     path: str,
@@ -75,7 +129,7 @@ async def handle_file_patch(
     expected_occurrences: int = 1,
     expected_followup_verifier: str | None = None,
 ) -> dict[str, Any]:
-    from .fs import _guard_suspicious_temp_root_path, _mark_repeat_patch, _repair_cycle_allows_patch, _resolve, _repair_cycle_reads
+    from .fs import _guard_suspicious_temp_root_path, _mark_repeat_patch, _resolve
 
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
@@ -176,19 +230,6 @@ async def handle_file_patch(
             encoding=encoding,
         )
 
-    if not staged_only and not _repair_cycle_allows_patch(state, target):
-        _mark_repeat_patch(state)
-        return fail(
-            "Repair cycle requires reading the target file before patching it again.",
-            metadata={
-                "path": str(target),
-                "requested_path": path,
-                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
-                "required_read_paths": _repair_cycle_reads(state),
-                "error_kind": "repair_cycle_read_required",
-            },
-        )
-
     if not source_path.exists():
         message = (
             f"Active staged copy `{source_path}` is missing for target `{path}`."
@@ -209,6 +250,68 @@ async def handle_file_patch(
                     "expected_occurrences": normalized_expected_occurrences,
                 },
             ),
+        )
+
+    try:
+        source_text = _read_text_file(source_path, encoding=encoding)
+    except Exception as exc:
+        return fail(f"Unable to read file for patching: {exc}")
+
+    patch_signature = _repeat_sensitive_patch_signature(
+        source_path=source_path,
+        target_text=normalized_target_text,
+        replacement_text=normalized_replacement_text,
+        expected_occurrences=normalized_expected_occurrences,
+    )
+    repeat_records = _repeat_sensitive_patch_records(state)
+    prior_repeat_sensitive_patch = repeat_records.get(patch_signature)
+    if (
+        isinstance(prior_repeat_sensitive_patch, dict)
+        and normalized_replacement_text
+        and normalized_replacement_text in source_text
+    ):
+        _mark_repeat_patch(state)
+        traceback_focus = _verifier_traceback_focus(
+            state,
+            source_path=source_path,
+            requested_path=path,
+        )
+        next_required_tool = {
+            "tool_name": "file_read",
+            "required_arguments": {"path": path},
+            "reason": "already_applied_patch_requires_current_file_snapshot",
+        }
+        if isinstance(traceback_focus, dict):
+            next_required_tool = traceback_focus.get("next_required_tool", next_required_tool)
+        return fail(
+            (
+                "This exact patch already landed; the old target text is gone and the replacement text "
+                "is present. Do not retry the prior patch; read the current verifier traceback slice "
+                "and patch the live failing line."
+            ),
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="repeat_sensitive_patch_already_applied",
+                extra={
+                    "prior_patch": prior_repeat_sensitive_patch,
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                    "suggested_tools": ["file_read", "ast_patch"],
+                    "next_required_tool": next_required_tool,
+                    "verifier_traceback_focus": traceback_focus,
+                },
+            ),
+        )
+
+    if not staged_only and not _repair_cycle_allows_patch(state, target):
+        _mark_repeat_patch(state)
+        return fail(
+            "Repair cycle requires reading the target file before patching it again.",
+            metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
 
     if not staged_only:
@@ -233,11 +336,6 @@ async def handle_file_patch(
                     "proof_bundle": risk_decision.proof_bundle,
                 },
             )
-
-    try:
-        source_text = _read_text_file(source_path, encoding=encoding)
-    except Exception as exc:
-        return fail(f"Unable to read file for patching: {exc}")
 
     actual_occurrences = _count_exact_occurrences(source_text, normalized_target_text)
     if actual_occurrences == 0:
@@ -302,14 +400,6 @@ async def handle_file_patch(
             ),
         )
 
-    patch_signature = _repeat_sensitive_patch_signature(
-        source_path=source_path,
-        target_text=normalized_target_text,
-        replacement_text=normalized_replacement_text,
-        expected_occurrences=normalized_expected_occurrences,
-    )
-    repeat_records = _repeat_sensitive_patch_records(state)
-    prior_repeat_sensitive_patch = repeat_records.get(patch_signature)
     if isinstance(prior_repeat_sensitive_patch, dict):
         return fail(
             (
@@ -377,7 +467,7 @@ async def handle_file_patch(
     except Exception as exc:
         return fail(f"Unable to patch file: {exc}")
 
-    if normalized_target_text and normalized_target_text in normalized_replacement_text and normalized_target_text in updated_text:
+    if normalized_target_text:
         repeat_records[patch_signature] = {
             "path": str(target),
             "source_path": str(source_path),
@@ -388,7 +478,24 @@ async def handle_file_patch(
             "expected_occurrences": normalized_expected_occurrences,
         }
 
+    section_added = False
+    write_session_final_chunk = False
     if session is not None:
+        if (
+            staged_only
+            and str(getattr(session, "write_session_intent", "") or "").strip().lower() == "patch_existing"
+            and not list(getattr(session, "write_sections_completed", []) or [])
+        ):
+            section_name = str(
+                getattr(session, "write_next_section", "")
+                or getattr(session, "write_current_section", "")
+                or "patch"
+            ).strip() or "patch"
+            session.write_current_section = section_name
+            section_added = _append_unique_section(session.write_sections_completed, section_name)
+            session.write_next_section = ""
+            session.write_pending_finalize = True
+            write_session_final_chunk = True
         session.write_last_staged_hash = _content_hash(updated_text)
         session.write_last_attempt_sections = list(getattr(session, "write_sections_completed", []) or [])
         session.write_last_attempt_ranges = _clone_section_ranges(getattr(session, "write_section_ranges", {}) or {})
@@ -417,6 +524,16 @@ async def handle_file_patch(
         staging_path=source_path if staged_only else None,
         status_block=status_block,
     )
+    if session is not None:
+        metadata.update(
+            {
+                "write_current_section": str(getattr(session, "write_current_section", "") or ""),
+                "write_next_section": str(getattr(session, "write_next_section", "") or ""),
+                "write_sections_completed": list(getattr(session, "write_sections_completed", []) or []),
+                "write_session_final_chunk": write_session_final_chunk,
+                "section_added": section_added,
+            }
+        )
     metadata["expected_followup_verifier"] = str(expected_followup_verifier or "")
     message = f"Patched {occurrence_count} occurrence(s) in `{path}`."
     if staged_only:

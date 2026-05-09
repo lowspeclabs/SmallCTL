@@ -92,7 +92,7 @@ async def handle_ast_patch(
         _guard_suspicious_temp_root_path,
         _mark_repeat_patch,
         _repair_cycle_allows_patch,
-        _repair_cycle_reads,
+        _repair_cycle_read_required_metadata,
         _resolve,
     )
 
@@ -186,15 +186,15 @@ async def handle_ast_patch(
         _mark_repeat_patch(state)
         return fail(
             "Repair cycle requires reading the target file before patching it again.",
-            metadata={
-                "path": str(target_path),
-                "requested_path": path,
-                "system_repair_cycle_id": getattr(state, "repair_cycle_id", ""),
-                "required_read_paths": _repair_cycle_reads(state),
-                "error_kind": "repair_cycle_read_required",
-                "language": normalized_language,
-                "operation": normalized_operation,
-            },
+            metadata=_repair_cycle_read_required_metadata(
+                state,
+                target_path,
+                requested_path=path,
+                extra={
+                    "language": normalized_language,
+                    "operation": normalized_operation,
+                },
+            ),
         )
 
     if staged_only and not source_path.exists():

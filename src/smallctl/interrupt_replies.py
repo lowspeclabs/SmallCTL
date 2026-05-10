@@ -80,9 +80,13 @@ def interrupt_response_action(interrupt: dict[str, Any] | None, task: str) -> st
     normalized = normalize_interrupt_reply(task)
     if not normalized:
         return None
+    kind = str(interrupt.get("kind") or "").strip()
+    response_mode = str(interrupt.get("response_mode") or "").strip().lower()
+    if kind == "ask_human" and response_mode in {"", "freeform", "text", "any"}:
+        return "answer"
     if normalized not in _response_choices(interrupt):
         return None
-    if str(interrupt.get("kind") or "").strip() == "plan_execute_approval" and normalized in _PLAN_APPROVAL_REPLIES:
+    if kind == "plan_execute_approval" and normalized in _PLAN_APPROVAL_REPLIES:
         return "approve"
     return _REPLY_ACTIONS.get(normalized, normalized)
 

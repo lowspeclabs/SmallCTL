@@ -25,11 +25,23 @@ from smallctl.harness.run_mode import (
     is_contextual_affirmative_execution_continuation,
 )
 from smallctl.harness.task_boundary import TaskBoundaryService
+from smallctl.interrupt_replies import is_interrupt_response, interrupt_response_action
 from smallctl.state_schema import ExecutionPlan
 
 
 class TestInterruptApprovalFixes:
     """Test suite for verifying interrupt approval handling fixes."""
+
+    def test_ask_human_accepts_freeform_password_reply(self):
+        """Free-form ask_human replies should resume the interrupt, not replace the task."""
+        interrupt = {
+            "kind": "ask_human",
+            "question": "What is the SSH password for root@192.168.1.89?",
+            "thread_id": "bcd21692",
+        }
+
+        assert is_interrupt_response(interrupt, "Temp@Pass")
+        assert interrupt_response_action(interrupt, "Temp@Pass") == "answer"
 
     @pytest.mark.asyncio
     async def test_fix_1_mode_decision_pending_interrupt_check(self):

@@ -217,5 +217,5 @@ class LoopGraphRuntime(CompiledGraphRuntimeBase):
             fallback_step="prepare_step",
         )
 from .runtime_chat import ChatGraphRuntime
-from .runtime_specialized import IndexerGraphRuntime, PlanningGraphRuntime
+from .runtime_specialized import IndexerGraphRuntime, PlanningGraphRuntime, ToolPlanRuntime
 from .runtime_auto import AutoGraphRuntime

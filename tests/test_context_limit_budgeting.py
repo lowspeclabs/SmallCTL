@@ -65,6 +65,31 @@ def test_runtime_probe_preserves_explicit_max_prompt_tokens_for_partitioning() -
     assert harness.state.recent_message_limit == 32
 
 
+def test_runtime_probe_can_expand_stale_lower_server_context_limit() -> None:
+    harness = _make_harness(max_prompt_tokens=32768)
+    harness.server_context_limit = 8192
+    harness.discovered_server_context_limit = 8192
+
+    new_limit = apply_server_context_limit(harness, 16384, source="runtime_probe")
+
+    assert new_limit == 32768
+    assert harness.server_context_limit == 16384
+    assert harness.discovered_server_context_limit == 16384
+    assert harness.context_policy.max_prompt_tokens == 32768
+
+
+def test_non_runtime_context_update_does_not_expand_stale_lower_limit() -> None:
+    harness = _make_harness(max_prompt_tokens=None, explicit=False)
+    harness.server_context_limit = 8192
+    harness.discovered_server_context_limit = 8192
+
+    new_limit = apply_server_context_limit(harness, 16384, source="stream_context_overflow")
+
+    assert new_limit == 6144
+    assert harness.server_context_limit == 8192
+    assert harness.discovered_server_context_limit == 8192
+
+
 def test_transport_budget_can_respect_runtime_limit_when_prompt_budget_is_explicit() -> None:
     harness = _make_harness(max_prompt_tokens=32768)
     harness.server_context_limit = 8192

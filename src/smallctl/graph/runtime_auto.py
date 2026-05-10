@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..harness.run_mode import _has_plan_execution_approval_context
+from ..harness.task_classifier import looks_like_tool_plan_candidate
 from ..interrupt_replies import is_interrupt_response, is_plan_approval_reply
 from .deps import GraphRuntimeDeps
 
@@ -25,7 +26,7 @@ class AutoGraphRuntime:
 
     async def run(self, task: str) -> dict[str, object]:
         from .runtime import ChatGraphRuntime, LoopGraphRuntime
-        from .runtime_specialized import PlanningGraphRuntime
+        from .runtime_specialized import IndexerGraphRuntime, PlanningGraphRuntime, ToolPlanRuntime
 
         harness = self.deps.harness
         # Defensive fallback: if the user is providing a short plan-approval reply
@@ -73,6 +74,54 @@ class AutoGraphRuntime:
             harness.state.pending_interrupt = None
             if interrupt_kind == "plan_execute_approval":
                 harness.state.planner_interrupt = None
+        explicit_mode = str(getattr(getattr(harness, "config", None), "run_mode", "auto") or "auto").strip().lower()
+        if explicit_mode and explicit_mode != "auto":
+            harness._runlog(
+                "runtime_route",
+                "routing task to explicit runtime",
+                mode=explicit_mode,
+                execution_path=self._execution_path(),
+            )
+            if explicit_mode == "planning":
+                return await PlanningGraphRuntime.from_harness(
+                    harness,
+                    event_handler=self.deps.event_handler,
+                ).run(task)
+            if explicit_mode == "chat":
+                return await ChatGraphRuntime.from_harness(
+                    harness,
+                    event_handler=self.deps.event_handler,
+                ).run(task)
+            if explicit_mode == "indexer":
+                return await IndexerGraphRuntime.from_harness(
+                    harness,
+                    event_handler=self.deps.event_handler,
+                ).run(task)
+            if explicit_mode == "tool_plan":
+                return await ToolPlanRuntime.from_harness(
+                    harness,
+                    event_handler=self.deps.event_handler,
+                ).run(task)
+            return await LoopGraphRuntime.from_harness(
+                harness,
+                event_handler=self.deps.event_handler,
+            ).run(task)
+        config = getattr(harness, "config", None)
+        if (
+            bool(getattr(config, "tool_plan_runtime_enabled", False))
+            and bool(getattr(config, "tool_plan_auto_select", False))
+            and looks_like_tool_plan_candidate(task)
+        ):
+            harness._runlog(
+                "runtime_route",
+                "auto-selecting tool_plan runtime",
+                mode="tool_plan",
+                execution_path=self._execution_path(),
+            )
+            return await ToolPlanRuntime.from_harness(
+                harness,
+                event_handler=self.deps.event_handler,
+            ).run(task)
         mode = await harness.decide_run_mode(task)
         harness._runlog(
             "runtime_route",

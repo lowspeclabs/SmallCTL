@@ -44,7 +44,14 @@ def apply_server_context_limit(
         return harness.context_policy.max_prompt_tokens
 
     normalized_limit = max(1, int(context_limit))
-    if harness.server_context_limit is None or normalized_limit < harness.server_context_limit:
+    # Runtime probes reflect the server that is actually listening now.  Allow
+    # them to expand a stale lower limit after a local llama.cpp restart with a
+    # larger --ctx-size, while still letting overflow reports shrink the budget.
+    if (
+        harness.server_context_limit is None
+        or normalized_limit < harness.server_context_limit
+        or source == "runtime_probe"
+    ):
         harness.discovered_server_context_limit = normalized_limit
         harness.server_context_limit = normalized_limit
 

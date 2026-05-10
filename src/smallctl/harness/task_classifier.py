@@ -238,6 +238,24 @@ _WEB_LOOKUP_MARKERS = (
     "announcement",
     "news",
 )
+_TOOL_PLAN_EVIDENCE_MARKERS = (
+    "read through",
+    "look through",
+    "find where",
+    "find out where",
+    "summarize current implementation",
+    "summarize the implementation",
+    "identify files",
+    "where does",
+    "where is",
+    "trace",
+    "investigate",
+    "multi-file",
+    "codebase",
+    "repo",
+    "repository",
+    "web research",
+)
 
 
 @dataclass(frozen=True)
@@ -604,6 +622,30 @@ def looks_like_shell_request(task: str) -> bool:
             r"\b(run|execute|exec|launch|invoke|start)\b.*\b(command|shell|terminal|script|scan|nmap|port|ports|ssh|ping|curl|wget)\b",
             text,
         )
+    )
+
+
+def looks_like_tool_plan_candidate(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if looks_like_plan_only_request(text):
+        return False
+    if looks_like_shell_request(text) or looks_like_action_request(text):
+        return False
+    if any(marker in text for marker in _TOOL_PLAN_EVIDENCE_MARKERS):
+        return True
+    if (
+        looks_like_write_patch_request(text)
+        or looks_like_write_file_request(text)
+        or looks_like_author_write_request(text)
+    ):
+        return False
+    if any(marker in text for marker in _WEB_LOOKUP_MARKERS) and looks_like_readonly_chat_request(text):
+        return True
+    mode = classify_task_mode(text)
+    return mode in {"analysis", "debug_inspect"} and (
+        needs_loop_for_content_lookup(text) or looks_like_readonly_chat_request(text)
     )
 
 

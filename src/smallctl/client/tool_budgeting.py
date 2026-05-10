@@ -107,6 +107,24 @@ def _with_tools(payload: dict[str, Any], tools: list[dict[str, Any]]) -> dict[st
     return fitted
 
 
+def _slim_schema_descriptions(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_slim_schema_descriptions(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    slimmed: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "description" and isinstance(item, str) and len(item) > 80:
+            slimmed[key] = item[:80]
+            continue
+        slimmed[key] = _slim_schema_descriptions(item)
+    return slimmed
+
+
+def _with_slimmed_tool_descriptions(payload: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
+    return _with_tools(payload, [_slim_schema_descriptions(tool) for tool in tools])
+
+
 def _result(
     *,
     payload: dict[str, Any],
@@ -187,7 +205,12 @@ def fit_tools_to_context_budget(
     current_payload = _with_tools(payload, required_tools)
     action = "reduced_tools"
     if estimator.footprint(current_payload, budget).over_budget_tokens > 0:
-        action = "exceeded"
+        slimmed_payload = _with_slimmed_tool_descriptions(payload, required_tools)
+        if estimator.footprint(slimmed_payload, budget).over_budget_tokens <= 0:
+            current_payload = slimmed_payload
+        else:
+            current_payload = slimmed_payload
+            action = "exceeded"
     return _result(
         payload=current_payload,
         action=action,

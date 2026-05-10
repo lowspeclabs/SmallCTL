@@ -60,6 +60,7 @@ class SmallctlConfig:
     model: str = "qwen3.5:4b"
     phase: str = "explore"
     provider_profile: str = "generic"
+    run_mode: str = "auto"
     indexer: bool = False
     tool_profiles: list[str] | None = None
     reasoning_mode: str = "auto"
@@ -80,6 +81,17 @@ class SmallctlConfig:
     staged_reasoning: bool = False
     staged_execution_enabled: bool = False
     staged_step_prompt_tokens: int = 4096
+    tool_plan_runtime_enabled: bool = False
+    tool_plan_auto_select: bool = False
+    tool_plan_readonly_only: bool = True
+    tool_plan_max_steps: int = 6
+    tool_plan_max_repair_attempts: int = 1
+    tool_plan_observation_token_limit: int = 900
+    tool_plan_max_observation_chars_per_step: int = 600
+    tool_plan_solver_fresh_output_limit: int = 1200
+    tool_plan_allow_web: bool = True
+    tool_plan_allow_artifact_read: bool = True
+    tool_plan_fallback_to_loop_on_invalid_plan: bool = True
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -207,6 +219,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["staged_execution_enabled"] = _to_bool(cli_clean["staged_execution_enabled"])
     if "indexer" in cli_clean:
         cli_clean["indexer"] = _to_bool(cli_clean["indexer"])
+    if "run_mode" in cli_clean:
+        cli_clean["run_mode"] = _normalize_run_mode(cli_clean["run_mode"])
     if "enable_write_intent_recovery" in cli_clean:
         cli_clean["enable_write_intent_recovery"] = _to_bool(cli_clean["enable_write_intent_recovery"])
     if "enable_assistant_code_write_recovery" in cli_clean:
@@ -226,6 +240,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "reflexion_enabled",
         "reflexion_persist_cross_task",
         "subtask_ledger_enabled",
+        "tool_plan_runtime_enabled",
+        "tool_plan_auto_select",
+        "tool_plan_readonly_only",
+        "tool_plan_allow_web",
+        "tool_plan_allow_artifact_read",
+        "tool_plan_fallback_to_loop_on_invalid_plan",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -271,6 +291,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "subtask_max_active",
         "subtask_max_history",
         "subtask_inject_completed_limit",
+        "tool_plan_max_steps",
+        "tool_plan_max_repair_attempts",
+        "tool_plan_observation_token_limit",
+        "tool_plan_max_observation_chars_per_step",
+        "tool_plan_solver_fresh_output_limit",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -322,6 +347,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "reflexion_enabled",
         "reflexion_persist_cross_task",
         "subtask_ledger_enabled",
+        "tool_plan_runtime_enabled",
+        "tool_plan_auto_select",
+        "tool_plan_readonly_only",
+        "tool_plan_allow_web",
+        "tool_plan_allow_artifact_read",
+        "tool_plan_fallback_to_loop_on_invalid_plan",
     ):
         if key in merged:
             merged[key] = _to_bool(merged[key])
@@ -336,6 +367,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "subtask_max_active",
         "subtask_max_history",
         "subtask_inject_completed_limit",
+        "tool_plan_max_steps",
+        "tool_plan_max_repair_attempts",
+        "tool_plan_observation_token_limit",
+        "tool_plan_max_observation_chars_per_step",
+        "tool_plan_solver_fresh_output_limit",
     ):
         if key in merged:
             parsed_limit = _to_int(merged[key])
@@ -360,6 +396,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     if preset_name and not preset_defaults:
         compatibility_warnings.append(f"Unknown preset '{preset_name}' ignored.")
     merged["phase"] = normalize_phase(str(merged.get("phase", "explore")))
+    merged["run_mode"] = _normalize_run_mode(merged.get("run_mode", "auto"))
     merged["graph_checkpointer"] = _normalize_graph_checkpointer(merged.get("graph_checkpointer", "memory"))
     if merged.get("graph_checkpoint_path") and merged["graph_checkpointer"] == "memory":
         merged["graph_checkpointer"] = "file"
@@ -407,9 +444,8 @@ def _apply_provider_profile(
     if profile_warnings:
         compatibility_warnings.extend(profile_warnings)
     merged["provider_profile"] = profile
-    defaults = PROVIDER_PROFILES.get(profile, PROVIDER_PROFILES["generic"])
-    for key, value in defaults.items():
-        if key not in merged:
-            merged[key] = value
-    merged.update({k: v for k, v in cli_clean.items() if k in defaults})
-    merged["provider_profile"] = profile
+
+
+def _normalize_run_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower().replace("-", "_")
+    return mode if mode in {"auto", "chat", "loop", "planning", "indexer", "tool_plan"} else "auto"

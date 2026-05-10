@@ -46,6 +46,16 @@ TEMPLATES = {
         "avoid": "Do not replay the same chunk or finalization attempt without new staged-file evidence.",
         "next": "Inspect the staged file and verifier output, then make the smallest local repair before retrying.",
     },
+    "tool_plan_invalid": {
+        "lesson": "The ToolPlan evidence planner did not produce a safe bounded read-only plan.",
+        "avoid": "Do not dispatch unsafe or malformed evidence steps.",
+        "next": "Fallback to normal loop or retry with fewer targeted read/search steps.",
+    },
+    "tool_plan_unsafe": {
+        "lesson": "The ToolPlan evidence planner proposed a step outside the read-only safety policy.",
+        "avoid": "Do not dispatch ToolPlan steps with unsafe paths, disabled web access, or non-read-only tools.",
+        "next": "Fallback to normal loop or gather evidence with workspace-relative read/search steps only.",
+    },
 }
 
 

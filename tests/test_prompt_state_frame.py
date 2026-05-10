@@ -1020,3 +1020,127 @@ def test_prompt_state_frame_build_messages_is_deterministic() -> None:
     assert [(item.lane, item.reason, item.dropped_count, list(item.dropped_ids)) for item in first.frame.drop_log] == [
         (item.lane, item.reason, item.dropped_count, list(item.dropped_ids)) for item in second.frame.drop_log
     ]
+
+
+def test_stable_system_prefix_moves_orientation_to_user_message() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "plan"
+    state.run_brief.original_task = "Refactor prompt flow"
+    state.run_brief.current_phase_objective = "Compile deterministic frame"
+    state.working_memory.current_goal = "Compile deterministic frame"
+    state.working_memory.next_actions = ["Wire frame into assembler"]
+    state.active_intent = "use_shell_exec"
+
+    policy = ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4, stable_system_prefix=True)
+    assembly = PromptAssembler(policy).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    # System message should contain ONLY the base prompt
+    assert assembly.messages[0]["role"] == "system"
+    assert assembly.messages[0]["content"] == "SYSTEM PROMPT"
+    assert "Run brief:" not in assembly.messages[0]["content"]
+    assert "Working memory:" not in assembly.messages[0]["content"]
+
+    # Orientation should appear in a later user message
+    user_contents = [m["content"] for m in assembly.messages if m["role"] == "user"]
+    orientation_found = any("<current-orientation>" in c for c in user_contents)
+    assert orientation_found, "Expected <current-orientation> user message when stable_system_prefix=True"
+
+
+def test_stable_system_prefix_without_run_brief_or_working_memory() -> None:
+    state = LoopState(cwd="/tmp")
+    # Leave run_brief and working_memory empty
+
+    policy = ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4, stable_system_prefix=True)
+    assembly = PromptAssembler(policy).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assert assembly.messages[0]["role"] == "system"
+    assert assembly.messages[0]["content"] == "SYSTEM PROMPT"
+    # System message must never contain orientation content when stable prefix is on
+    assert "Run brief:" not in assembly.messages[0]["content"]
+    assert "Working memory:" not in assembly.messages[0]["content"]
+
+
+def test_monotonic_transcript_compaction_reuses_cached_truncation() -> None:
+    from smallctl.models.conversation import ConversationMessage
+
+    policy = ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4, monotonic_transcript_compaction=True)
+    assembler = PromptAssembler(policy)
+
+    long_content = "word " * 2000  # ~800 tokens
+    msg = ConversationMessage(role="user", content=long_content)
+
+    # First call with tight limit compacts the message
+    compacted_tight = assembler._compact_message_for_prompt(
+        LoopState(cwd="/tmp"),
+        msg,
+        transcript_token_limit=100,
+    )
+    tight_tokens = len(compacted_tight.content.split())
+    assert tight_tokens < 2000
+
+    # Second call with a larger limit should reuse the cached compacted version
+    compacted_loose = assembler._compact_message_for_prompt(
+        LoopState(cwd="/tmp"),
+        msg,
+        transcript_token_limit=500,
+    )
+    assert compacted_loose.content == compacted_tight.content
+
+
+def test_monotonic_transcript_compaction_does_not_cache_when_limit_tightens() -> None:
+    from smallctl.models.conversation import ConversationMessage
+
+    policy = ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4, monotonic_transcript_compaction=True)
+    assembler = PromptAssembler(policy)
+
+    long_content = "word " * 2000
+    msg = ConversationMessage(role="user", content=long_content)
+
+    # First call with loose limit compacts to a larger size
+    compacted_loose = assembler._compact_message_for_prompt(
+        LoopState(cwd="/tmp"),
+        msg,
+        transcript_token_limit=500,
+    )
+    loose_tokens = len(compacted_loose.content.split())
+
+    # Second call with tighter limit should produce a smaller message
+    compacted_tight = assembler._compact_message_for_prompt(
+        LoopState(cwd="/tmp"),
+        msg,
+        transcript_token_limit=100,
+    )
+    tight_tokens = len(compacted_tight.content.split())
+    assert tight_tokens < loose_tokens
+
+
+def test_stable_system_prefix_section_tokens_accounting() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "plan"
+    state.run_brief.original_task = "Refactor prompt flow"
+    state.run_brief.current_phase_objective = "Compile deterministic frame"
+    state.working_memory.current_goal = "Compile deterministic frame"
+    state.working_memory.next_actions = ["Wire frame into assembler"]
+
+    policy = ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4, stable_system_prefix=True)
+    assembly = PromptAssembler(policy).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    # system section should equal raw system prompt tokens (not subtracting run_brief/working_memory)
+    system_section = assembly.section_tokens["system"]
+    run_brief_section = assembly.section_tokens["run_brief"]
+    working_memory_section = assembly.section_tokens["working_memory"]
+
+    # The total should still include all three
+    total = system_section + run_brief_section + working_memory_section
+    assert total > system_section
+    assert run_brief_section > 0
+    assert working_memory_section > 0

@@ -9,8 +9,8 @@ from . import task_completion_outcomes as _task_completion_outcomes
 from . import write_session_outcomes as _write_session_outcomes
 from .deps import GraphRuntimeDeps
 from .routing import LoopRoute
-from .state import GraphRunState, ToolExecutionRecord
-from .chat_progress import _record_chat_progress_outcome
+from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
+from .chat_progress import _record_chat_progress_outcome, build_file_read_recovery_message
 from .planning_outcomes import apply_planning_tool_outcomes
 from .shell_outcomes import (
     _shell_human_retry_hint,
@@ -18,6 +18,8 @@ from .shell_outcomes import (
     _shell_workspace_relative_retry_hint,
 )
 from .tool_execution_recovery import handle_failed_file_write_outcome
+from ..harness.tool_visibility import schedule_retry_tool_exposure
+from ..models.conversation import ConversationMessage
 from .tool_execution_recovery_helpers import (
     _maybe_emit_repair_recovery_nudge,
     _maybe_schedule_repair_loop_status_autocontinue,
@@ -55,6 +57,7 @@ async def apply_tool_outcomes(
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
+        _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
         if record.tool_name == "shell_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
             _maybe_schedule_repair_loop_status_autocontinue(graph_state, harness, record)
@@ -98,6 +101,7 @@ async def apply_chat_tool_outcomes(
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
+        _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
         await handle_failed_file_write_outcome(
             graph_state=graph_state,
             harness=harness,
@@ -118,6 +122,76 @@ async def apply_chat_tool_outcomes(
     _record_chat_progress_outcome(harness, graph_state.last_tool_results)
     graph_state.last_tool_results = []
     return LoopRoute.NEXT_STEP
+
+
+def _maybe_emit_missing_requested_output_file_nudge(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "file_read" or record.result.success:
+        return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    raw_path = str(
+        record.args.get("path")
+        or metadata.get("requested_path")
+        or metadata.get("path")
+        or ""
+    ).strip()
+    if not raw_path:
+        return False
+    error_text = str(record.result.error or record.result.output or "").lower()
+    read_result = str(metadata.get("read_result") or "").strip().lower()
+    if read_result != "missing" and "does not exist" not in error_text:
+        return False
+
+    message = build_file_read_recovery_message(
+        harness,
+        PendingToolCall(tool_name="file_read", args={"path": raw_path}),
+    )
+    if "requested output file" not in message:
+        return False
+
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        harness.state.scratchpad = scratchpad
+    nudge_key = f"missing-output-file:{raw_path}"
+    if scratchpad.get("_missing_output_file_write_nudged") == nudge_key:
+        return False
+    scratchpad["_missing_output_file_write_nudged"] = nudge_key
+
+    retry_scheduled = schedule_retry_tool_exposure(
+        harness.state,
+        mode=graph_state.run_mode,
+        tool_name="file_write",
+        arguments={"path": raw_path},
+    )
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=message,
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "missing_requested_output_file",
+                "recovery_mode": "write_requested_output",
+                "path": raw_path,
+                "tool_name": "file_read",
+                "retry_tool_name": "file_write",
+                "retry_scheduled": retry_scheduled,
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "missing_requested_output_file_nudge",
+            "nudged model to write requested output file after missing file_read",
+            path=raw_path,
+            run_mode=graph_state.run_mode,
+            retry_scheduled=retry_scheduled,
+        )
+    return True
 
 
 def _update_subtask_ledger_from_record(harness: Any, record: ToolExecutionRecord) -> None:

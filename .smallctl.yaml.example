@@ -2,6 +2,7 @@ endpoint: http://localhost:8000/v1
 model: qwen3.5:4b
 phase: explore
 provider_profile: generic
+run_mode: auto
 reasoning_mode: auto
 thinking_visibility: true
 thinking_start_tag: "<thinking>"
@@ -31,6 +32,18 @@ backend_unload_command: null
 # backend_unload_command: null
 backend_healthcheck_timeout_sec: 5
 backend_restart_grace_sec: 20
+# ReWOO-style read-only evidence planning
+tool_plan_runtime_enabled: false
+tool_plan_auto_select: false
+tool_plan_readonly_only: true
+tool_plan_max_steps: 6
+tool_plan_max_repair_attempts: 1
+tool_plan_observation_token_limit: 900
+tool_plan_max_observation_chars_per_step: 600
+tool_plan_solver_fresh_output_limit: 1200
+tool_plan_allow_web: true
+tool_plan_allow_artifact_read: true
+tool_plan_fallback_to_loop_on_invalid_plan: true
 summarize_at_ratio: 0.8
 recent_message_limit: 6
 max_summary_items: 3

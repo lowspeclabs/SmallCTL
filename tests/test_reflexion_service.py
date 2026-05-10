@@ -91,3 +91,23 @@ def test_reflexion_service_ignores_below_min_severity() -> None:
 
     assert service.maybe_create_reflection(_failure("wrong_path")) is None
     assert state.reflexion_memory == []
+
+
+def test_reflexion_service_has_tool_plan_invalid_template() -> None:
+    state = LoopState()
+    service = ReflexionService(_harness(state))
+
+    reflection = service.maybe_create_reflection(_failure("tool_plan_invalid"))
+
+    assert reflection is not None
+    assert "toolplan" in reflection.lesson.lower()
+
+
+def test_reflexion_service_has_tool_plan_unsafe_template() -> None:
+    state = LoopState()
+    service = ReflexionService(_harness(state))
+
+    reflection = service.maybe_create_reflection(_failure("tool_plan_unsafe"))
+
+    assert reflection is not None
+    assert "safety policy" in reflection.lesson.lower()

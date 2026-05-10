@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from smallctl.graph.model_stream_resolution import (
+    _chunk_error_failure_message,
+    _chunk_error_failure_type,
+)
 from smallctl.graph.model_stream_fallback_support import _classify_model_call_error
+from smallctl.graph.model_stream_loop import _parse_context_window_overflow
 
 
 class _FakeResponse:
@@ -38,3 +43,28 @@ def test_non_http_error_remains_stream_error() -> None:
 
     assert error_type == "stream"
     assert details == {}
+
+
+def test_context_budget_chunk_error_reports_prompt_budget_failure() -> None:
+    details = {
+        "type": "context_budget_exceeded",
+        "provider_profile": "llamacpp",
+        "over_budget_tokens": 58,
+    }
+
+    assert (
+        _chunk_error_failure_message(details)
+        == "llamacpp prompt exceeded the local context budget before request by 58 estimated tokens"
+    )
+    assert _chunk_error_failure_type(details) == "prompt_budget"
+
+
+def test_context_overflow_details_parse_as_window_overflow() -> None:
+    details = {
+        "type": "context_budget_exceeded",
+        "context_overflow": True,
+        "request_tokens": 16385,
+        "context_limit": 16384,
+    }
+
+    assert _parse_context_window_overflow("llamacpp context window exceeded", details) == (16385, 16384)

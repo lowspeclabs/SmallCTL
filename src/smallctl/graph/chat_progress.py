@@ -30,6 +30,14 @@ _ARTIFACT_EVIDENCE_UNAVAILABLE_MARKERS = (
     "has no stored content",
     "has no content to search",
 )
+_WRITE_OUTPUT_KEYWORDS = (
+    "save",
+    "write",
+    "store",
+    "export",
+    "persist",
+    "record",
+)
 
 
 def recent_assistant_texts(harness: Any, *, limit: int = 2) -> list[str]:
@@ -331,6 +339,34 @@ def build_artifact_evidence_unavailable_message(harness: Any, *, artifact_id: st
     )
 
 
+def _task_requests_written_output_path(harness: Any, raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    normalized_path = raw_path.strip().lower()
+    path_name = Path(raw_path).name.lower()
+    task_text = _merged_task_text(harness)
+    if not task_text:
+        return False
+    mentions_path = normalized_path in task_text or (path_name and path_name in task_text)
+    if not mentions_path:
+        return False
+    return any(keyword in task_text for keyword in _WRITE_OUTPUT_KEYWORDS)
+
+
+def _has_prior_successful_evidence_for_output_write(harness: Any) -> bool:
+    history = getattr(getattr(harness, "state", None), "tool_history", [])
+    if not isinstance(history, list):
+        return False
+    for item in reversed(history):
+        text = str(item or "")
+        if "|success" not in text:
+            continue
+        tool_name = text.split("|", 1)[0]
+        if tool_name not in {"file_read", "dir_list", "memory_update", "task_complete", "task_fail"}:
+            return True
+    return False
+
+
 def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> str:
     raw_path = str(pending.args.get("path", "") or "").strip()
     state = getattr(harness, "state", None)
@@ -358,6 +394,18 @@ def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> 
             path = path.resolve()
         except Exception:
             pass
+
+    if _task_requests_written_output_path(harness, raw_path):
+        evidence_note = ""
+        if _has_prior_successful_evidence_for_output_write(harness):
+            evidence_note = " Use the prior successful tool output as the file content."
+        return (
+            f"`{path}` is the requested output file and it does not exist yet. "
+            f"Do not call `file_read` on it again. Create it with "
+            f"`file_write(path='{raw_path}', content='...')`."
+            f"{evidence_note} Do not call `task_complete` until the `file_write` succeeds."
+            f"{tx_note}"
+        )
 
     return (
         f"You already read `{path}`. Do not reread the same file; use the evidence you already "

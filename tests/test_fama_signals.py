@@ -68,3 +68,19 @@ def test_fama_state_helpers_tolerate_missing_step_field() -> None:
     push_fama_signal(state, signal, window=8)
 
     assert state.scratchpad["_fama"]["last_observed_step"] == 0
+
+
+def test_context_drift_routes_tool_plan_evidence_capsule() -> None:
+    state = LoopState(step_count=2)
+    signal = FamaSignal(
+        kind=FamaFailureKind.CONTEXT_DRIFT,
+        severity=2,
+        source="test",
+        evidence="context_missing",
+        step=2,
+        failure_class="context_missing",
+    )
+
+    mitigations = route_signal(signal, state=state, config=_Config())
+
+    assert "evidence_gathering_needed" in {item.name for item in mitigations}

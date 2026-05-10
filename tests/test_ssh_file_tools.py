@@ -906,6 +906,35 @@ def test_remote_mutation_requirement_keeps_real_redirection_after_fd_redirect_st
     assert requirement["guessed_paths"] == ["/var/log/caddy.log"]
 
 
+def test_remote_mutation_requirement_ignores_quoted_paths_in_echo_payload() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": 'echo "/etc/ld.so.cache /etc" >> /home/stephen/temp/change_risk.txt',
+        },
+    )
+
+    requirement = state.scratchpad.get(ssh_files.REMOTE_MUTATION_VERIFICATION_KEY)
+    assert isinstance(requirement, dict)
+    assert requirement["guessed_paths"] == ["/home/stephen/temp/change_risk.txt"]
+
+
+def test_remote_mutation_path_guessing_skips_known_directory_operands() -> None:
+    guessed_paths = tool_result_artifact_updates._guess_remote_mutation_paths(
+        'echo "probe /etc" > /etc',
+        deletion=False,
+    )
+
+    assert guessed_paths == []
+
+
 def test_task_complete_ignores_stale_pathless_remote_mutation_requirement() -> None:
     state = LoopState(cwd=".")
     state.acceptance_waived = True

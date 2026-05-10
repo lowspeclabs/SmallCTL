@@ -44,6 +44,11 @@ async def persist_tool_results(graph_state: GraphRunState, deps: Any) -> None:
                 result=record.result,
             )
 
+        stored_source = str(stored.get("source") or "").strip().lower()
+        if stored_source == "tool_plan" or str(record.tool_call_id or "").startswith("toolplan:"):
+            stored["hidden_from_prompt"] = True
+            harness.state.tool_execution_records[record.operation_id] = stored
+            continue
         if _has_matching_tool_message(harness, message):
             continue
         harness.state.append_message(message)

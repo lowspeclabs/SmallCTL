@@ -287,6 +287,14 @@ async def run_model_stream_loop(
 
 def _parse_context_window_overflow(err_msg: str, details: dict[str, Any]) -> tuple[int, int] | None:
     match = re.search(r"n_keep=(\d+).*?n_ctx=(\d+)", f"{err_msg} {details!r}")
-    if match is None:
-        return None
-    return int(match.group(1)), int(match.group(2))
+    if match is not None:
+        return int(match.group(1)), int(match.group(2))
+    if details.get("context_overflow") is True:
+        try:
+            request_tokens = int(details.get("request_tokens") or 0)
+            context_limit = int(details.get("context_limit") or 0)
+        except Exception:
+            return None
+        if request_tokens > 0 and context_limit > 0:
+            return request_tokens, context_limit
+    return None

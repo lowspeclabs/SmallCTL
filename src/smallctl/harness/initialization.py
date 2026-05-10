@@ -125,6 +125,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
     subtask_max_active = params.get("subtask_max_active", 1)
     subtask_max_history = params.get("subtask_max_history", 12)
     subtask_inject_completed_limit = params.get("subtask_inject_completed_limit", 3)
+    run_mode = params.get("run_mode", "auto")
+    tool_plan_runtime_enabled = params.get("tool_plan_runtime_enabled", False)
+    tool_plan_auto_select = params.get("tool_plan_auto_select", False)
+    tool_plan_readonly_only = params.get("tool_plan_readonly_only", True)
+    tool_plan_max_steps = params.get("tool_plan_max_steps", 6)
+    tool_plan_max_repair_attempts = params.get("tool_plan_max_repair_attempts", 1)
+    tool_plan_observation_token_limit = params.get("tool_plan_observation_token_limit", 900)
+    tool_plan_max_observation_chars_per_step = params.get("tool_plan_max_observation_chars_per_step", 600)
+    tool_plan_solver_fresh_output_limit = params.get("tool_plan_solver_fresh_output_limit", 1200)
+    tool_plan_allow_web = params.get("tool_plan_allow_web", True)
+    tool_plan_allow_artifact_read = params.get("tool_plan_allow_artifact_read", True)
+    tool_plan_fallback_to_loop_on_invalid_plan = params.get("tool_plan_fallback_to_loop_on_invalid_plan", True)
 
     normalized_phase = normalize_phase(phase)
     self._initial_phase = normalized_phase
@@ -243,6 +255,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
         allow_interactive_shell_approval=self.allow_interactive_shell_approval,
         shell_approval_session_default=self.shell_approval_session_default,
         provider_profile_resolved=self.provider_profile,
+        run_mode=str(run_mode or "auto"),
+        tool_plan_runtime_enabled=bool(tool_plan_runtime_enabled),
+        tool_plan_auto_select=bool(tool_plan_auto_select),
+        tool_plan_readonly_only=bool(tool_plan_readonly_only),
+        tool_plan_max_steps=int(tool_plan_max_steps),
+        tool_plan_max_repair_attempts=int(tool_plan_max_repair_attempts),
+        tool_plan_observation_token_limit=int(tool_plan_observation_token_limit),
+        tool_plan_max_observation_chars_per_step=int(tool_plan_max_observation_chars_per_step),
+        tool_plan_solver_fresh_output_limit=int(tool_plan_solver_fresh_output_limit),
+        tool_plan_allow_web=bool(tool_plan_allow_web),
+        tool_plan_allow_artifact_read=bool(tool_plan_allow_artifact_read),
+        tool_plan_fallback_to_loop_on_invalid_plan=bool(tool_plan_fallback_to_loop_on_invalid_plan),
         fama_enabled=bool(fama_enabled),
         fama_mode=str(fama_mode or "lite"),
         fama_default_ttl_steps=int(fama_default_ttl_steps),

@@ -306,7 +306,12 @@ class PromptBuilderService:
             return
 
         probe_attempted = bool(getattr(self.harness, "_runtime_context_probe_attempted", False))
-        if self.harness.server_context_limit is not None and probe_attempted:
+        provider_profile = str(getattr(self.harness, "provider_profile", "") or "").strip().lower()
+        if (
+            provider_profile != "llamacpp"
+            and self.harness.server_context_limit is not None
+            and probe_attempted
+        ):
             return
 
         try:

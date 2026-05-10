@@ -10,6 +10,14 @@ from .rendering import render_shell_failure, render_shell_output
 _LISTING_PREVIEW_ENTRY_LIMIT = 50
 _ARTIFACT_PREVIEW_CHAR_LIMIT = 4000
 _SHELL_EXEC_INLINE_CHAR_LIMIT = 1600
+_WRITE_OUTPUT_KEYWORDS = (
+    "save",
+    "write",
+    "store",
+    "export",
+    "persist",
+    "record",
+)
 
 
 def next_step_hint(
@@ -97,9 +105,17 @@ def _request_prefers_summary_exit(request_text: str | None) -> bool:
     text = re.sub(r"\s+", " ", str(request_text or "").strip().lower())
     if not text:
         return False
+    if _request_requires_saved_output(text):
+        return False
     asks_for_summary = any(keyword in text for keyword in ("table", "summary", "summarize", "report", "overview", "present"))
     asks_about_listing = any(keyword in text for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env"))
     return asks_for_summary and asks_about_listing
+
+
+def _request_requires_saved_output(text: str) -> bool:
+    if not any(keyword in text for keyword in _WRITE_OUTPUT_KEYWORDS):
+        return False
+    return bool(re.search(r"(?:^|\s)(?:\.{0,2}/)?[\w./-]+\.(?:txt|md|json|jsonl|csv|log|yaml|yml)(?:\s|$|[.,;:])", text))
 
 
 def _artifact_summary_exit_hint(

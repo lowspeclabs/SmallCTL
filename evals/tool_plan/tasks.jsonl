@@ -1,0 +1,5 @@
+{"id":"runtime_seams","task":"Read through the repo and find where runtime mode routing happens. Summarize the relevant files and functions.","tags":["repo_analysis","routing"]}
+{"id":"tool_dispatch_seams","task":"Find where tool calls are dispatched and where tool results are persisted. Summarize the flow without editing files.","tags":["repo_analysis","tools"]}
+{"id":"fama_capsule_path","task":"Find where FAMA capsules are rendered into prompts and where mitigations are routed. Summarize the implementation.","tags":["repo_analysis","fama"]}
+{"id":"web_tool_surface","task":"Inspect the web tool implementation and summarize the safety gates around search and fetch.","tags":["repo_analysis","web"]}
+

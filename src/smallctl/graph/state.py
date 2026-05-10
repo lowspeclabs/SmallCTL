@@ -318,6 +318,7 @@ def _serialize_pending_tool_call(item: PendingToolCall) -> dict[str, Any]:
         "tool_call_id": item.tool_call_id,
         "source": str(item.source or "model"),
         "raw_arguments": str(item.raw_arguments or ""),
+        "parser_metadata": _coerce_dict_payload(item.parser_metadata),
     }
 
 
@@ -337,7 +338,7 @@ def _coerce_pending_tool_call(value: Any) -> PendingToolCall | None:
         return None
     tool_call_id = value.get("tool_call_id")
     source = str(value.get("source", "model") or "model").strip().lower()
-    if source not in {"model", "system"}:
+    if source not in {"model", "system", "tool_plan"}:
         source = "model"
     return PendingToolCall(
         tool_name=str(value.get("tool_name", "")),
@@ -345,6 +346,7 @@ def _coerce_pending_tool_call(value: Any) -> PendingToolCall | None:
         tool_call_id=None if tool_call_id is None else str(tool_call_id),
         raw_arguments=str(value.get("raw_arguments", "")),
         source=source,
+        parser_metadata=_coerce_dict_payload(value.get("parser_metadata")),
     )
 
 

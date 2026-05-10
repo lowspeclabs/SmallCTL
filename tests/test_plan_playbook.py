@@ -393,6 +393,39 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "patched\n"
 
 
+def test_repair_cycle_missing_file_read_unblocks_create_write(tmp_path: Path) -> None:
+    state = _make_state()
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "new.txt"
+
+    blocked = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="hello\n",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+    assert blocked["success"] is False
+    assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
+
+    missing = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+    assert missing["success"] is False
+    assert missing["metadata"]["read_result"] == "missing"
+
+    allowed = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="hello\n",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+    assert allowed["success"] is True
+    assert target.read_text(encoding="utf-8") == "hello\n"
+
+
 def test_file_patch_exact_match_updates_target_file(tmp_path: Path) -> None:
     state = _make_state()
     target = tmp_path / "example.txt"

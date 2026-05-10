@@ -65,6 +65,8 @@ class ContextPolicy:
     max_hot_messages: int = 256
     compaction_strategy: str = "lazy"   # "lazy" | "aggressive"
     backend_profile: str = "generic"
+    stable_system_prefix: bool = False
+    monotonic_transcript_compaction: bool = False
 
     def scaled_inline_limit(
         self,

@@ -84,6 +84,11 @@ def _normalize_graph_checkpointer(value: Any) -> str:
     return backend if backend in {"memory", "file"} else "memory"
 
 
+def _normalize_run_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower().replace("-", "_")
+    return mode if mode in {"auto", "chat", "loop", "planning", "indexer", "tool_plan"} else "auto"
+
+
 def _env_config() -> dict[str, Any]:
     dotenv = _read_dotenv(Path.cwd() / ".env")
     env_or_dotenv = lambda key: os.getenv(key) or dotenv.get(key)
@@ -92,6 +97,7 @@ def _env_config() -> dict[str, Any]:
         "model": env_or_dotenv(f"{ENV_PREFIX}MODEL"),
         "phase": env_or_dotenv(f"{ENV_PREFIX}PHASE"),
         "provider_profile": env_or_dotenv(f"{ENV_PREFIX}PROVIDER_PROFILE"),
+        "run_mode": env_or_dotenv(f"{ENV_PREFIX}RUN_MODE"),
         "tool_profiles": env_or_dotenv(f"{ENV_PREFIX}TOOL_PROFILES"),
         "reasoning_mode": env_or_dotenv(f"{ENV_PREFIX}REASONING_MODE"),
         "thinking_visibility": env_or_dotenv(f"{ENV_PREFIX}THINKING_VISIBILITY"),
@@ -111,6 +117,17 @@ def _env_config() -> dict[str, Any]:
         "staged_reasoning": env_or_dotenv(f"{ENV_PREFIX}STAGED_REASONING"),
         "staged_execution_enabled": env_or_dotenv(f"{ENV_PREFIX}STAGED_EXECUTION"),
         "staged_step_prompt_tokens": env_or_dotenv(f"{ENV_PREFIX}STAGED_STEP_PROMPT_TOKENS"),
+        "tool_plan_runtime_enabled": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_RUNTIME_ENABLED"),
+        "tool_plan_auto_select": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_AUTO_SELECT"),
+        "tool_plan_readonly_only": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_READONLY_ONLY"),
+        "tool_plan_max_steps": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_MAX_STEPS"),
+        "tool_plan_max_repair_attempts": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_MAX_REPAIR_ATTEMPTS"),
+        "tool_plan_observation_token_limit": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_OBSERVATION_TOKEN_LIMIT"),
+        "tool_plan_max_observation_chars_per_step": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_MAX_OBSERVATION_CHARS_PER_STEP"),
+        "tool_plan_solver_fresh_output_limit": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_SOLVER_FRESH_OUTPUT_LIMIT"),
+        "tool_plan_allow_web": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_ALLOW_WEB"),
+        "tool_plan_allow_artifact_read": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_ALLOW_ARTIFACT_READ"),
+        "tool_plan_fallback_to_loop_on_invalid_plan": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_FALLBACK_TO_LOOP_ON_INVALID_PLAN"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -210,6 +227,8 @@ def _env_config() -> dict[str, Any]:
         cfg["staged_execution_enabled"] = _to_bool(cfg["staged_execution_enabled"])
     if "indexer" in cfg:
         cfg["indexer"] = _to_bool(cfg["indexer"])
+    if "run_mode" in cfg:
+        cfg["run_mode"] = _normalize_run_mode(cfg["run_mode"])
     if "chunk_mode_new_file_only" in cfg:
         cfg["chunk_mode_new_file_only"] = _to_bool(cfg["chunk_mode_new_file_only"])
     if "allow_multi_section_turns_for_small_edits" in cfg:
@@ -231,6 +250,12 @@ def _env_config() -> dict[str, Any]:
         "reflexion_enabled",
         "reflexion_persist_cross_task",
         "subtask_ledger_enabled",
+        "tool_plan_runtime_enabled",
+        "tool_plan_auto_select",
+        "tool_plan_readonly_only",
+        "tool_plan_allow_web",
+        "tool_plan_allow_artifact_read",
+        "tool_plan_fallback_to_loop_on_invalid_plan",
     ):
         if key in cfg:
             cfg[key] = _to_bool(cfg[key])
@@ -284,6 +309,11 @@ def _env_config() -> dict[str, Any]:
         "subtask_max_active",
         "subtask_max_history",
         "subtask_inject_completed_limit",
+        "tool_plan_max_steps",
+        "tool_plan_max_repair_attempts",
+        "tool_plan_observation_token_limit",
+        "tool_plan_max_observation_chars_per_step",
+        "tool_plan_solver_fresh_output_limit",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])

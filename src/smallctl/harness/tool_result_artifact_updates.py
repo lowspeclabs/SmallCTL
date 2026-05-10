@@ -126,7 +126,9 @@ _REMOTE_SHELL_INTERPRETER_PATHS = frozenset(
 _REMOTE_PATH_GLOB_CHARS = frozenset("*?[")
 _REMOTE_CONTROL_TOKENS = frozenset({"&&", "||", "|", ";", "\n", "&"})
 _REMOTE_REDIRECT_TOKENS = frozenset({">", ">>", "<", "<<", "<<<", "<>", ">|"})
+_REMOTE_OUTPUT_REDIRECT_TOKENS = frozenset({">", ">>", "<>", ">|"})
 _REMOTE_DELETION_COMMANDS = frozenset({"rm", "truncate"})
+_REMOTE_PATH_MUTATOR_COMMANDS = frozenset({"sed", "perl", "tee", "cp", "mv", "install"})
 
 
 def _maybe_emit_artifact_read_eof_overread_nudge(
@@ -435,13 +437,75 @@ def _guess_remote_mutation_paths(command: str, *, deletion: bool = False) -> lis
     if deletion:
         return _guess_remote_deletion_paths(command)
     paths: list[str] = []
-    for match in _REMOTE_PATH_RE.finditer(str(command or "")):
-        path = match.group(0)
-        if _remote_path_should_be_ignored(path):
-            continue
-        if path not in paths:
-            paths.append(path)
+    _collect_remote_redirection_targets(command, paths)
+    _collect_remote_mutator_operands(command, paths)
+    if _python_open_write_mutation(command):
+        for match in _REMOTE_PATH_RE.finditer(str(command or "")):
+            _append_remote_mutation_path(paths, match.group(0))
     return paths[:12]
+
+
+def _collect_remote_redirection_targets(command: str, paths: list[str]) -> None:
+    for tokens in _remote_shell_command_lines(command):
+        index = 0
+        while index < len(tokens):
+            target_index = _redirection_target_index(tokens, index, output_only=True)
+            if target_index is None:
+                index += 1
+                continue
+            if target_index < len(tokens):
+                target = _redirection_target_token(tokens[target_index])
+                _append_remote_mutation_path(paths, target)
+            index = target_index + 1
+
+
+def _collect_remote_mutator_operands(command: str, paths: list[str]) -> None:
+    for tokens in _remote_shell_command_lines(command):
+        index = 0
+        while index < len(tokens):
+            token = _shell_command_name(tokens[index])
+            if token not in _REMOTE_PATH_MUTATOR_COMMANDS:
+                index += 1
+                continue
+            index = _collect_mutator_path_operands(tokens, index, paths)
+
+
+def _collect_mutator_path_operands(tokens: list[str], command_index: int, paths: list[str]) -> int:
+    command = _shell_command_name(tokens[command_index])
+    index = command_index + 1
+    operands: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _REMOTE_CONTROL_TOKENS or token == "+":
+            break
+        target_index = _redirection_target_index(tokens, index, output_only=False)
+        if target_index is not None:
+            index = target_index + 1
+            continue
+        if token == "--" or token.startswith("-") or token in {"{}", r"\;"}:
+            index += 1
+            continue
+        normalized = _normalize_remote_mutation_operand(token)
+        if normalized:
+            operands.append(normalized)
+        index += 1
+
+    if command in {"cp", "install"} and operands:
+        _append_remote_mutation_path(paths, operands[-1])
+    else:
+        for operand in operands:
+            _append_remote_mutation_path(paths, operand)
+    return max(index, command_index + 1)
+
+
+def _python_open_write_mutation(command: str) -> bool:
+    return bool(
+        re.search(
+            r"\bpython3?\s+-c\b.*\bopen\s*\([^)]*['\"]w",
+            str(command or ""),
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
 
 
 def _guess_remote_deletion_paths(command: str) -> list[str]:
@@ -564,6 +628,41 @@ def _skip_redirection(tokens: list[str], index: int) -> int:
     return index
 
 
+def _redirection_target_index(tokens: list[str], index: int, *, output_only: bool) -> int | None:
+    token = str(tokens[index] or "").strip()
+    redirect_token = ""
+    target_index = index + 1
+    if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in _REMOTE_REDIRECT_TOKENS:
+        redirect_token = str(tokens[index + 1])
+        target_index = index + 2
+    elif token in _REMOTE_REDIRECT_TOKENS:
+        redirect_token = token
+    else:
+        compact = re.match(r"^\d*(>>?|<>|>\|)(/\S+)$", token)
+        if not compact:
+            return None
+        redirect_token = compact.group(1)
+        if output_only and redirect_token not in _REMOTE_OUTPUT_REDIRECT_TOKENS:
+            return None
+        return index
+
+    if output_only and redirect_token not in _REMOTE_OUTPUT_REDIRECT_TOKENS:
+        return None
+    if redirect_token in {"<<", "<<<"}:
+        return None
+    if target_index < len(tokens) and tokens[target_index] not in _REMOTE_CONTROL_TOKENS:
+        return target_index
+    return None
+
+
+def _redirection_target_token(token: str) -> str:
+    value = str(token or "").strip()
+    compact = re.match(r"^\d*(?:>>?|<>|>\|)(/\S+)$", value)
+    if compact:
+        return compact.group(1)
+    return value
+
+
 def _normalize_remote_deletion_operand(token: str) -> str:
     candidate = str(token or "").strip().strip("`'\"")
     candidate = candidate.rstrip(";,")
@@ -578,6 +677,49 @@ def _normalize_remote_deletion_operand(token: str) -> str:
     if _remote_path_should_be_ignored(candidate):
         return ""
     return candidate
+
+
+def _normalize_remote_mutation_operand(token: str) -> str:
+    candidate = str(token or "").strip().strip("`'\"")
+    candidate = candidate.rstrip(";,")
+    if not candidate.startswith("/"):
+        return ""
+    if any(char in candidate for char in _REMOTE_PATH_GLOB_CHARS):
+        return ""
+    if candidate.endswith("/"):
+        candidate = candidate.rstrip("/")
+    if not _REMOTE_PATH_RE.fullmatch(candidate):
+        return ""
+    if _remote_path_should_be_ignored(candidate) or _remote_path_is_known_directory(candidate):
+        return ""
+    return candidate
+
+
+def _append_remote_mutation_path(paths: list[str], path: str) -> None:
+    normalized = _normalize_remote_mutation_operand(path)
+    if normalized and normalized not in paths:
+        paths.append(normalized)
+
+
+def _remote_path_is_known_directory(path: str) -> bool:
+    return str(path or "").strip().rstrip("/") in {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    }
 
 
 def _remote_deletion_glob_empty_check(token: str) -> dict[str, str] | None:

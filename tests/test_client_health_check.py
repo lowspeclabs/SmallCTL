@@ -82,3 +82,60 @@ def test_prompt_builder_skips_context_probe_when_runtime_probe_disabled() -> Non
     asyncio.run(PromptBuilderService(harness).ensure_context_limit())
 
     assert harness._runtime_context_probe_attempted is False
+
+
+def test_prompt_builder_reprobes_llamacpp_context_limit_after_initial_probe() -> None:
+    calls: list[str] = []
+
+    async def fetch_model_context_limit() -> int | None:
+        calls.append("probe")
+        return 16384
+
+    applied: list[tuple[int, str]] = []
+
+    def apply_server_context_limit(limit: int, *, source: str) -> None:
+        applied.append((limit, source))
+        harness.server_context_limit = limit
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(
+            runtime_context_probe=True,
+            fetch_model_context_limit=fetch_model_context_limit,
+        ),
+        provider_profile="llamacpp",
+        server_context_limit=8192,
+        _runtime_context_probe_attempted=True,
+        _apply_server_context_limit=apply_server_context_limit,
+    )
+
+    import asyncio
+
+    asyncio.run(PromptBuilderService(harness).ensure_context_limit())
+
+    assert calls == ["probe"]
+    assert applied == [(16384, "runtime_probe")]
+    assert harness._runtime_context_probe_attempted is True
+
+
+def test_prompt_builder_does_not_reprobe_non_llamacpp_after_initial_probe() -> None:
+    async def fail_fetch_model_context_limit() -> int | None:
+        raise AssertionError("fetch_model_context_limit should not run after probe")
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(
+            runtime_context_probe=True,
+            fetch_model_context_limit=fail_fetch_model_context_limit,
+        ),
+        provider_profile="generic",
+        server_context_limit=8192,
+        _runtime_context_probe_attempted=True,
+        _apply_server_context_limit=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("_apply_server_context_limit should not run")
+        ),
+    )
+
+    import asyncio
+
+    asyncio.run(PromptBuilderService(harness).ensure_context_limit())
+
+    assert harness._runtime_context_probe_attempted is True

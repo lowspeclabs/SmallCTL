@@ -46,6 +46,15 @@ def test_payload_under_budget_returns_unchanged() -> None:
     assert result.kept_tool_names == ("ssh_exec", "task_complete")
 
 
+def test_request_budget_keeps_tokenizer_slop_away_from_hard_context_edge() -> None:
+    budget = build_request_budget(16384)
+
+    assert budget.reserve_completion_tokens == 1024
+    assert budget.safety_margin_tokens == 2048
+    assert budget.tokenizer_slop_tokens == 512
+    assert budget.effective_prompt_budget == 12800
+
+
 def test_payload_over_budget_drops_optional_tools_before_required_tools() -> None:
     tools = [
         _tool("artifact_read", size=3000),
@@ -155,3 +164,30 @@ def test_messages_plus_required_tools_can_exceed_budget() -> None:
 
     assert result.action == "exceeded"
     assert result.footprint.over_budget_tokens > 0
+
+
+def test_required_tool_descriptions_are_slimmed_before_declaring_budget_exceeded() -> None:
+    tools = [
+        _tool("file_read", size=1000),
+        _tool("file_write", size=1000),
+        _tool("task_complete", size=1000),
+        _tool("task_fail", size=1000),
+    ]
+    payload = _payload(tools, message_size=80)
+
+    result = fit_tools_to_context_budget(
+        payload=payload,
+        tools=tools,
+        budget=build_request_budget(3072),
+        requested_tool_name="file_write",
+        estimator=RequestEstimator(),
+    )
+
+    assert result.action == "reduced_tools"
+    assert result.footprint.over_budget_tokens == 0
+    descriptions = [
+        str(tool["function"]["description"])
+        for tool in result.payload["tools"]
+    ]
+    assert descriptions
+    assert all(len(description) <= 80 for description in descriptions)

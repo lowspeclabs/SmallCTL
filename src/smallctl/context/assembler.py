@@ -33,6 +33,7 @@ class PromptAssembler:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
         self.frame_compiler = PromptStateFrameCompiler(policy=self.policy)
+        self._compaction_cache: dict[tuple[str, str | None, str | None, str], str] = {}
 
     def build_messages(
         self,
@@ -57,9 +58,9 @@ class PromptAssembler:
         run_brief_text = frame.spine.run_brief_text
         working_memory_text = frame.spine.working_memory_text
         system_sections = [system_prompt]
-        if include_structured_sections and run_brief_text:
+        if include_structured_sections and run_brief_text and not self.policy.stable_system_prefix:
             system_sections.append(run_brief_text)
-        if include_structured_sections and working_memory_text:
+        if include_structured_sections and working_memory_text and not self.policy.stable_system_prefix:
             system_sections.append(working_memory_text)
         system_msg_text = "\n\n".join(system_sections)
         system_tokens = estimate_text_tokens(system_msg_text)
@@ -98,7 +99,7 @@ class PromptAssembler:
         fama_capsule_tokens = estimate_text_tokens("\n".join(frame.spine.fama_capsule_lines))
         recovery_guidance_tokens = estimate_text_tokens("\n".join(frame.spine.recovery_guidance_lines))
         section_tokens = {
-            "system": system_tokens - run_brief_tokens - working_memory_tokens,
+            "system": system_tokens if self.policy.stable_system_prefix else system_tokens - run_brief_tokens - working_memory_tokens,
             "recent_messages": transcript_tokens,
             "run_brief": run_brief_tokens,
             "working_memory": working_memory_tokens,
@@ -488,7 +489,21 @@ class PromptAssembler:
                 "</retrieved-knowledge-base>"
             )
             messages.append(ConversationMessage(role="user", content=wrapped_context).to_dict())
-            
+
+        if self.policy.stable_system_prefix and include_structured_sections and (run_brief_text or working_memory_text):
+            orientation_parts: list[str] = []
+            if run_brief_text:
+                orientation_parts.append(run_brief_text)
+            if working_memory_text:
+                orientation_parts.append(working_memory_text)
+            orientation_msg = (
+                "<current-orientation>\n"
+                + "\n\n".join(orientation_parts)
+                + "\n</current-orientation>"
+            )
+            messages.append(ConversationMessage(role="user", content=orientation_msg).to_dict())
+
+        if ephemeral_sections:
             objective_reminder = (
                 "<current-mission-recap>\n"
                 f"Your primary objective is STILL: {frame.spine.task_goal or 'Fulfill the user request'}\n"
@@ -825,7 +840,25 @@ class PromptAssembler:
         else:
             token_limit = max(96, transcript_token_limit)
 
+        cache_key: tuple[str, str | None, str | None, str] | None = None
+        if self.policy.monotonic_transcript_compaction:
+            cache_key = (message.role, message.name, message.tool_call_id, content)
+            cached_content = self._compaction_cache.get(cache_key)
+            if cached_content is not None:
+                if estimate_text_tokens(cached_content) <= token_limit:
+                    return ConversationMessage(
+                        role=message.role,
+                        content=cached_content,
+                        name=message.name,
+                        tool_call_id=message.tool_call_id,
+                        tool_calls=message.tool_calls,
+                        metadata=message.metadata,
+                        retrieval_safe_text=message.retrieval_safe_text,
+                    )
+
         if estimate_text_tokens(content) <= token_limit:
+            if self.policy.monotonic_transcript_compaction and cache_key is not None:
+                self._compaction_cache[cache_key] = content
             return message
 
         compact_content = content
@@ -848,6 +881,9 @@ class PromptAssembler:
             compact_content = self._truncate_text_for_prompt(
                 compact_content, token_limit=token_limit, truncation_note=truncation_note
             )
+
+        if self.policy.monotonic_transcript_compaction and cache_key is not None:
+            self._compaction_cache[cache_key] = compact_content
 
         return ConversationMessage(
             role=message.role,

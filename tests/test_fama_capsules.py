@@ -57,6 +57,17 @@ def test_fama_capsules_render_zero_test_recovery_line() -> None:
     ]
 
 
+def test_fama_capsules_render_tool_plan_evidence_line() -> None:
+    state = LoopState()
+    _activate(state, "evidence_gathering_needed")
+
+    lines = render_fama_capsules(state, token_budget=180)
+
+    assert lines == [
+        "Gather a bounded read-only ToolPlan evidence pass before patching or finishing."
+    ]
+
+
 def test_fama_capsules_respect_disabled_config() -> None:
     state = LoopState()
     state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}

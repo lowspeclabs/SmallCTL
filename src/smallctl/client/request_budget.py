@@ -12,6 +12,7 @@ class RequestBudget:
     context_limit: int
     reserve_completion_tokens: int
     safety_margin_tokens: int
+    tokenizer_slop_tokens: int
     effective_prompt_budget: int
 
 
@@ -82,11 +83,16 @@ def client_context_limit(client: Any) -> int | None:
 def build_request_budget(context_limit: int) -> RequestBudget:
     normalized_limit = max(1, int(context_limit))
     reserve_completion_tokens = 1024
-    safety_margin_tokens = max(512, normalized_limit // 16)
-    effective_prompt_budget = max(1, normalized_limit - reserve_completion_tokens - safety_margin_tokens)
+    safety_margin_tokens = max(512, normalized_limit // 8)
+    tokenizer_slop_tokens = max(256, normalized_limit // 32)
+    effective_prompt_budget = max(
+        1,
+        normalized_limit - reserve_completion_tokens - safety_margin_tokens - tokenizer_slop_tokens,
+    )
     return RequestBudget(
         context_limit=normalized_limit,
         reserve_completion_tokens=reserve_completion_tokens,
         safety_margin_tokens=safety_margin_tokens,
+        tokenizer_slop_tokens=tokenizer_slop_tokens,
         effective_prompt_budget=effective_prompt_budget,
     )

@@ -782,6 +782,94 @@ def test_stream_chat_llamacpp_preflight_reduces_before_first_request(monkeypatch
     assert {"web_search", "web_fetch", "process_kill"} & (set(original_names) - set(sent_names))
 
 
+def test_llamacpp_preflight_preserves_file_write_for_build_script_intent() -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    client.runtime_context_limit = 4096
+
+    def _tool(name: str, *, size: int = 4000) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool " + ("x" * size),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "description": "y" * size},
+                    },
+                },
+            },
+        }
+
+    tools = [
+        _tool("artifact_read"),
+        _tool("dir_list"),
+        _tool("file_read"),
+        _tool("file_write", size=100),
+        _tool("file_patch", size=100),
+        _tool("ask_human", size=100),
+        _tool("loop_status", size=100),
+        _tool("task_complete", size=100),
+        _tool("task_fail", size=100),
+    ]
+    payload = {
+        "model": client.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Build a self-contained Python script at ./temp/task_queue.py.",
+            }
+        ],
+        "stream": True,
+        "tools": tools,
+    }
+
+    result = client_transport._llamacpp_budget_preflight(client, payload=payload, stage="test")
+
+    assert result is not None
+    assert result.action == "reduced_tools"
+    assert "file_write" in result.kept_tool_names
+    assert "file_read" in result.kept_tool_names
+    assert {"artifact_read", "dir_list"} & set(result.dropped_tool_names)
+
+
+def test_stream_chat_llamacpp_context_budget_error_is_not_retryable(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    client.runtime_context_limit = 2048
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+            raise AssertionError("streamer should not be created for preflight budget failure")
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "x" * 30000}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk_error"]
+    assert events[0]["error"] == "llamacpp context budget exceeded before request"
+    assert events[0]["details"]["type"] == "context_budget_exceeded"
+    assert events[0]["details"]["recoverable"] is False
+
+
 def test_llamacpp_400_diagnostics_parse_context_overflow_body() -> None:
     summary = client_transport._summarize_http_error_body(
         "request (9214 tokens) exceeds the available context size (8192 tokens), try increasing it"
@@ -792,6 +880,61 @@ def test_llamacpp_400_diagnostics_parse_context_overflow_body() -> None:
     assert summary["request_tokens"] == 9214
     assert summary["context_limit"] == 8192
     assert summary["context_overflow_tokens"] == 1022
+
+
+def test_stream_chat_llamacpp_400_context_overflow_returns_chunk_error(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="llamacpp",
+    )
+    client.STREAM_RETRY_ATTEMPTS = 1
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, headers, payload
+            raise _http_status_error(
+                url,
+                status_code=400,
+                text="request (16385 tokens) exceeds the available context size (16384 tokens), try increasing it",
+            )
+            yield {}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run for context overflow")
+            yield {}
+
+    async def _fake_reset(_client: object) -> None:
+        return None
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+    monkeypatch.setattr(client_transport, "_reset_async_client", _fake_reset)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "continue"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk_error"]
+    assert events[0]["error"] == "llamacpp context window exceeded"
+    assert events[0]["details"]["type"] == "context_budget_exceeded"
+    assert events[0]["details"]["reason"] == "context_overflow"
+    assert events[0]["details"]["request_tokens"] == 16385
+    assert events[0]["details"]["context_limit"] == 16384
+    assert events[0]["details"]["recoverable"] is True
+    assert client.runtime_context_limit == 16384
 
 
 def test_llamacpp_400_payload_diagnostics_include_context_pressure_estimate() -> None:

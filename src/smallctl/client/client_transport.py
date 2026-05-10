@@ -31,6 +31,15 @@ _LLAMACPP_CONTEXT_OVERFLOW_RE = re.compile(
     r"request\s*\((?P<request_tokens>\d+)\s+tokens?\)\s+exceeds\s+the\s+available\s+context\s+size\s*\((?P<context_tokens>\d+)\s+tokens?\)",
     re.IGNORECASE,
 )
+_LOCAL_WRITE_INTENT_RE = re.compile(
+    r"\b(build|create|implement|write|generate|add|make)\b.*\b(file|script|module|\.py|\.js|\.ts|\.md|\.txt)\b"
+    r"|\b(file|script|module)\b.*\b(build|create|implement|write|generate|add|make)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_LOCAL_PATCH_INTENT_RE = re.compile(
+    r"\b(fix|patch|update|modify|edit|change|repair|refactor)\b",
+    re.IGNORECASE,
+)
 _UNSET = object()
 
 
@@ -812,6 +821,43 @@ def _provider_400_chunk_error_details(
     }
 
 
+def _llamacpp_context_overflow_chunk_error_details(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    body_summary: dict[str, Any],
+    status_code: int,
+    attempt: int,
+) -> dict[str, Any]:
+    context_limit = body_summary.get("context_limit")
+    request_tokens = body_summary.get("request_tokens")
+    budget_limit = context_limit if isinstance(context_limit, int) else _client_context_limit(client)
+    budget = build_request_budget(budget_limit) if isinstance(budget_limit, int) else None
+    details: dict[str, Any] = {
+        "type": "context_budget_exceeded",
+        "reason": "context_overflow",
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "status_code": status_code,
+        "attempt": attempt,
+        "recoverable": True,
+        **_summarize_400_payload(payload, context_limit=budget_limit),
+        **body_summary,
+    }
+    if budget is not None:
+        details.update(
+            {
+                "effective_prompt_budget": budget.effective_prompt_budget,
+                "reserve_completion_tokens": budget.reserve_completion_tokens,
+                "safety_margin_tokens": budget.safety_margin_tokens,
+                "tokenizer_slop_tokens": budget.tokenizer_slop_tokens,
+            }
+        )
+    if isinstance(request_tokens, int) and isinstance(budget_limit, int):
+        details["over_budget_tokens"] = max(0, request_tokens - budget_limit)
+    return details
+
+
 def _provider_400_error_message(details: dict[str, Any]) -> str:
     provider = str(details.get("provider_profile") or "provider")
     upstream = str(details.get("upstream_provider") or "").strip()
@@ -887,6 +933,7 @@ def _log_llamacpp_budget_preflight(
                 "effective_prompt_budget": budget.effective_prompt_budget,
                 "reserve_completion_tokens": budget.reserve_completion_tokens,
                 "safety_margin_tokens": budget.safety_margin_tokens,
+                "tokenizer_slop_tokens": budget.tokenizer_slop_tokens,
                 "estimated_payload_tokens": result.footprint.estimated_payload_tokens,
                 "estimated_message_tokens": result.footprint.estimated_message_tokens,
                 "estimated_tool_tokens": result.footprint.estimated_tool_tokens,
@@ -969,6 +1016,7 @@ def _llamacpp_budget_preflight(
         payload=payload,
         tools=tools,
         budget=budget,
+        requested_tool_name=_infer_llamacpp_requested_tool(payload, tools),
         estimator=RequestEstimator(),
     )
     displayed_context_limit = limit if log_context_limit is _UNSET else log_context_limit
@@ -983,6 +1031,45 @@ def _llamacpp_budget_preflight(
         reduction_reason=reduction_reason,
     )
     return result
+
+
+def _payload_text_for_tool_inference(payload: dict[str, Any], *, limit: int = 12000) -> str:
+    pieces: list[str] = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            pieces.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    pieces.append(str(item.get("text") or ""))
+        if sum(len(piece) for piece in pieces) >= limit:
+            break
+    return "\n".join(pieces)[-limit:]
+
+
+def _infer_llamacpp_requested_tool(payload: dict[str, Any], tools: list[dict[str, Any]]) -> str:
+    """Keep the task-critical mutation tool alive when shrinking llama.cpp payloads."""
+    available = {_tool_name(tool) for tool in tools if _tool_name(tool)}
+    text = _payload_text_for_tool_inference(payload)
+    if {"file_write", "file_patch", "ast_patch"} & available:
+        if "file_write" in available and _LOCAL_WRITE_INTENT_RE.search(text):
+            return "file_write"
+        if "file_patch" in available and _LOCAL_PATCH_INTENT_RE.search(text):
+            return "file_patch"
+        if "ast_patch" in available and _LOCAL_PATCH_INTENT_RE.search(text):
+            return "ast_patch"
+    if {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"} & available:
+        lower_text = text.lower()
+        if "ssh_file_write" in available and ("ssh" in lower_text or "remote" in lower_text):
+            if _LOCAL_WRITE_INTENT_RE.search(text):
+                return "ssh_file_write"
+        if "ssh_file_patch" in available and ("ssh" in lower_text or "remote" in lower_text):
+            if _LOCAL_PATCH_INTENT_RE.search(text):
+                return "ssh_file_patch"
+    return ""
 
 
 def _build_llamacpp_reduced_tools_payload(
@@ -1106,6 +1193,7 @@ async def stream_chat(
                     "effective_prompt_budget": budget.effective_prompt_budget if budget else None,
                     "reserve_completion_tokens": budget.reserve_completion_tokens if budget else None,
                     "safety_margin_tokens": budget.safety_margin_tokens if budget else None,
+                    "tokenizer_slop_tokens": budget.tokenizer_slop_tokens if budget else None,
                     "estimated_payload_tokens": initial_llamacpp_budget.footprint.estimated_payload_tokens,
                     "estimated_message_tokens": initial_llamacpp_budget.footprint.estimated_message_tokens,
                     "estimated_tool_tokens": initial_llamacpp_budget.footprint.estimated_tool_tokens,
@@ -1114,6 +1202,7 @@ async def stream_chat(
                     "dropped_tool_names": list(initial_llamacpp_budget.dropped_tool_names),
                     "kept_tool_names": list(initial_llamacpp_budget.kept_tool_names),
                     "over_budget_tokens": initial_llamacpp_budget.footprint.over_budget_tokens,
+                    "recoverable": False,
                 },
             }
             return
@@ -1410,6 +1499,20 @@ async def stream_chat(
                         client,
                         observed_context_limit if isinstance(observed_context_limit, int) else None,
                     )
+                    if body_summary.get("context_overflow") is True:
+                        details = _llamacpp_context_overflow_chunk_error_details(
+                            client,
+                            payload=current_payload,
+                            body_summary=body_summary,
+                            status_code=status_code,
+                            attempt=attempt,
+                        )
+                        yield {
+                            "type": "chunk_error",
+                            "error": "llamacpp context window exceeded",
+                            "details": details,
+                        }
+                        return
                 diagnostics = {
                     **_summarize_400_payload(current_payload, context_limit=_client_context_limit(client)),
                     **body_summary,
@@ -1610,6 +1713,9 @@ async def stream_chat(
                                 "effective_prompt_budget": build_request_budget(
                                     fallback_limit
                                 ).effective_prompt_budget,
+                                "tokenizer_slop_tokens": build_request_budget(
+                                    fallback_limit
+                                ).tokenizer_slop_tokens,
                                 "estimated_payload_tokens": budget_result.footprint.estimated_payload_tokens,
                                 "estimated_message_tokens": budget_result.footprint.estimated_message_tokens,
                                 "estimated_tool_tokens": budget_result.footprint.estimated_tool_tokens,
@@ -1618,6 +1724,7 @@ async def stream_chat(
                                 "dropped_tool_names": list(budget_result.dropped_tool_names),
                                 "kept_tool_names": list(budget_result.kept_tool_names),
                                 "over_budget_tokens": budget_result.footprint.over_budget_tokens,
+                                "recoverable": False,
                             },
                         }
                         return

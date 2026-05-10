@@ -213,9 +213,10 @@ async def file_read(
     target = _resolve(path, cwd)
     source = _active_session_staging_path(state, path, cwd) or target
     if not source.exists():
+        _record_repair_cycle_read(state, target)
         return fail(
             _missing_path_error(requested_path=path, resolved_path=target, cwd=cwd),
-            metadata={"path": str(target), "requested_path": path},
+            metadata={"path": str(target), "requested_path": path, "read_result": "missing"},
         )
     try:
         source_size = source.stat().st_size

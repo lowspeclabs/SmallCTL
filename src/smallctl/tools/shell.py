@@ -24,6 +24,7 @@ from .shell_support import (
     _detect_unsupported_shell_syntax,
     _extract_missing_argparse_arguments,
     _foreground_command_guard,
+    _interactive_installer_yes_pipe_guard,
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
     _shell_write_session_artifact_delete_guard,
@@ -380,6 +381,9 @@ async def shell_exec(
     )
     if foreground_guard is not None:
         return foreground_guard
+    yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="shell_exec")
+    if yes_pipe_guard is not None:
+        return yes_pipe_guard
     return await shell_exec_foreground(
         command,
         state=state,

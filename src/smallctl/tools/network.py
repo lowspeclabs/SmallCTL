@@ -13,7 +13,11 @@ from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .shell import create_process
 from .process_streams import read_stream_chunks
-from .shell_support import _foreground_command_guard
+from .shell_support import (
+    InvalidInputLoopDetector,
+    _foreground_command_guard,
+    _interactive_installer_yes_pipe_guard,
+)
 from .ui_streaming import BufferedUIEventEmitter
 
 if TYPE_CHECKING:
@@ -566,6 +570,23 @@ async def run_ssh_command(
             },
         )
 
+    yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="ssh_exec")
+    if yes_pipe_guard is not None:
+        metadata = dict(yes_pipe_guard.get("metadata") or {})
+        metadata.update(
+            {
+                "host": host,
+                "user": user,
+                **_ssh_execution_debug_metadata(
+                    password=password,
+                    identity_file=identity_file,
+                    strict_host_key_checking=strict_host_key_mode,
+                ),
+            }
+        )
+        yes_pipe_guard["metadata"] = metadata
+        return yes_pipe_guard
+
     foreground_guard = _foreground_command_guard(command, tool_name="ssh_exec")
     if foreground_guard is not None:
         metadata = dict(foreground_guard.get("metadata") or {})
@@ -617,6 +638,7 @@ async def run_ssh_command(
     )
 
     last_process_output: dict[str, Any] | None = None
+    invalid_input_loop: dict[str, Any] | None = None
 
     def _build_process_output(
         *,
@@ -660,6 +682,7 @@ async def run_ssh_command(
 
         stdout_data: list[str] = []
         stderr_data: list[str] = []
+        invalid_input_detector = InvalidInputLoopDetector()
         stream_emitter = BufferedUIEventEmitter(
             harness=harness,
             event_type=UIEventType.SHELL_STREAM,
@@ -667,6 +690,25 @@ async def run_ssh_command(
 
         async def read_stream(stream: Any, out_list: list[str]) -> None:
             async def handle_chunk(chunk_str: str) -> None:
+                nonlocal invalid_input_loop
+                if invalid_input_loop is None:
+                    loop_metadata = invalid_input_detector.observe(chunk_str)
+                    if loop_metadata is not None:
+                        invalid_input_loop = {
+                            **loop_metadata,
+                            "command": command,
+                            "tool_name": "ssh_exec",
+                            "host": host,
+                            "user": user,
+                        }
+                        if proc.returncode is None:
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
                 await stream_emitter.emit_text(chunk_str)
 
             await read_stream_chunks(stream, out_list, chunk_size=4096, on_chunk=handle_chunk, idle_timeout_sec=30)
@@ -717,6 +759,25 @@ async def run_ssh_command(
                 "ssh_option_retry": "strict_host_key_checking_no",
                 "ssh_option_retry_reason": "accept_new_incompatible",
             }
+
+        if invalid_input_loop is not None:
+            return fail(
+                "SSH command stopped after repeated invalid interactive input. "
+                "Use documented non-interactive flags, a config/preseed file, or an explicit prompt answer script.",
+                metadata={
+                    "output": output,
+                    "output_received": bool(
+                        str(output.get("stdout") or "").strip()
+                        or str(output.get("stderr") or "").strip()
+                    ),
+                    "failure_kind": "interactive_input_loop",
+                    "ssh_error_class": "interactive_invalid_input_loop",
+                    "ssh_transport_succeeded": True,
+                    **execution_debug_metadata,
+                    **retry_metadata,
+                    **invalid_input_loop,
+                },
+            )
 
         if proc.returncode != 0:
             err_output = output.get("stderr", "")

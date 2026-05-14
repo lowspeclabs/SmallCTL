@@ -11,10 +11,12 @@ from .common import fail, needs_human, ok
 from .process_streams import read_stream_chunks
 from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
 from .shell_support import (
+    InvalidInputLoopDetector,
     _build_argparse_missing_args_question,
     _build_shell_status_update,
     _detect_unsupported_shell_syntax,
     _extract_missing_argparse_arguments,
+    _interactive_installer_yes_pipe_guard,
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
     _shell_workspace_relative_hint,
@@ -80,6 +82,9 @@ async def shell_exec_foreground(
             authoring_guard = _shell_execution_authoring_guard(state, command)
             if authoring_guard is not None:
                 return authoring_guard
+            yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="shell_exec")
+            if yes_pipe_guard is not None:
+                return yes_pipe_guard
             unsupported_shell_message = _detect_unsupported_shell_syntax(command)
             if unsupported_shell_message:
                 return needs_human(
@@ -125,6 +130,8 @@ async def shell_exec_foreground(
             stdout_data = []
             stderr_data = []
             detection_buffer = ""
+            invalid_input_loop: dict[str, Any] | None = None
+            invalid_input_detector = InvalidInputLoopDetector()
             heartbeat_interval = _shell_status_update_interval(timeout_sec)
             start_time = time.monotonic()
             stream_emitter = BufferedUIEventEmitter(
@@ -133,10 +140,10 @@ async def shell_exec_foreground(
             )
 
             async def read_stream(stream, out_list, is_stderr: bool = False):
-                nonlocal password_prompt_detected, detection_buffer
+                nonlocal password_prompt_detected, detection_buffer, invalid_input_loop
 
                 async def handle_chunk(chunk_str: str) -> None:
-                    nonlocal password_prompt_detected, detection_buffer
+                    nonlocal password_prompt_detected, detection_buffer, invalid_input_loop
 
                     if not password_prompt_detected:
                         detection_buffer += chunk_str
@@ -147,6 +154,19 @@ async def shell_exec_foreground(
                             if pattern.search(detection_buffer):
                                 password_prompt_detected = True
                                 break
+                    if invalid_input_loop is None:
+                        loop_metadata = invalid_input_detector.observe(chunk_str)
+                        if loop_metadata is not None:
+                            invalid_input_loop = {
+                                **loop_metadata,
+                                "command": command,
+                                "tool_name": "shell_exec",
+                            }
+                            if proc and proc.returncode is None:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
 
                     await stream_emitter.emit_text(chunk_str)
 
@@ -240,6 +260,13 @@ async def shell_exec_foreground(
                     output["progress_updates"] = progress_updates
 
             execution_sec = time.monotonic() - start_time
+
+            if invalid_input_loop is not None:
+                return fail(
+                    "Command stopped after repeated invalid interactive input. "
+                    "Use documented non-interactive flags, a config/preseed file, or an explicit prompt answer script.",
+                    metadata={"output": output, **invalid_input_loop},
+                )
 
             if password_prompt_detected:
                 if proc and proc.returncode is None:

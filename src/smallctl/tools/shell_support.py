@@ -15,6 +15,94 @@ _ARGPARSE_REQUIRED_ARGS_PATTERN = re.compile(
     r"(?:error:\s*)?the following arguments are required:\s*(.+)",
     re.IGNORECASE,
 )
+_YES_PIPE_PATTERN = re.compile(
+    r"(?:^|[;&(]\s*)yes(?:\s+[^|;&]+)?\s*\|\s*(?P<target>[^;&|]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_INVALID_INPUT_MARKERS = (
+    "invalid input, please try again",
+    "answer not recognized",
+)
+
+
+def _interactive_installer_yes_pipe_guard(
+    command: str,
+    *,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    raw = str(command or "").strip()
+    if not raw:
+        return None
+
+    for match in _YES_PIPE_PATTERN.finditer(raw):
+        target = " ".join(str(match.group("target") or "").split())
+        target_lower = target.lower()
+        if not _looks_like_interactive_installer_target(target_lower):
+            continue
+        return fail(
+            f"`{tool_name}` blocked `yes |` automation for an interactive installer: `{raw}`. "
+            "Use the installer's non-interactive mode when available, such as `--autoaccept` or `-y`; "
+            "otherwise use a config/preseed file or an explicit `printf` script with known answers.",
+            metadata={
+                "command": raw,
+                "reason": "unsafe_yes_pipe_interactive_installer",
+                "detected_target": target,
+                "next_required_action": {
+                    "strategy": "use_structured_noninteractive_install",
+                    "preferred_inputs": [
+                        "--autoaccept or -y if the installer documents it",
+                        "a preseed/config file such as .fogsettings",
+                        "an explicit printf script with known prompt answers",
+                    ],
+                },
+            },
+        )
+    return None
+
+
+def _looks_like_interactive_installer_target(target_lower: str) -> bool:
+    if not target_lower:
+        return False
+    words = _split_shell_words(target_lower)
+    if not words:
+        return False
+    executable = Path(words[0]).name
+    if executable in {"bash", "sh", "dash", "zsh", "ksh", "env"}:
+        return any(_looks_like_interactive_installer_word(word) for word in words[1:])
+    return any(_looks_like_interactive_installer_word(word) for word in words)
+
+
+def _looks_like_interactive_installer_word(word: str) -> bool:
+    name = Path(str(word or "")).name.lower()
+    return bool(name) and (name.endswith(".sh") or "install" in name)
+
+
+class InvalidInputLoopDetector:
+    def __init__(self, *, threshold: int = 3, max_tail_chars: int = 4096) -> None:
+        self.threshold = max(1, int(threshold))
+        self.max_tail_chars = max(512, int(max_tail_chars))
+        self.count = 0
+        self.output_tail = ""
+
+    def observe(self, chunk: str) -> dict[str, Any] | None:
+        text = str(chunk or "")
+        if not text:
+            return None
+        self.output_tail = (self.output_tail + text)[-self.max_tail_chars :]
+        lowered = text.lower()
+        self.count += sum(lowered.count(marker) for marker in _INVALID_INPUT_MARKERS)
+        if self.count < self.threshold:
+            return None
+        return {
+            "reason": "interactive_invalid_input_loop",
+            "invalid_input_count": self.count,
+            "output_tail": self.output_tail,
+            "diagnosis": (
+                "The command is repeatedly rejecting automated input. Stop this run and replace "
+                "blanket input piping with documented non-interactive flags, a config/preseed file, "
+                "or an explicit prompt answer script."
+            ),
+        }
 
 
 def _extract_missing_argparse_arguments(error_text: str) -> list[str]:

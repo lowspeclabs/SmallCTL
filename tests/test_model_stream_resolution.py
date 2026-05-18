@@ -5,7 +5,9 @@ import time
 from types import SimpleNamespace
 
 import smallctl.graph.model_stream as model_stream_module
-from smallctl.client import StreamResult
+import smallctl.graph.model_stream_loop as model_stream_loop_module
+from smallctl.client import OpenAICompatClient, StreamResult
+from smallctl.graph.model_stream_loop import run_model_stream_loop
 from smallctl.graph.model_stream import process_model_stream
 from smallctl.graph.model_stream_resolution import resolve_model_stream_result
 from smallctl.graph.state import GraphRunState
@@ -83,6 +85,135 @@ class _RemoteFallbackClient:
         }
 
 
+class _ReasoningOnlyClient:
+    model = "qwen3.5:9b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        for _ in range(3):
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "still thinking"
+                            }
+                        }
+                    ]
+                },
+            }
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "Done."
+                        }
+                    }
+                ]
+            },
+        }
+
+
+def _incident_native_tool_call_chunks(*, wrapped: bool = True) -> list[dict[str, object]]:
+    raw_chunks: list[dict[str, object]] = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "Gathering low-level host facts.\n",
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_diskstats",
+                                "type": "function",
+                                "function": {
+                                    "name": "ssh_exec",
+                                    "arguments": (
+                                        '{"host":"192.168.1.89","command":"cat /proc/diskstats | head -20"}'
+                                    ),
+                                },
+                            },
+                            {
+                                "index": 1,
+                                "id": "call_free",
+                                "type": "function",
+                                "function": {
+                                    "name": "ssh_exec",
+                                    "arguments": '{"host":"192.168.1.89","command":"free -m"}',
+                                },
+                            },
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 2,
+                                "id": "call_dmesg",
+                                "type": "function",
+                                "function": {
+                                    "name": "ssh_exec",
+                                    "arguments": (
+                                        '{"host":"192.168.1.89","command":"dmesg 2>/dev/null | tail -30 | '
+                                        'grep -iE \\"error|fail|overrun|timeout|I/O\\" || echo \\"dmesg not '
+                                        'available or no errors\\""}'
+                                    ),
+                                },
+                            },
+                            {
+                                "index": 3,
+                                "id": "call_ss",
+                                "type": "function",
+                                "function": {
+                                    "name": "ssh_exec",
+                                    "arguments": (
+                                        '{"host":"192.168.1.89","command":"ss -tuln 2>/dev/null || '
+                                        'netstat -tuln 2>/dev/null || echo \\"network tools not available\\""}'
+                                    ),
+                                },
+                            },
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+    ]
+    if not wrapped:
+        return raw_chunks
+    return [{"type": "chunk", "data": chunk} for chunk in raw_chunks]
+
+
 def _build_state_with_write_session() -> LoopState:
     state = LoopState(cwd="/tmp")
     session = new_write_session(
@@ -94,6 +225,38 @@ def _build_state_with_write_session() -> LoopState:
     session.write_sections_completed = ["imports"]
     state.write_session = session
     return state
+
+
+def test_reasoning_only_stream_retries_with_action_nudge(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _ReasoningOnlyClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}]
+
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "what is the weather?"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert graph_state.final_result is None
+    assert len(harness.client.calls) == 2
+    assert "too long in reasoning" in harness.client.calls[1]["messages"][-1]["content"]
+    assert result["stream_completed_cleanly"] is True
 
 
 def test_stream_chunk_error_schedules_one_auto_resume_for_recoverable_write_session() -> None:
@@ -396,3 +559,102 @@ def test_stalled_ssh_file_write_stream_uses_remote_write_fallback() -> None:
     assert harness.client.calls[0]["tools"] == []
     assert harness.client.calls[0]["messages"][-1]["role"] == "user"
     assert state.scratchpad["_last_remote_write_fallback"]["target_path"] == "/var/www/html/index.html"
+
+
+def test_collect_stream_accepts_raw_provider_native_tool_call_chunks() -> None:
+    stream = OpenAICompatClient.collect_stream(_incident_native_tool_call_chunks(wrapped=False))
+
+    assert [call["id"] for call in stream.tool_calls] == [
+        "call_diskstats",
+        "call_free",
+        "call_dmesg",
+        "call_ss",
+    ]
+    assert all(call["function"]["name"] == "ssh_exec" for call in stream.tool_calls)
+    assert "cat /proc/diskstats" in stream.tool_calls[0]["function"]["arguments"]
+    assert "network tools not available" in stream.tool_calls[3]["function"]["arguments"]
+
+
+def test_clean_stream_with_multiple_native_tool_calls_survives_resolution() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=_incident_native_tool_call_chunks(),
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=False,
+            stream_ended_without_done_details={},
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=True,
+            echo_to_stdout=False,
+            messages=[{"role": "user", "content": "triage 192.168.1.89"}],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.halted is False
+    assert len(result.stream.tool_calls) == 4
+    assert [call["id"] for call in result.stream.tool_calls] == [
+        "call_diskstats",
+        "call_free",
+        "call_dmesg",
+        "call_ss",
+    ]
+    assert "_last_tool_call_aggregation_failure" not in state.scratchpad
+
+
+def test_tool_calls_finish_without_collected_calls_schedules_recovery_nudge() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        }
+    ]
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=chunks,
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=False,
+            stream_ended_without_done_details={},
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=True,
+            echo_to_stdout=False,
+            messages=[{"role": "user", "content": "triage 192.168.1.89"}],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.halted is True
+    assert result.halt_reason == "tool_call_aggregation_failure"
+    assert state.scratchpad["_last_tool_call_aggregation_failure"]["saw_tool_calls_finish"] is True
+    assert any(
+        message.metadata.get("recovery_kind") == "tool_call_aggregation_failure"
+        for message in state.recent_messages
+    )

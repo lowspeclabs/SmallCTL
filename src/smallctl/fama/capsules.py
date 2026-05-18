@@ -12,10 +12,12 @@ CAPSULE_TEXT: dict[str, str] = {
     "acceptance_checklist_capsule": "Use the acceptance checklist and latest verifier result as the finish gate.",
     "zero_test_recovery_capsule": "Latest test evidence discovered 0 tests; add real test classes/functions and rerun that test command before finishing.",
     "remote_scope_capsule": "Remote scope is active; use SSH tools for remote paths and verify remotely before finishing.",
+    "remote_verification_pending_capsule": "A remote mutation is pending verification; read back the remote path/state instead of rediscovering local paths.",
     "micro_plan_capsule": "Break the next move into one concrete action, expected evidence, and stop condition.",
     "evidence_reuse_capsule": "Use visible evidence before repeating the same read or command.",
     "tool_exposure_narrowing": "Do not repeat the same tool call; use prior output or switch to one different tool/action that can create new evidence.",
     "evidence_gathering_needed": "Gather a bounded read-only ToolPlan evidence pass before patching or finishing.",
+    "evidence_gathering_needed_hard_route": "",
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
 }

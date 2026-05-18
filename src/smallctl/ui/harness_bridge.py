@@ -92,6 +92,12 @@ class HarnessBridge:
             from ..state import LoopState
 
             self.harness.state = LoopState.from_dict(state_payload)
+            if isinstance(getattr(self.harness.state, "scratchpad", None), dict):
+                self.harness.state.scratchpad["_session_restored"] = True
+                self.harness.state.scratchpad["_resume_contract"] = {
+                    "kind": "chat_session_resume",
+                    "thread_id": str(getattr(self.harness.state, "thread_id", "") or ""),
+                }
             self.harness._sync_run_logger_session_id()
             return {
                 "thread_id": str(getattr(self.harness.state, "thread_id", "") or ""),
@@ -197,12 +203,32 @@ class HarnessBridge:
         return loop
 
 
-def _serialize_recent_messages(state: Any) -> list[dict[str, str]]:
-    serialized: list[dict[str, str]] = []
-    for message in list(getattr(state, "recent_messages", []) or []):
+def _serialize_recent_messages(state: Any) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    source_messages = list(getattr(state, "transcript_messages", []) or [])
+    if not source_messages:
+        source_messages = list(getattr(state, "recent_messages", []) or [])
+    for message in source_messages:
         role = str(getattr(message, "role", "") or "").strip().lower()
-        content = str(getattr(message, "content", "") or "").strip()
-        if not role or not content:
+        if not role:
             continue
-        serialized.append({"role": role, "content": content})
+        content_value = getattr(message, "content", None)
+        content = "" if content_value is None else str(content_value)
+        tool_calls = getattr(message, "tool_calls", None)
+        has_tool_calls = isinstance(tool_calls, list) and bool(tool_calls)
+        if not content.strip() and not has_tool_calls:
+            continue
+        payload: dict[str, Any] = {"role": role, "content": content}
+        name = getattr(message, "name", None)
+        if name:
+            payload["name"] = str(name)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            payload["tool_call_id"] = str(tool_call_id)
+        if has_tool_calls:
+            payload["tool_calls"] = tool_calls
+        metadata = getattr(message, "metadata", None)
+        if isinstance(metadata, dict) and metadata:
+            payload["metadata"] = metadata
+        serialized.append(payload)
     return serialized

@@ -27,6 +27,18 @@ _NGINX_UNEXPECTED_EOF_RE = re.compile(
     r"unexpected\s+end\s+of\s*file",
     re.IGNORECASE,
 )
+_LOCAL_REMOTE_BLOCKER_RE = re.compile(
+    r'The account\s+"[^"]+"\s+already exists'
+    r"|Please remove the account"
+    r"|set a new service username"
+    r"|\buserdel\s+\S+"
+    r"|\bfailed to create symbolic link\b.*?\bFile exists\b"
+    r"|\b(?:bash|sh):\s+line\s+\d+:\s+\S+:\s+command not found\b"
+    r"|\bpermission denied\b"
+    r"|\bSorry,\s+answer not recognized\b"
+    r"|\bAre you sure you wish to continue\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _record_output_text(record: ToolExecutionRecord) -> str:
@@ -234,6 +246,8 @@ def _maybe_schedule_web_search_for_repeated_error(
 
     error = _record_output_text(record)
     if not error or len(error) < 20:
+        return False
+    if record.tool_name in {"ssh_exec", "shell_exec"} and _LOCAL_REMOTE_BLOCKER_RE.search(error):
         return False
 
     # Normalize signature: first 200 chars, collapsed whitespace

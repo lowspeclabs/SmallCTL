@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from ..diagnostic_tasks import diagnostic_failure_completion_allowed
 from ..models.tool_result import ToolEnvelope
 from .config import done_gate_on_failure, fama_enabled
+from .fingerprints import active_done_gate_fingerprints, normalize_verifier_target
 from .signals import get_fama_state
 from .state import active_mitigation_names
 
@@ -69,7 +71,6 @@ def enforce_fama_tool_call(
     mode: str,
     config: Any = None,
 ) -> ToolEnvelope | None:
-    del arguments
     config = _effective_config(state, config)
     if not fama_enabled(config) or not done_gate_on_failure(config):
         return None
@@ -81,6 +82,11 @@ def enforce_fama_tool_call(
     verdict = str((verifier or {}).get("verdict") or "").strip().lower()
     if verdict == "pass" or bool(getattr(state, "acceptance_waived", False)):
         return None
+    message = str((arguments or {}).get("message") or "")
+    if diagnostic_failure_completion_allowed(state, message=message, verifier=verifier):
+        return None
+    required_fps = active_done_gate_fingerprints(state)
+    actual_fp = normalize_verifier_target(str((verifier or {}).get("command") or (verifier or {}).get("target") or ""))
     return ToolEnvelope(
         success=False,
         error=(
@@ -91,6 +97,9 @@ def enforce_fama_tool_call(
             "reason": "fama_done_gate",
             "active_mitigation": "done_gate",
             "last_verifier_verdict": verifier,
+            "required_fingerprints": sorted(required_fps),
+            "actual_fingerprint": actual_fp,
+            "fingerprint_match": bool(actual_fp and actual_fp in required_fps),
             "mode": str(mode or ""),
             "next_required_action": "run verification, satisfy acceptance, or call task_fail with the blocker",
         },

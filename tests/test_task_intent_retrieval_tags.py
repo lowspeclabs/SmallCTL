@@ -196,6 +196,48 @@ def test_retrieval_penalizes_generic_task_complete_memories_for_vague_prompts() 
     assert bundle.experiences[0].memory_id == "mem-greeting"
 
 
+def test_retrieval_bundle_reports_ranked_candidates_and_miss_reasons() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "inspect alpha beta"
+    state.working_memory.current_goal = "inspect alpha beta"
+    state.artifacts = {
+        "A1": ArtifactRecord(
+            artifact_id="A1",
+            kind="tool_result",
+            source="/tmp/alpha.txt",
+            created_at="2026-01-01T00:00:00Z",
+            size_bytes=100,
+            summary="alpha beta primary file",
+            keywords=["alpha", "beta"],
+            tool_name="file_read",
+            inline_content="alpha beta selected content",
+        ),
+        "A2": ArtifactRecord(
+            artifact_id="A2",
+            kind="tool_result",
+            source="/tmp/beta.txt",
+            created_at="2026-01-01T00:00:01Z",
+            size_bytes=100,
+            summary="alpha beta secondary file",
+            keywords=["alpha", "beta"],
+            tool_name="file_read",
+            inline_content="alpha beta unselected content",
+        ),
+    }
+
+    retriever = LexicalRetriever(policy=ContextPolicy(max_artifact_snippets=1))
+    bundle = retriever.retrieve_bundle(
+        state=state,
+        query="inspect alpha beta",
+        include_experiences=False,
+    )
+
+    assert [snippet.artifact_id for snippet in bundle.artifacts] == ["A2"]
+    assert [candidate["artifact_id"] for candidate in bundle.ranked_candidates["artifacts"][:2]] == ["A2", "A1"]
+    assert bundle.ranked_candidates["artifacts"][0]["tool_name"] == "file_read"
+    assert bundle.miss_reasons["experiences"] == ["experiences_disabled"]
+
+
 def test_chat_task_mode_suppresses_execution_biased_retrieval_and_chat_tools() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "execute"
@@ -398,6 +440,64 @@ def test_remote_failure_artifact_is_downranked_after_same_target_success() -> No
     )
 
     assert success_score > failure_score
+
+
+def test_remote_repair_retrieval_prefers_interactive_ssh_failure_over_meta_failure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.task_mode = "remote_execute"
+    state.current_phase = "repair"
+    state.active_intent = "requested_ssh_exec"
+    state.intent_tags = ["ssh_exec", "phase_repair"]
+    state.last_failure_class = "verifier_failed"
+    state.run_brief.original_task = "install FOG over SSH on root@192.168.1.89"
+    state.working_memory.current_goal = "Continue remote task over SSH and restart the installation"
+    state.artifacts = {
+        "A0019": _artifact(
+            "A0019",
+            kind="artifact_grep",
+            path="artifact_grep",
+            summary="Query 'y/N|yes|n/no' looks like a regex, but artifact_grep uses literal substring matching",
+            metadata={
+                "success": False,
+                "error": "Query 'y/N|yes|n/no' looks like a regex",
+                "intent": "requested_ssh_exec",
+                "phase": "repair",
+            },
+        ),
+        "A0025": _artifact(
+            "A0025",
+            kind="ssh_exec",
+            path="/root/fogproject/bin/installfog.sh",
+            summary="Remote SSH command exited with code 1",
+            metadata={
+                "success": False,
+                "host": "192.168.1.89",
+                "command": "cd /root/fogproject/bin && echo \"n\" | ./installfog.sh",
+                "failure_kind": "remote_command",
+                "ssh_transport_succeeded": True,
+                "output_received": True,
+                "intent": "requested_ssh_exec",
+                "phase": "repair",
+                "output": {
+                    "stdout": "Should the installer try to disable the local firewall for you now? (y/N)\n"
+                    "Are you sure you wish to continue (Y/N)\n"
+                    "Sorry, answer not recognized",
+                    "stderr": "",
+                    "exit_code": 1,
+                },
+            },
+        ),
+    }
+
+    snippets = LexicalRetriever(ContextPolicy(max_artifact_snippets=4)).retrieve_artifacts(
+        state=state,
+        query=build_retrieval_query(state),
+        token_budget=4000,
+    )
+
+    assert snippets
+    assert snippets[0].artifact_id == "A0025"
+    assert "A0019" not in {snippet.artifact_id for snippet in snippets[:1]}
 
 
 def test_single_file_non_detail_retrieval_keeps_one_primary_file() -> None:

@@ -12,6 +12,7 @@ from smallctl.state import (
     EvidenceRecord,
     EpisodicSummary,
     ExperienceMemory,
+    FailureEvent,
     LoopState,
     MemoryEntry,
     TurnBundle,
@@ -582,6 +583,60 @@ def test_frame_compiler_prunes_verifier_invalidated_optimistic_items() -> None:
     assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["S-neutral"]
 
 
+def test_frame_compiler_keeps_newer_password_summary_after_old_verifier_failure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.invalidate_context(
+        reason="verifier_failed",
+        details={
+            "command": "curl -s https://fogproject.org/scripts/fog-install.sh | bash",
+            "target": "192.168.1.89 :: curl -s https://fogproject.org/scripts/fog-install.sh | bash",
+            "failure_mode": "logic",
+            "state_change": "Verifier failure invalidated optimistic context",
+        },
+    )
+
+    summaries = [
+        EpisodicSummary(
+            summary_id="task-0003-summary",
+            created_at="2026-05-14T19:45:10+00:00",
+            notes=[
+                'Task task-0003 failed: ssh root@192.168.1.89 with password "Temp@Pass" and install fog pxe server.'
+            ],
+            failed_approaches=["Guard tripped: repeated tool call loop"],
+        )
+    ]
+
+    frame = PromptStateFrameCompiler().compile(state=state, retrieved_summaries=summaries)
+
+    assert [summary.summary_id for summary in frame.evidence_packet.summaries] == ["task-0003-summary"]
+    assert not [
+        drop
+        for drop in frame.drop_log
+        if drop.lane == "episodic_summaries" and "task-0003-summary" in drop.dropped_ids
+    ]
+
+
+def test_password_text_is_not_treated_as_optimistic_context() -> None:
+    state = LoopState(cwd="/tmp")
+    state.working_memory.known_facts = ['SSH password is "Temp@Pass" for the remote host']
+    state.working_memory.known_fact_meta = [
+        MemoryEntry(
+            content='SSH password is "Temp@Pass" for the remote host',
+            freshness="current",
+            confidence=0.9,
+        )
+    ]
+
+    event = state.invalidate_context(
+        reason="verifier_failed",
+        details={"state_change": "Verifier failure invalidated optimistic context"},
+    )
+
+    assert event["invalidated_fact_count"] == 0
+    assert state.working_memory.known_fact_meta[0].freshness == "current"
+
+
 def test_frame_compiler_treats_fama_failure_like_verifier_failure() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"
@@ -1104,3 +1159,273 @@ def test_path_scoped_verifier_failure_preserves_unrelated_validated_remote_facts
     assert event["paths"] == ["/var/log/caddy/*.log"]
     assert event["invalidated_fact_count"] == 0
     assert "A-caddyfile" not in state.scratchpad.get("_artifact_staleness", {})
+
+
+def test_phase_advanced_execute_to_repair_preserves_failure_evidence_and_artifacts() -> None:
+    """Regression: after a failed installer, execute->repair must keep diagnostic context."""
+    state = LoopState(cwd="/tmp")
+    state.step_count = 12
+    state.current_phase = "repair"
+
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-fog-error",
+            statement="CRITICAL: ERROR: Site 001-fog does not exist!",
+            phase="execute",
+            tool_name="ssh_exec",
+            created_at_step=8,
+            negative=True,
+            metadata={"command": "bash /opt/fog/install.sh", "exit_code": 1, "stderr": "Site does not exist"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-php-missing",
+            statement="Module php does not exist!",
+            phase="execute",
+            tool_name="ssh_exec",
+            created_at_step=9,
+            negative=True,
+            metadata={"command": "apachectl configtest"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-db-missing",
+            statement="db.cfg MISSING",
+            phase="execute",
+            tool_name="ssh_file_read",
+            created_at_step=9,
+            negative=True,
+            metadata={"path": "/opt/fog/db.cfg"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-success-claim",
+            statement="Installation completed successfully",
+            phase="execute",
+            tool_name="ssh_exec",
+            created_at_step=10,
+            negative=False,
+            metadata={"command": "bash /opt/fog/install.sh"},
+        ),
+    ]
+
+    state.artifacts = {
+        "A-installer-output": ArtifactRecord(
+            artifact_id="A-installer-output",
+            kind="ssh_exec",
+            source="bash /opt/fog/install.sh",
+            created_at="2026-05-14T20:00:00+00:00",
+            size_bytes=256,
+            summary="Installer output containing failure strings: Site 001-fog does not exist",
+            tool_name="ssh_exec",
+            metadata={"phase": "execute", "created_at_step": 8, "command": "bash /opt/fog/install.sh", "exit_code": 1},
+        ),
+        "A-success-artifact": ArtifactRecord(
+            artifact_id="A-success-artifact",
+            kind="file_write",
+            source="/opt/fog/config.php",
+            created_at="2026-05-14T20:00:00+00:00",
+            size_bytes=128,
+            summary="Install succeeded",
+            tool_name="file_write",
+            metadata={"phase": "execute", "created_at_step": 10, "path": "/opt/fog/config.php", "verifier_verdict": "pass"},
+        ),
+    }
+
+    event = state.invalidate_context(
+        reason="phase_advanced",
+        details={"from_phase": "execute", "to_phase": "repair"},
+    )
+
+    stale_obs = set(state.scratchpad.get("_observation_staleness", {}).keys())
+    stale_art = set(state.scratchpad.get("_artifact_staleness", {}).keys())
+
+    assert "E-fog-error" not in stale_obs
+    assert "E-php-missing" not in stale_obs
+    assert "E-db-missing" not in stale_obs
+    assert "E-success-claim" in stale_obs
+
+    assert "A-installer-output" not in stale_art
+    assert "A-success-artifact" in stale_art
+
+    assert event["invalidated_observation_count"] == 1
+    assert event["invalidated_artifact_count"] == 1
+
+
+def test_verifier_failed_preserves_negative_evidence_and_stores_repair_capsule() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 7
+    state.current_phase = "repair"
+    state.last_failure_class = "logic"
+    state.working_memory.failures = ["Tried reinstalling FOG"]
+    state.working_memory.next_actions = ["Check PHP module availability"]
+    state.failure_events = [
+        FailureEvent(
+            event_id="F-1",
+            timestamp=0.0,
+            failure_class="logic",
+            severity="recoverable",
+            source="verifier",
+            message="FOG installer failed",
+            suggested_next_action="Inspect apache modules",
+        )
+    ]
+    state.last_verifier_verdict = {"verdict": "fail", "exit_code": 1, "command": "bash /opt/fog/install.sh"}
+
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-negative",
+            statement="FOG installer returned error",
+            phase="execute",
+            tool_name="ssh_exec",
+            negative=True,
+            metadata={"command": "bash /opt/fog/install.sh"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-optimistic",
+            statement="All tests pass after patch",
+            phase="execute",
+            tool_name="ssh_exec",
+            negative=False,
+            metadata={"command": "bash /opt/fog/install.sh", "verifier_verdict": "pass"},
+        ),
+    ]
+
+    event = state.invalidate_context(
+        reason="verifier_failed",
+        details={
+            "command": "bash /opt/fog/install.sh",
+            "target": "192.168.1.89 :: bash /opt/fog/install.sh",
+            "failure_mode": "logic",
+        },
+    )
+
+    stale_obs = set(state.scratchpad.get("_observation_staleness", {}).keys())
+    assert "E-negative" not in stale_obs
+    assert "E-optimistic" in stale_obs
+
+    capsule = state.scratchpad.get("_repair_continuity_capsule")
+    assert isinstance(capsule, dict)
+    assert capsule["command"] == "bash /opt/fog/install.sh"
+    assert capsule["failure_mode"] == "logic"
+    assert capsule["verdict"] == "fail"
+    assert capsule["exit_code"] == 1
+    assert capsule["last_attempted_fix"] == "Tried reinstalling FOG"
+    assert capsule["next_suggested_action"] == "Check PHP module availability"
+    assert capsule["suggested_next_action"] == "Inspect apache modules"
+
+    frame = PromptStateFrameCompiler().compile(state=state)
+    wm_text = frame.spine.working_memory_text
+    assert "Repair continuity:" in wm_text
+    assert "Failed command: bash /opt/fog/install.sh" in wm_text
+    assert "Suspected cause: logic" in wm_text
+    assert "Last attempted fix: Tried reinstalling FOG" in wm_text
+    assert "Next suggested action: Check PHP module availability" in wm_text
+
+
+def test_repair_continuity_capsule_expires_after_five_turns() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 12
+    state.scratchpad["_repair_continuity_capsule"] = {
+        "created_at_step": 6,
+        "command": "bash /opt/fog/install.sh",
+        "failure_mode": "logic",
+    }
+
+    frame = PromptStateFrameCompiler().compile(state=state)
+    wm_text = frame.spine.working_memory_text
+    assert "Repair continuity:" not in wm_text
+
+    state.step_count = 11
+    frame = PromptStateFrameCompiler().compile(state=state)
+    wm_text = frame.spine.working_memory_text
+    assert "Repair continuity:" in wm_text
+
+
+def test_guard_trip_preserved_context_survives_stale_lane_filters() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 15
+    state.current_phase = "execute"
+    state.scratchpad["_guard_trip_preserved_summary_ids"] = ["task-0003-summary"]
+    state.scratchpad["_guard_trip_preserved_artifact_ids"] = ["A0010"]
+    state.scratchpad["_guard_trip_preserved_observation_ids"] = ["E-A0010"]
+    state.scratchpad["_guard_trip_recovery_capsule"] = {
+        "created_at_step": 15,
+        "summary_id": "task-0003-summary",
+        "failed_tool": "web_fetch",
+        "goal": "Install FOG after web research",
+        "preserved_artifact_ids": ["A0010"],
+    }
+    state.scratchpad["_summary_staleness"] = {
+        "task-0003-summary": {"stale": True, "reason": "context_invalidated"}
+    }
+    state.scratchpad["_artifact_staleness"] = {
+        "A0010": {"stale": True, "reason": "phase_advanced"},
+        "A-web": {"stale": True, "reason": "phase_advanced"},
+    }
+    state.scratchpad["_observation_staleness"] = {
+        "E-A0010": {"stale": True, "reason": "phase_advanced"},
+        "E-web": {"stale": True, "reason": "phase_advanced"},
+    }
+
+    summary = EpisodicSummary(
+        summary_id="task-0003-summary",
+        created_at="2026-05-14T19:45:10+00:00",
+        notes=["Task task-0003 failed after PHP dependencies were installed"],
+        failed_approaches=["Guard tripped: repeated tool call loop"],
+        artifact_ids=["A0010"],
+    )
+    state.artifacts = {
+        "A0010": ArtifactRecord(
+            artifact_id="A0010",
+            kind="ssh_exec",
+            source="apt-get install -y php php-cli",
+            created_at="2026-05-14T19:45:01+00:00",
+            size_bytes=200,
+            summary="ssh_exec SUCCESS: apt-get install -y php php-cli",
+            tool_name="ssh_exec",
+            metadata={"success": True, "exit_code": 0, "evidence_id": "E-A0010"},
+        ),
+        "A-web": ArtifactRecord(
+            artifact_id="A-web",
+            kind="web_fetch",
+            source="web_fetch",
+            created_at="2026-05-14T19:45:02+00:00",
+            size_bytes=100,
+            summary="Web fetch budget exhausted",
+            tool_name="web_fetch",
+            metadata={"evidence_id": "E-web"},
+        ),
+    }
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-A0010",
+            statement="ssh_exec SUCCESS: apt-get install -y php php-cli",
+            phase="execute",
+            tool_name="ssh_exec",
+            metadata={"artifact_id": "A0010"},
+        ),
+        EvidenceRecord(
+            evidence_id="E-web",
+            statement="web_fetch failed: budget exhausted",
+            phase="execute",
+            tool_name="web_fetch",
+            metadata={"artifact_id": "A-web"},
+        ),
+    ]
+
+    frame = PromptStateFrameCompiler().compile(
+        state=state,
+        retrieved_summaries=[summary],
+        retrieved_artifacts=[
+            ArtifactSnippet(artifact_id="A0010", text="PHP dependencies installed"),
+            ArtifactSnippet(artifact_id="A-web", text="web fetch failed"),
+        ],
+    )
+
+    assert [item.summary_id for item in frame.evidence_packet.summaries] == ["task-0003-summary"]
+    assert [item.artifact_id for item in frame.artifact_packet.snippets] == ["A0010"]
+    assert [item.observation_id for item in frame.evidence_packet.observations] == ["E-A0010"]
+    assert "Guard trip recovery:" in frame.spine.working_memory_text
+    assert "Do not retry web_fetch with the same arguments" in frame.spine.working_memory_text
+
+    dropped = {(item.lane, tuple(item.dropped_ids)) for item in frame.drop_log}
+    assert ("artifact_snippets", ("A-web",)) in dropped
+    assert ("normalized_observations", ("E-web",)) in dropped

@@ -46,6 +46,7 @@ from .tool_call_parser_support import (
     _fallback_repeated_file_read,
     _find_full_file_artifact_for_path,
     _file_read_line_progress_is_progress,
+    _repair_empty_target_file_patch_to_file_write,
     _is_strict_subpath,
     _normalize_json_like,
     _normalize_path_token,

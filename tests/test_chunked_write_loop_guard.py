@@ -21,6 +21,7 @@ from smallctl.tools.fs_loop_guard import (
     build_loop_guard_status,
     clear_loop_guard_outline_requirement,
     clear_loop_guard_verification_requirement,
+    outline_mode_violation,
 )
 from smallctl.write_session_fsm import new_write_session
 
@@ -288,6 +289,57 @@ def test_full_script_under_full_file_can_finalize_candidate(tmp_path: Path) -> N
     assert result["metadata"]["write_session_final_chunk"] is True
 
 
+def test_accidental_full_file_first_chunk_with_next_section_becomes_final_candidate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "path_normalizer.py"
+    _attach_write_session(state, target)
+    full_script = (
+        "#!/usr/bin/env python3\n"
+        "import unittest\n\n"
+        "class PathNormalizer:\n"
+        "    def normalize(self, path):\n"
+        "        if not path:\n"
+        "            return ''\n"
+        "        rooted = path.startswith('/')\n"
+        "        parts = []\n"
+        "        for part in path.split('/'):\n"
+        "            if part in ('', '.'):\n"
+        "                continue\n"
+        "            if part == '..':\n"
+        "                if parts:\n"
+        "                    parts.pop()\n"
+        "                continue\n"
+        "            parts.append(part)\n"
+        "        normalized = '/'.join(parts)\n"
+        "        return '/' + normalized if rooted and normalized else ('/' if rooted else normalized)\n\n"
+        "class TestPathNormalizer(unittest.TestCase):\n"
+        "    def test_simple_paths(self):\n"
+        "        self.assertEqual(PathNormalizer().normalize('a/./b'), 'a/b')\n\n"
+        "    def test_root_bounds(self):\n"
+        "        self.assertEqual(PathNormalizer().normalize('/../../a'), '/a')\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n"
+    )
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=full_script,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="imports_and_class",
+            replace_strategy="overwrite",
+            next_section_name="tests",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section"] == ""
+    assert state.write_session.write_next_section == ""
+
+
 def _seed_outline_mode(state: LoopState, target: Path, *, pending_read: bool = False) -> str:
     resolved = str(target.resolve())
     state.scratchpad["_chunk_write_loop_guard"] = {
@@ -312,6 +364,51 @@ def _seed_outline_mode(state: LoopState, target: Path, *, pending_read: bool = F
         },
     }
     return resolved
+
+
+def test_outline_mode_allows_task_complete_for_finalizable_write_session(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "guarded.py"
+    _seed_outline_mode(state, target, pending_read=True)
+    session = new_write_session(
+        session_id="ws-guard",
+        target_path=str(target),
+        intent="replace_file",
+    )
+    session.write_sections_completed = ["imports_and_class"]
+    session.write_next_section = ""
+    state.write_session = session
+
+    violation = outline_mode_violation(
+        state,
+        tool_name="task_complete",
+        args={"message": "complete"},
+    )
+
+    assert violation is None
+
+
+def test_outline_mode_still_blocks_task_complete_for_incomplete_write_session(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "guarded.py"
+    _seed_outline_mode(state, target, pending_read=True)
+    session = new_write_session(
+        session_id="ws-guard",
+        target_path=str(target),
+        intent="replace_file",
+        next_section="tests",
+    )
+    session.write_sections_completed = ["imports_and_class"]
+    state.write_session = session
+
+    violation = outline_mode_violation(
+        state,
+        tool_name="task_complete",
+        args={"message": "complete"},
+    )
+
+    assert violation is not None
+    assert "LoopGuard outline mode is active" in violation["message"]
 
 
 def test_chunked_write_loop_guard_requires_read_after_checkpoint_revisit(tmp_path: Path) -> None:

@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from smallctl.graph.runtime_base import GraphNodeTimeoutError, RuntimeGraphBuilder
 from smallctl.graph.runtime_payloads import execute_streaming_graph
 
 
@@ -66,3 +69,110 @@ def test_execute_streaming_graph_finalizes_cancelled_runs_before_reraising() -> 
     assert harness._cancel_requested is False
     assert harness._active_dispatch_task is None
     assert compiled.get_state_calls == 0
+
+
+def test_runtime_graph_node_wrapper_logs_entry_exit() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    harness = SimpleNamespace(config=SimpleNamespace(graph_node_timeout_sec=1))
+    harness._runlog = lambda event, message, **data: events.append((event, data))
+    runtime = SimpleNamespace(deps=SimpleNamespace(harness=harness))
+
+    async def node(payload):  # type: ignore[no-untyped-def]
+        return {"ok": payload["ok"]}
+
+    wrapped = RuntimeGraphBuilder._wrap_node(runtime, "interpret_model_output", node)
+    result = asyncio.run(wrapped({"ok": True}))
+
+    assert result == {"ok": True}
+    assert [event for event, _ in events] == [
+        "interpret_model_output_start",
+        "interpret_model_output_end",
+    ]
+    assert events[0][1]["node"] == "interpret_model_output"
+
+
+def test_runtime_graph_node_wrapper_times_out_hung_node() -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    harness = SimpleNamespace(config=SimpleNamespace(graph_node_timeout_sec=0.01))
+    harness._runlog = lambda event, message, **data: events.append((event, data))
+    runtime = SimpleNamespace(deps=SimpleNamespace(harness=harness))
+
+    async def node(_payload):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(1)
+
+    wrapped = RuntimeGraphBuilder._wrap_node(runtime, "interpret_model_output", node)
+
+    with pytest.raises(GraphNodeTimeoutError) as exc_info:
+        asyncio.run(wrapped({}))
+
+    assert exc_info.value.node_name == "interpret_model_output"
+    assert [event for event, _ in events] == [
+        "interpret_model_output_start",
+        "interpret_model_output_timeout",
+    ]
+
+
+def test_execute_streaming_graph_finalizes_node_timeout() -> None:
+    class _TimeoutCompiledGraph:
+        async def astream(self, payload, config):  # type: ignore[no-untyped-def]
+            del payload, config
+            raise GraphNodeTimeoutError("dispatch_tools", 0.01)
+            yield {}
+
+        def get_state(self, config):  # type: ignore[no-untyped-def]
+            del config
+            raise AssertionError("get_state() should not run after node timeout")
+
+    harness = _Harness()
+    harness.config = SimpleNamespace(graph_idle_watchdog_sec=0)
+    harness._failure = lambda message, error_type, details=None: {
+        "status": "failed",
+        "reason": message,
+        "error": {"type": error_type, "details": details or {}},
+    }
+    runtime = SimpleNamespace(deps=SimpleNamespace(harness=harness))
+
+    result = asyncio.run(
+        execute_streaming_graph(
+            runtime,
+            {"input_task": "demo"},
+            build_graph=_TimeoutCompiledGraph,
+            empty_result_message="unused",
+            recursion_limit=8,
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert result["error"]["type"] == "graph_node_timeout"
+    assert result["error"]["details"] == {"node": "dispatch_tools", "timeout_sec": 0.01}
+
+
+def test_execute_streaming_graph_logs_idle_watchdog_when_graph_is_silent() -> None:
+    class _SilentCompiledGraph:
+        async def astream(self, payload, config):  # type: ignore[no-untyped-def]
+            del payload, config
+            await asyncio.sleep(0.03)
+            yield {"__interrupt__": {"question": "continue?"}}
+
+        def get_state(self, config):  # type: ignore[no-untyped-def]
+            del config
+            return SimpleNamespace(values={})
+
+    harness = _Harness()
+    harness.config = SimpleNamespace(graph_idle_watchdog_sec=0.01)
+    events: list[str] = []
+    harness._runlog = lambda event, message, **data: events.append(event)
+    runtime = SimpleNamespace(deps=SimpleNamespace(harness=harness))
+
+    result = asyncio.run(
+        execute_streaming_graph(
+            runtime,
+            {"input_task": "demo"},
+            build_graph=_SilentCompiledGraph,
+            empty_result_message="unused",
+            recursion_limit=8,
+        )
+    )
+
+    assert result["status"] == "needs_human"
+    assert "harness_idle_watchdog" in events

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from typing import Any, AsyncIterator
 
 try:
@@ -15,6 +16,25 @@ except Exception:  # pragma: no cover
 from .chunk_parser import chunk_contains_tool_call_delta
 from .provider_adapters import get_provider_adapter
 from ..logging_utils import log_kv
+
+
+def summarize_stream_chunk(obj: Any) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        return {"type": type(obj).__name__}
+    choices = obj.get("choices")
+    delta: dict[str, Any] = {}
+    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    raw_delta = first_choice.get("delta") if isinstance(first_choice, dict) else None
+    if isinstance(raw_delta, dict):
+        delta = raw_delta
+    content = delta.get("content")
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    return {
+        "content_delta": str(content or "")[:120],
+        "reasoning_delta": str(reasoning or "")[:120],
+        "tool_call_delta": chunk_contains_tool_call_delta(obj),
+        "finish_reason": first_choice.get("finish_reason") if isinstance(first_choice, dict) else None,
+    }
 
 
 class SSEStreamer:
@@ -88,6 +108,7 @@ class SSEStreamer:
         chunk_count = 0
         saw_done = False
         tool_call_stream_active = False
+        recent_chunks: deque[dict[str, Any]] = deque(maxlen=5)
         read_timeout_cap = max(
             float(self.STREAM_READ_TIMEOUT_SEC),
             float(self.tool_call_continuation_timeout_sec),
@@ -138,6 +159,7 @@ class SSEStreamer:
                                 "timeout_sec": read_timeout,
                                 "tool_call_stream_active": False,
                                 "chunk_count": 0,
+                                "last_chunks": [],
                             },
                         }
                         return
@@ -169,6 +191,7 @@ class SSEStreamer:
                                     "message": message,
                                     "timeout_sec": read_timeout,
                                     "tool_call_stream_active": True,
+                                    "last_chunks": list(recent_chunks),
                                 },
                             }
                             return
@@ -207,6 +230,7 @@ class SSEStreamer:
                         )
                     continue
                 chunk_count += 1
+                recent_chunks.append(summarize_stream_chunk(obj))
                 if chunk_contains_tool_call_delta(obj):
                     tool_call_stream_active = True
                 if isinstance(obj, dict) and "error" in obj:
@@ -243,6 +267,7 @@ class SSEStreamer:
                     # The outer stream_chat retry loop will re-attempt the full call
                     # rather than crashing the run on transient upstream errors
                     # (e.g. Venice "list index out of range" mid-stream).
+                    details["last_chunks"] = list(recent_chunks)
                     yield {"type": "chunk_error", "error": message, "details": details}
                     return
 
@@ -268,12 +293,14 @@ class SSEStreamer:
                     "stream_ended_without_done",
                     "chat stream ended without [DONE]",
                     chunk_count=chunk_count,
+                    last_chunks=list(recent_chunks),
                 )
             yield {
                 "type": "stream_ended_without_done",
                 "details": {
                     "chunk_count": chunk_count,
                     "tool_call_stream_active": tool_call_stream_active,
+                    "last_chunks": list(recent_chunks),
                 },
             }
 
@@ -291,7 +318,13 @@ class SSEStreamer:
         fallback_payload = dict(payload)
         fallback_payload["stream"] = False
         fallback_payload.pop("stream_options", None)
-        response = await client.post(url, headers=headers, json=fallback_payload)
+        timeout = httpx.Timeout(
+            connect=self.STREAM_CONNECT_TIMEOUT_SEC,
+            read=self.STREAM_READ_TIMEOUT_SEC,
+            write=self.STREAM_WRITE_TIMEOUT_SEC,
+            pool=self.STREAM_POOL_TIMEOUT_SEC,
+        )
+        response = await client.post(url, headers=headers, json=fallback_payload, timeout=timeout)
         response.raise_for_status()
         obj = response.json()
         if self.run_logger:

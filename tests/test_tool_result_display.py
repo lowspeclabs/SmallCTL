@@ -40,6 +40,23 @@ def test_format_tool_result_display_keeps_short_errors_unchanged() -> None:
     assert rendered == "Short failure."
 
 
+def test_format_tool_result_display_labels_ssh_remote_nonzero_as_reached_host() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="Remote SSH command exited with code 2",
+        metadata={
+            "failure_mode": "remote_exit_nonzero",
+            "ssh_error_class": "remote_exit_nonzero",
+            "ssh_transport_succeeded": True,
+        },
+    )
+
+    rendered = format_tool_result_display(tool_name="ssh_exec", result=result)
+
+    assert rendered.startswith("SSH reached the remote host; remote command exited non-zero.")
+    assert "Remote SSH command exited with code 2" in rendered
+
+
 def test_format_tool_result_display_preserves_word_boundaries_in_tail_guidance() -> None:
     prefix = "Patch-existing write sessions need an explicit first-chunk choice. " * 8
     tail = (
@@ -135,3 +152,30 @@ def test_ssh_file_write_compact_message_is_actionable_confirmation() -> None:
     assert "readback verified: yes" in rendered
     assert "Tool output captured as Artifact" not in rendered
     assert "artifact_read" not in rendered
+
+
+def test_ssh_exec_compact_message_labels_remote_nonzero_as_reached_host() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0101",
+        kind="ssh_exec",
+        source="ssh://root@192.168.1.63",
+        created_at="2026-04-30T00:00:00+00:00",
+        size_bytes=512,
+        summary="ssh_exec failure",
+        tool_name="ssh_exec",
+    )
+    result = ToolEnvelope(
+        success=False,
+        error="Remote SSH command exited with code 2",
+        metadata={
+            "failure_mode": "remote_exit_nonzero",
+            "ssh_error_class": "remote_exit_nonzero",
+            "ssh_transport_succeeded": True,
+            "output": {"stdout": "", "stderr": "", "exit_code": 2},
+        },
+    )
+
+    rendered = format_compact_tool_message(artifact, result)
+
+    assert rendered.startswith("SSH reached the remote host; remote command exited non-zero.")
+    assert "Remote SSH command exited with code 2" in rendered

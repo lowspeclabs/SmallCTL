@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from smallctl.context.messages import next_step_hint
 from smallctl.graph.chat_progress import build_file_read_recovery_message
+from smallctl.graph.interpret_nodes import _working_memory_signals_completion
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_outcomes import _maybe_emit_missing_requested_output_file_nudge
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
+from smallctl.tools.control import task_complete
 
 
 def test_missing_requested_output_file_read_recovery_points_to_file_write(tmp_path) -> None:
@@ -125,3 +128,79 @@ def test_summary_exit_hint_is_suppressed_when_request_requires_saved_output() ->
     )
 
     assert "Synthesize the answer now" not in hint
+
+
+def test_missing_required_input_file_recovery_suggests_nearby_match(tmp_path) -> None:
+    (tmp_path / "foginstall.txt").write_text("install notes", encoding="utf-8")
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = (
+        'read fogxinstall.txt and follow the instructions to install fog server on root@192.168.1.89'
+    )
+    state.working_memory.current_goal = state.run_brief.original_task
+    harness = SimpleNamespace(state=state)
+
+    message = build_file_read_recovery_message(
+        harness,
+        PendingToolCall(tool_name="file_read", args={"path": "fogxinstall.txt"}),
+    )
+
+    assert "required input file" in message
+    assert "does not exist" in message
+    assert "`foginstall.txt`" in message
+    assert "Do not claim the task is complete" in message
+
+
+def test_missing_required_input_file_nudge_records_completion_blocker(tmp_path) -> None:
+    (tmp_path / "foginstall.txt").write_text("install notes", encoding="utf-8")
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "read fogxinstall.txt and install FOG"
+    state.working_memory.current_goal = state.run_brief.original_task
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+    )
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-missing-input", run_mode="chat")
+    record = ToolExecutionRecord(
+        operation_id="op-file-read-missing-input",
+        tool_name="file_read",
+        args={"path": "fogxinstall.txt"},
+        tool_call_id="call-file-read-missing-input",
+        result=ToolEnvelope(
+            success=False,
+            error=f"File does not exist: {tmp_path / 'fogxinstall.txt'}",
+            metadata={
+                "path": str(tmp_path / "fogxinstall.txt"),
+                "read_result": "missing",
+                "requested_path": "fogxinstall.txt",
+            },
+        ),
+    )
+
+    assert _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record) is True
+
+    recovery_message = state.recent_messages[-1]
+    assert recovery_message.metadata["recovery_kind"] == "missing_required_input_file"
+    assert state.scratchpad["_unresolved_missing_input_file"]["path"] == "fogxinstall.txt"
+    assert "missing_required_input_file_nudge" in runlog_events
+
+
+def test_task_complete_blocks_unresolved_missing_required_input(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.scratchpad["_unresolved_missing_input_file"] = {"path": "fogxinstall.txt"}
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(task_complete("done", state, harness))
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "missing_required_input_file"
+    assert "fogxinstall.txt" in result["error"]
+
+
+def test_force_finalize_completion_signal_ignores_missing_required_input(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.scratchpad["_task_complete"] = True
+    state.scratchpad["_unresolved_missing_input_file"] = {"path": "fogxinstall.txt"}
+    harness = SimpleNamespace(state=state)
+
+    assert _working_memory_signals_completion(harness) is False

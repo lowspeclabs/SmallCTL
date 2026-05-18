@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..client.request_budget import build_request_budget
+
+
+_PROVIDER_REQUEST_BUDGET_PROFILES = {"llamacpp"}
+
 
 def resolve_effective_prompt_budget(
     *,
@@ -10,12 +15,16 @@ def resolve_effective_prompt_budget(
     server_context_limit: int | None,
     current_max_prompt_tokens: int | None = None,
     observed_n_keep: int | None = None,
+    provider_profile: str | None = None,
 ) -> int | None:
     candidates: list[int] = []
     if configured_max_prompt_tokens is not None and configured_max_prompt_tokens_explicit:
         candidates.append(max(64, int(configured_max_prompt_tokens)))
 
-    derived_server_budget = derive_prompt_budget_from_context_limit(server_context_limit)
+    derived_server_budget = derive_prompt_budget_from_context_limit(
+        server_context_limit,
+        provider_profile=provider_profile,
+    )
     if derived_server_budget is not None:
         candidates.append(derived_server_budget)
 
@@ -62,29 +71,27 @@ def apply_server_context_limit(
         and harness.server_context_limit is not None
         and observed_n_keep >= harness.server_context_limit
     )
-    preserve_configured_budget = (
-        configured_budget is not None
-        and configured_budget_explicit
-        and not overflow_detected
+    effective_max_prompt_tokens = resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=configured_budget,
+        configured_max_prompt_tokens_explicit=configured_budget_explicit,
+        server_context_limit=harness.server_context_limit,
+        current_max_prompt_tokens=harness.context_policy.max_prompt_tokens,
+        observed_n_keep=observed_n_keep if overflow_detected else None,
+        provider_profile=getattr(harness, "provider_profile", None),
     )
-    if preserve_configured_budget:
-        effective_max_prompt_tokens = max(64, int(configured_budget))
-    else:
-        effective_max_prompt_tokens = resolve_effective_prompt_budget(
-            configured_max_prompt_tokens=configured_budget,
-            configured_max_prompt_tokens_explicit=configured_budget_explicit,
-            server_context_limit=harness.server_context_limit,
-            current_max_prompt_tokens=harness.context_policy.max_prompt_tokens,
-            observed_n_keep=observed_n_keep,
-        )
     if effective_max_prompt_tokens is not None:
         harness.context_policy.max_prompt_tokens = effective_max_prompt_tokens
+    preserved_configured_budget = (
+        configured_budget is not None
+        and configured_budget_explicit
+        and effective_max_prompt_tokens == max(64, int(configured_budget))
+    )
 
     partition_context = harness.context_policy.max_prompt_tokens or harness.server_context_limit
     if partition_context is not None:
         harness.context_policy.recalculate_quotas(
             partition_context,
-            backend_profile=harness.provider_profile,
+            backend_profile=getattr(harness, "provider_profile", None),
         )
         model_name = getattr(getattr(harness, "client", None), "model", None)
         harness.context_policy.apply_model_profile(model_name)
@@ -100,7 +107,7 @@ def apply_server_context_limit(
         configured_max_prompt_tokens=configured_budget,
         max_prompt_tokens=harness.context_policy.max_prompt_tokens,
         partition_context=partition_context,
-        preserved_configured_budget=preserve_configured_budget,
+        preserved_configured_budget=preserved_configured_budget,
         hot_message_limit=harness.context_policy.hot_message_limit,
         recent_message_limit=harness.context_policy.recent_message_limit,
         observed_n_keep=observed_n_keep,
@@ -108,10 +115,17 @@ def apply_server_context_limit(
     return harness.context_policy.max_prompt_tokens
 
 
-def derive_prompt_budget_from_context_limit(context_limit: int | None) -> int | None:
+def derive_prompt_budget_from_context_limit(
+    context_limit: int | None,
+    *,
+    provider_profile: str | None = None,
+) -> int | None:
     if context_limit is None:
         return None
     limit = max(1, int(context_limit))
+    profile = str(provider_profile or "").strip().lower()
+    if profile in _PROVIDER_REQUEST_BUDGET_PROFILES:
+        return build_request_budget(limit).effective_prompt_budget
     # Use a fixed reserve for completion/tools rather than a percentage,
     # so large context windows are not disproportionately penalized.
     reserve = min(2048, limit // 4)

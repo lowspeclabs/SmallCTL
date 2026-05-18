@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 from typing import Any
 
 from ..docker_retry_normalization import (
@@ -22,14 +23,32 @@ from ..shell_utils import strip_benign_shell_redirections as _strip_benign_shell
 _BINARY_PROBE_RE = re.compile(
     r"^(?:"
     r"which\s+\S+"
+    r"|whereis\s+\S+"
     r"|\S+\s+(?:--version|version|info|status|--help)(?:\s|\||\>|\&|$)"
     r"|type\s+\S+"
     r"|command\s+-v\s+\S+"
     r"|dpkg\s+-l\s+\S+"
+    r"|apt\s+(?:list|show|search)\s+\S+"
     r"|rpm\s+-q\s+\S+"
     r"|apk\s+info\s+\S+"
     r")"
     r"(?:.*)?$",
+    re.IGNORECASE,
+)
+_REMOVAL_ABSENCE_PROBE_RE = re.compile(
+    r"\b(?:grep|egrep|fgrep|find|ls|systemctl|pgrep|ps)\b",
+    re.IGNORECASE,
+)
+_REMOVAL_ABSENCE_PIPE_RE = re.compile(
+    r"\|\s*(?:grep|egrep|fgrep)\b",
+    re.IGNORECASE,
+)
+_LS_NO_SUCH_FILE_RE = re.compile(
+    r"\bls:\s+cannot\s+access\b.*\b(?:no such file|not found)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_FOG_RESOURCE_RE = re.compile(
+    r"\bfog(?:project|server|\.service|[_-]?(?:nfs|scheduler|multicast|snapin|replicator|image|web|php|worker))?\b",
     re.IGNORECASE,
 )
 
@@ -41,7 +60,7 @@ _REMOVAL_TASK_KEYWORDS = frozenset([
 ])
 
 # Strings in stderr/stdout that confirm exit-127 means "not found".
-_NOT_FOUND_MARKERS = ("command not found", "not found", "no such file", "permission denied")
+_NOT_FOUND_MARKERS = ("command not found", "not found", "no such file", "permission denied", "could not be found")
 _SSH_AUTH_RECOVERY_KEY = "_ssh_auth_recovery_state"
 _REMOTE_MUTATING_COMMAND_RE = re.compile(
     r"\bsed\s+-i\b"
@@ -61,6 +80,7 @@ _REMOTE_MUTATING_COMMAND_RE = re.compile(
     r"\b(?:mv|cp)\b.+\s+/(?:etc|var|usr|opt|srv|root)/\S+",
     re.IGNORECASE | re.DOTALL,
 )
+_REMOTE_READBACK_COMMANDS = {"cat", "head", "tail"}
 _NGINX_VERIFIER_COMMAND_RE = re.compile(r"\bnginx\s+-t\b", re.IGNORECASE)
 _NGINX_VERIFIER_FAILURE_RE = re.compile(
     r"nginx:\s*configuration\s*file\b.*\btest\s*failed\b"
@@ -78,6 +98,67 @@ _CURL_VERIFIER_FAILURE_RE = re.compile(
     r"\bconnection refused\b",
     re.IGNORECASE | re.DOTALL,
 )
+_LONG_RUNNING_REMOTE_INSTALLER_COMMAND_RE = re.compile(
+    r"\binstallfog\.sh\b"
+    r"|"
+    r"\b(?:apt-get|apt|dnf|yum|zypper|pacman)\b.*\b(?:install|upgrade|dist-upgrade|full-upgrade)\b"
+    r"|"
+    r"\b(?:docker\s+compose|docker-compose)\s+up\b"
+    r"|"
+    r"\b(?:make|ninja)\s+(?:install|build)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_LONG_RUNNING_REMOTE_INSTALLER_OUTPUT_RE = re.compile(
+    r"\binstallation started\b"
+    r"|"
+    r"\btesting internet connection\b"
+    r"|"
+    r"\binstalling\b.+\bas needed\b"
+    r"|"
+    r"\bbuilding dependency tree\b"
+    r"|"
+    r"\bsetting up\b\s+\S+"
+    r"|"
+    r"\bpulling\b.+\bimage\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_REMOTE_APPLICATION_BLOCKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "fogproject_account_exists",
+        re.compile(
+            r'The account\s+"fogproject"\s+already exists.*?'
+            r"(?:Please remove the account\s+\"fogproject\".*?|"
+            r"username=<usernameForSystem>\s+\./installfog\.sh\s+-y)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "account_exists",
+        re.compile(
+            r'The account\s+"[^"]+"\s+already exists.*?'
+            r"(?:Please remove the account|set a new service username|userdel\s+\S+)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "command_not_found",
+        re.compile(r"\b(?:bash|sh):\s+line\s+\d+:\s+\S+:\s+command not found\b", re.IGNORECASE),
+    ),
+    (
+        "file_exists",
+        re.compile(r"\bfailed to create symbolic link\b.*?\bFile exists\b", re.IGNORECASE | re.DOTALL),
+    ),
+    (
+        "permission_denied",
+        re.compile(r"\bpermission denied\b", re.IGNORECASE),
+    ),
+)
+_INTERACTIVE_PROMPT_RE = re.compile(
+    r"\b(?:Choice:\s*\[\d+\]|Are you sure you wish to continue|Should .*?\?\s*\([yYnN]/|"
+    r"Sorry,\s+answer not recognized|Hit \[?Enter\]?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_RAW_SSH_COMMAND_RE = re.compile(r"^\s*(?:ssh\b|scp\b|sftp\b|sshpass\b)", re.IGNORECASE)
 
 
 def _ssh_auth_recovery_entry_key(host: str, user: str) -> str:
@@ -102,6 +183,10 @@ def _update_ssh_auth_recovery_state(
 ) -> None:
     if tool_name != "ssh_exec":
         return
+    args = arguments if isinstance(arguments, dict) else {}
+    command = str(args.get("command") or "").strip()
+    if _RAW_SSH_COMMAND_RE.match(command):
+        return
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):
         scratchpad = {}
@@ -117,7 +202,6 @@ def _update_ssh_auth_recovery_state(
         metadata_output = metadata.get("output")
         if isinstance(metadata_output, dict):
             output = metadata_output
-    args = arguments if isinstance(arguments, dict) else {}
     host = str(args.get("host") or metadata.get("host") or "").strip().lower()
     user = str(args.get("user") or "").strip()
     if not host:
@@ -199,14 +283,28 @@ def _store_verifier_verdict(
             target = f"(missing host) :: {remote_command}"
 
     exit_code = output.get("exit_code") if isinstance(output, dict) else None
-    stdout = _snip_text(output.get("stdout") if isinstance(output, dict) else "", limit=400)
-    stderr = _snip_text(output.get("stderr") if isinstance(output, dict) else "", limit=400)
+    raw_stdout = str(output.get("stdout") if isinstance(output, dict) else "")
+    raw_stderr = str(output.get("stderr") if isinstance(output, dict) else "")
+    stdout = _snip_text(raw_stdout, limit=400)
+    stderr = _snip_text(raw_stderr, limit=400)
     semantic_failure = _semantic_verifier_failure(command=command, stdout=stdout, stderr=stderr)
+    absence_probe = _classify_removal_absence_probe(
+        state,
+        command=command,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
     status = str(result.status or metadata.get("status") or "").strip()
     if status == "needs_human":
         verdict = "needs_human"
     elif semantic_failure:
         verdict = "fail"
+    elif absence_probe["is_absence_probe"] and absence_probe["found_resources"]:
+        verdict = "fail"
+        semantic_failure = str(absence_probe["reason"] or "absence probe found matching resources")
+    elif absence_probe["is_absence_probe"] and absence_probe["absence_confirmed"]:
+        verdict = "pass"
     elif result.success and (exit_code in (0, None)):
         verdict = "pass"
     elif (
@@ -219,9 +317,28 @@ def _store_verifier_verdict(
         # successful removal task. Treat this as a pass rather than a verifier
         # failure so the session can exit the repair phase normally.
         verdict = "pass"
+    elif (
+        exit_code == 1
+        and _command_is_binary_probe(command)
+        and _output_confirms_not_found(stdout, stderr)
+    ):
+        # Exit 1 from a diagnostic probe (systemctl status, dpkg -l, apt list,
+        # which, whereis, etc.) that confirms the resource is absent is
+        # informational negative intelligence, not a failure.
+        verdict = "pass"
     else:
         verdict = "fail"
     failure_class = _classify_execution_failure(result.error or stderr or stdout)
+    if absence_probe["is_absence_probe"]:
+        failure_class = "" if verdict == "pass" else "removal_residue"
+    if _is_long_running_remote_command_timeout(
+        tool_name=tool_name,
+        command=command,
+        result=result,
+        stdout=stdout,
+        stderr=stderr,
+    ):
+        failure_class = "long_running_remote_command"
     docker_retry = _record_docker_retry_state(
         state,
         command=command,
@@ -245,13 +362,41 @@ def _store_verifier_verdict(
         "failure_mode": failure_class,
         "acceptance_delta": acceptance_delta,
     }
+    if absence_probe["is_absence_probe"]:
+        normalized["verifier_kind"] = "removal_absence_probe"
+        normalized["absence_probe_reason"] = absence_probe["reason"]
     if docker_retry:
         normalized.update(docker_retry)
+    blocker = _extract_latest_execution_blocker(
+        tool_name=tool_name,
+        command=command,
+        target=target,
+        exit_code=exit_code,
+        failure_class=failure_class,
+        stdout=raw_stdout,
+        stderr=raw_stderr,
+        error=str(result.error or ""),
+        verdict=verdict,
+    )
+    if blocker:
+        normalized["latest_blocker"] = blocker
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
+    if blocker:
+        _store_latest_execution_blocker(state, blocker)
     state.scratchpad.pop("_last_verifier_stale_after_mutation", None)
     state.last_failure_class = failure_class
     state.scratchpad["_last_failure_class"] = failure_class
+    if failure_class == "long_running_remote_command":
+        state.scratchpad["_last_long_running_remote_command_timeout"] = {
+            "tool": tool_name,
+            "target": target,
+            "command": command,
+            "host": str((arguments or {}).get("host") or "").strip(),
+            "stdout": stdout,
+            "stderr": stderr,
+            "error": str(result.error or ""),
+        }
     _update_acceptance_ledger(state, verdict=verdict)
     _update_ssh_auth_recovery_state(
         state,
@@ -270,6 +415,68 @@ def _store_verifier_verdict(
         docker_retry=docker_retry,
     )
     return normalized
+
+
+def _extract_latest_execution_blocker(
+    *,
+    tool_name: str,
+    command: str,
+    target: str,
+    exit_code: Any,
+    failure_class: str,
+    stdout: str,
+    stderr: str,
+    error: str,
+    verdict: str,
+) -> dict[str, Any] | None:
+    if tool_name not in {"shell_exec", "ssh_exec"} or verdict == "pass":
+        return None
+    combined = "\n".join(str(part or "").strip() for part in (error, stderr, stdout) if str(part or "").strip())
+    if not combined:
+        return None
+    blocker_class = ""
+    salient = ""
+    for candidate_class, pattern in _REMOTE_APPLICATION_BLOCKERS:
+        match = pattern.search(combined)
+        if match:
+            blocker_class = candidate_class
+            salient = _snip_text(match.group(0), limit=280)
+            break
+    if not blocker_class and _INTERACTIVE_PROMPT_RE.search(combined):
+        blocker_class = "interactive_prompt"
+        match = _INTERACTIVE_PROMPT_RE.search(combined)
+        salient = _snip_text(match.group(0) if match else combined, limit=280)
+    if not blocker_class:
+        return None
+    signature_seed = "|".join([tool_name, command, blocker_class, salient.lower()])
+    return {
+        "tool": tool_name,
+        "command": command,
+        "target": target,
+        "exit_code": exit_code,
+        "blocker_class": blocker_class,
+        "failure_class": failure_class,
+        "salient_error": salient,
+        "is_interactive_prompt": blocker_class == "interactive_prompt",
+        "signature": hashlib.sha1(signature_seed.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _store_latest_execution_blocker(state: Any, blocker: dict[str, Any]) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        state.scratchpad = scratchpad
+    prior = scratchpad.get("_latest_execution_blocker")
+    prior_signature = str(prior.get("signature") or "") if isinstance(prior, dict) else ""
+    new_signature = str(blocker.get("signature") or "")
+    scratchpad["_latest_execution_blocker"] = blocker
+    if prior_signature and new_signature and prior_signature != new_signature:
+        counters = state.stagnation_counters if isinstance(getattr(state, "stagnation_counters", None), dict) else {}
+        counters["no_progress"] = 0
+        counters["repeat_command"] = 0
+        state.stagnation_counters = counters
+        scratchpad["_repair_last_failure_signature"] = new_signature
 
 
 def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str:
@@ -363,6 +570,30 @@ def assess_remote_mutation_verification(
         )
         return assessment
 
+    if not isinstance(patterns, dict):
+        readback_path = _simple_remote_readback_path(command)
+        if readback_path and readback_path in guessed_paths:
+            if result.success and exit_code in (0, None) and stdout.strip():
+                assessment.update(
+                    {
+                        "verification_strength": "strong",
+                        "clears_requirement": True,
+                        "reason": "simple_readback_path_verified",
+                        "verified_path": readback_path,
+                    }
+                )
+                return assessment
+            assessment.update(
+                {
+                    "verification_strength": "strong",
+                    "clears_requirement": False,
+                    "reason": "simple_readback_path_empty_or_failed",
+                    "verified_path": readback_path,
+                    "message": _snip_text(stderr or stdout or "Readback command did not return file content.", limit=240),
+                }
+            )
+            return assessment
+
     if profile == "html_stylesheet_swap":
         command_lower = command.lower()
         stdout_lower = stdout.lower()
@@ -435,6 +666,30 @@ def assess_remote_mutation_verification(
         }
     )
     return assessment
+
+
+def _simple_remote_readback_path(command: str) -> str:
+    try:
+        tokens = shlex.split(str(command or "").strip())
+    except ValueError:
+        return ""
+    if not tokens:
+        return ""
+    if tokens[0] == "sudo":
+        tokens = tokens[1:]
+    if not tokens:
+        return ""
+
+    command_name = tokens[0]
+    if command_name in _REMOTE_READBACK_COMMANDS:
+        path_operands = [token for token in tokens[1:] if token.startswith("/")]
+        return path_operands[0] if len(path_operands) == 1 else ""
+
+    if command_name == "sed" and "-n" in tokens:
+        path_operands = [token for token in tokens[1:] if token.startswith("/")]
+        if len(path_operands) == 1:
+            return path_operands[0]
+    return ""
 
 
 def _remote_mutation_directory_empty_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
@@ -529,6 +784,36 @@ def _classify_execution_failure(text: str) -> str:
     return "logic"
 
 
+def _is_long_running_remote_command_timeout(
+    *,
+    tool_name: str,
+    command: str,
+    result: ToolEnvelope,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    if tool_name != "ssh_exec":
+        return False
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    failure_kind = str(metadata.get("failure_kind") or "").strip()
+    ssh_error_class = str(metadata.get("ssh_error_class") or "").strip()
+    error_text = str(result.error or "").lower()
+    is_timeout = (
+        failure_kind == "timeout"
+        or ssh_error_class == "command_timeout"
+        or "timed out" in error_text
+        or "timeout" in error_text
+    )
+    if not is_timeout:
+        return False
+    command_text = str(command or "")
+    output_text = "\n".join(part for part in (stdout, stderr) if str(part or "").strip())
+    return bool(
+        _LONG_RUNNING_REMOTE_INSTALLER_COMMAND_RE.search(command_text)
+        or _LONG_RUNNING_REMOTE_INSTALLER_OUTPUT_RE.search(output_text)
+    )
+
+
 def _command_is_binary_probe(command: str) -> bool:
     """Return True when the command looks like a binary-presence probe."""
     cmd = str(command or "").strip()
@@ -547,14 +832,173 @@ def _output_confirms_not_found(stdout: str, stderr: str) -> bool:
     return any(marker in combined for marker in _NOT_FOUND_MARKERS)
 
 
+def _classify_removal_absence_probe(
+    state: Any,
+    *,
+    command: str,
+    exit_code: Any,
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    default = {
+        "is_absence_probe": False,
+        "absence_confirmed": False,
+        "found_resources": False,
+        "reason": "",
+    }
+    if not _task_has_removal_intent(state):
+        return default
+    cmd = str(command or "").strip()
+    if not cmd or not _command_is_removal_absence_probe(cmd, state):
+        return default
+
+    out = str(stdout or "").strip()
+    err = str(stderr or "").strip()
+    combined = "\n".join(part for part in (out, err) if part).strip()
+    found_resources = _absence_probe_found_resources(command=cmd, stdout=out, stderr=err, exit_code=exit_code)
+    if found_resources:
+        return {
+            "is_absence_probe": True,
+            "absence_confirmed": False,
+            "found_resources": True,
+            "reason": "absence probe found matching cleanup/removal resources",
+        }
+
+    if _LS_NO_SUCH_FILE_RE.search(err) or _LS_NO_SUCH_FILE_RE.search(out):
+        return {
+            "is_absence_probe": True,
+            "absence_confirmed": True,
+            "found_resources": False,
+            "reason": "ls reported deleted resource is absent",
+        }
+
+    lowered_cmd = cmd.lower()
+    empty_output = not combined
+    if empty_output and _exit_code_matches(exit_code, {0, 1}):
+        if "grep" in lowered_cmd:
+            return {
+                "is_absence_probe": True,
+                "absence_confirmed": True,
+                "found_resources": False,
+                "reason": "grep absence probe returned no matches",
+            }
+        if "find" in lowered_cmd:
+            return {
+                "is_absence_probe": True,
+                "absence_confirmed": True,
+                "found_resources": False,
+                "reason": "find absence probe returned no matches",
+            }
+        if "systemctl" in lowered_cmd and _REMOVAL_ABSENCE_PIPE_RE.search(cmd):
+            return {
+                "is_absence_probe": True,
+                "absence_confirmed": True,
+                "found_resources": False,
+                "reason": "systemctl absence probe returned no matching units",
+            }
+        if "pgrep" in lowered_cmd or re.search(r"(?:^|\s)ps(?:\s|$)", lowered_cmd):
+            return {
+                "is_absence_probe": True,
+                "absence_confirmed": True,
+                "found_resources": False,
+                "reason": "process absence probe returned no matches",
+            }
+
+    return {
+        "is_absence_probe": True,
+        "absence_confirmed": False,
+        "found_resources": False,
+        "reason": "absence probe did not prove resource absence",
+    }
+
+
+def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
+    cmd = str(command or "").strip()
+    if not _REMOVAL_ABSENCE_PROBE_RE.search(cmd):
+        return False
+    lowered = cmd.lower()
+    has_absence_tool_shape = (
+        re.search(r"(?:^|[;&|]\s*)find\s+", lowered) is not None
+        or re.search(r"(?:^|[;&|]\s*)ls\s+", lowered) is not None
+        or "grep" in lowered
+        or "pgrep" in lowered
+        or re.search(r"(?:^|[;&|]\s*)ps(?:\s|$)", lowered) is not None
+        or ("systemctl" in lowered and _REMOVAL_ABSENCE_PIPE_RE.search(cmd) is not None)
+    )
+    if not has_absence_tool_shape:
+        return False
+    return _command_mentions_removal_subject(cmd, state)
+
+
+def _command_mentions_removal_subject(command: str, state: Any) -> bool:
+    lowered = str(command or "").lower()
+    if _FOG_RESOURCE_RE.search(lowered):
+        return True
+    task_terms = _removal_task_subject_terms(state)
+    return any(term in lowered for term in task_terms)
+
+
+def _removal_task_subject_terms(state: Any) -> set[str]:
+    task_text = _removal_task_text(state)
+    if not task_text:
+        return set()
+    candidates = re.findall(r"[a-z0-9][a-z0-9_.@/-]{2,}", task_text.lower())
+    stop_words = {
+        "cleanup", "clean", "remove", "removed", "removal", "delete", "deleted",
+        "purge", "stop", "disable", "disabled", "mask", "masked", "verify",
+        "remote", "server", "host", "file", "files", "service", "services",
+        "systemd", "process", "processes", "user", "users", "database",
+    }
+    terms = set()
+    for candidate in candidates:
+        stripped = candidate.strip(".,:;()[]{}'\"")
+        if stripped in stop_words:
+            continue
+        if stripped.startswith(("http", "/tmp/")):
+            continue
+        terms.add(stripped)
+    return terms
+
+
+def _removal_task_text(state: Any) -> str:
+    run_brief = getattr(state, "run_brief", None)
+    original_task = str(getattr(run_brief, "original_task", "") or "")
+    wm = getattr(state, "working_memory", None)
+    current_goal = str(getattr(wm, "current_goal", "") or "")
+    return " ".join(part for part in (original_task, current_goal) if part).strip()
+
+
+def _absence_probe_found_resources(
+    *,
+    command: str,
+    stdout: str,
+    stderr: str,
+    exit_code: Any,
+) -> bool:
+    out = str(stdout or "").strip()
+    err = str(stderr or "").strip()
+    if _LS_NO_SUCH_FILE_RE.search(err) or _LS_NO_SUCH_FILE_RE.search(out):
+        return False
+    lowered_cmd = str(command or "").lower()
+    if ("grep -q" in lowered_cmd or "grep --quiet" in lowered_cmd) and _exit_code_matches(exit_code, {0}):
+        return True
+    if out:
+        return True
+    if err and not _output_confirms_not_found("", err):
+        return True
+    return False
+
+
+def _exit_code_matches(exit_code: Any, values: set[int]) -> bool:
+    try:
+        return int(exit_code) in values
+    except (TypeError, ValueError):
+        return exit_code is None and 0 in values
+
+
 def _task_has_removal_intent(state: Any) -> bool:
     """Return True when the original task description signals a removal intent."""
-    run_brief = getattr(state, "run_brief", None)
-    original_task = str(getattr(run_brief, "original_task", "") or "").lower()
-    if not original_task:
-        # Fall back to current_goal if available.
-        wm = getattr(state, "working_memory", None)
-        original_task = str(getattr(wm, "current_goal", "") or "").lower()
+    original_task = _removal_task_text(state).lower()
     if not original_task:
         return False
     return any(kw in original_task for kw in _REMOVAL_TASK_KEYWORDS)

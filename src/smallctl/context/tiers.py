@@ -113,6 +113,13 @@ class MessageTierManager:
             "transcript_fallback_used": bool(turn_bundle.transcript_fallback_used),
             "observation_ref_count": len(turn_bundle.observation_refs),
             "observation_refs": list(turn_bundle.observation_refs[:6]),
+            "lane_counts": {
+                "plan_state": len(turn_bundle.plan_state),
+                "evidence_refs": len(turn_bundle.evidence_refs),
+                "decision_deltas": len(turn_bundle.decision_deltas),
+                "experience_candidates": len(turn_bundle.experience_candidates),
+            },
+            "fallback_reason": "insufficient_observation_packets" if turn_bundle.transcript_fallback_used else "",
         })
 
         if len(state.turn_bundles) <= self.turn_bundle_limit:
@@ -241,6 +248,10 @@ class MessageTierManager:
 
     def should_compact_predictive(self, state: LoopState, soft_limit: int) -> bool:
         """Compact early if the next turn is likely to overflow the window. (Phase IV)"""
+        # Guard: don't trigger predictive compaction when we don't have enough
+        # messages to move out of the hot window.
+        if len(state.recent_messages) <= self.hot_window:
+            return False
         # Use actual token usage from the last streamed response if available
         last_completion = int(state.scratchpad.get("last_completion_tokens", 0))
         current_usage = int(state.scratchpad.get("context_used_tokens", 0))

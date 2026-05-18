@@ -10,6 +10,36 @@ from ..models.events import UIEvent, UIEventType
 from ..state import json_safe_value
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 
+_INTERACTIVE_SCRIPT_PROMPT_MARKERS = (
+    "(y/n)",
+    "[y/n]",
+    "choice: [",
+    "hit enter",
+    "hit [enter]",
+    "are you sure you wish to continue",
+    "answer not recognized",
+    "sorry, answer not recognized",
+)
+
+
+def _ssh_failure_contains_interactive_prompt(metadata: dict[str, Any]) -> bool:
+    output = metadata.get("output")
+    output_bits: list[str] = []
+    if isinstance(output, dict):
+        output_bits.extend([
+            str(output.get("stdout") or ""),
+            str(output.get("stderr") or ""),
+        ])
+    text = "\n".join(
+        bit
+        for bit in [
+            str(metadata.get("error") or ""),
+            *output_bits,
+        ]
+        if bit
+    ).lower()
+    return bool(text and any(marker in text for marker in _INTERACTIVE_SCRIPT_PROMPT_MARKERS))
+
 
 def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) -> str:
     tool_name = record.tool_name
@@ -66,6 +96,20 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
         )
     if tool_name in {"shell_exec", "ssh_exec"}:
         bits_str = " | ".join(bits)
+        if tool_name == "ssh_exec" and failure_class == "long_running_remote_command":
+            return (
+                bits_str
+                + ". The remote command produced installer/service progress before timing out. "
+                "Do not switch to file repair. Continue with a longer `timeout_sec`, or launch the remote command detached "
+                "with stdout/stderr redirected to a log file, then verify by reading that log or checking the service."
+            )
+        if tool_name == "ssh_exec" and _ssh_failure_contains_interactive_prompt(metadata):
+            return (
+                bits_str
+                + ". The remote command output looks like an interactive script prompt. "
+                "Use `ssh_exec` with `stdin_data` containing the complete finite answer stream, use the script's silent/noninteractive flags, "
+                "or ask the human for choices. Do not retry a single `echo \"y\" | ...` or `echo \"n\" | ...` pipe for a multi-prompt installer."
+            )
         schema_hint = ""
         if tool_name == "ssh_exec":
             record_args = record.args if isinstance(getattr(record, "args", None), dict) else {}
@@ -84,6 +128,7 @@ def _build_repair_recovery_message(harness: Any, record: ToolExecutionRecord) ->
                         "identity_file",
                         "password",
                         "timeout_sec",
+                        "stdin_data",
                     }
                     for k in record_args.keys()
                 )

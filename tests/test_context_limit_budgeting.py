@@ -12,7 +12,12 @@ from smallctl.models.conversation import ConversationMessage
 from smallctl.state import EvidenceRecord, LoopState
 
 
-def _make_harness(*, max_prompt_tokens: int | None, explicit: bool = True) -> SimpleNamespace:
+def _make_harness(
+    *,
+    max_prompt_tokens: int | None,
+    explicit: bool = True,
+    provider_profile: str = "generic",
+) -> SimpleNamespace:
     return SimpleNamespace(
         configured_max_prompt_tokens=max_prompt_tokens,
         configured_max_prompt_tokens_explicit=explicit,
@@ -24,14 +29,14 @@ def _make_harness(*, max_prompt_tokens: int | None, explicit: bool = True) -> Si
         ),
         server_context_limit=None,
         discovered_server_context_limit=None,
-        provider_profile="generic",
+        provider_profile=provider_profile,
         state=SimpleNamespace(recent_message_limit=6),
         _harness_kwargs={},
         _runlog=lambda *args, **kwargs: None,
     )
 
 
-def test_initialization_preserves_explicit_max_prompt_tokens_over_context_limit(tmp_path, monkeypatch) -> None:
+def test_initialization_clamps_explicit_max_prompt_tokens_to_context_limit(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
     harness = Harness(
@@ -48,21 +53,32 @@ def test_initialization_preserves_explicit_max_prompt_tokens_over_context_limit(
 
     assert harness.configured_max_prompt_tokens == 32768
     assert harness.server_context_limit == 16384
-    assert harness.context_policy.max_prompt_tokens != derived
-    assert harness.context_policy.max_prompt_tokens == 32768
+    assert harness.context_policy.max_prompt_tokens == derived
 
 
-def test_runtime_probe_preserves_explicit_max_prompt_tokens_for_partitioning() -> None:
+def test_runtime_probe_clamps_explicit_max_prompt_tokens_for_partitioning() -> None:
     harness = _make_harness(max_prompt_tokens=32768)
 
     new_limit = apply_server_context_limit(harness, 16384, source="runtime_probe")
 
-    assert new_limit == 32768
+    assert new_limit == 14336
     assert harness.server_context_limit == 16384
-    assert harness.context_policy.max_prompt_tokens == 32768
-    assert harness.context_policy.hot_message_limit == 32
-    assert harness.context_policy.recent_message_limit == 32
-    assert harness.state.recent_message_limit == 32
+    assert harness.context_policy.max_prompt_tokens == 14336
+    assert harness.context_policy.hot_message_limit == 14
+    assert harness.context_policy.recent_message_limit == 14
+    assert harness.state.recent_message_limit == 14
+
+
+def test_runtime_probe_uses_llamacpp_request_budget_for_prompt_ceiling() -> None:
+    harness = _make_harness(max_prompt_tokens=32768, provider_profile="llamacpp")
+
+    new_limit = apply_server_context_limit(harness, 16384, source="runtime_probe")
+
+    assert new_limit == build_request_budget(16384).effective_prompt_budget
+    assert new_limit == 12800
+    assert harness.server_context_limit == 16384
+    assert harness.context_policy.max_prompt_tokens == 12800
+    assert int(harness.context_policy.max_prompt_tokens * harness.context_policy.summarize_at_ratio) == 10240
 
 
 def test_runtime_probe_can_expand_stale_lower_server_context_limit() -> None:
@@ -72,10 +88,10 @@ def test_runtime_probe_can_expand_stale_lower_server_context_limit() -> None:
 
     new_limit = apply_server_context_limit(harness, 16384, source="runtime_probe")
 
-    assert new_limit == 32768
+    assert new_limit == 14336
     assert harness.server_context_limit == 16384
     assert harness.discovered_server_context_limit == 16384
-    assert harness.context_policy.max_prompt_tokens == 32768
+    assert harness.context_policy.max_prompt_tokens == 14336
 
 
 def test_non_runtime_context_update_does_not_expand_stale_lower_limit() -> None:
@@ -142,7 +158,7 @@ def test_small_lmstudio_model_uses_tighter_hot_window() -> None:
     assert policy.transcript_token_limit > 10000
 
 
-def test_non_probe_source_preserves_configured_budget_without_overflow() -> None:
+def test_non_probe_source_clamps_configured_budget_without_overflow() -> None:
     harness = _make_harness(max_prompt_tokens=32768)
 
     new_limit = apply_server_context_limit(
@@ -152,12 +168,12 @@ def test_non_probe_source_preserves_configured_budget_without_overflow() -> None
         observed_n_keep=None,
     )
 
-    assert new_limit == 32768
+    assert new_limit == 14336
     assert harness.server_context_limit == 16384
-    assert harness.context_policy.max_prompt_tokens == 32768
-    assert harness.context_policy.hot_message_limit == 32
-    assert harness.context_policy.recent_message_limit == 32
-    assert harness.state.recent_message_limit == 32
+    assert harness.context_policy.max_prompt_tokens == 14336
+    assert harness.context_policy.hot_message_limit == 14
+    assert harness.context_policy.recent_message_limit == 14
+    assert harness.state.recent_message_limit == 14
 
 
 def test_stream_context_overflow_can_still_shrink_prompt_budget() -> None:

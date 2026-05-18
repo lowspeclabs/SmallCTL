@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import time
 from typing import Any, Awaitable, Callable
 
 from langgraph.graph import END, START, StateGraph
@@ -25,6 +27,20 @@ from .runtime_payloads import (
 from .state import GraphRunState
 
 
+DEFAULT_GRAPH_NODE_TIMEOUT_SEC = 300.0
+DEFAULT_GRAPH_MODEL_CALL_TIMEOUT_SEC = 600.0
+DEFAULT_GRAPH_DISPATCH_TOOLS_TIMEOUT_SEC = 300.0
+
+
+class GraphNodeTimeoutError(TimeoutError):
+    """Raised when a compiled graph node exceeds its configured timeout."""
+
+    def __init__(self, node_name: str, timeout_sec: float) -> None:
+        super().__init__(f"Graph node `{node_name}` timed out after {timeout_sec:g}s")
+        self.node_name = node_name
+        self.timeout_sec = timeout_sec
+
+
 @dataclass(frozen=True)
 class RuntimeGraphSpec:
     """Configuration for building a runtime StateGraph."""
@@ -47,7 +63,7 @@ class RuntimeGraphBuilder:
 
         for node_name, method_name in self.spec.node_map.items():
             fn = getattr(self.runtime, method_name)
-            builder.add_node(node_name, fn)
+            builder.add_node(node_name, self._wrap_node(self.runtime, node_name, fn))
 
         entry_source, entry_target = self.spec.entry_point
         builder.add_edge(entry_source, entry_target)
@@ -57,13 +73,87 @@ class RuntimeGraphBuilder:
             # LangGraph routing via Command(goto=...) is stable here, while
             # chained add_conditional_edges() transitions can stall on this version.
             route_node_name = f"route__{source}"
-            builder.add_node(route_node_name, self._make_route_node(router, targets))
+            builder.add_node(
+                route_node_name,
+                self._wrap_node(self.runtime, route_node_name, self._make_route_node(router, targets)),
+            )
             builder.add_edge(source, route_node_name)
 
         for source, target in self.spec.static_edges:
             builder.add_edge(source, target)
 
         return builder.compile(checkpointer=get_runtime_checkpointer(self.runtime.deps.harness))
+
+    @staticmethod
+    def _wrap_node(
+        runtime: Any,
+        node_name: str,
+        fn: Callable[[LoopGraphPayload], Awaitable[Any]],
+    ) -> Callable[[LoopGraphPayload], Awaitable[Any]]:
+        async def wrapped_node(payload: LoopGraphPayload) -> Any:
+            harness = runtime.deps.harness
+            timeout_sec = graph_node_timeout_sec(harness, node_name)
+            started = time.monotonic()
+            touch_graph_activity(harness)
+            set_active_graph_node(harness, node_name=node_name, started=started)
+            runlog(
+                harness,
+                f"{node_name}_start",
+                "graph node started",
+                node=node_name,
+                timeout_sec=timeout_sec,
+            )
+            try:
+                if timeout_sec is None:
+                    result = await fn(payload)
+                else:
+                    result = await asyncio.wait_for(fn(payload), timeout=timeout_sec)
+            except asyncio.TimeoutError as exc:
+                elapsed = time.monotonic() - started
+                touch_graph_activity(harness)
+                runlog(
+                    harness,
+                    f"{node_name}_timeout",
+                    "graph node timed out",
+                    node=node_name,
+                    timeout_sec=timeout_sec,
+                    elapsed_sec=round(elapsed, 3),
+                )
+                raise GraphNodeTimeoutError(node_name, timeout_sec or 0.0) from exc
+            except asyncio.CancelledError:
+                elapsed = time.monotonic() - started
+                touch_graph_activity(harness)
+                runlog(
+                    harness,
+                    f"{node_name}_cancelled",
+                    "graph node cancelled",
+                    node=node_name,
+                    elapsed_sec=round(elapsed, 3),
+                )
+                raise
+            except Exception:
+                elapsed = time.monotonic() - started
+                touch_graph_activity(harness)
+                runlog(
+                    harness,
+                    f"{node_name}_error",
+                    "graph node failed",
+                    node=node_name,
+                    elapsed_sec=round(elapsed, 3),
+                )
+                raise
+            elapsed = time.monotonic() - started
+            touch_graph_activity(harness)
+            runlog(
+                harness,
+                f"{node_name}_end",
+                "graph node completed",
+                node=node_name,
+                elapsed_sec=round(elapsed, 3),
+            )
+            return result
+
+        return wrapped_node
 
     @staticmethod
     def _make_route_node(
@@ -137,6 +227,49 @@ class CompiledGraphRuntimeBase:
 
     def restore(self, *, thread_id: str | None = None) -> bool:
         return restore_runtime_state(self, thread_id=thread_id, recursion_limit=self._recursion_limit)
+
+
+def runlog(harness: Any, event: str, message: str, **data: Any) -> None:
+    logger = getattr(harness, "_runlog", None)
+    if callable(logger):
+        logger(event, message, **data)
+
+
+def config_value(harness: Any, name: str, default: Any) -> Any:
+    config = getattr(harness, "config", None)
+    if config is not None and hasattr(config, name):
+        return getattr(config, name)
+    return getattr(harness, name, default)
+
+
+def positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def graph_node_timeout_sec(harness: Any, node_name: str) -> float | None:
+    if "model_call" in node_name:
+        default = DEFAULT_GRAPH_MODEL_CALL_TIMEOUT_SEC
+        value = config_value(harness, "graph_model_call_timeout_sec", default)
+    elif "dispatch_tools" in node_name:
+        default = DEFAULT_GRAPH_DISPATCH_TOOLS_TIMEOUT_SEC
+        value = config_value(harness, "graph_dispatch_tools_timeout_sec", default)
+    else:
+        default = DEFAULT_GRAPH_NODE_TIMEOUT_SEC
+        value = config_value(harness, "graph_node_timeout_sec", default)
+    return positive_float(value)
+
+
+def touch_graph_activity(harness: Any) -> None:
+    setattr(harness, "_last_graph_activity_monotonic", time.monotonic())
+
+
+def set_active_graph_node(harness: Any, *, node_name: str | None, started: float | None) -> None:
+    setattr(harness, "_active_graph_node_name", node_name)
+    setattr(harness, "_active_graph_node_started_monotonic", started)
 
 
 async def prepare_prompt_node(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from typing import Any
 
 from langgraph.types import Command
@@ -9,6 +11,9 @@ from typing_extensions import TypedDict
 from .checkpoint import create_graph_checkpointer
 from .state import GraphRunState, inflate_graph_state, serialize_graph_state
 from ..state import json_safe_value
+
+
+DEFAULT_GRAPH_IDLE_WATCHDOG_SEC = 300.0
 
 
 class LoopGraphPayload(TypedDict, total=False):
@@ -170,14 +175,30 @@ async def execute_streaming_graph(
     compiled = build_graph()
     config = checkpoint_config(harness, recursion_limit=recursion_limit)
     interrupt_payload: dict[str, Any] | None = None
+    _touch_graph_activity(harness)
+    watchdog_task = _start_graph_idle_watchdog(runtime)
     try:
         async for chunk in compiled.astream(payload, config):
+            _touch_graph_activity(harness)
             if not isinstance(chunk, dict):
                 continue
             interrupt_chunk = chunk.get("__interrupt__")
             interrupt_payload = coerce_interrupt_payload(interrupt_chunk)
             if interrupt_payload is not None:
                 break
+    except TimeoutError as exc:
+        node_name = str(getattr(exc, "node_name", "") or "")
+        timeout_sec = getattr(exc, "timeout_sec", None)
+        return harness._finalize(
+            harness._failure(
+                str(exc),
+                error_type="graph_node_timeout" if node_name else "runtime_timeout",
+                details={
+                    "node": node_name,
+                    "timeout_sec": timeout_sec,
+                },
+            )
+        )
     except asyncio.CancelledError:
         harness._finalize(
             {
@@ -186,6 +207,11 @@ async def execute_streaming_graph(
             }
         )
         raise
+    finally:
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog_task
     snapshot = compiled.get_state(config)
     values = coerce_graph_values_payload(getattr(snapshot, "values", None))
     if values:
@@ -218,6 +244,73 @@ async def execute_streaming_graph(
         result = dict(result)
         result["latency_metrics"] = metrics
     return harness._finalize(result)
+
+
+def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:
+    logger = getattr(harness, "_runlog", None)
+    if callable(logger):
+        logger(event, message, **data)
+
+
+def _config_value(harness: Any, name: str, default: Any) -> Any:
+    config = getattr(harness, "config", None)
+    if config is not None and hasattr(config, name):
+        return getattr(config, name)
+    return getattr(harness, name, default)
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _graph_idle_watchdog_sec(harness: Any) -> float | None:
+    return _positive_float(
+        _config_value(harness, "graph_idle_watchdog_sec", DEFAULT_GRAPH_IDLE_WATCHDOG_SEC)
+    )
+
+
+def _touch_graph_activity(harness: Any) -> None:
+    setattr(harness, "_last_graph_activity_monotonic", time.monotonic())
+
+
+def _start_graph_idle_watchdog(runtime: Any) -> asyncio.Task[None] | None:
+    interval = _graph_idle_watchdog_sec(runtime.deps.harness)
+    if interval is None:
+        return None
+    return asyncio.create_task(_graph_idle_watchdog(runtime, interval_sec=interval))
+
+
+async def _graph_idle_watchdog(runtime: Any, *, interval_sec: float) -> None:
+    harness = runtime.deps.harness
+    while True:
+        await asyncio.sleep(interval_sec)
+        last_activity = getattr(harness, "_last_graph_activity_monotonic", None)
+        if not isinstance(last_activity, (int, float)):
+            continue
+        idle_sec = time.monotonic() - float(last_activity)
+        if idle_sec < interval_sec:
+            continue
+        node_name = str(getattr(harness, "_active_graph_node_name", "") or "")
+        node_started = getattr(harness, "_active_graph_node_started_monotonic", None)
+        node_elapsed_sec = (
+            round(time.monotonic() - float(node_started), 3)
+            if isinstance(node_started, (int, float))
+            else None
+        )
+        _touch_graph_activity(harness)
+        _runlog(
+            harness,
+            "harness_idle_watchdog",
+            "active graph runtime emitted no activity within watchdog window",
+            idle_sec=round(idle_sec, 3),
+            watchdog_sec=interval_sec,
+            active_node=node_name,
+            active_node_elapsed_sec=node_elapsed_sec,
+        )
 
 
 def restore_runtime_state(runtime: Any, *, thread_id: str | None = None, recursion_limit: int) -> bool:

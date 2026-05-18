@@ -300,9 +300,9 @@ def _maybe_schedule_task_complete_repair_loop_status(
             role="system",
             content=(
                 "Auto-continuing repair recovery with `loop_status` after blocked "
-                "`task_complete` in the REPAIR phase. The verifier still has a "
-                "non-zero exit code. Fix the failing command (re-run it and "
-                "achieve exit_code 0) to exit the repair phase."
+                "`task_complete` in the REPAIR phase. If the failure is expected "
+                "or diagnostic (e.g. 'not found'), you may call `task_complete` "
+                "with the finding. Otherwise, fix the failing command before completing."
             ),
             metadata={
                 "is_recovery_nudge": True,

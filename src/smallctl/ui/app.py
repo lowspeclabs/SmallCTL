@@ -121,6 +121,9 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._capture_status_snapshot_from_harness()
         self._refresh_status()
         if restore_status is not None:
+            restored_messages = restore_status.get("recent_messages") if isinstance(restore_status, dict) else None
+            if isinstance(restored_messages, list):
+                await self._render_restored_chat(messages=restored_messages)
             asyncio.create_task(
                 self._append_system_line(
                     self._format_restore_status(restore_status),

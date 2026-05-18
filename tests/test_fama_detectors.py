@@ -91,3 +91,27 @@ def test_detect_verifier_failure_classifies_zero_discovered_tests() -> None:
     assert signal.kind is FamaFailureKind.EARLY_STOP
     assert signal.failure_class == "zero_tests_discovered"
     assert "zero tests discovered" in signal.evidence
+
+
+def test_detect_verifier_failure_ignores_expected_diagnostic_failure() -> None:
+    state = LoopState(step_count=2)
+    state.run_brief.original_task = "rca why the fog install is not working"
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "stdout": "curl: (7) Failed to connect to 192.168.1.89 port 8080\n",
+            "stderr": "",
+            "exit_code": 0,
+        },
+        metadata={
+            "last_verifier_verdict": {
+                "verdict": "fail",
+                "command": "curl -Is https://192.168.1.89:8080/fog/",
+                "key_stdout": "curl: (7) Failed to connect to 192.168.1.89 port 8080",
+            }
+        },
+    )
+
+    signal = detect_verifier_failure_from_result(state, tool_name="ssh_exec", result=result)
+
+    assert signal is None

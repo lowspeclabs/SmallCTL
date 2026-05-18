@@ -39,6 +39,63 @@ async def _emit(*args, **kwargs) -> None:
     del args, kwargs
 
 
+def test_interpret_dispatches_valid_sibling_when_one_tool_call_has_bad_schema(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.run_brief.original_task = "Inspect a file and continue reading an artifact"
+    state.working_memory.current_goal = state.run_brief.original_task
+
+    def _schema(tool_name: str):
+        required = {"file_read": ["path"], "artifact_read": ["artifact_id"]}.get(tool_name, [])
+        return SimpleNamespace(schema={"required": required})
+
+    runlog_events: list[tuple[str, dict[str, object]]] = []
+    emitted: list[object] = []
+
+    async def _capture_emit(_handler, event) -> None:
+        emitted.append(event)
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=SimpleNamespace(
+            names=lambda: {"file_read", "artifact_read"},
+            get=_schema,
+            export_openai_tools=lambda **kwargs: [_tool_schema("file_read"), _tool_schema("artifact_read")],
+        ),
+        config=SimpleNamespace(schema_validation_max_repair_attempts=2, min_exploration_steps=0),
+        summarizer=None,
+        summarizer_client=None,
+        _runlog=lambda event, _message, **data: runlog_events.append((event, data)),
+        _emit=_capture_emit,
+        _extract_planning_request=lambda _task: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": {"message": error, "type": error_type, "details": details or {}}
+        },
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-mixed-schema",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(tool_name="file_read", args={"path": "README.md"}, source="model"),
+            PendingToolCall(tool_name="artifact_read", args={}, raw_arguments="{}", source="model"),
+        ],
+    )
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    assert [pending.tool_name for pending in graph_state.pending_tool_calls] == ["file_read"]
+    assert state.recent_messages == []
+    queued = state.scratchpad["_deferred_schema_validation_repair_messages"]
+    assert queued[0]["metadata"]["recovery_kind"] == "schema_validation"
+    assert queued[0]["metadata"]["tool_name"] == "artifact_read"
+    assert any(event == "tool_call_repair_deferred" for event, _data in runlog_events)
+    assert emitted
+
+
 def test_interpret_blocks_registered_but_hidden_model_tool_and_keeps_allowed_loop_tool(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
@@ -171,6 +228,67 @@ def test_dispatch_hard_blocks_hidden_model_tool_in_chat_mode(tmp_path) -> None:
     assert result.metadata["run_mode"] == "chat"
     assert result.metadata["allowed_tools"] == ["file_read"]
     assert "tool_blocked_not_exposed" in runlog_events
+
+
+def test_dispatch_allows_chat_ssh_exec_when_remote_handoff_is_active(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.run_brief.original_task = "ssh into root@192.168.1.89 and fix the remote service"
+    state.working_memory.current_goal = "fix approved proceed"
+    state.scratchpad["_last_task_handoff"] = {
+        "task_mode": "remote_execute",
+        "ssh_target": {"host": "192.168.1.89", "user": "root"},
+    }
+
+    dispatched: list[tuple[str, dict[str, object]]] = []
+    runlog_events: list[str] = []
+
+    async def _dispatch_tool_call(tool_name: str, args: dict[str, object]) -> ToolEnvelope:
+        dispatched.append((tool_name, args))
+        return ToolEnvelope(success=True, output={"stdout": "ok\n", "stderr": "", "exit_code": 0})
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it"),
+        state=state,
+        registry=SimpleNamespace(
+            names=lambda: {"task_complete", "task_fail", "ssh_exec"},
+            get=lambda _name: None,
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("task_complete"),
+                _tool_schema("task_fail"),
+                _tool_schema("ssh_exec"),
+            ],
+        ),
+        _current_user_task=lambda: "fix approved proceed",
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+        _emit=_emit,
+        _dispatch_tool_call=_dispatch_tool_call,
+        _active_dispatch_task=None,
+        log=logging.getLogger("test.context_aware_tool_gate.chat_ssh"),
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-chat-ssh-remote-handoff",
+        run_mode="chat",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="ssh_exec",
+                args={"host": "192.168.1.89", "user": "root", "command": "whoami"},
+                source="model",
+            ),
+        ],
+    )
+
+    asyncio.run(dispatch_tools(graph_state, deps))
+
+    assert dispatched == [
+        ("ssh_exec", {"host": "192.168.1.89", "user": "root", "command": "whoami"})
+    ]
+    assert graph_state.last_tool_results[0].result.success is True
+    assert "network" in state.active_tool_profiles
+    assert "tool_blocked_not_exposed" not in runlog_events
 
 
 def test_dispatch_hidden_file_write_schedules_retry_exposure_for_next_chat_turn(tmp_path) -> None:

@@ -67,8 +67,10 @@ class SubtaskLedgerService:
             active = next((task for task in ledger.subtasks if task.status == "active"), None)
             active = active or next((task for task in ledger.subtasks if task.status == "pending"), None)
             if active is not None:
+                old_status = active.status
                 active.status = "active"
                 ledger.active_subtask_id = active.subtask_id
+                _log_transition(self.harness, active, old_status, active.status, reason="import_plan_activate")
         self._enforce_limits()
 
     def infer_or_create_active_subtask(self, graph_state: Any = None) -> Subtask:
@@ -81,9 +83,11 @@ class SubtaskLedgerService:
             return active
         for task in ledger.subtasks:
             if task.status in {"pending", "blocked"}:
+                old_status = task.status
                 task.status = "active"
                 task.updated_at = time()
                 ledger.active_subtask_id = task.subtask_id
+                _log_transition(self.harness, task, old_status, task.status, reason="infer_active_subtask")
                 return task
         subtask = Subtask(
             subtask_id=f"S{len(ledger.subtasks) + 1}",
@@ -139,16 +143,20 @@ class SubtaskLedgerService:
         task = self._find(subtask_id)
         if task is None:
             return False
+        old_status = task.status
         task.status = "done"
         task.updated_at = time()
         increment_metric(self.harness.state, "subtasks_completed")
+        _log_transition(self.harness, task, old_status, task.status, reason="verifier_passed")
         ledger = self.harness.state.subtask_ledger
         if ledger is not None and ledger.active_subtask_id == subtask_id:
             next_task = next((item for item in ledger.subtasks if item.status == "pending"), None)
             if next_task is not None:
+                next_old_status = next_task.status
                 next_task.status = "active"
                 next_task.updated_at = time()
                 ledger.active_subtask_id = next_task.subtask_id
+                _log_transition(self.harness, next_task, next_old_status, next_task.status, reason="previous_done")
             else:
                 ledger.active_subtask_id = None
         return True
@@ -157,8 +165,10 @@ class SubtaskLedgerService:
         ledger = self.ensure_ledger(str(user_text or "").strip() or "Follow latest user direction")
         active = ledger.active()
         if active is not None:
+            old_status = active.status
             active.status = "abandoned"
             active.updated_at = time()
+            _log_transition(self.harness, active, old_status, active.status, reason="human_resteer")
         subtask = Subtask(
             subtask_id=f"S{len(ledger.subtasks) + 1}",
             title="Follow latest user direction",
@@ -196,8 +206,10 @@ class SubtaskLedgerService:
                     ledger.active_subtask_id = task.subtask_id
                 active_seen += 1
                 continue
+            old_status = task.status
             task.status = "pending"
             task.updated_at = time()
+            _log_transition(self.harness, task, old_status, task.status, reason="max_active_limit")
         if ledger.active_subtask_id and ledger.active() is None:
             ledger.active_subtask_id = None
 
@@ -244,4 +256,22 @@ def _runlog(harness: Any, event: str, *, subtask: Subtask | None = None, count: 
             subtask_id=getattr(subtask, "subtask_id", ""),
             title=getattr(subtask, "title", ""),
             count=count,
+        )
+
+
+def _log_transition(harness: Any, subtask: Subtask, old_status: str, new_status: str, *, reason: str = "") -> None:
+    if old_status == new_status:
+        return
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "subtask_transition",
+            f"Subtask {subtask.subtask_id} {old_status} -> {new_status}",
+            subtask_id=subtask.subtask_id,
+            title=subtask.title,
+            old_status=old_status,
+            new_status=new_status,
+            reason=reason,
+            attempts=subtask.attempts,
+            blockers=subtask.blockers[-3:],
         )

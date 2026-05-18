@@ -72,6 +72,10 @@ class SmallctlConfig:
     checkpoint_path: str | None = None
     graph_checkpointer: str = "memory"
     graph_checkpoint_path: str | None = None
+    graph_node_timeout_sec: int = 300
+    graph_model_call_timeout_sec: int = 600
+    graph_dispatch_tools_timeout_sec: int = 300
+    graph_idle_watchdog_sec: int = 300
     restore_graph_state: bool = False
     graph_thread_id: str | None = None
     fresh_run: bool = False
@@ -86,12 +90,28 @@ class SmallctlConfig:
     tool_plan_readonly_only: bool = True
     tool_plan_max_steps: int = 6
     tool_plan_max_repair_attempts: int = 1
+    schema_validation_max_repair_attempts: int = 2
     tool_plan_observation_token_limit: int = 900
     tool_plan_max_observation_chars_per_step: int = 600
     tool_plan_solver_fresh_output_limit: int = 1200
     tool_plan_allow_web: bool = True
     tool_plan_allow_artifact_read: bool = True
     tool_plan_fallback_to_loop_on_invalid_plan: bool = True
+    tool_dag_enabled: bool = False
+    tool_dag_max_parallel: int = 4
+    tool_dag_timeout_sec: int = 30
+    tool_dag_preserve_result_order: bool = True
+    solver_refine_enabled: bool = False
+    solver_refine_max_passes: int = 1
+    solver_refine_on_final_answer: bool = True
+    solver_refine_on_patch_plan: bool = True
+    solver_refine_on_task_complete: bool = True
+    solver_refine_token_budget: int = 700
+    rewoo_lane_frames_enabled: bool = False
+    rewoo_planner_frame_enabled: bool = False
+    rewoo_solver_frame_enabled: bool = False
+    rewoo_refiner_frame_enabled: bool = False
+    rewoo_frame_token_budget: int = 1200
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -246,6 +266,16 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "tool_plan_allow_web",
         "tool_plan_allow_artifact_read",
         "tool_plan_fallback_to_loop_on_invalid_plan",
+        "tool_dag_enabled",
+        "tool_dag_preserve_result_order",
+        "solver_refine_enabled",
+        "solver_refine_on_final_answer",
+        "solver_refine_on_patch_plan",
+        "solver_refine_on_task_complete",
+        "rewoo_lane_frames_enabled",
+        "rewoo_planner_frame_enabled",
+        "rewoo_solver_frame_enabled",
+        "rewoo_refiner_frame_enabled",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -268,6 +298,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "max_restarts_per_hour",
         "backend_healthcheck_timeout_sec",
         "backend_restart_grace_sec",
+        "graph_node_timeout_sec",
+        "graph_model_call_timeout_sec",
+        "graph_dispatch_tools_timeout_sec",
+        "graph_idle_watchdog_sec",
         "recent_message_limit",
         "max_summary_items",
         "max_artifact_snippets",
@@ -286,6 +320,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "fama_signal_window",
         "fama_capsule_token_budget",
         "fama_llm_judge_min_severity",
+        "graph_node_timeout_sec",
+        "graph_model_call_timeout_sec",
+        "graph_dispatch_tools_timeout_sec",
+        "graph_idle_watchdog_sec",
         "reflexion_max_items",
         "reflexion_inject_top_k",
         "subtask_max_active",
@@ -293,9 +331,15 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "subtask_inject_completed_limit",
         "tool_plan_max_steps",
         "tool_plan_max_repair_attempts",
+        "schema_validation_max_repair_attempts",
         "tool_plan_observation_token_limit",
         "tool_plan_max_observation_chars_per_step",
         "tool_plan_solver_fresh_output_limit",
+        "tool_dag_max_parallel",
+        "tool_dag_timeout_sec",
+        "solver_refine_max_passes",
+        "solver_refine_token_budget",
+        "rewoo_frame_token_budget",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -353,6 +397,16 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "tool_plan_allow_web",
         "tool_plan_allow_artifact_read",
         "tool_plan_fallback_to_loop_on_invalid_plan",
+        "tool_dag_enabled",
+        "tool_dag_preserve_result_order",
+        "solver_refine_enabled",
+        "solver_refine_on_final_answer",
+        "solver_refine_on_patch_plan",
+        "solver_refine_on_task_complete",
+        "rewoo_lane_frames_enabled",
+        "rewoo_planner_frame_enabled",
+        "rewoo_solver_frame_enabled",
+        "rewoo_refiner_frame_enabled",
     ):
         if key in merged:
             merged[key] = _to_bool(merged[key])
@@ -369,9 +423,15 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "subtask_inject_completed_limit",
         "tool_plan_max_steps",
         "tool_plan_max_repair_attempts",
+        "schema_validation_max_repair_attempts",
         "tool_plan_observation_token_limit",
         "tool_plan_max_observation_chars_per_step",
         "tool_plan_solver_fresh_output_limit",
+        "tool_dag_max_parallel",
+        "tool_dag_timeout_sec",
+        "solver_refine_max_passes",
+        "solver_refine_token_budget",
+        "rewoo_frame_token_budget",
     ):
         if key in merged:
             parsed_limit = _to_int(merged[key])

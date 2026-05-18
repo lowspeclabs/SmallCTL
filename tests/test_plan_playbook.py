@@ -12,7 +12,7 @@ import pytest
 
 from smallctl.graph.deps import GraphRuntimeDeps
 from smallctl.graph.autocontinue import _DURABLE_AUTOCONTINUE_KEY, drain_durable_autocontinue
-from smallctl.graph.lifecycle_nodes import resume_loop_run
+from smallctl.graph.lifecycle_nodes import prepare_loop_step, resume_loop_run
 from smallctl.graph.nodes import (
     LoopRoute,
     _apply_small_model_authoring_budget,
@@ -24,6 +24,7 @@ from smallctl.graph.nodes import (
 )
 from smallctl.graph.tool_call_parser import (
     _detect_repeated_tool_loop,
+    _repair_empty_target_file_patch_to_file_write,
     _repair_active_write_session_args,
     allow_repeated_tool_call_once,
 )
@@ -472,6 +473,42 @@ def test_file_patch_empty_target_text_suggests_anchor_or_ast_patch(tmp_path: Pat
     assert "function" in result["metadata"]["recovery_hint"]
 
 
+def test_file_patch_empty_target_text_on_empty_write_session_requires_file_write(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "replica_sync_checker.py"
+    session = _make_open_write_session(target, session_id="ws-empty")
+    session.write_next_section = "imports"
+    state.write_session = session
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="",
+            replacement_text="#!/usr/bin/env python3\nprint('ready')\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id=session.write_session_id,
+        )
+    )
+
+    assert result["success"] is False
+    assert "Use `file_write`" in result["error"]
+    assert result["metadata"]["error_kind"] == "patch_target_empty_for_new_file"
+    assert result["metadata"]["suggested_tools"] == ["file_write"]
+    assert result["metadata"]["next_required_tool"] == {
+        "tool_name": "file_write",
+        "required_fields": ["path", "content", "write_session_id", "section_name", "replace_strategy"],
+        "required_arguments": {
+            "path": str(target),
+            "content": "#!/usr/bin/env python3\nprint('ready')\n",
+            "replace_strategy": "overwrite",
+            "write_session_id": "ws-empty",
+            "section_name": "imports",
+        },
+        "reason": "empty_or_new_file_requires_file_write_not_file_patch",
+    }
+
+
 def test_file_patch_zero_occurrences_fails_without_mutating_file(tmp_path: Path) -> None:
     state = _make_state()
     target = tmp_path / "example.txt"
@@ -918,6 +955,88 @@ def test_repair_active_write_session_args_backfills_missing_session_id_for_activ
     assert pending.args["section_name"] == "helpers"
 
 
+def test_empty_target_file_patch_repaired_to_file_write_for_empty_write_session() -> None:
+    state = _make_state()
+    target = Path("temp/replica_sync_checker.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    session.write_next_section = "imports"
+    state.write_session = session
+    events: list[tuple[str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, _message, **data: events.append((event, data)),
+    )
+    pending = PendingToolCall(
+        tool_name="file_patch",
+        args={
+            "path": str(target),
+            "target_text": "",
+            "replacement_text": "import unittest\n",
+            "write_session_id": "ws-active",
+        },
+    )
+
+    repaired = _repair_empty_target_file_patch_to_file_write(harness, pending)
+
+    assert repaired is True
+    assert pending.tool_name == "file_write"
+    assert pending.args == {
+        "path": str(target),
+        "content": "import unittest\n",
+        "replace_strategy": "overwrite",
+        "write_session_id": "ws-active",
+        "section_name": "imports",
+    }
+    assert pending.parser_metadata["auto_repaired_from_tool"] == "file_patch"
+    assert events[0][0] == "tool_call_auto_repaired"
+
+
+def test_empty_target_file_patch_repaired_to_file_write_for_zero_byte_file(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "empty.py"
+    target.write_text("", encoding="utf-8")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    pending = PendingToolCall(
+        tool_name="file_patch",
+        args={
+            "path": str(target),
+            "target_text": "",
+            "replacement_text": "print('created')\n",
+        },
+    )
+
+    repaired = _repair_empty_target_file_patch_to_file_write(harness, pending)
+
+    assert repaired is True
+    assert pending.tool_name == "file_write"
+    assert pending.args == {
+        "path": str(target),
+        "content": "print('created')\n",
+        "replace_strategy": "overwrite",
+    }
+
+
+def test_empty_target_file_patch_not_repaired_for_existing_file_edit(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.py"
+    target.write_text("def run():\n    return False\n", encoding="utf-8")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    pending = PendingToolCall(
+        tool_name="file_patch",
+        args={
+            "path": str(target),
+            "target_text": "",
+            "replacement_text": "return True",
+        },
+    )
+
+    repaired = _repair_empty_target_file_patch_to_file_write(harness, pending)
+
+    assert repaired is False
+    assert pending.tool_name == "file_patch"
+    assert pending.args["target_text"] == ""
+
+
 def test_interpret_model_output_backfills_missing_write_session_metadata_for_active_target() -> None:
     state = _make_state()
     target = Path("temp/task_queue.py")
@@ -961,6 +1080,123 @@ def test_interpret_model_output_backfills_missing_write_session_metadata_for_act
     pending = graph_state.pending_tool_calls[0]
     assert pending.args["write_session_id"] == "ws-active"
     assert pending.args["section_name"] == "helpers"
+
+
+def test_interpret_model_output_repairs_empty_target_patch_before_dispatch() -> None:
+    state = _make_state()
+    target = Path("temp/replica_sync_checker.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    session.write_next_section = "imports"
+    state.write_session = session
+    runlog_events: list[tuple[str, dict[str, object]]] = []
+
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda event, _message, **data: runlog_events.append((event, data)),
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-empty-patch-repair",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="file_patch",
+                args={
+                    "path": str(target),
+                    "target_text": "",
+                    "replacement_text": "import unittest\n",
+                    "write_session_id": "ws-active",
+                },
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "file_write"
+    assert pending.args == {
+        "path": str(target),
+        "content": "import unittest\n",
+        "replace_strategy": "overwrite",
+        "write_session_id": "ws-active",
+        "section_name": "imports",
+    }
+    assert any(event == "tool_call_auto_repaired" for event, _data in runlog_events)
+
+
+def test_prepare_loop_step_schema_repairs_argumentless_file_patch_before_dispatch() -> None:
+    state = _make_state()
+    emitted: list[object] = []
+    runlog_events: list[tuple[str, dict[str, object]]] = []
+
+    class _Registry:
+        @staticmethod
+        def get(tool_name: str):
+            if tool_name == "file_patch":
+                return SimpleNamespace(
+                    schema={
+                        "required": ["path", "target_text", "replacement_text"],
+                        "properties": {
+                            "path": {"type": "string"},
+                            "target_text": {"type": "string"},
+                            "replacement_text": {"type": "string"},
+                        },
+                    }
+                )
+            return None
+
+    async def _emit(_handler, event) -> None:
+        emitted.append(event)
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        dispatcher=SimpleNamespace(phase="execute"),
+        guards=SimpleNamespace(max_steps=35, max_tokens=None, max_consecutive_errors=5, max_repeated_actions=6),
+        _cancel_requested=False,
+        _runlog=lambda event, _message, **data: runlog_events.append((event, data)),
+        _emit=_emit,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": {"message": error, "type": error_type, "details": details or {}}
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-compiled-schema-repair",
+        run_mode="planning",
+        pending_tool_calls=[
+            PendingToolCall(tool_name="file_patch", args={}, tool_call_id="tool-empty-patch")
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    asyncio.run(prepare_loop_step(graph_state, deps))
+
+    assert graph_state.pending_tool_calls == []
+    assert graph_state.final_result is None
+    assert state.recent_messages
+    repair = state.recent_messages[-1]
+    assert repair.metadata["recovery_kind"] == "schema_validation"
+    assert repair.metadata["tool_name"] == "file_patch"
+    assert repair.metadata["required_fields"] == ["path", "target_text", "replacement_text"]
+    assert "file_patch" in repair.content
+    assert "path, target_text, replacement_text" in repair.content
+    assert emitted
+    assert getattr(emitted[-1], "event_type", None).value == "alert"
+    assert any(event == "tool_call_repair" for event, _data in runlog_events)
 
 
 def test_interpret_model_output_marks_action_stall_nudge_as_recovery_message() -> None:
@@ -1565,6 +1801,108 @@ def test_dispatch_tools_reroutes_shell_exec_ssh_to_ssh_exec() -> None:
     assert graph_state.final_result is None
     assert graph_state.last_tool_results
     assert graph_state.last_tool_results[0].tool_name == "ssh_exec"
+
+
+def test_ssh_exec_as_root_strips_redundant_sudo() -> None:
+    stripped, changed = network._strip_redundant_root_sudo("sudo apt update && sudo apt upgrade -y", "root")
+
+    assert changed is True
+    assert stripped == "apt update && apt upgrade -y"
+
+
+def test_store_verifier_classifies_remote_installer_timeout() -> None:
+    state = _make_state()
+    result = ToolEnvelope(
+        success=False,
+        error="SSH command timed out after 60s",
+        metadata={
+            "failure_kind": "timeout",
+            "ssh_error_class": "command_timeout",
+            "output": {
+                "stdout": " * Installation Started\n\n * Testing internet connection.................................",
+                "stderr": "",
+                "exit_code": None,
+            },
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "cd /root/fogproject/bin && ./installfog.sh -y",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["failure_mode"] == "long_running_remote_command"
+    assert state.last_failure_class == "long_running_remote_command"
+    assert state.scratchpad["_last_long_running_remote_command_timeout"]["host"] == "192.168.1.89"
+
+
+def test_dispatch_blocks_file_write_after_remote_installer_timeout() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "install fogserver on root@192.168.1.89"
+    state.scratchpad["_last_long_running_remote_command_timeout"] = {
+        "host": "192.168.1.89",
+        "command": "cd /root/fogproject/bin && ./installfog.sh -y",
+    }
+    dispatched: list[tuple[str, dict[str, object]]] = []
+
+    async def _dispatch_tool_call(tool_name: str, args: dict[str, object]) -> ToolEnvelope:
+        dispatched.append((tool_name, args))
+        return ToolEnvelope(success=True, output="ok")
+
+    async def _emit(*args, **kwargs) -> None:
+        del args, kwargs
+
+    class _Registry:
+        @staticmethod
+        def names() -> set[str]:
+            return {"file_write"}
+
+        @staticmethod
+        def get(tool_name: str):
+            if tool_name == "file_write":
+                return SimpleNamespace(schema={"required": ["path", "content"]})
+            return None
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        dispatcher=SimpleNamespace(phase="repair"),
+        log=logging.getLogger("test.plan.remote_timeout_write_guard"),
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=_emit,
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+        _dispatch_tool_call=_dispatch_tool_call,
+        _active_dispatch_task=None,
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-remote-installer",
+        run_mode="execute",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="file_write",
+                args={"path": "foginstall.text", "content": "sudo apt update"},
+            )
+        ],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    asyncio.run(dispatch_tools(graph_state, deps))
+
+    assert dispatched == []
+    assert graph_state.last_tool_results == []
+    assert graph_state.pending_tool_calls == []
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "long_running_remote_command"
+    assert "larger `timeout_sec`" in state.recent_messages[-1].content
+    assert any(event == "long_running_remote_timeout_write_guard" for event, _message, _data in runlog_events)
 
 
 def test_dispatch_tools_blocks_local_shell_exec_for_remote_task_and_nudges() -> None:
@@ -2187,6 +2525,21 @@ def test_repeated_shell_exec_command_still_trips_after_the_updated_streak_limit(
     )
 
 
+def test_web_fetch_budget_exhaustion_blocks_followup_fetch_before_repeat() -> None:
+    state = _make_state()
+    state.scratchpad["_web_fetch_budget_exhausted"] = {
+        "error": "Web fetch budget exhausted for this run.",
+        "terminal": True,
+    }
+    harness = SimpleNamespace(state=state)
+    pending = PendingToolCall(tool_name="web_fetch", args={"result_id": "r6"})
+
+    message = _detect_repeated_tool_loop(harness, pending) or ""
+
+    assert "Web fetch budget exhausted for this run" in message
+    assert "Do not retry web_fetch in this run" in message
+
+
 def test_repeated_artifact_print_trips_after_one_repeat() -> None:
     state = _make_state()
     harness = SimpleNamespace(state=state)
@@ -2452,6 +2805,50 @@ def test_task_complete_error_surfaces_latest_verifier_summary() -> None:
     assert "Latest verifier:" in blocked["error"]
     assert "docker ps" in blocked["error"]
     assert "docker: command not found" in blocked["error"]
+
+
+def test_task_complete_allows_diagnostic_failure_report_with_failing_verifier() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "rca why the fog pxe server failed to install on the remote host"
+    state.last_verifier_verdict = {
+        "tool": "ssh_exec",
+        "target": "curl -Is https://192.168.1.89:8080/fog/",
+        "command": "curl -Is https://192.168.1.89:8080/fog/",
+        "exit_code": 7,
+        "key_stdout": "curl: (7) Failed to connect to 192.168.1.89 port 8080",
+        "key_stderr": "",
+        "verdict": "fail",
+    }
+    state.run_brief.acceptance_criteria = ["Report the root cause or blocker"]
+
+    result = asyncio.run(
+        control.task_complete(
+            "RCA: site verification failed; port 8080 is not responding to curl.",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["output"]["status"] == "complete"
+
+
+def test_task_complete_still_blocks_non_diagnostic_failing_verifier() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "fix the docker deployment"
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "docker ps",
+        "command": "docker ps",
+        "exit_code": 127,
+        "key_stderr": "bash: line 1: docker: command not found",
+        "verdict": "fail",
+    }
+
+    blocked = asyncio.run(control.task_complete("Docker is not working.", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert "latest verifier verdict is still failing" in blocked["error"]
 
 
 def test_repair_recovery_nudge_triggers_on_repeated_shell_failures() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..diagnostic_tasks import diagnostic_failure_completion_allowed
 from ..state import LoopState, clip_text_value
 from ..write_session_fsm import recent_write_session_events, record_write_session_event
 from .common import fail, ok
@@ -363,6 +364,16 @@ def _looks_like_weather_search_meta_completion(message: str) -> bool:
     return any(marker in text for marker in meta_markers) and "result" in text
 
 
+def _unresolved_missing_input_file(state: LoopState) -> dict | None:
+    scratchpad = getattr(state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        return None
+    blocker = scratchpad.get("_unresolved_missing_input_file")
+    if isinstance(blocker, dict) and str(blocker.get("path") or "").strip():
+        return blocker
+    return None
+
+
 async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
     if state.plan_execution_mode and state.active_step_id:
         return fail(
@@ -383,6 +394,25 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "reason": "remote_mutation_requires_verification",
                 "remote_mutation_requirement": remote_requirement,
                 "next_required_action": block_payload["next_required_action"],
+                "last_verifier_verdict": verifier_verdict,
+            },
+        )
+    missing_input = _unresolved_missing_input_file(state)
+    if missing_input is not None:
+        path = str(missing_input.get("path") or "").strip()
+        return fail(
+            f"Cannot complete the task because required input file `{path}` was not found.",
+            metadata={
+                "reason": "missing_required_input_file",
+                "missing_input_file": missing_input,
+                "next_required_action": {
+                    "tool_names": ["file_read", "ask_human", "task_fail"],
+                    "notes": [
+                        "Read the correct input file if the path was a typo.",
+                        "Ask the user for the correct path if no intended file is available.",
+                        "Do not infer the missing file contents from memory or directory listings.",
+                    ],
+                },
                 "last_verifier_verdict": verifier_verdict,
             },
         )
@@ -432,7 +462,17 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                     "acceptance_checklist": state.acceptance_checklist(),
                 },
             )
-    if verifier_verdict and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"} and not state.acceptance_waived:
+    verifier_failure_satisfies_diagnostic = (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
+    )
+    if (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and not state.acceptance_waived
+        and not verifier_failure_satisfies_diagnostic
+    ):
         error = "Cannot complete the task while the latest verifier verdict is still failing."
         verifier_summary = _verifier_failure_summary(verifier_verdict)
         if verifier_summary:
@@ -444,7 +484,7 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
-    if not state.acceptance_ready():
+    if not state.acceptance_ready() and not verifier_failure_satisfies_diagnostic:
         checklist = state.acceptance_checklist()
         pending = [item["criterion"] for item in checklist if not item["satisfied"]]
         return fail(

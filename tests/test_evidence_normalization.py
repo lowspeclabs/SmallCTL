@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from smallctl.context.artifacts import ArtifactStore
 from smallctl.context.policy import ContextPolicy
+from smallctl.context.observations import build_observation_packets
 from smallctl.evidence import normalize_tool_result
 from smallctl.graph.state import PendingToolCall
 from smallctl.graph.tool_outcomes import _store_tool_execution_record
@@ -14,6 +15,7 @@ from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.risk_policy import evaluate_risk_policy
 from smallctl.state import ArtifactRecord, LoopState
+from smallctl.state import EvidenceRecord
 from smallctl.tools.artifact import artifact_read
 
 
@@ -178,6 +180,35 @@ def test_normalize_tool_result_sets_observation_adapter_for_web_fetch() -> None:
     assert "Official Docker-based install guide for Ghost." in evidence.metadata["observation_items"][0]
 
 
+def test_tool_plan_observation_packet_classifies_cleanly() -> None:
+    state = LoopState()
+    state.reasoning_graph.evidence_records.append(
+        EvidenceRecord(
+            evidence_id="TP-E3-E1",
+            kind="tool_plan_observation",
+            statement="path=src/app.py; lines=12",
+            phase="tool_plan",
+            tool_name="file_read",
+            operation_id="op-1",
+            artifact_id="A0001",
+            source="src/app.py",
+            confidence=0.8,
+            metadata={
+                "observation_adapter": "tool_plan_observation",
+                "observation_kind": "tool_plan_observation",
+                "path": "src/app.py",
+            },
+        )
+    )
+
+    packets = build_observation_packets(state)
+
+    assert packets[0].kind == "tool_plan_observation"
+    assert packets[0].summary.startswith("ToolPlan observation (src/app.py)")
+    assert packets[0].artifact_id == "A0001"
+    assert packets[0].operation_id == "op-1"
+
+
 def test_tool_execution_record_carries_provisional_evidence_context() -> None:
     state = LoopState(cwd="/tmp")
     harness = SimpleNamespace(state=state)
@@ -279,6 +310,84 @@ def test_shell_failure_records_negative_evidence(tmp_path: Path) -> None:
         assert "Permission denied" in evidence.statement
         invalidations = harness.state.scratchpad.get("_context_invalidations", [])
         assert any(str(item.get("reason") or "") == "verifier_failed" for item in invalidations if isinstance(item, dict))
+
+    asyncio.run(_run())
+
+
+def test_small_ssh_exec_result_stays_inline_without_artifact(tmp_path: Path) -> None:
+    async def _run() -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        harness = _make_harness(tmp_path)
+        harness._runlog = lambda event, message, **kwargs: events.append((event, kwargs))
+        service = ToolResultService(harness)
+        result = ToolEnvelope(
+            success=True,
+            output={"stdout": "ok\n", "stderr": "", "exit_code": 0},
+            metadata={"command": "echo ok"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-ssh-inline",
+            tool_name="ssh_exec",
+            tool_call_id="call-ssh-inline",
+            args={"host": "example.test", "user": "root", "command": "echo ok"},
+            result=result,
+        )
+
+        message = await service.record_result(
+            tool_name="ssh_exec",
+            tool_call_id="call-ssh-inline",
+            operation_id="op-ssh-inline",
+            result=result,
+            arguments={"host": "example.test", "user": "root", "command": "echo ok"},
+        )
+
+        assert "artifact_id" not in message.metadata
+        assert "ok" in message.content
+        assert "--- [EXIT CODE: 0] ---" in message.content
+        assert harness.state.artifacts == {}
+        assert harness.state.tool_execution_records["op-ssh-inline"]["artifact_id"] == ""
+        assert harness.state.scratchpad["_session_ssh_targets"]["example.test"]["confirmed"] is True
+        assert any(event == "tool_result_inlined" for event, _ in events)
+        assert not any(event == "artifact_created" for event, _ in events)
+
+    asyncio.run(_run())
+
+
+def test_large_ssh_exec_result_still_persists_artifact(tmp_path: Path) -> None:
+    async def _run() -> None:
+        events: list[tuple[str, dict[str, object]]] = []
+        harness = _make_harness(tmp_path)
+        harness._runlog = lambda event, message, **kwargs: events.append((event, kwargs))
+        service = ToolResultService(harness)
+        stdout = "\n".join(f"line {index} {'x' * 60}" for index in range(80))
+        result = ToolEnvelope(
+            success=True,
+            output={"stdout": stdout, "stderr": "", "exit_code": 0},
+            metadata={"command": "find /tmp -maxdepth 3 -type f"},
+        )
+        _prime_execution_record(
+            harness,
+            operation_id="op-ssh-large",
+            tool_name="ssh_exec",
+            tool_call_id="call-ssh-large",
+            args={"host": "example.test", "user": "root", "command": "find /tmp -maxdepth 3 -type f"},
+            result=result,
+        )
+
+        message = await service.record_result(
+            tool_name="ssh_exec",
+            tool_call_id="call-ssh-large",
+            operation_id="op-ssh-large",
+            result=result,
+            arguments={"host": "example.test", "user": "root", "command": "find /tmp -maxdepth 3 -type f"},
+        )
+
+        artifact_id = str(message.metadata.get("artifact_id") or "")
+        assert artifact_id
+        assert artifact_id in harness.state.artifacts
+        assert harness.state.tool_execution_records["op-ssh-large"]["artifact_id"] == artifact_id
+        assert any(event == "artifact_created" for event, _ in events)
 
     asyncio.run(_run())
 

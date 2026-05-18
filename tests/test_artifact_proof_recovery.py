@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
+from smallctl.context import format_reused_artifact_message
 from smallctl.graph.chat_progress import build_repeated_tool_loop_interrupt_payload
 from smallctl.graph.state import PendingToolCall
 from smallctl.graph.tool_execution_recovery import handle_repeated_tool_loop
@@ -163,3 +165,88 @@ def test_repeated_web_artifact_loop_injects_summary_exit_nudge() -> None:
     assert recovery_message.role == "system"
     assert recovery_message.metadata["recovery_kind"] == "artifact_summary_exit"
     assert "task_complete(message='...')" in recovery_message.content
+
+
+def test_reused_small_complete_artifact_inlines_content(tmp_path: Path) -> None:
+    content_path = tmp_path / "A0027.txt"
+    content_path.write_text("SHELL=/bin/sh\n24 * * * * root run-parts /etc/cron.hourly\n", encoding="utf-8")
+    artifact = ArtifactRecord(
+        artifact_id="A0027",
+        kind="ssh_file_read",
+        source="/etc/crontab",
+        created_at="2026-05-12T00:00:00+00:00",
+        size_bytes=62,
+        summary="crontab full file (2 lines)",
+        tool_name="ssh_file_read",
+        content_path=str(content_path),
+        metadata={"complete_file": True, "path": "/etc/crontab", "truncated": False},
+    )
+
+    message = format_reused_artifact_message(artifact, tool_name="ssh_file_read")
+
+    assert "Full cached content is visible below" in message
+    assert "24 * * * * root run-parts /etc/cron.hourly" in message
+    assert "do not call `artifact_read`" in message
+
+
+def test_repeated_artifact_summary_exit_stays_blocked_after_first_nudge(tmp_path: Path) -> None:
+    harness = _make_harness()
+    harness.state.run_brief.original_task = "read the cron jobs and summarize them in plain English"
+    harness.state.working_memory.current_goal = harness.state.run_brief.original_task
+    content_path = tmp_path / "A0027.txt"
+    content_path.write_text(
+        "SHELL=/bin/sh\n24 * * * * root run-parts /etc/cron.hourly\n",
+        encoding="utf-8",
+    )
+    harness.state.artifacts["A0027"] = ArtifactRecord(
+        artifact_id="A0027",
+        kind="ssh_file_read",
+        source="/etc/crontab",
+        created_at="2026-05-12T00:00:00+00:00",
+        size_bytes=62,
+        summary="crontab full file (2 lines)",
+        tool_name="ssh_file_read",
+        content_path=str(content_path),
+        metadata={"complete_file": True, "path": "/etc/crontab", "truncated": False},
+    )
+    pending = PendingToolCall(tool_name="artifact_read", args={"artifact_id": "A0027"})
+    graph_state = SimpleNamespace(
+        pending_tool_calls=[pending],
+        last_tool_results=["stale"],
+        thread_id="thread-1",
+        interrupt_payload=None,
+    )
+    deps = SimpleNamespace(event_handler=None)
+    repeat_error = "Guard tripped: repeated tool call loop (artifact_read repeated with identical arguments)"
+
+    first = asyncio.run(
+        handle_repeated_tool_loop(
+            harness=harness,
+            graph_state=graph_state,
+            deps=deps,
+            pending=pending,
+            repeat_error=repeat_error,
+        )
+    )
+    second = asyncio.run(
+        handle_repeated_tool_loop(
+            harness=harness,
+            graph_state=graph_state,
+            deps=deps,
+            pending=pending,
+            repeat_error=repeat_error,
+        )
+    )
+
+    assert first is None
+    assert second is None
+    assert graph_state.interrupt_payload is None
+    assert graph_state.pending_tool_calls == []
+    assert harness.state.retrieval_cache[0] == "A0027"
+    summary_nudges = [
+        message for message in harness.state.recent_messages
+        if message.metadata.get("recovery_kind") == "artifact_summary_exit"
+    ]
+    assert len(summary_nudges) == 1
+    assert "Full content of A0027 is pinned" in summary_nudges[0].content
+    assert "24 * * * * root run-parts /etc/cron.hourly" in summary_nudges[0].content

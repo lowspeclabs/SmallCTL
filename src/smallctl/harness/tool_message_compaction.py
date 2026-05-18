@@ -116,6 +116,14 @@ def compact_oversized_tool_messages(harness: Any, *, soft_limit: int) -> bool:
             char_cap = threshold * 4
             if len(content) > char_cap:
                 message.content = content[:char_cap] + " [truncated]"
+                harness._runlog(
+                    "tool_message_truncated",
+                    "hard-clipped oversized tool message without artifact",
+                    message_name=message.name,
+                    original_length=len(content),
+                    clipped_length=len(message.content),
+                    marker_included=True,
+                )
                 compacted_any = True
             continue
         artifact = harness.state.artifacts.get(artifact_id)

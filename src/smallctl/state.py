@@ -98,6 +98,7 @@ class LoopState(LoopStateFlowMixin):
     scratchpad: dict[str, Any] = field(default_factory=dict)
     strategy: dict[str, Any] | None = None
     recent_messages: list[ConversationMessage] = field(default_factory=list)
+    transcript_messages: list[ConversationMessage] = field(default_factory=list)
     run_brief: RunBrief = field(default_factory=RunBrief)
     working_memory: WorkingMemory = field(default_factory=WorkingMemory)
     reasoning_graph: ReasoningGraph = field(default_factory=ReasoningGraph)
@@ -164,6 +165,7 @@ class LoopState(LoopStateFlowMixin):
         self.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def append_message(self, message: ConversationMessage) -> None:
+        self.transcript_messages.append(message)
         self.recent_messages.append(message)
         self.recent_messages = _trim_recent_messages(
             self.recent_messages,
@@ -183,6 +185,11 @@ class LoopState(LoopStateFlowMixin):
             json_safe_value(m.to_dict(include_retrieval_safe_text=True))
             for m in self.recent_messages
         ]
+        transcript_source = self.transcript_messages or self.recent_messages
+        serialized_transcript_messages = [
+            json_safe_value(m.to_dict(include_retrieval_safe_text=True))
+            for m in transcript_source
+        ]
         payload = {
             "schema_version": LOOP_STATE_SCHEMA_VERSION,
             "current_phase": self.current_phase,
@@ -195,6 +202,7 @@ class LoopState(LoopStateFlowMixin):
             "strategy": json_safe_value(self.strategy),
             "scratchpad": json_safe_value(self.scratchpad),
             "recent_messages": serialized_messages,
+            "transcript_messages": serialized_transcript_messages,
             "run_brief": json_safe_value(self.run_brief),
             "working_memory": json_safe_value(self.working_memory),
             "reasoning_graph": json_safe_value(self.reasoning_graph),
@@ -255,7 +263,7 @@ class LoopState(LoopStateFlowMixin):
             "recent_message_limit": self.recent_message_limit,
             "last_completion_tokens": self.last_completion_tokens,
         }
-        payload["conversation_history"] = list(serialized_messages)
+        payload["conversation_history"] = list(serialized_transcript_messages)
         return payload
 
     @classmethod
@@ -263,8 +271,18 @@ class LoopState(LoopStateFlowMixin):
         incoming_version = _coerce_int(data.get("schema_version"), default=0)
         migrated = _migrate_loop_state_payload(dict(data), incoming_version=incoming_version)
         raw_recent_messages = migrated.get("recent_messages")
+        raw_transcript_messages = migrated.get("transcript_messages")
+        if raw_transcript_messages is None:
+            raw_transcript_messages = _coerce_list_payload(migrated.get("conversation_history"))
+        else:
+            raw_transcript_messages = _coerce_list_payload(raw_transcript_messages)
+        transcript_messages = [
+            message
+            for msg in raw_transcript_messages
+            if (message := _coerce_conversation_message(msg)) is not None
+        ]
         if raw_recent_messages is None:
-            raw_recent_messages = _coerce_list_payload(migrated.get("conversation_history"))
+            raw_recent_messages = raw_transcript_messages
         else:
             raw_recent_messages = _coerce_list_payload(raw_recent_messages)
         recent_messages = [
@@ -272,6 +290,8 @@ class LoopState(LoopStateFlowMixin):
             for msg in raw_recent_messages
             if (message := _coerce_conversation_message(msg)) is not None
         ]
+        if not transcript_messages:
+            transcript_messages = list(recent_messages)
         raw = dict(migrated)
         raw["schema_version"] = LOOP_STATE_SCHEMA_VERSION
         raw.pop("conversation_history", None)
@@ -288,6 +308,7 @@ class LoopState(LoopStateFlowMixin):
         raw["recent_errors"] = _coerce_string_list(migrated.get("recent_errors"))
         raw["strategy"] = _coerce_json_dict_payload(migrated.get("strategy"))
         raw["recent_messages"] = recent_messages
+        raw["transcript_messages"] = transcript_messages
         raw["recent_message_limit"] = recent_limit
         raw["run_brief"] = _coerce_run_brief(migrated.get("run_brief"))
         raw["working_memory"] = _coerce_working_memory(

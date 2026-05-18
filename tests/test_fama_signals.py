@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from smallctl.fama.runtime import _handle_signal, expire_for_turn
 from smallctl.fama.signals import FamaFailureKind, FamaSignal, get_fama_state, push_fama_signal
 from smallctl.fama.state import activate_mitigations, active_mitigations, expire_mitigations
 from smallctl.fama.router import route_signal
@@ -9,7 +10,12 @@ from smallctl.state import LoopState
 
 
 class _Config:
+    fama_enabled = True
+    fama_mode = "lite"
     fama_default_ttl_steps = 2
+    fama_max_active_mitigations = 2
+    fama_signal_window = 8
+    fama_done_gate_on_failure = True
 
 
 def test_fama_signal_stores_under_versioned_scratchpad() -> None:
@@ -84,3 +90,55 @@ def test_context_drift_routes_tool_plan_evidence_capsule() -> None:
     mitigations = route_signal(signal, state=state, config=_Config())
 
     assert "evidence_gathering_needed" in {item.name for item in mitigations}
+
+
+def test_fama_suppressed_signal_is_logged() -> None:
+    state = LoopState(step_count=4)
+    events: list[tuple[str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        config=_Config(),
+        _runlog=lambda event, message, **kwargs: events.append((event, kwargs)),
+    )
+    signal = FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="test",
+        evidence="verifier failed",
+        step=4,
+        tool_name="task_complete",
+    )
+
+    assert _handle_signal(harness, state=state, config=harness.config, signal=signal, dedupe=True) is True
+    assert _handle_signal(harness, state=state, config=harness.config, signal=signal, dedupe=True) is False
+
+    suppressed = [data for event, data in events if event == "fama_signal_suppressed"]
+    assert suppressed
+    assert suppressed[-1]["kind"] == "early_stop"
+    assert suppressed[-1]["tool_name"] == "task_complete"
+    assert "early_stop" in str(suppressed[-1]["signature"])
+
+
+def test_fama_active_mitigation_ttl_is_logged() -> None:
+    state = LoopState(step_count=11)
+    events: list[tuple[str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        config=_Config(),
+        _runlog=lambda event, message, **kwargs: events.append((event, kwargs)),
+    )
+    signal = FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="test",
+        evidence="verifier failed",
+        step=10,
+        tool_name="task_complete",
+    )
+    activate_mitigations(state, route_signal(signal, state=state, config=_Config()), max_active=2)
+
+    expire_for_turn(harness, mode="loop")
+
+    ttl_events = [data for event, data in events if event == "fama_mitigation_ttl"]
+    assert {event["mitigation"] for event in ttl_events} == {"done_gate", "acceptance_checklist_capsule"}
+    assert all(event["remaining_steps"] > 0 for event in ttl_events)

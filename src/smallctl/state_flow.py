@@ -23,6 +23,10 @@ _MUTATING_COMMAND_RE = re.compile(
     re.IGNORECASE,
 )
 _PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
+_OPTIMISTIC_STATEMENT_RE = re.compile(
+    r"(?<![@\w])(pass(?:ed|es|ing)?|verified|success(?:ful(?:ly)?)?|fixed|resolved)(?![@\w])",
+    re.IGNORECASE,
+)
 
 
 def _is_read_only_artifact(artifact: Any) -> bool:
@@ -104,10 +108,7 @@ class LoopStateFlowMixin:
 
     @staticmethod
     def _is_optimistic_statement(value: str) -> bool:
-        lowered = str(value or "").strip().lower()
-        if not lowered:
-            return False
-        return any(token in lowered for token in ("pass", "verified", "success", "fixed", "resolved"))
+        return bool(_OPTIMISTIC_STATEMENT_RE.search(str(value or "")))
 
     def _lane_staleness_index(self, key: str) -> dict[str, dict[str, Any]]:
         payload = self.scratchpad.get(key)
@@ -576,6 +577,89 @@ class LoopStateFlowMixin:
             return False
         return self._verifier_failure_related_to_text(text, detail_payload)
 
+    @staticmethod
+    def _is_execute_repair_transition(detail_payload: dict[str, Any]) -> bool:
+        from_phase = str(detail_payload.get("from_phase") or "").strip().lower()
+        to_phase = str(detail_payload.get("to_phase") or "").strip().lower()
+        return {from_phase, to_phase} == {"execute", "repair"}
+
+    @staticmethod
+    def _evidence_has_failure_semantics(evidence: Any) -> bool:
+        if getattr(evidence, "negative", False):
+            return True
+        metadata = getattr(evidence, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if metadata.get("success") is False:
+            return True
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None and int(exit_code) != 0:
+            return True
+        if metadata.get("failure_mode"):
+            return True
+        if str(metadata.get("verifier_verdict") or "").strip().lower() == "fail":
+            return True
+        if metadata.get("stderr"):
+            return True
+        statement = str(getattr(evidence, "statement", "") or "").lower()
+        if any(marker in statement for marker in ("error:", "failed", "failure", "missing", "does not exist", "not found", "verifier_failed")):
+            return True
+        tool_name = str(getattr(evidence, "tool_name", "") or "").strip().lower()
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            command = str(metadata.get("command") or "").lower()
+            if any(marker in command for marker in ("grep ", "rg ", "find ", "findstr ", "journalctl", "tail ", "head ", "cat ", "ls ", "dmesg", "systemctl status")):
+                return True
+        return False
+
+    @staticmethod
+    def _artifact_has_failure_semantics(artifact: Any) -> bool:
+        metadata = getattr(artifact, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if metadata.get("success") is False:
+            return True
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None and int(exit_code) != 0:
+            return True
+        if metadata.get("failure_mode"):
+            return True
+        if str(metadata.get("verifier_verdict") or "").strip().lower() == "fail":
+            return True
+        if metadata.get("stderr"):
+            return True
+        summary = str(getattr(artifact, "summary", "") or "").lower()
+        if any(marker in summary for marker in ("error:", "failed", "failure", "missing", "does not exist", "not found", "verifier_failed")):
+            return True
+        tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            command = str(metadata.get("command") or "").lower()
+            if any(marker in command for marker in ("grep ", "rg ", "find ", "findstr ", "journalctl", "tail ", "head ", "cat ", "ls ", "dmesg", "systemctl status")):
+                return True
+        return False
+
+    def _build_repair_continuity_capsule(self, detail_payload: dict[str, Any]) -> dict[str, Any]:
+        capsule: dict[str, Any] = {
+            "created_at_step": int(self.step_count or 0),
+            "command": str(detail_payload.get("command") or detail_payload.get("target") or "").strip(),
+            "failure_mode": str(detail_payload.get("failure_mode") or self.last_failure_class or "").strip(),
+        }
+        verdict = self.current_verifier_verdict()
+        if verdict:
+            capsule["verdict"] = str(verdict.get("verdict") or verdict.get("status") or "").strip()
+            exit_code = verdict.get("exit_code")
+            if exit_code is not None:
+                capsule["exit_code"] = int(exit_code)
+        latest_failure = self.failure_events[-1] if self.failure_events else None
+        if latest_failure is not None:
+            suggested = str(getattr(latest_failure, "suggested_next_action", "") or "").strip()
+            if suggested:
+                capsule["suggested_next_action"] = suggested
+        if self.working_memory.failures:
+            capsule["last_attempted_fix"] = str(self.working_memory.failures[-1] or "").strip()
+        if self.working_memory.next_actions:
+            capsule["next_suggested_action"] = str(self.working_memory.next_actions[-1] or "").strip()
+        return capsule
+
     def invalidate_context(
         self,
         *,
@@ -799,9 +883,14 @@ class LoopStateFlowMixin:
                     or self._is_recent_context_step(metadata.get("created_at_step"))
                 ):
                     should_mark_stale = False
+                if should_mark_stale and self._is_execute_repair_transition(detail_payload) and self._artifact_has_failure_semantics(artifact):
+                    should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = (
-                    str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                    (
+                        str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                        or self._is_optimistic_statement(str(getattr(artifact, "summary", "") or ""))
+                    )
                     and self._verifier_failure_related_to_text(
                         " ".join(
                             str(part or "")
@@ -850,12 +939,15 @@ class LoopStateFlowMixin:
                     created_at_step = int(getattr(evidence, "created_at_step", 0) or 0)
                     if created_at_step >= max(0, self.step_count - 1):
                         should_mark_stale = False
+                if should_mark_stale and self._is_execute_repair_transition(detail_payload) and self._evidence_has_failure_semantics(evidence):
+                    should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = (
                     (
                         str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
                         or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
                     )
+                    and not getattr(evidence, "negative", False)
                     and self._verifier_failure_related_to_text(
                         " ".join(
                             str(part or "")
@@ -880,6 +972,9 @@ class LoopStateFlowMixin:
                 )
 
         self.prune_context_staleness_indexes()
+
+        if reason_label == "verifier_failed":
+            self.scratchpad["_repair_continuity_capsule"] = self._build_repair_continuity_capsule(detail_payload)
 
         invalidation_event: dict[str, Any] = {
             "reason": reason_label,

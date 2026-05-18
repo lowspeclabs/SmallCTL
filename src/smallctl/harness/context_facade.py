@@ -19,6 +19,7 @@ def _resolve_effective_prompt_budget(
     server_context_limit: int | None,
     current_max_prompt_tokens: int | None = None,
     observed_n_keep: int | None = None,
+    provider_profile: str | None = None,
 ) -> int | None:
     return _resolve_effective_prompt_budget_helper(
         configured_max_prompt_tokens=configured_max_prompt_tokens,
@@ -26,6 +27,7 @@ def _resolve_effective_prompt_budget(
         server_context_limit=server_context_limit,
         current_max_prompt_tokens=current_max_prompt_tokens,
         observed_n_keep=observed_n_keep,
+        provider_profile=provider_profile,
     )
 
 

@@ -137,6 +137,12 @@ class ArtifactStore:
                 txt_content = content
             else:
                 txt_content = json.dumps(result.output, ensure_ascii=True, default=str, indent=2)
+        elif tool_name == "ssh_file_write" and isinstance(result.output, dict):
+            content = result.output.get("content")
+            if isinstance(content, str):
+                txt_content = content
+            else:
+                txt_content = json.dumps(result.output, ensure_ascii=True, default=str, indent=2)
         elif isinstance(result.output, dict):
             plain_text = self._structured_plain_text(result.output)
             if plain_text is not None:

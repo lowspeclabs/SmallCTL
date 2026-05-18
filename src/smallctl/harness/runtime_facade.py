@@ -321,6 +321,10 @@ def restore_graph_state(self: Any, thread_id: str | None = None) -> bool:
             )
         if isinstance(getattr(self.state, "scratchpad", None), dict):
             self.state.scratchpad["_session_restored"] = True
+            self.state.scratchpad["_resume_contract"] = {
+                "kind": "chat_session_resume",
+                "thread_id": str(getattr(self.state, "thread_id", "") or thread_id or "").strip(),
+            }
         self._sync_run_logger_session_id()
     return restored
 

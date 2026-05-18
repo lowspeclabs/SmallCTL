@@ -54,3 +54,11 @@ def test_stream_sse_emits_stream_ended_without_done_event() -> None:
 
     assert events[-1]["type"] == "stream_ended_without_done"
     assert events[-1]["details"]["chunk_count"] == 1
+    assert events[-1]["details"]["last_chunks"] == [
+        {
+            "content_delta": "Hello",
+            "reasoning_delta": "",
+            "tool_call_delta": False,
+            "finish_reason": None,
+        }
+    ]

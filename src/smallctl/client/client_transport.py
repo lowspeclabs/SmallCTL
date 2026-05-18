@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ except Exception:  # pragma: no cover
     httpx = None
 
 from ..logging_utils import log_kv
+from ..redaction import redact_sensitive_text
 from .adapters.common import merge_system_messages_for_single_system_providers
 from .chunk_parser import chunk_contains_tool_call_delta
 from .provider_adapters import sanitize_messages_for_openrouter
@@ -23,7 +25,7 @@ from .request_budget import approx_token_count as _budget_approx_token_count
 from .request_budget import build_request_budget
 from .request_budget import client_context_limit as _budget_client_context_limit
 from .request_budget import json_size_bytes as _budget_json_size_bytes
-from .streaming import SSEStreamer
+from .streaming import SSEStreamer, summarize_stream_chunk
 from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
 from .usage import extract_context_limit, extract_runtime_context_limit
 
@@ -41,6 +43,7 @@ _LOCAL_PATCH_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _UNSET = object()
+_DEFAULT_MAX_COMPLETION_TOKENS = 2048
 
 
 def _client_key(client: Any) -> tuple[str, str]:
@@ -626,6 +629,72 @@ def _summarize_400_payload(payload: dict[str, Any], *, context_limit: int | None
     }
 
 
+def _message_role_counts(messages: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(messages, list):
+        return counts
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "unknown").strip() or "unknown"
+        counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
+def _latest_user_message_audit(messages: Any) -> dict[str, Any]:
+    if not isinstance(messages, list):
+        return {"latest_user_present": False}
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ]
+            text = "\n".join(text_parts)
+        else:
+            text = str(content or "")
+        encoded = text.encode("utf-8", errors="replace")
+        preview = redact_sensitive_text(text).replace("\n", "\\n")[:240]
+        return {
+            "latest_user_present": bool(text.strip()),
+            "latest_user_sha256": hashlib.sha256(encoded).hexdigest()[:12] if text else "",
+            "latest_user_chars": len(text),
+            "latest_user_preview": preview,
+        }
+    return {"latest_user_present": False}
+
+
+def _log_request_audit(client: Any, *, payload: dict[str, Any], tools: list[dict[str, Any]], stage: str) -> None:
+    messages = payload.get("messages")
+    payload_tools = payload.get("tools")
+    active_tools = payload_tools if isinstance(payload_tools, list) else tools
+    tool_names = [_tool_name(tool) for tool in active_tools if _tool_name(tool)]
+    details = {
+        "stage": stage,
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "message_count": len(messages) if isinstance(messages, list) else 0,
+        "role_counts": _message_role_counts(messages),
+        "tool_count": len(active_tools),
+        "tool_names": tool_names,
+        **_latest_user_message_audit(messages),
+    }
+    log_kv(client.log, logging.INFO, "chat_request_payload_audit", **details)
+    if client.run_logger:
+        client.run_logger.log(
+            "chat",
+            "request_payload_audit",
+            "chat request payload audit",
+            **details,
+        )
+
+
 def _normalize_tool_schemas_for_openrouter(tools: Any) -> tuple[list[dict[str, Any]], list[str]]:
     if not isinstance(tools, list):
         return [], []
@@ -1166,6 +1235,10 @@ async def stream_chat(
         "model": client.model,
         "messages": messages,
         "stream": True,
+        "max_tokens": int(
+            getattr(client, "max_completion_tokens", _DEFAULT_MAX_COMPLETION_TOKENS)
+            or _DEFAULT_MAX_COMPLETION_TOKENS
+        ),
     }
     if tools:
         payload["tools"] = tools
@@ -1207,6 +1280,7 @@ async def stream_chat(
             }
             return
         payload = initial_llamacpp_budget.payload
+    _log_request_audit(client, payload=payload, tools=tools, stage="initial")
 
     log_kv(
         client.log,
@@ -1267,6 +1341,7 @@ async def stream_chat(
         retry_after_seconds: float | None = None
         saw_chunk = False
         saw_tool_call_chunk = False
+        recent_chunks: list[dict[str, Any]] = []
         retry_after_backend_recovery = False
         current_payload = _preflight_openrouter_payload(client, current_payload, stage=f"attempt_{attempt}")
         try:
@@ -1329,11 +1404,12 @@ async def stream_chat(
                     yield {
                         "type": "backend_wedged",
                         "error": "Backend did not emit a first token before timeout",
-                        "details": wedge_details,
+                        "details": {**wedge_details, "last_chunks": wedge_details.get("last_chunks", recent_chunks)},
                     }
                     return
                 if event.get("type") == "chunk":
                     saw_chunk = True
+                    recent_chunks = (recent_chunks + [summarize_stream_chunk(event.get("data", {}))])[-5:]
                     if chunk_contains_tool_call_delta(event.get("data", {})):
                         saw_tool_call_chunk = True
                 if _is_llamacpp_model_unloaded_chunk_error(client, event):
@@ -1836,6 +1912,7 @@ async def stream_chat(
                                 "attempt": attempt,
                                 "provider_profile": client.provider_profile,
                                 "message": str(exc),
+                                "last_chunks": recent_chunks,
                             },
                         }
                         return
@@ -1862,6 +1939,7 @@ async def stream_chat(
                             "provider_profile": client.provider_profile,
                             "message": str(exc),
                             "tool_call_stream_active": saw_tool_call_chunk,
+                            "last_chunks": recent_chunks,
                         },
                     }
                     return

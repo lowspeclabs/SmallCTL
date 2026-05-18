@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 from ..logging_utils import RunLogger, log_kv
 from ..models.tool_result import ToolEnvelope
 from ..remote_scope import has_single_confirmed_ssh_target, remote_scope_is_active
+from ..state import json_safe_value
 from . import network
 from .registry import ToolRegistry
 
@@ -76,6 +77,44 @@ _PATCH_ARGUMENT_ALIASES = {
     "replacement": "replacement_text",
 }
 _SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
+_HARNESS_TOOL_SHELL_NAMES = {
+    "artifact_grep",
+    "artifact_print",
+    "artifact_read",
+    "ask_human",
+    "ast_patch",
+    "dir_list",
+    "file_delete",
+    "file_download",
+    "file_patch",
+    "file_read",
+    "file_write",
+    "find_files",
+    "http_get",
+    "http_post",
+    "index_query_symbol",
+    "json_query",
+    "log_note",
+    "loop_status",
+    "memory_update",
+    "plan_set",
+    "process_kill",
+    "shell_exec",
+    "ssh_exec",
+    "ssh_file_patch",
+    "ssh_file_read",
+    "ssh_file_replace_between",
+    "ssh_file_write",
+    "task_complete",
+    "task_fail",
+    "web_fetch",
+    "web_search",
+    "yaml_read",
+}
+_HARNESS_TOOL_AS_SHELL_RE = re.compile(
+    r"^\s*(?P<tool>[A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_]*=|[{'\"])",
+    re.DOTALL,
+)
 _WRITE_SESSION_PATH_REPAIR_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch"}
 _REMOTE_GUARDED_FILE_TOOLS = {"dir_list", "file_read", "file_write", "file_patch", "ast_patch"}
 _SSH_TASK_TARGET_RE = re.compile(
@@ -258,15 +297,7 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     phase=self.phase,
                 )
-            if tool_name == "task_complete" and self.phase == "repair":
-                error = (
-                    f"Tool '{tool_name}' is not allowed in phase 'repair'. "
-                    "The last verifier run still shows a non-zero exit code. "
-                    "Fix the failing command first (re-run it and achieve exit_code 0), "
-                    "then call task_complete."
-                )
-            else:
-                error = f"Tool '{tool_name}' is not allowed in phase '{self.phase}'"
+            error = f"Tool '{tool_name}' is not allowed in phase '{self.phase}'"
             return ToolEnvelope(
                 success=False,
                 error=error,
@@ -317,6 +348,7 @@ class ToolDispatcher:
                     "tool argument validation failed",
                     tool_name=tool_name,
                     error=validation_error,
+                    arguments_preview=json_safe_value(args),
                 )
             metadata = {"tool_name": tool_name}
             if dropped_keys:
@@ -645,6 +677,13 @@ def normalize_tool_request(
     if tool_name == "ssh_exec":
         arguments, repair_metadata = _repair_ssh_exec_malformed_args(arguments)
         normalization_metadata.update(repair_metadata)
+        command = str(arguments.get("command") or "").strip() if isinstance(arguments, dict) else ""
+        harness_tool_shell_error = _guard_harness_tool_as_ssh_shell_command(command)
+        if harness_tool_shell_error is not None:
+            return tool_name, arguments, harness_tool_shell_error, normalization_metadata
+        nested_raw_ssh_error = _guard_nested_raw_ssh_in_ssh_exec(command)
+        if nested_raw_ssh_error is not None:
+            return tool_name, arguments, nested_raw_ssh_error, normalization_metadata
         # Recover missing host/user/password from task context BEFORE normalization
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
@@ -792,6 +831,27 @@ def normalize_tool_request(
     return "ssh_exec", rewritten_args, None, normalization_metadata
 
 
+def _guard_harness_tool_as_ssh_shell_command(command: str) -> ToolEnvelope | None:
+    match = _HARNESS_TOOL_AS_SHELL_RE.match(str(command or ""))
+    if not match:
+        return None
+    attempted = str(match.group("tool") or "").strip()
+    if attempted not in _HARNESS_TOOL_SHELL_NAMES:
+        return None
+    return ToolEnvelope(
+        success=False,
+        error=(
+            f"You tried to run harness tool `{attempted}` as a remote shell command. "
+            f"Call `{attempted}` directly with JSON arguments instead of passing it to `ssh_exec`."
+        ),
+        metadata={
+            "tool_name": "ssh_exec",
+            "reason": "harness_tool_as_remote_shell_command",
+            "suggested_tool": attempted,
+        },
+    )
+
+
 def _repair_write_session_path_from_state(
     tool_name: str,
     arguments: dict[str, Any],
@@ -833,6 +893,26 @@ def _value_present(value: Any) -> bool:
 
 def _looks_like_raw_ssh_shell_command(command: str) -> bool:
     return bool(_RAW_SSH_SHELL_RE.match(str(command or "").strip()))
+
+
+def _guard_nested_raw_ssh_in_ssh_exec(command: str) -> ToolEnvelope | None:
+    if not _looks_like_raw_ssh_shell_command(command):
+        return None
+    return ToolEnvelope(
+        success=False,
+        error=(
+            "Do not put raw `ssh`/`sshpass`/`scp`/`sftp` inside `ssh_exec.command`; "
+            "`ssh_exec` already opens the SSH connection. Use canonical `ssh_exec` arguments, "
+            "for example `ssh_exec(host='192.168.1.89', user='root', password='...', command='whoami')`."
+        ),
+        metadata={
+            "tool_name": "ssh_exec",
+            "reason": "nested_raw_ssh_in_ssh_exec",
+            "command": command,
+            "suggested_tool": "ssh_exec",
+            "suggested_command": "whoami",
+        },
+    )
 
 
 def _ssh_auth_recovery_entry_key(host: str, user: str) -> str:
@@ -1488,25 +1568,44 @@ def _pin_and_guard_ssh_credentials(
             },
         ), metadata
 
-    if password and confirmed_password and password_origin == "explicit":
+    if password and confirmed_password:
         current_fp = _password_fingerprint(password)
         confirmed_fp = _password_fingerprint(confirmed_password)
         if current_fp != confirmed_fp:
-            metadata["ssh_credential_block_reason"] = "password_mismatch"
-            error = (
-                f"SSH password mismatch for {user}@{host}. "
-                "Use the confirmed session credentials or ask the user for new credentials."
-            )
-            return repaired, ToolEnvelope(
-                success=False,
-                error=error,
-                metadata={
-                    "reason": "ssh_credential_pinning_blocked",
-                    "block_reason": "password_mismatch",
-                },
-            ), metadata
+            if (
+                password_origin == "explicit"
+                and _explicit_ssh_password_matches_current_user_context(
+                    host,
+                    password,
+                    user=user,
+                    state=state,
+                )
+            ):
+                metadata["ssh_credential_rotation_candidate"] = True
+                metadata["ssh_credential_rotation_source"] = "current_user_context"
+                return repaired, None, metadata
+
+            repaired["password"] = confirmed_password
+            metadata["pinned_ssh_password"] = True
+            metadata["pinned_ssh_password_overrode_mismatch"] = True
+            metadata["pinned_ssh_password_overrode_origin"] = password_origin or "unknown"
+            metadata["provided_ssh_password_fingerprint"] = current_fp
+            metadata["confirmed_ssh_password_fingerprint"] = confirmed_fp
 
     return repaired, None, metadata
+
+
+def _explicit_ssh_password_matches_current_user_context(
+    host: str,
+    password: str,
+    *,
+    user: str | None = None,
+    state: Any | None = None,
+) -> bool:
+    if state is None:
+        return False
+    inferred = _infer_ssh_password_from_state_context(host, user=user, state=state)
+    return bool(inferred) and _password_fingerprint(inferred) == _password_fingerprint(password)
 
 
 def _session_ssh_target_record(host: str, *, state: Any | None = None) -> dict[str, Any]:

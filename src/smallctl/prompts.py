@@ -22,6 +22,10 @@ _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
 _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES = (
     "google_gemma-4-26b-a4b-it",
 )
+_REMOTE_CLEANUP_TASK_KEYWORDS = (
+    "uninstall", "remove", "delete", "purge", "clean up", "clean-up",
+    "get rid of", "wipe", "tear down", "teardown", "disable",
+)
 
 
 def is_gemma_model_name(model_name: str | None) -> bool:
@@ -49,6 +53,22 @@ def is_exact_large_gemma_4_26b_a4b_it_model_name(model_name: str | None) -> bool
             for suffix in _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES
         )
     )
+
+
+def _state_has_remote_cleanup_intent(state: LoopState) -> bool:
+    run_brief = getattr(state, "run_brief", None)
+    wm = getattr(state, "working_memory", None)
+    text = " ".join(
+        part
+        for part in (
+            str(getattr(run_brief, "original_task", "") or ""),
+            str(getattr(wm, "current_goal", "") or ""),
+        )
+        if part
+    ).lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in _REMOTE_CLEANUP_TASK_KEYWORDS)
 
 
 def build_system_prompt(
@@ -367,15 +387,26 @@ def build_system_prompt(
                     "When connecting as `root`, do not prefix the remote command with `sudo`; run the command directly. "
                     "For remote services or watch/follow commands, do not run a foreground command that is expected to keep running; use a service manager, detached/background launch, or a bounded `timeout ...` probe, then verify separately. "
                     "If the user explicitly asks to rerun, recheck, or confirm live, do not rely on retrieved historical notes alone; issue a fresh `ssh_exec` unless the tool is unavailable or blocked. "
-                    "Do not infer remote file, package, or service absence from local shell output, local filesystem paths, or stale artifacts; strong remote claims require fresh `ssh_exec` evidence from that host."
+                    "Do not infer remote file, package, or service absence from local shell output, local filesystem paths, or stale artifacts; strong remote claims require fresh `ssh_exec` evidence from that host. "
+                    "DIAGNOSTIC EXIT CODES: Exit code 1 from status or presence probes (systemctl status, dpkg -l, apt list, which, whereis) that report 'not found' is valid negative intelligence, NOT an error. Report the finding and call task_complete when you have enough evidence."
                 )
+                if _state_has_remote_cleanup_intent(state):
+                    parts.append(
+                        "REMOTE CLEANUP PLAYBOOK: Batch cleanup work into a small number of `ssh_exec` calls. "
+                        "First stop, disable, and mask related services; run daemon-reload; kill matching lingering processes; remove files, users, packages, and database rows as requested. "
+                        "Then run one comprehensive read-only verifier that checks services, processes, files, users, packages, and database residue. "
+                        "For absence checks, no matches or 'No such file or directory' is success; matching residue is the failure to repair."
+                    )
                 if any(name in available_tool_names for name in {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}):
                     parts.append(
                         "REMOTE FILES: Prefer typed SSH file tools over raw `ssh_exec` for remote file reads and edits. "
                         "Use `ssh_file_read` instead of cat/head/sed reads, `ssh_file_write` for full remote writes, "
                         "`ssh_file_patch` for exact text replacement, and `ssh_file_replace_between` for multiline bounded blocks such as `<style>...</style>`. "
                         "REMOTE PATCH VERBATIM RULE: When using `ssh_file_patch`, copy the `target_text` verbatim from the most recent `ssh_file_read` output or artifact. "
-                        "Do not reconstruct target text from memory or previews. If the remote file may have changed since your last read, re-read it immediately before patching."
+                        "Do not reconstruct target text from memory or previews. If the remote file may have changed since your last read, re-read it immediately before patching. "
+                        "FILESYSTEM NAMESPACES: `file_read`, `file_write`, `dir_list`, and `shell_exec` operate on the LOCAL orchestrator filesystem ONLY. "
+                        "`ssh_file_read`, `ssh_file_write`, `ssh_file_patch`, and `ssh_file_replace_between` operate on REMOTE hosts. "
+                        "After writing a file remotely with `ssh_file_write`, verify it with `ssh_file_read`, NEVER with `file_read`."
                     )
                 if is_small_model_name(state.scratchpad.get("_model_name")):
                     parts.append(

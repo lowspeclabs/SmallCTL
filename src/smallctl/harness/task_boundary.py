@@ -47,6 +47,26 @@ _INLINE_CONTINUE_TASK_PREFIX_RE = re.compile(
     r"^\s*Continue current task:\s*(?P<body>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_CONTINUE_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:continue|cntinue|conitnue|continune|cotinue|keep\s+going|resume|proceed|go\s+on|carry\s+on)\b"
+    r"(?P<suffix>\s*[,;:.-]\s*|\s+(?:and|by|with|to|then|next)\s+).+",
+    re.IGNORECASE | re.DOTALL,
+)
+_CONTINUATION_ACTION_LEAD_RE = re.compile(
+    r"^\s*(?:yes|yep|yeah|ok|okay|sure|go\s+ahead|do\s+it|please\s+do|start|begin|run|do|use|try)\b",
+    re.IGNORECASE,
+)
+_WEB_RESEARCH_DIRECTIVE_RE = re.compile(
+    r"\b(?:"
+    r"web\s*search|websearch|search\s+(?:the\s+)?web|internet\s+search|"
+    r"web\s+lookup|look\s+(?:it\s+)?up|browse|research"
+    r")\b",
+    re.IGNORECASE,
+)
+_RESEARCH_CONTEXT_RE = re.compile(
+    r"\b(?:research|web|internet|online|search|look\s+up|lookup|summary|summarize|summarise|main\s+plot|plot\s+points)\b",
+    re.IGNORECASE,
+)
 _INLINE_USER_WRAP_MARKER_RE = re.compile(
     r"\.\s*User\s+(?P<kind>follow-up|correction):\s*",
     re.IGNORECASE,
@@ -731,7 +751,9 @@ class TaskBoundaryService:
         )
         message = self._clip_task_summary_text(payload.get("message"), limit=180)
         reason = self._clip_task_summary_text(payload.get("reason"), limit=140)
+        full_reason = str(payload.get("reason") or payload.get("message") or "").strip()
         status = str(payload.get("status") or "").strip()
+        is_guard_trip = status == "failed" and "guard tripped:" in full_reason.lower()
         notes = [f"Task {task_id} {status}: {task_text}".strip()]
         if message:
             notes.append(message)
@@ -744,26 +766,131 @@ class TaskBoundaryService:
             if count:
                 artifacts = list((getattr(self.harness.state, "artifacts", {}) or {}).keys())[-min(count, 5):]
 
+        decisions = [f"status={status}"] if status else []
+        remaining_plan: list[str] = []
+        if payload.get("replacement_task"):
+            remaining_plan.append(str(payload.get("replacement_task") or "").strip())
+        if is_guard_trip:
+            decisions.append("guard_trip_recovery")
+            remaining_plan.append("Continue from preserved progress; do not retry the repeated tool call.")
+
         self.harness.state.episodic_summaries.append(
             EpisodicSummary(
                 summary_id=summary_id,
                 created_at=str(payload.get("finished_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")),
-                decisions=[f"status={status}"] if status else [],
+                decisions=decisions,
                 files_touched=[
                     str(path).strip()
                     for path in (payload.get("target_paths") or [])
                     if str(path).strip()
                 ],
                 failed_approaches=[reason] if status in {"aborted", "failed"} and reason else [],
-                remaining_plan=[str(payload.get("replacement_task") or "").strip()]
-                if payload.get("replacement_task")
-                else [],
+                remaining_plan=[item for item in remaining_plan if item],
                 artifact_ids=artifacts,
                 notes=notes,
                 full_summary_artifact_id=None,
             )
         )
         self.harness.state.episodic_summaries = self.harness.state.episodic_summaries[-12:]
+        if is_guard_trip:
+            self._record_guard_trip_recovery_context(
+                summary_id=summary_id,
+                artifact_ids=artifacts,
+                reason=full_reason,
+                task_text=task_text,
+            )
+
+    def _record_guard_trip_recovery_context(
+        self,
+        *,
+        summary_id: str,
+        artifact_ids: list[str],
+        reason: str,
+        task_text: str,
+    ) -> None:
+        state = self.harness.state
+        scratchpad = state.scratchpad
+        protected_summaries = [
+            str(item).strip()
+            for item in (scratchpad.get("_guard_trip_preserved_summary_ids") or [])
+            if str(item).strip()
+        ]
+        if summary_id and summary_id not in protected_summaries:
+            protected_summaries.append(summary_id)
+        scratchpad["_guard_trip_preserved_summary_ids"] = protected_summaries[-8:]
+        state._clear_lane_staleness("_summary_staleness", summary_id)
+
+        protected_artifacts = [
+            str(item).strip()
+            for item in (scratchpad.get("_guard_trip_preserved_artifact_ids") or [])
+            if str(item).strip()
+        ]
+        protected_observations = [
+            str(item).strip()
+            for item in (scratchpad.get("_guard_trip_preserved_observation_ids") or [])
+            if str(item).strip()
+        ]
+        artifacts_by_id = getattr(state, "artifacts", {}) if isinstance(getattr(state, "artifacts", {}), dict) else {}
+        for artifact_id in artifact_ids:
+            artifact = artifacts_by_id.get(artifact_id)
+            if not self._guard_trip_preserves_artifact(artifact):
+                continue
+            if artifact_id not in protected_artifacts:
+                protected_artifacts.append(artifact_id)
+            state._clear_lane_staleness("_artifact_staleness", artifact_id)
+            metadata = getattr(artifact, "metadata", {}) if artifact is not None else {}
+            if isinstance(metadata, dict):
+                evidence_id = str(metadata.get("evidence_id") or "").strip()
+                if evidence_id:
+                    if evidence_id not in protected_observations:
+                        protected_observations.append(evidence_id)
+                    state._clear_lane_staleness("_observation_staleness", evidence_id)
+        if protected_artifacts:
+            scratchpad["_guard_trip_preserved_artifact_ids"] = protected_artifacts[-12:]
+        if protected_observations:
+            scratchpad["_guard_trip_preserved_observation_ids"] = protected_observations[-12:]
+
+        repeated_tool = self._guard_trip_repeated_tool(reason)
+        scratchpad["_guard_trip_recovery_capsule"] = {
+            "created_at_step": int(getattr(state, "step_count", 0) or 0),
+            "summary_id": summary_id,
+            "failed_tool": repeated_tool,
+            "reason": self._clip_task_summary_text(reason, limit=220),
+            "goal": task_text,
+            "preserved_artifact_ids": protected_artifacts[-6:],
+        }
+
+    @staticmethod
+    def _guard_trip_preserves_artifact(artifact: Any) -> bool:
+        if artifact is None:
+            return False
+        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
+        if tool_name in {"web_fetch", "web_search", "artifact_read", "artifact_print"}:
+            return False
+        metadata = getattr(artifact, "metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if metadata.get("success") is True:
+            return True
+        exit_code = metadata.get("exit_code")
+        if exit_code is not None:
+            try:
+                return int(exit_code) == 0
+            except (TypeError, ValueError):
+                return False
+        verdict = str(metadata.get("verifier_verdict") or "").strip().lower()
+        return verdict == "pass"
+
+    @staticmethod
+    def _guard_trip_repeated_tool(reason: str) -> str:
+        text = str(reason or "")
+        match = re.search(r"repeated tool call loop \((?P<tool>[a-zA-Z0-9_]+) repeated", text)
+        if match:
+            return match.group("tool")
+        match = re.search(r"Last repeated action:\s*`?(?P<tool>[a-zA-Z0-9_]+)`?", text)
+        if match:
+            return match.group("tool")
+        return ""
 
     @staticmethod
     def _normalize_target_path(value: Any) -> str:
@@ -2005,6 +2132,28 @@ class TaskBoundaryService:
             "carry on",
         }
 
+    def _is_continue_directive_followup(self, task: str) -> bool:
+        text = str(task or "").strip()
+        if not text:
+            return False
+        if _CONTINUE_DIRECTIVE_RE.match(text):
+            return True
+        if not _WEB_RESEARCH_DIRECTIVE_RE.search(text):
+            return False
+        if _CONTINUATION_ACTION_LEAD_RE.search(text):
+            return True
+        if not (self.has_task_local_context() or self.last_task_handoff()):
+            return False
+        context = " ".join(
+            part
+            for part in (
+                self._current_or_handoff_continuity_task(),
+                self._current_or_handoff_task(),
+            )
+            if part
+        )
+        return bool(context and _RESEARCH_CONTEXT_RE.search(context))
+
     def _is_affirmative_followup(self, task: str) -> bool:
         return is_affirmative_followup(task, fillers=_FOLLOWUP_FILLERS)
 
@@ -2082,6 +2231,8 @@ class TaskBoundaryService:
             return False
         if not (self.has_task_local_context() or self.last_task_handoff()):
             return False
+        if self._is_continue_directive_followup(text):
+            return True
         if _CONTEXTUAL_REFERENCE_RE.search(text) and (
             _FOLLOWUP_ACTION_RE.search(text) or _GENERIC_TARGET_RE.search(text)
         ):
@@ -2720,6 +2871,11 @@ class TaskBoundaryService:
         )
         if self._is_continue_like_followup(raw_task):
             return continuity_candidate or candidate or raw_task
+        if self._is_continue_directive_followup(raw_task) and (continuity_candidate or candidate):
+            base = continuity_candidate or candidate
+            resolved = f"Continue current task: {base}. User follow-up: {raw_task}"
+            self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+            return resolved
         if not candidate:
             return raw_task
 

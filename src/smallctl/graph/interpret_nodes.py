@@ -59,6 +59,7 @@ _TERMINAL_PROSE_STRONG_MARKERS = (
     "final answer",
     "completed successfully",
 )
+_FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 
 
 def _working_memory_signals_completion(harness: Any) -> bool:
@@ -70,6 +71,10 @@ def _working_memory_signals_completion(harness: Any) -> bool:
     3. Last assistant text explicitly stating completion (weak signal, only used
        if the two stronger signals are absent).
     """
+    blocker = harness.state.scratchpad.get("_unresolved_missing_input_file")
+    if isinstance(blocker, dict) and str(blocker.get("path") or "").strip():
+        return False
+
     # 1. Explicit scratchpad completion flag.
     if harness.state.scratchpad.get("_task_complete"):
         return True
@@ -126,12 +131,13 @@ def _terminal_prose_completion_message(
     if not text:
         return ""
 
+    raw_terminal_message = _raw_terminal_json_completion_message(text)
     lowered = re.sub(r"\s+", " ", text.lower()).strip()
     has_strong_marker = any(marker in lowered for marker in _TERMINAL_PROSE_STRONG_MARKERS)
-    looks_like_completion = has_strong_marker or lowered.endswith("**task complete**") or lowered.endswith("task complete")
+    looks_like_completion = bool(raw_terminal_message) or has_strong_marker or lowered.endswith("**task complete**") or lowered.endswith("task complete")
     if not looks_like_completion:
         return ""
-    if not has_strong_marker and nudge_count < 1:
+    if not raw_terminal_message and not has_strong_marker and nudge_count < 1:
         return ""
 
     has_recent_tool_evidence = any(
@@ -153,7 +159,34 @@ def _terminal_prose_completion_message(
     if not _latest_verifier_allows_terminal_recovery(harness):
         return ""
 
-    return text[:4000]
+    return (raw_terminal_message or text)[:4000]
+
+
+def _raw_terminal_json_completion_message(text: str) -> str:
+    candidates = []
+    for match in _FENCED_JSON_BLOCK_RE.finditer(text):
+        candidate = match.group(1).strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            candidates.append(candidate)
+    stripped = str(text or "").strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        value = payload.get("task_complete")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            message = str(value.get("message") or "").strip()
+            if message:
+                return message
+    return ""
 
 
 def _maybe_promote_terminal_prose_task_complete(
@@ -498,6 +531,7 @@ async def interpret_model_output(
         partial_tool_calls = []
         hidden_tool_calls: list[PendingToolCall] = []
         allowed_pending_calls: list[PendingToolCall] = []
+        schema_repair_failures: list[tuple[PendingToolCall, str, dict[str, Any], str | None]] = []
         if isinstance(incomplete_payload, dict):
             raw_partial_calls = incomplete_payload.get("partial_tool_calls_raw")
             if isinstance(raw_partial_calls, list):
@@ -508,6 +542,7 @@ async def interpret_model_output(
                 pending,
                 assistant_text=recovery_assistant_text,
             )
+            _nodes._repair_empty_target_file_patch_to_file_write(harness, pending)
             if _nodes._apply_declared_read_before_write_reroute(
                 graph_state,
                 harness,
@@ -682,90 +717,75 @@ async def interpret_model_output(
                 if target_path:
                     details = dict(details)
                     details["target_path"] = target_path
-            repair_attempts = int(harness.state.scratchpad.get("_schema_validation_nudges", 0))
-            _nodes._remember_write_session_schema_failure(
+            schema_repair_failures.append((pending, err_msg, details, target_path))
+            continue
+
+        if schema_repair_failures:
+            pending, err_msg, details, target_path = schema_repair_failures[0]
+            repair_decision = _nodes.schema_validation_repair_decision(
                 harness,
                 pending,
+                err_msg,
                 details,
-                error_message=err_msg,
-                nudge_count=repair_attempts + 1,
+                target_path=target_path,
             )
-            if repair_attempts >= 1:
+            if repair_decision.status == "fail":
                 harness.state.recent_errors.append(err_msg)
                 harness._runlog(
                     "tool_call_validation_error",
                     "tool call missing required arguments",
-                    tool_name=pending.tool_name,
-                    tool_call_id=pending.tool_call_id,
-                    required_fields=details.get("required_fields", []),
+                    **repair_decision.runlog_data,
                 )
                 await harness._emit(
                     deps.event_handler,
                     UIEvent(
                         event_type=UIEventType.ERROR,
                         content=err_msg,
-                        data={"error_type": "schema_validation_error", **details},
+                        data=repair_decision.alert_data,
                     ),
                 )
                 graph_state.pending_tool_calls = []
                 graph_state.final_result = harness._failure(
                     err_msg,
                     error_type="schema_validation_error",
-                    details=details,
+                    details=repair_decision.details,
                 )
                 graph_state.error = graph_state.final_result["error"]
                 return LoopRoute.FINALIZE
 
-            harness.state.scratchpad["_schema_validation_nudges"] = repair_attempts + 1
             harness.state.recent_errors.append(err_msg)
-            repair_message = err_msg
-            if not details.get("offending_field"):
-                repair_message = _nodes._build_schema_repair_message(
-                    harness,
-                    pending,
-                    details.get("required_fields", []),
-                )
-            harness.state.append_message(
-                ConversationMessage(
-                    role="user",
-                    content=repair_message,
-                    metadata={
-                        "is_recovery_nudge": True,
-                        "recovery_kind": "schema_validation",
-                        "tool_name": pending.tool_name,
-                        "required_fields": details.get("required_fields", []),
-                        "tool_call_id": pending.tool_call_id,
-                        "target_path": target_path,
-                    },
-                )
-            )
             harness._runlog(
                 "tool_call_repair",
                 "injected schema repair nudge",
-                tool_name=pending.tool_name,
-                tool_call_id=pending.tool_call_id,
-                required_fields=details.get("required_fields", []),
-                retry_count=repair_attempts + 1,
+                **repair_decision.runlog_data,
             )
             await harness._emit(
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.ALERT,
-                    content=repair_message,
-                    data={
-                        "repair_kind": "schema_validation",
-                        "tool_name": pending.tool_name,
-                        "tool_call_id": pending.tool_call_id,
-                        "required_fields": details.get("required_fields", []),
-                        "retry_count": repair_attempts + 1,
-                        "target_path": target_path,
-                    },
+                    content=repair_decision.repair_message,
+                    data=repair_decision.alert_data,
                 ),
             )
-            graph_state.pending_tool_calls = []
-            graph_state.last_assistant_text = ""
-            graph_state.last_thinking_text = ""
-            return LoopRoute.NEXT_STEP
+            repair_conversation_message = repair_decision.conversation_message
+            if repair_conversation_message is None:
+                return LoopRoute.FINALIZE
+            if allowed_pending_calls:
+                _nodes.defer_schema_validation_repair_message(harness, repair_conversation_message)
+                harness._runlog(
+                    "tool_call_repair_deferred",
+                    "deferred schema repair nudge while dispatching valid sibling tool calls",
+                    tool_name=repair_decision.tool_name,
+                    tool_call_id=repair_decision.tool_call_id,
+                    valid_sibling_count=len(allowed_pending_calls),
+                    retry_count=repair_decision.retry_count,
+                )
+            else:
+                harness.state.append_message(repair_conversation_message)
+                graph_state.pending_tool_calls = []
+                graph_state.last_assistant_text = ""
+                graph_state.last_thinking_text = ""
+                return LoopRoute.NEXT_STEP
 
         graph_state.pending_tool_calls = allowed_pending_calls
         if hidden_tool_calls:

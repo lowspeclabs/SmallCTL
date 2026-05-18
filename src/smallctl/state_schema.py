@@ -381,6 +381,9 @@ class TurnBundle:
     observation_refs: list[str] = field(default_factory=list)
     observation_summaries: list[str] = field(default_factory=list)
     observation_kinds: list[str] = field(default_factory=list)
+    plan_state: dict[str, Any] = field(default_factory=dict)
+    decision_deltas: list[str] = field(default_factory=list)
+    experience_candidates: list[str] = field(default_factory=list)
     compaction_strategy: str = ""
     transcript_fallback_used: bool = False
     source_message_count: int = 0
@@ -414,6 +417,8 @@ class ContextBrief:
     invalidated_facts: list[str] = field(default_factory=list)
     state_changes: list[str] = field(default_factory=list)
     decision_deltas: list[str] = field(default_factory=list)
+    plan_state: dict[str, Any] = field(default_factory=dict)
+    experience_candidates: list[str] = field(default_factory=list)
     full_artifact_id: str | None = None
 
 

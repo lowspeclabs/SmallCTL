@@ -10,11 +10,12 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
     FamaFailureKind.EARLY_STOP: ["done_gate", "acceptance_checklist_capsule"],
     FamaFailureKind.LOOPING: ["micro_plan_capsule", "evidence_reuse_capsule", "tool_exposure_narrowing", "evidence_gathering_needed"],
     FamaFailureKind.REMOTE_LOCAL_CONFUSION: ["remote_scope_capsule", "remote_tool_exposure_guard"],
+    FamaFailureKind.REMOTE_VERIFICATION_PENDING: ["remote_scope_capsule", "remote_verification_pending_capsule"],
     FamaFailureKind.TOOL_OUTPUT_MISREAD: ["evidence_reuse_capsule", "acceptance_checklist_capsule"],
     FamaFailureKind.BAD_TOOL_ARGS: ["micro_plan_capsule"],
     FamaFailureKind.WRITE_SESSION_STALL: ["write_session_recovery_capsule", "outline_only_recovery"],
     FamaFailureKind.BACKEND_STREAM_HALT: ["micro_plan_capsule", "outline_only_recovery"],
-    FamaFailureKind.CONTEXT_DRIFT: ["micro_plan_capsule", "evidence_gathering_needed", "remote_scope_capsule"],
+    FamaFailureKind.CONTEXT_DRIFT: ["micro_plan_capsule", "evidence_gathering_needed", "evidence_gathering_needed_hard_route", "remote_scope_capsule"],
 }
 
 

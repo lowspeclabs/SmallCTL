@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from typing import Any
 
 from textual.widgets import Button
 
@@ -10,7 +12,54 @@ from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
 from .console import ConsolePane
+from .display import format_tool_call_for_display
 from .model_selector import ModelSelectScreen
+
+
+def _restored_speaker_data(metadata: dict[str, Any]) -> dict[str, Any]:
+    speaker = str(metadata.get("speaker") or "").strip().lower()
+    return {"speaker": speaker} if speaker else {}
+
+
+def _restored_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    restored: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            function = {}
+        name = str(function.get("name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        args = _parse_restored_tool_args(function.get("arguments", item.get("arguments")))
+        tool_call_id = str(item.get("id") or item.get("tool_call_id") or "").strip()
+        restored.append(
+            {
+                "name": name,
+                "data": {
+                    "tool_name": name,
+                    "tool_call_id": tool_call_id,
+                    "args": args,
+                    "display_text": format_tool_call_for_display(name, args),
+                },
+            }
+        )
+    return restored
+
+
+def _parse_restored_tool_args(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class SmallctlAppActionsMixin:
@@ -177,6 +226,12 @@ class SmallctlAppActionsMixin:
                     from ..state import LoopState
 
                     self.harness.state = LoopState.from_dict(state_payload)
+                    if isinstance(getattr(self.harness.state, "scratchpad", None), dict):
+                        self.harness.state.scratchpad["_session_restored"] = True
+                        self.harness.state.scratchpad["_resume_contract"] = {
+                            "kind": "chat_session_resume",
+                            "thread_id": str(getattr(self.harness.state, "thread_id", "") or thread_id),
+                        }
                     self.harness._sync_run_logger_session_id()
                 restored = True
         snapshot = restore_result.get("snapshot") if isinstance(restore_result, dict) else None
@@ -193,7 +248,7 @@ class SmallctlAppActionsMixin:
         await self._render_restored_chat(messages=restored_messages if isinstance(restored_messages, list) else None)
         await self._append_system_line(f"Restored chat session {thread_id}.", force=True)
 
-    async def _render_restored_chat(self, messages: list[dict[str, str]] | None = None) -> None:
+    async def _render_restored_chat(self, messages: list[dict[str, Any]] | None = None) -> None:
         console = self._get_console()
         harness = self.harness
         if console is None:
@@ -205,23 +260,64 @@ class SmallctlAppActionsMixin:
             source_messages = [
                 {
                     "role": str(getattr(message, "role", "") or "").strip().lower(),
-                    "content": str(getattr(message, "content", "") or "").strip(),
+                    "content": "" if getattr(message, "content", None) is None else str(getattr(message, "content")),
+                    "name": str(getattr(message, "name", "") or ""),
+                    "tool_call_id": str(getattr(message, "tool_call_id", "") or ""),
+                    "tool_calls": getattr(message, "tool_calls", []) or [],
+                    "metadata": getattr(message, "metadata", {}) or {},
                 }
-                for message in (getattr(harness.state, "recent_messages", []) or [])
+                for message in (
+                    getattr(harness.state, "transcript_messages", None)
+                    or getattr(harness.state, "recent_messages", [])
+                    or []
+                )
             ]
         else:
             source_messages = list(messages)
         for message in source_messages:
             role = str(message.get("role") or "").strip().lower()
-            content = str(message.get("content") or "").strip()
-            if not content:
-                continue
+            content = str(message.get("content") or "")
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            speaker_data = _restored_speaker_data(metadata)
             if role == "user":
-                await console.append_event(UIEvent(UIEventType.USER, content))
+                if content.strip():
+                    await console.append_event(UIEvent(UIEventType.USER, content.strip()))
             elif role == "assistant":
-                await console.append_event(UIEvent(UIEventType.ASSISTANT, content))
-            elif role == "system":
-                await console.append_event(UIEvent(UIEventType.SYSTEM, content))
+                if content.strip():
+                    await console.append_event(
+                        UIEvent(UIEventType.ASSISTANT, content, data=speaker_data)
+                    )
+                for tool_call in _restored_tool_calls(message.get("tool_calls")):
+                    await console.append_event(
+                        UIEvent(
+                            UIEventType.TOOL_CALL,
+                            tool_call["name"],
+                            data={**speaker_data, **tool_call["data"]},
+                        )
+                    )
+            elif role in {"thinking", "reasoning"}:
+                if content.strip():
+                    await console.append_event(
+                        UIEvent(UIEventType.THINKING, content, data=speaker_data)
+                    )
+            elif role == "tool":
+                if content.strip():
+                    tool_name = str(message.get("name") or metadata.get("tool_name") or "").strip()
+                    tool_call_id = str(message.get("tool_call_id") or "").strip()
+                    await console.append_event(
+                        UIEvent(
+                            UIEventType.TOOL_RESULT,
+                            content,
+                            data={
+                                **speaker_data,
+                                "tool_name": tool_name,
+                                "tool_call_id": tool_call_id,
+                                **metadata,
+                            },
+                        )
+                    )
 
     async def _push_model_selector(
         self,

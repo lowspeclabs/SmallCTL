@@ -329,6 +329,22 @@ class TestWebSearchOnRepeatedError:
         msg = harness.state.append_message.call_args[0][0]
         assert "Auto-searching" in msg.content
 
+    def test_skips_web_search_for_concrete_remote_local_blocker(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = (
+            'Remote SSH command exited with code 1\n'
+            'The account "fogproject" already exists and has been used to log in.\n'
+            'Please remove the account "fogproject" manually before running the installer again.'
+        )
+        record = _make_record("ssh_exec", success=False, error=error)
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert gs.pending_tool_calls == []
+        harness.state.append_message.assert_not_called()
+
     def test_nudges_when_web_search_unavailable(self):
         gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
         harness = _make_harness()

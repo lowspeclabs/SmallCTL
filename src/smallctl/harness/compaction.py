@@ -124,6 +124,8 @@ class CompactionService:
                         transcript_fallback_used=bool(demotion.get("transcript_fallback_used", False)),
                         observation_ref_count=demotion.get("observation_ref_count", 0),
                         observation_refs=demotion.get("observation_refs", []),
+                        lane_counts=demotion.get("lane_counts", {}),
+                        fallback_reason=demotion.get("fallback_reason", ""),
                         active_phase=str(getattr(self.harness.state, "current_phase", "") or ""),
                         active_intent=str(getattr(self.harness.state, "active_intent", "") or ""),
                     )
@@ -155,6 +157,18 @@ class CompactionService:
                     return # Successfully compacted
             except Exception as e:
                 self.harness._runlog("compaction_error", "Structured tier compaction failed", error=str(e))
+
+        # Guard: if all messages fit inside the hot window, structured tier compaction
+        # has nothing to do. Skip the expensive AI-based fallback and go straight to
+        # emergency truncation if the caller is still over budget.
+        if len(self.harness.state.recent_messages) <= tier_manager.hot_window:
+            self.harness._runlog(
+                "compaction_skipped",
+                "Messages fit within hot window; skipping AI fallback",
+                recent_messages=len(self.harness.state.recent_messages),
+                hot_window=tier_manager.hot_window,
+            )
+            return
 
         # 3. Ratio-based Safety Fallback (Legacy/Emergency Truncation)
         if len(self.harness.state.recent_messages) > self.harness.context_policy.recent_message_limit:
@@ -291,7 +305,22 @@ class CompactionService:
             )
 
             before_count = current_recent_messages
-            attempt = await _attempt_compaction(keep_recent)
+            try:
+                attempt = await asyncio.wait_for(
+                    _attempt_compaction(keep_recent),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                self.harness._runlog(
+                    "compaction_timeout",
+                    "AI summarization timed out; falling back to heuristic truncation",
+                    keep_recent=keep_recent,
+                )
+                attempt = self.harness.summarizer.compact_recent_messages_with_status(
+                    state=self.harness.state,
+                    keep_recent=keep_recent,
+                    artifact_store=self.harness.artifact_store,
+                )
             summary = attempt.summary
             if summary:
                 after_count = len(self.harness.state.recent_messages)

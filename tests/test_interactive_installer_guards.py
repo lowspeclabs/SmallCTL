@@ -47,6 +47,23 @@ class _LoopingProcess:
         self._done.set()
 
 
+class _DoneProcess:
+    def __init__(self, stdout: str = "ok\n") -> None:
+        self.stdout = _ChunkStream([stdout.encode("utf-8"), b""])
+        self.stderr = _ChunkStream([b""])
+        self.stdin = None
+        self.returncode = 0
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+
 def test_shell_exec_blocks_yes_pipe_to_interactive_installer() -> None:
     result = asyncio.run(
         shell.shell_exec(
@@ -75,6 +92,113 @@ def test_ssh_exec_blocks_yes_pipe_to_interactive_installer_before_launch() -> No
     assert result["success"] is False
     assert result["metadata"]["reason"] == "unsafe_yes_pipe_interactive_installer"
     assert result["metadata"]["host"] == "192.0.2.10"
+
+
+def test_ssh_exec_blocks_single_echo_pipe_to_interactive_installer_before_launch() -> None:
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command='echo "Y" | /opt/fogproject/bin/installfog.sh',
+            timeout_sec=300,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "unsafe_single_answer_pipe_interactive_installer"
+    assert "single-answer" in result["error"]
+    assert "printf" in result["error"]
+
+
+def test_ssh_exec_auto_extends_default_timeout_for_installer_like_command(monkeypatch) -> None:
+    async def _fake_create_process(**_kwargs):
+        return _DoneProcess()
+
+    monkeypatch.setattr(network, "create_process", _fake_create_process)
+
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="/opt/fogproject/bin/installfog.sh -Y",
+            timeout_sec=60,
+        )
+    )
+
+    assert result["success"] is True
+    extension = result["metadata"]["timeout_sec_auto_extended"]
+    assert extension["from"] == 60
+    assert extension["to"] == 600
+
+
+def test_ssh_exec_requires_remote_installer_preflight_before_installfog() -> None:
+    state = _state()
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="cd /opt/fogproject/bin && ./installfog.sh -Y",
+            timeout_sec=600,
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "remote_installer_preflight_required"
+    assert "git status --short" in result["metadata"]["next_required_action"]
+    assert "test -x /opt/fogproject/bin/installfog.sh" in result["metadata"]["next_required_action"]
+
+
+def test_ssh_exec_allows_clean_remote_installer_preflight(monkeypatch) -> None:
+    state = _state()
+    state.scratchpad["_remote_installer_preflight"] = {
+        "192.0.2.10|root|/opt/fogproject/bin|/opt/fogproject/bin/installfog.sh": {
+            "status": "clean",
+            "created_at_step": state.step_count,
+        }
+    }
+
+    async def _fake_create_process(**_kwargs):
+        return _DoneProcess()
+
+    monkeypatch.setattr(network, "create_process", _fake_create_process)
+
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="cd /opt/fogproject/bin && ./installfog.sh -Y",
+            timeout_sec=600,
+            state=state,
+        )
+    )
+
+    assert result["success"] is True
+
+
+def test_ssh_exec_failed_remote_installer_preflight_recommends_clean_reset() -> None:
+    state = _state()
+    state.scratchpad["_remote_installer_preflight"] = {
+        "192.0.2.10|root|/opt/fogproject/bin|/opt/fogproject/bin/installfog.sh": {
+            "status": "missing_critical_files",
+            "created_at_step": state.step_count,
+            "checks": ["git status --short", "test -x /opt/fogproject/bin/installfog.sh"],
+        }
+    }
+
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="cd /opt/fogproject/bin && ./installfog.sh -Y",
+            timeout_sec=600,
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "remote_installer_preflight_failed"
+    assert "fresh clone or clean reset" in result["error"]
 
 
 def test_shell_exec_stops_repeated_invalid_input_loop(monkeypatch) -> None:

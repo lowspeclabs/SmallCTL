@@ -4,7 +4,13 @@ from __future__ import annotations
 TOOL_PLAN_TOOL_LIST = "file_read | dir_list | grep | find_files | artifact_read | artifact_grep | web_search | web_fetch"
 
 
-def build_tool_plan_planner_prompt(*, task: str, max_steps: int) -> str:
+def build_tool_plan_planner_prompt(*, task: str, max_steps: int, context_frame: str = "") -> str:
+    frame_section = f"""
+
+Use this compact context frame to choose reads, but do not quote it or solve the task.
+
+{context_frame}
+""" if context_frame else ""
     return f"""You are the ToolPlan planner.
 
 Your job is NOT to solve the task yet.
@@ -31,15 +37,17 @@ Rules:
 - Do not solve the task in this response.
 - Do not use shell_exec, ssh_exec, file_write, file_patch, ast_patch, task_complete, ask_human, memory_update, log_note, or ansible.
 - Prefer targeted reads/searches over broad exploration.
+{frame_section}
 
 User task:
 {task}"""
 
 
 def build_tool_plan_solver_system_suffix(observations_text: str, *, fresh_output_limit: int = 1200) -> str:
+    context_label = "REWOO CONTEXT FRAME" if "REWOO " in observations_text else "TOOL PLAN OBSERVATIONS"
     return f"""You are the ToolPlan solver.
 
-Use the user task, active context, safety guidance, and TOOL PLAN OBSERVATIONS.
+Use the user task, active context, safety guidance, and {context_label}.
 
 Now decide the next action:
 - answer

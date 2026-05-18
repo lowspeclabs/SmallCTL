@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from smallctl.fama.detectors import (
     detect_empty_write,
+    detect_remote_verification_pending,
     detect_repeated_tool_loop,
     detect_test_failure_from_verdict,
     detect_verifier_failure_from_result,
@@ -77,6 +78,33 @@ def test_wrong_path_detector_sets_narrow_failure_class() -> None:
     assert signal.kind is FamaFailureKind.REMOTE_LOCAL_CONFUSION
     assert signal.failure_class == "wrong_path"
     assert "path=src/missing.py" in signal.evidence
+
+
+def test_remote_mutation_requires_verification_uses_pending_classification() -> None:
+    state = LoopState(step_count=3)
+    result = ToolEnvelope(
+        success=False,
+        error="Remote mutation requires read-back verification before completion.",
+        metadata={
+            "reason": "remote_mutation_requires_verification",
+            "host": "192.0.2.10",
+            "pending_paths": ["/var/www/index.html"],
+        },
+    )
+
+    signal = detect_remote_verification_pending(
+        state,
+        tool_name="task_complete",
+        result=result,
+        operation_id="op-verify",
+    )
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.REMOTE_VERIFICATION_PENDING
+    assert signal.failure_class == "remote_verification_pending"
+    assert signal.failure_class != "wrong_path"
+    assert "read-back verification" in signal.next_safe_action
+    assert detect_wrong_path(state, tool_name="task_complete", result=result) is None
 
 
 def test_empty_write_detector_uses_arguments_and_result_markers() -> None:

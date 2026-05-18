@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Any
 
 from ..client import OpenAICompatClient, StreamResult
+from ..client.chunk_parser import chunk_contains_tool_call_delta
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -27,6 +29,33 @@ from .model_stream_loop_rendering import handle_model_stream_chunk
 from .model_stream_loop_rendering import StreamTagState
 from .model_stream_loop_recovery import handle_model_stream_chunk_error
 
+_REASONING_ONLY_MAX_SECONDS = 60.0
+_REASONING_ONLY_MAX_CHUNKS = 4096
+_REASONING_ONLY_MAX_RETRIES = 1
+
+
+def _chunk_delta(event: dict[str, Any]) -> dict[str, Any]:
+    data = event.get("data", {})
+    if not isinstance(data, dict):
+        return {}
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return {}
+    delta = choices[0].get("delta", {})
+    return delta if isinstance(delta, dict) else {}
+
+
+def _chunk_has_assistant_content(event: dict[str, Any]) -> bool:
+    delta = _chunk_delta(event)
+    content = delta.get("content")
+    return isinstance(content, str) and bool(content.strip())
+
+
+def _chunk_has_reasoning(event: dict[str, Any]) -> bool:
+    delta = _chunk_delta(event)
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    return isinstance(reasoning, str) and bool(reasoning)
+
 
 async def run_model_stream_loop(
     graph_state: GraphRunState,
@@ -40,6 +69,12 @@ async def run_model_stream_loop(
     end_tag: str,
     start_time: float,
 ) -> dict[str, Any]:
+    run_logger = getattr(harness, "run_logger", None)
+    set_trace_id = getattr(run_logger, "set_trace_id", None)
+    if callable(set_trace_id):
+        thread_id = str(getattr(harness.state, "thread_id", "") or getattr(harness, "conversation_id", "") or "run")
+        set_trace_id(f"{thread_id}:{getattr(harness.state, 'step_count', 0)}")
+
     chunks: list[dict[str, Any]] = []
     first_token_time: float | None = None
     stream_state = StreamTagState()
@@ -52,12 +87,17 @@ async def run_model_stream_loop(
     _CHUNK_ERROR_MAX_RETRIES = 2
     _trigger_early_4b_fallback: bool = bool(harness.state.scratchpad.get("_sub4b_chat_fallback_active"))
     _stream_completed_cleanly: bool = False
+    reasoning_only_retries = 0
 
     for _model_attempt in range(_CHUNK_ERROR_MAX_RETRIES + 1):
         try:
             chunks = []
             stream_state = StreamTagState()
             _retry_immediately = False
+            attempt_started_at = time.monotonic()
+            reasoning_only_chunks = 0
+            saw_assistant_content = False
+            saw_tool_call = False
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
                 if harness._cancel_requested:
                     await harness._emit(
@@ -176,6 +216,7 @@ async def run_model_stream_loop(
                         "backend_wedged",
                         "backend did not emit a first token before timeout",
                         details=details,
+                        last_chunks=details.get("last_chunks", []),
                     )
                     await harness._emit(
                         deps.event_handler,
@@ -208,6 +249,58 @@ async def run_model_stream_loop(
                         stream_ended_without_done_details = dict(details)
                     continue
                 if event.get("type") == "chunk":
+                    saw_tool_call = saw_tool_call or chunk_contains_tool_call_delta(event.get("data", {}))
+                    saw_assistant_content = saw_assistant_content or _chunk_has_assistant_content(event)
+                    if _chunk_has_reasoning(event) and not saw_assistant_content and not saw_tool_call:
+                        reasoning_only_chunks += 1
+                    if (
+                        tools
+                        and not saw_assistant_content
+                        and not saw_tool_call
+                        and reasoning_only_retries < _REASONING_ONLY_MAX_RETRIES
+                        and (
+                            reasoning_only_chunks >= _REASONING_ONLY_MAX_CHUNKS
+                            or (time.monotonic() - attempt_started_at) >= _REASONING_ONLY_MAX_SECONDS
+                        )
+                    ):
+                        reasoning_only_retries += 1
+                        nudge = (
+                            "The prior response stream spent too long in reasoning without producing assistant "
+                            "content or a tool call. Continue now by calling an appropriate available tool, or "
+                            "answer directly if no tool is needed. Do not continue hidden reasoning only."
+                        )
+                        messages = list(messages) + [ConversationMessage(role="user", content=nudge).to_dict()]
+                        harness.state.scratchpad["_last_reasoning_only_retry"] = {
+                            "attempt": _model_attempt + 1,
+                            "reasoning_only_chunks": reasoning_only_chunks,
+                            "tools_available": [
+                                str((tool.get("function") or {}).get("name") or "").strip()
+                                for tool in tools
+                                if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+                            ],
+                        }
+                        harness._runlog(
+                            "reasoning_only_stream_retry",
+                            "retrying model call after reasoning-only stream stall",
+                            attempt=_model_attempt + 1,
+                            reasoning_only_chunks=reasoning_only_chunks,
+                            elapsed_seconds=round(time.monotonic() - attempt_started_at, 3),
+                            tool_count=len(tools),
+                        )
+                        await harness._emit(
+                            deps.event_handler,
+                            UIEvent(
+                                event_type=UIEventType.ALERT,
+                                content="Model stream stalled in reasoning; retrying with a tool/action nudge.",
+                                data={
+                                    "reason": "reasoning_only_stream_stall",
+                                    "retrying": True,
+                                    "reasoning_only_chunks": reasoning_only_chunks,
+                                },
+                            ),
+                        )
+                        _retry_immediately = True
+                        break
                     stream_state, first_token_time = await handle_model_stream_chunk(
                         harness=harness,
                         deps=deps,

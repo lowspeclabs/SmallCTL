@@ -181,6 +181,38 @@ def test_chat_mode_tools_hides_index_queries_until_an_index_exists(tmp_path) -> 
     assert exposure["names"] == ["file_read"]
 
 
+def test_chat_mode_tools_exposes_ssh_for_active_remote_handoff(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.scratchpad["_last_task_handoff"] = {
+        "task_mode": "remote_execute",
+        "ssh_target": {"host": "192.168.1.89", "user": "root"},
+    }
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it"),
+        state=state,
+        _current_user_task=lambda: "fix approved proceed",
+        _runlog=lambda *args, **kwargs: None,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("task_complete"),
+                _tool_schema("task_fail"),
+                _tool_schema("ssh_exec"),
+                _tool_schema("ssh_file_read"),
+            ],
+            get=lambda name: None,
+        ),
+    )
+
+    tools = chat_mode_tools(harness)
+    names = set(_tool_names(tools))
+
+    assert "network" in state.active_tool_profiles
+    assert {"ssh_exec", "ssh_file_read"} <= names
+    assert {"ssh_exec", "ssh_file_read"} <= set(resolve_turn_tool_exposure(harness, "chat")["names"])
+
+
 def test_budget_reducer_does_not_add_runtime_hidden_tools() -> None:
     tools = [_tool_schema("file_read")]
     payload = {

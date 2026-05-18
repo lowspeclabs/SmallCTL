@@ -23,6 +23,19 @@ _WEB_SEARCH_URL_LINE_RE = re.compile(r"^\s*URL:\s*(\S+)\s*$")
 _WEB_SEARCH_DOMAIN_LINE_RE = re.compile(r"^\s*Domain:\s*(\S+)\s*$")
 
 
+def _mark_web_fetch_budget_exhausted(state: Any, error: str) -> None:
+    lowered = str(error or "").strip().lower()
+    if "web fetch" not in lowered or "budget exhausted" not in lowered:
+        return
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    scratchpad["_web_fetch_budget_exhausted"] = {
+        "error": str(error),
+        "terminal": True,
+    }
+
+
 def _next_fetch_id(state: Any) -> str:
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):
@@ -595,6 +608,7 @@ async def web_fetch(
             },
         )
     except SearchServerError as exc:
+        _mark_web_fetch_budget_exhausted(state, str(exc))
         return fail(str(exc), metadata=getattr(exc, "metadata", {}))
     except Exception as exc:
         return fail(str(exc))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import asyncio.subprocess
+import re
 import shlex
 import shutil
 import time
@@ -17,6 +18,8 @@ from .shell_support import (
     InvalidInputLoopDetector,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
+    _installer_command_suggested_timeout,
+    _remote_installer_preflight_guard,
 )
 from .ui_streaming import BufferedUIEventEmitter
 
@@ -64,6 +67,12 @@ _SAFE_SSH_OPTION_KEYS = {
     "User",
 }
 _LOCAL_SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", ";&", ";;&"}
+_SSH_DIAGNOSTIC_NOT_FOUND_MARKERS = (
+    "not found",
+    "could not be found",
+    "no such file",
+    "command not found",
+)
 _SSH_TRANSPORT_FAILURE_MARKERS = (
     "permission denied",
     "connection timed out",
@@ -77,6 +86,29 @@ _SSH_TRANSPORT_FAILURE_MARKERS = (
     "operation timed out",
     "network is unreachable",
 )
+_ROOT_SUDO_PREFIX_RE = re.compile(
+    r"^\s*sudo(?:\s+-(?:n|E|H|S))*\s+(?:(?:-i|-s)\s+)?(?:--\s+)?(?P<command>.+?)\s*$",
+    re.DOTALL,
+)
+_ROOT_SUDO_SEGMENT_RE = re.compile(
+    r"(?P<prefix>^|(?:&&|\|\||;|\|)\s*)sudo(?:\s+-(?:n|E|H|S))*\s+(?:(?:-i|-s)\s+)?(?:--\s+)?",
+)
+
+
+def _strip_redundant_root_sudo(command: str, user: str | None) -> tuple[str, bool]:
+    if str(user or "").strip().lower() != "root":
+        return command, False
+    text = str(command or "").strip()
+    if not text.startswith("sudo"):
+        return command, False
+    match = _ROOT_SUDO_PREFIX_RE.match(text)
+    if not match:
+        return command, False
+    stripped = str(match.group("command") or "").strip()
+    stripped = _ROOT_SUDO_SEGMENT_RE.sub(lambda match: str(match.group("prefix") or ""), stripped)
+    return stripped, bool(stripped and stripped != text)
+
+
 _SSH_ACCEPT_NEW_INCOMPATIBLE_MARKERS = (
     "keyword stricthostkeychecking extra arguments at end of line",
     "bad configuration option",
@@ -413,6 +445,14 @@ def _ssh_error_class(*, exit_code: int, stderr: str) -> str:
     return "transport_failure" if _ssh_failure_kind(exit_code=exit_code, stderr=stderr) == "transport" else "remote_exit_nonzero"
 
 
+def _ssh_diagnostic_not_found(command: str, output: dict[str, Any]) -> bool:
+    """Return True when an exit-1 SSH result is a diagnostic 'not found' probe."""
+    stderr = str(output.get("stderr") or "").lower()
+    stdout = str(output.get("stdout") or "").lower()
+    combined = stdout + " " + stderr
+    return any(marker in combined for marker in _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS)
+
+
 def _ssh_execution_debug_metadata(
     *,
     password: str | None,
@@ -438,6 +478,7 @@ async def ssh_exec(
     identity_file: str | None = None,
     password: str | None = None,
     timeout_sec: int = 60,
+    stdin_data: str | None = None,
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
@@ -523,6 +564,7 @@ async def ssh_exec(
         identity_file=identity_file,
         password=password,
         timeout_sec=timeout_sec,
+        stdin_data=stdin_data,
         state=state,
         harness=harness,
     )
@@ -569,6 +611,9 @@ async def run_ssh_command(
                 "reason": "invalid_ssh_target",
             },
         )
+    command, stripped_root_sudo = _strip_redundant_root_sudo(command, user)
+    requested_timeout_sec = timeout_sec
+    timeout_sec = _installer_command_suggested_timeout(command, timeout_sec)
 
     yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="ssh_exec")
     if yes_pipe_guard is not None:
@@ -590,6 +635,8 @@ async def run_ssh_command(
     foreground_guard = _foreground_command_guard(command, tool_name="ssh_exec")
     if foreground_guard is not None:
         metadata = dict(foreground_guard.get("metadata") or {})
+        if stripped_root_sudo:
+            metadata["stripped_redundant_root_sudo"] = True
         metadata.update(
             {
                 "host": host,
@@ -603,6 +650,32 @@ async def run_ssh_command(
         )
         foreground_guard["metadata"] = metadata
         return foreground_guard
+
+    preflight_guard = None
+    if stdin_data is None:
+        preflight_guard = _remote_installer_preflight_guard(
+            command,
+            host=host,
+            user=user,
+            state=state,
+        )
+    if preflight_guard is not None:
+        metadata = dict(preflight_guard.get("metadata") or {})
+        if stripped_root_sudo:
+            metadata["stripped_redundant_root_sudo"] = True
+        metadata.update(
+            {
+                "host": host,
+                "user": user,
+                **_ssh_execution_debug_metadata(
+                    password=password,
+                    identity_file=identity_file,
+                    strict_host_key_checking=strict_host_key_mode,
+                ),
+            }
+        )
+        preflight_guard["metadata"] = metadata
+        return preflight_guard
 
     try:
         full_cmd, env_overrides = _build_ssh_command(
@@ -636,6 +709,14 @@ async def run_ssh_command(
         identity_file=identity_file,
         strict_host_key_checking=strict_host_key_mode,
     )
+    if timeout_sec != requested_timeout_sec:
+        execution_debug_metadata["timeout_sec_auto_extended"] = {
+            "from": requested_timeout_sec,
+            "to": timeout_sec,
+            "reason": "installer_like_command",
+        }
+    if stripped_root_sudo:
+        execution_debug_metadata["stripped_redundant_root_sudo"] = True
 
     last_process_output: dict[str, Any] | None = None
     invalid_input_loop: dict[str, Any] | None = None
@@ -754,6 +835,8 @@ async def run_ssh_command(
                 identity_file=identity_file,
                 strict_host_key_checking=strict_host_key_mode,
             )
+            if stripped_root_sudo:
+                execution_debug_metadata["stripped_redundant_root_sudo"] = True
             output, proc = await _run_ssh_process(full_cmd, stdin_data)
             retry_metadata = {
                 "ssh_option_retry": "strict_host_key_checking_no",
@@ -783,6 +866,14 @@ async def run_ssh_command(
             err_output = output.get("stderr", "")
             if not isinstance(err_output, str):
                 err_output = str(err_output or "")
+            # Diagnostic probes that explicitly report "not found" are informational
+            # successes, not execution failures. Treating them as ok prevents the
+            # harness from entering a repair loop over a negative result.
+            if (
+                int(proc.returncode) == 1
+                and _ssh_diagnostic_not_found(command, output)
+            ):
+                return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
             failure_kind = _ssh_failure_kind(
                 exit_code=int(proc.returncode),
                 stderr=err_output,
@@ -817,6 +908,7 @@ async def run_ssh_command(
                     ),
                     "hints": hints,
                     "failure_kind": failure_kind,
+                    "failure_mode": ssh_error_class,
                     "ssh_error_class": ssh_error_class,
                     "ssh_transport_succeeded": failure_kind == "remote_command",
                     **execution_debug_metadata,

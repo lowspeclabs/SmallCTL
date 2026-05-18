@@ -20,9 +20,10 @@ def register_filesystem_tools(
             make_registration(
                 name="file_read",
                 description=(
-                    "Read a text file with optional line slicing. Paths resolve relative to the current cwd. "
+                    "Read a LOCAL text file with optional line slicing. Paths resolve relative to the current cwd. "
                     "For large files, read in chunks to avoid context overflow. If a file was recently written in 'chunked_build' mode, "
-                    "verify the final output after the last section is written."
+                    "verify the final output after the last section is written. "
+                    "This tool operates on the LOCAL orchestrator filesystem ONLY. Never use it to verify remote files."
                 ),
                 schema={
                     "type": "object",
@@ -43,7 +44,7 @@ def register_filesystem_tools(
             ),
             make_registration(
                 name="dir_list",
-                description="List directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path.",
+                description="List LOCAL directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path. This tool operates on the LOCAL orchestrator filesystem ONLY.",
                 schema={
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -59,9 +60,10 @@ def register_filesystem_tools(
             make_registration(
                 name="file_write",
                 description=(
-                    "Write content to a file. For large files or complex implementations, use chunked mode by providing "
+                    "Write content to a LOCAL file. For large files or complex implementations, use chunked mode by providing "
                     "`write_session_id`, section metadata, and an optional `replace_strategy`. Overwrites existing files unless in an active session. "
-                    "During an active write session, always pass the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
+                    "During an active write session, always pass the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only. "
+                    "This tool operates on the LOCAL orchestrator filesystem ONLY."
                 ),
                 schema={
                     "type": "object",
@@ -90,6 +92,7 @@ def register_filesystem_tools(
                 description=(
                     "Patch a file by replacing exact target text with replacement text. "
                     "Use this for small, precise edits to an existing file or active staged write session. "
+                    "Never use `target_text=''` to create or replace a file; use `file_write` with `replace_strategy='overwrite'` for initial content or full replacement. "
                     "During an active write session, always patch the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
                 ),
                 schema={

@@ -145,6 +145,72 @@ def test_tool_plan_runtime_executes_plan_and_injects_observations(tmp_path: Path
     active = harness.state.subtask_ledger.active()
     assert active is not None
     assert any(item.startswith("ToolPlan observations:") for item in active.evidence)
+    assert harness.state.scratchpad["_tool_plan_evidence_ids"] == ["TP-E0-E1"]
+    assert any(record.kind == "tool_plan_observation" for record in harness.state.reasoning_graph.evidence_records)
+
+
+def test_tool_plan_runtime_uses_rewoo_planner_and_solver_frames(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "src" / "app.py"
+    source.parent.mkdir()
+    source.write_text("def dispatch_tools():\n    return 'ok'\n", encoding="utf-8")
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+        tool_plan_max_repair_attempts=0,
+        rewoo_planner_frame_enabled=True,
+        rewoo_solver_frame_enabled=True,
+    )
+    harness.state.working_memory.failures = ["Earlier read used the wrong directory"]
+    harness.state.working_memory.open_questions = ["Which file owns dispatch_tools?"]
+    planner_response = json.dumps(
+        {
+            "mode": "tool_plan",
+            "objective": "locate dispatch seam",
+            "steps": [
+                {
+                    "id": "E1",
+                    "tool": "file_read",
+                    "args": {"path": "src/app.py"},
+                    "reason": "read the target file",
+                }
+            ],
+        }
+    )
+    captured_prompts: list[list[dict[str, object]]] = []
+    responses = [
+        _content_stream(planner_response),
+        _tool_call_stream("solver-complete", "task_complete", {"message": "The dispatch seam is in src/app.py."}),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del tools
+        captured_prompts.append(list(messages))
+        if not responses:
+            raise AssertionError("unexpected extra model call")
+        for event in responses.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(asyncio.wait_for(ToolPlanRuntime.from_harness(harness).run("find dispatch seam"), timeout=10))
+
+    assert result["status"] == "completed"
+    planner_prompt_text = "\n".join(str(message.get("content") or "") for message in captured_prompts[0])
+    assert "REWOO PLAN STATE" in planner_prompt_text
+    assert "Earlier read used the wrong directory" in planner_prompt_text
+    assert "Which file owns dispatch_tools?" in planner_prompt_text
+    assert "TOOL PLAN OBSERVATIONS" not in planner_prompt_text
+    solver_prompt_text = "\n".join(str(message.get("content") or "") for message in captured_prompts[1])
+    assert "REWOO EVIDENCE" in solver_prompt_text
+    assert "TP-E0-E1" in solver_prompt_text
+    assert "TOOL PLAN OBSERVATIONS" not in solver_prompt_text
 
 
 def test_tool_plan_runtime_invalid_plan_falls_back_to_loop(tmp_path: Path, monkeypatch) -> None:

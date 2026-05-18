@@ -416,6 +416,16 @@ class MemoryService:
         source: str = "observed",
     ) -> ExperienceMemory:
         failure_mode = self._normalize_failure_mode(result.error, tool_name=tool_name, success=result.success)
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        if not result.success and tool_name == "ssh_exec":
+            ssh_failure_mode = str(
+                metadata.get("failure_mode")
+                or metadata.get("ssh_error_class")
+                or metadata.get("failure_kind")
+                or ""
+            ).strip()
+            if ssh_failure_mode:
+                failure_mode = ssh_failure_mode
         outcome = "success" if result.success else "failure"
         confidence = 0.85 if result.success else 0.60
         if tool_name == "task_complete" and result.success:
@@ -444,6 +454,16 @@ class MemoryService:
                     op_notes = f"Do not send placeholder arguments to {tool_name}. Call it empty."
                 elif failure_mode == SCHEMA_VALIDATION_ERROR:
                     op_notes = f"Argument mismatch for {tool_name}: {result.error}"
+                elif (
+                    tool_name == "ssh_exec"
+                    and bool(metadata.get("ssh_transport_succeeded"))
+                    and failure_mode == "remote_exit_nonzero"
+                ):
+                    detail = str(result.error or result.output or "").strip()
+                    op_notes = (
+                        "SSH reached the remote host; the remote command exited non-zero."
+                        + (f" Detail: {detail}" if detail else "")
+                    )
                 else:
                     op_notes = str(result.error or result.output or "").strip()
         op_notes = redact_sensitive_text(op_notes)

@@ -1127,6 +1127,9 @@ async def ssh_file_write(
                 "Remote readback hash did not match intended content.",
                 metadata={**metadata, "error_kind": "readback_mismatch", "intended_sha256": intended_sha},
             )
+        output_dict = result.get("output")
+        if isinstance(output_dict, dict):
+            output_dict["content"] = content
         _clear_remote_mutation_requirement(state, path=path, host=str(metadata.get("host") or ""))
     return result
 

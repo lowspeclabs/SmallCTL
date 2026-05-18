@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..context.policy import estimate_text_tokens
-from ..state import json_safe_value
+from ..state import EvidenceRecord, LoopState, json_safe_value
 from .state import ToolExecutionRecord
 from .tool_plan_schema import ToolPlan
 
@@ -232,3 +232,67 @@ def render_tool_plan_observations(objective: str, observations: list[ToolPlanObs
     for observation in observations:
         lines.extend(_render_observation_lines(observation))
     return "\n".join(lines).rstrip()
+
+
+def observation_to_evidence_record(
+    observation: ToolPlanObservation,
+    *,
+    objective: str,
+    step_index: int,
+    created_at_step: int,
+) -> EvidenceRecord:
+    source = observation.path or observation.query or f"tool_plan:{observation.step_id}"
+    statement = observation.summary if observation.success else (observation.error or observation.summary)
+    return EvidenceRecord(
+        evidence_id=f"TP-E{created_at_step}-{observation.step_id}",
+        kind="tool_plan_observation" if observation.success else "tool_plan_negative_observation",
+        statement=statement,
+        phase="tool_plan",
+        tool_name=observation.tool,
+        operation_id=observation.operation_id,
+        artifact_id=observation.artifact_id,
+        source=source,
+        evidence_type="direct_observation",
+        confidence=0.8 if observation.success else 0.4,
+        negative=not observation.success,
+        metadata={
+            "tool_plan_step_id": observation.step_id,
+            "tool_plan_step_index": step_index,
+            "path": observation.path,
+            "query": observation.query,
+            "error": observation.error,
+            "duplicate_of": observation.duplicate_of,
+            "objective": objective,
+            "observation_adapter": "tool_plan_observation",
+            "observation_kind": "tool_plan_observation"
+            if observation.success
+            else "tool_plan_negative_observation",
+        },
+        created_at_step=created_at_step,
+    )
+
+
+def attach_tool_plan_observation_evidence(
+    state: LoopState,
+    *,
+    objective: str,
+    observations: list[ToolPlanObservation],
+) -> list[str]:
+    graph = state.reasoning_graph
+    created_at_step = int(getattr(state, "step_count", 0) or 0)
+    existing = {record.evidence_id for record in graph.evidence_records}
+    attached_ids: list[str] = []
+    for index, observation in enumerate(observations, start=1):
+        record = observation_to_evidence_record(
+            observation,
+            objective=objective,
+            step_index=index,
+            created_at_step=created_at_step,
+        )
+        attached_ids.append(record.evidence_id)
+        if record.evidence_id in existing:
+            continue
+        graph.evidence_records.append(record)
+        existing.add(record.evidence_id)
+    graph.touch_ids()
+    return attached_ids

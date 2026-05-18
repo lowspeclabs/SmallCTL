@@ -170,6 +170,10 @@ def _coerce_turn_bundle(value: Any) -> Any:
         payload["observation_refs"] = _coerce_string_list(payload.get("observation_refs"))
         payload["observation_summaries"] = _coerce_string_list(payload.get("observation_summaries"))
         payload["observation_kinds"] = _coerce_string_list(payload.get("observation_kinds"))
+        plan_state = json_safe_value(payload.get("plan_state") or {})
+        payload["plan_state"] = plan_state if isinstance(plan_state, dict) else {}
+        payload["decision_deltas"] = _coerce_string_list(payload.get("decision_deltas"))
+        payload["experience_candidates"] = _coerce_string_list(payload.get("experience_candidates"))
         payload["compaction_strategy"] = str(payload.get("compaction_strategy", "") or "")
         payload["transcript_fallback_used"] = bool(payload.get("transcript_fallback_used", False))
         payload["source_message_count"] = _coerce_int(payload.get("source_message_count"), default=0)

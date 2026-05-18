@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END
 
 from ..models.conversation import ConversationMessage
+from ..context.rewoo_lanes import ReWOOLaneCompiler
 from ..context.policy import estimate_text_tokens
 from ..recovery_metrics import increment_metric, record_failure_event_metric, recovery_metrics
 from ..recovery_schema import FailureEvent
@@ -32,11 +33,20 @@ from .state import GraphRunState, inflate_graph_state
 from .tool_execution_nodes import dispatch_tools, persist_tool_results
 from .tool_outcomes import apply_tool_outcomes
 from .tool_plan_executor import prepare_tool_plan_dispatch
-from .tool_plan_observations import build_tool_plan_observations, render_tool_plan_observations
+from .tool_plan_observations import (
+    attach_tool_plan_observation_evidence,
+    build_tool_plan_observations,
+    render_tool_plan_observations,
+)
 from .tool_plan_parser import parse_tool_plan
 from .tool_plan_prompts import build_tool_plan_planner_prompt, build_tool_plan_solver_system_suffix
 from .tool_plan_safety import validate_tool_plan
 from .tool_plan_schema import ToolPlan, ToolPlanStep
+from .tool_dag import build_execution_dag
+from .tool_dag_executor import dispatch_tool_dag
+from .tool_dag_safety import assert_no_mutating_steps, MutatingStepInDAGError
+from ..harness.refine_service import RefineService
+from ..harness.trajectory_recorder import TrajectoryRecorder
 
 
 _MUTATING_SOLVER_TOOLS = {
@@ -56,6 +66,16 @@ _MUTATING_SOLVER_TOOLS = {
 def _tool_plan_config(deps: Any, name: str, default: Any) -> Any:
     config = getattr(deps.harness, "config", None)
     return getattr(config, name, default)
+
+
+def _rewoo_role_enabled(deps: Any, role_flag: str) -> bool:
+    return bool(_tool_plan_config(deps, "rewoo_lane_frames_enabled", False)) or bool(
+        _tool_plan_config(deps, role_flag, False)
+    )
+
+
+def _rewoo_frame_budget(deps: Any) -> int:
+    return max(1, int(_tool_plan_config(deps, "rewoo_frame_token_budget", 1200) or 1200))
 
 
 def _select_no_tools(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]]:
@@ -196,9 +216,33 @@ def _record_tool_plan_failure(harness: Any, message: str, *, failure_class: str)
 
 async def _prepare_planner_prompt(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]] | None:
     harness = deps.harness
-    task = str(harness.state.run_brief.original_task or harness.state.run_brief.effective_task or "")
+    task = str(
+        harness.state.run_brief.original_task
+        or getattr(harness.state.run_brief, "effective_task", "")
+        or ""
+    )
     max_steps = max(1, int(_tool_plan_config(deps, "tool_plan_max_steps", 6) or 6))
-    prompt = build_tool_plan_planner_prompt(task=task, max_steps=max_steps)
+    context_frame = ""
+    if _rewoo_role_enabled(deps, "rewoo_planner_frame_enabled"):
+        try:
+            compiler = ReWOOLaneCompiler(getattr(harness, "context_policy", None))
+            frame = compiler.compile(
+                state=harness.state,
+                role="planner",
+                token_budget=_rewoo_frame_budget(deps),
+            )
+            context_frame = compiler.render(frame, token_budget=_rewoo_frame_budget(deps))
+            harness.state.scratchpad["_rewoo_planner_drop_log"] = frame.drop_log
+            if frame.drop_log:
+                harness._runlog(
+                    "rewoo_planner_drop_log",
+                    "ReWOO planner frame dropped items",
+                    drops=[{"lane": d.lane, "reason": d.reason, "count": d.dropped_count} for d in frame.drop_log],
+                )
+        except Exception as exc:
+            harness._runlog("rewoo_planner_frame_failed", "planner frame compilation failed", error=str(exc))
+            context_frame = ""
+    prompt = build_tool_plan_planner_prompt(task=task, max_steps=max_steps, context_frame=context_frame)
     repair_nudge = str(harness.state.scratchpad.pop("_tool_plan_repair_nudge", "") or "").strip()
     if repair_nudge:
         prompt = f"{prompt}\n\nRepair previous invalid ToolPlan output:\n{repair_nudge}\nReturn ONLY corrected JSON."
@@ -207,19 +251,58 @@ async def _prepare_planner_prompt(graph_state: GraphRunState, deps: Any) -> list
 
 async def _prepare_solver_prompt(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]] | None:
     harness = deps.harness
-    observations_text = str(harness.state.scratchpad.pop("_tool_plan_observations_text", "") or "").strip()
-    if observations_text:
-        fresh_output_limit = max(1, int(_tool_plan_config(deps, "tool_plan_solver_fresh_output_limit", 1200) or 1200))
-        harness.state.append_message(
-            ConversationMessage(
-                role="system",
-                content=build_tool_plan_solver_system_suffix(
-                    observations_text,
-                    fresh_output_limit=fresh_output_limit,
-                ),
-                metadata={"tool_plan_observations": True},
+    if _rewoo_role_enabled(deps, "rewoo_solver_frame_enabled"):
+        try:
+            observations = harness.state.scratchpad.get("_tool_plan_observations")
+            if not isinstance(observations, list):
+                observations = []
+            compiler = ReWOOLaneCompiler(getattr(harness, "context_policy", None))
+            frame = compiler.compile(
+                state=harness.state,
+                role="solver",
+                tool_plan_observations=observations,
+                token_budget=_rewoo_frame_budget(deps),
             )
-        )
+            frame_text = compiler.render(frame, token_budget=_rewoo_frame_budget(deps))
+            harness.state.scratchpad["_rewoo_solver_drop_log"] = frame.drop_log
+            if frame.drop_log:
+                harness._runlog(
+                    "rewoo_solver_drop_log",
+                    "ReWOO solver frame dropped items",
+                    drops=[{"lane": d.lane, "reason": d.reason, "count": d.dropped_count} for d in frame.drop_log],
+                )
+            fresh_output_limit = max(1, int(_tool_plan_config(deps, "tool_plan_solver_fresh_output_limit", 1200) or 1200))
+            task = str(
+                harness.state.run_brief.original_task
+                or getattr(harness.state.run_brief, "effective_task", "")
+                or ""
+            )
+            return [
+                {
+                    "role": "system",
+                    "content": build_tool_plan_solver_system_suffix(
+                        frame_text,
+                        fresh_output_limit=fresh_output_limit,
+                    ),
+                },
+                {"role": "user", "content": task or "Use the ReWOO evidence frame to decide the next action."},
+            ]
+        except Exception as exc:
+            harness._runlog("rewoo_solver_frame_failed", "solver frame compilation failed", error=str(exc))
+    else:
+        observations_text = str(harness.state.scratchpad.pop("_tool_plan_observations_text", "") or "").strip()
+        if observations_text:
+            fresh_output_limit = max(1, int(_tool_plan_config(deps, "tool_plan_solver_fresh_output_limit", 1200) or 1200))
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=build_tool_plan_solver_system_suffix(
+                        observations_text,
+                        fresh_output_limit=fresh_output_limit,
+                    ),
+                    metadata={"tool_plan_observations": True},
+                )
+            )
     return await prepare_prompt(graph_state, deps)
 
 
@@ -391,6 +474,45 @@ class ToolPlanRuntime(LoopGraphRuntime):
             prepare_tool_plan_dispatch(graph_state, plan)
         return serialize_runtime_state(graph_state)
 
+    async def _dispatch_tools_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
+        graph_state = load_runtime_state(self, payload)
+        plan = _coerce_tool_plan(graph_state.loop_state.scratchpad.get("_tool_plan"))
+        use_dag = (
+            plan is not None
+            and bool(_tool_plan_config(self.deps, "tool_dag_enabled", False))
+        )
+        if use_dag:
+            try:
+                batches = build_execution_dag(plan)
+                assert_no_mutating_steps(batches)
+                pending_by_id = {pc.tool_call_id: pc for pc in graph_state.pending_tool_calls}
+                pending_batches: list[list[Any]] = []
+                for batch in batches:
+                    pb = []
+                    for step in batch:
+                        pc = pending_by_id.get(f"toolplan:{step.id}")
+                        if pc is not None:
+                            pb.append(pc)
+                    if pb:
+                        pending_batches.append(pb)
+                graph_state.recorded_tool_call_ids = []
+                graph_state.last_tool_results = []
+                records = await dispatch_tool_dag(
+                    graph_state,
+                    self.deps,
+                    pending_batches,
+                    max_parallel=int(_tool_plan_config(self.deps, "tool_dag_max_parallel", 4)),
+                    timeout_sec=int(_tool_plan_config(self.deps, "tool_dag_timeout_sec", 30)),
+                    preserve_result_order=bool(_tool_plan_config(self.deps, "tool_dag_preserve_result_order", True)),
+                )
+                graph_state.last_tool_results = records
+                graph_state.pending_tool_calls = []
+                return serialize_runtime_state(graph_state)
+            except MutatingStepInDAGError as exc:
+                self.deps.harness._runlog("tool_dag_aborted", str(exc))
+                # fall through to serial dispatch
+        return await super()._dispatch_tools_node(payload)
+
     async def _compress_observations_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
         phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
@@ -407,6 +529,12 @@ class ToolPlanRuntime(LoopGraphRuntime):
         )
         rendered = render_tool_plan_observations(plan.objective, observations)
         graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = rendered
+        graph_state.loop_state.scratchpad["_tool_plan_observations"] = observations
+        graph_state.loop_state.scratchpad["_tool_plan_evidence_ids"] = attach_tool_plan_observation_evidence(
+            graph_state.loop_state,
+            objective=plan.objective,
+            observations=observations,
+        )
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "solver"
         increment_metric(self.deps.harness.state, "tool_plan_steps_executed", len(observations))
         increment_metric(
@@ -441,6 +569,61 @@ class ToolPlanRuntime(LoopGraphRuntime):
 
     async def _interpret_solver_output_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
+        harness = self.deps.harness
+        phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
+        draft = str(graph_state.last_assistant_text or "").strip()
+        if phase == "solver" and draft and bool(_tool_plan_config(self.deps, "solver_refine_enabled", False)):
+            passes = int(graph_state.loop_state.scratchpad.get("_tool_plan_refine_passes", 0) or 0)
+            max_passes = max(0, int(_tool_plan_config(self.deps, "solver_refine_max_passes", 1) or 0))
+            if passes < max_passes:
+                graph_state.loop_state.scratchpad["_tool_plan_refine_passes"] = passes + 1
+                observations_text = str(graph_state.loop_state.scratchpad.get("_tool_plan_observations_text") or "").strip()
+                context_frame = ""
+                if _rewoo_role_enabled(self.deps, "rewoo_refiner_frame_enabled"):
+                    try:
+                        observations = graph_state.loop_state.scratchpad.get("_tool_plan_observations")
+                        if not isinstance(observations, list):
+                            observations = []
+                        compiler = ReWOOLaneCompiler(getattr(harness, "context_policy", None))
+                        frame = compiler.compile(
+                            state=graph_state.loop_state,
+                            role="refiner",
+                            tool_plan_observations=observations,
+                            token_budget=_rewoo_frame_budget(self.deps),
+                        )
+                        context_frame = compiler.render(frame, token_budget=_rewoo_frame_budget(self.deps))
+                        graph_state.loop_state.scratchpad["_rewoo_refiner_drop_log"] = frame.drop_log
+                        if frame.drop_log:
+                            harness._runlog(
+                                "rewoo_refiner_drop_log",
+                                "ReWOO refiner frame dropped items",
+                                drops=[{"lane": d.lane, "reason": d.reason, "count": d.dropped_count} for d in frame.drop_log],
+                            )
+                    except Exception as exc:
+                        harness._runlog("rewoo_refiner_frame_failed", "refiner frame compilation failed", error=str(exc))
+                        observations_text = str(graph_state.loop_state.scratchpad.get("_tool_plan_observations_text") or "").strip()
+                        context_frame = ""
+                refine = RefineService(harness)
+                refine_result = await refine.run_bounded_refine(
+                    draft=draft,
+                    observations_text=observations_text,
+                    context_frame=context_frame,
+                )
+                if refine_result is not None:
+                    if refine_result.verdict == "block":
+                        harness.state.append_message(
+                            ConversationMessage(
+                                role="system",
+                                content="Solver draft was blocked by critique: " + "; ".join(refine_result.issues),
+                                metadata={"is_recovery_nudge": True, "recovery_kind": "solver_refine_block"},
+                            )
+                        )
+                        graph_state.last_assistant_text = ""
+                        graph_state.pending_tool_calls = []
+                        return serialize_runtime_state(graph_state)
+                    if refine_result.verdict == "revise" and refine_result.revised_output:
+                        graph_state.last_assistant_text = refine_result.revised_output
+                        harness._runlog("solver_refine", "solver draft revised", issues=refine_result.issues)
         await interpret_model_output(graph_state, self.deps)
         if graph_state.pending_tool_calls:
             graph_state.loop_state.scratchpad["_tool_plan_phase"] = "normal"
@@ -453,6 +636,14 @@ class ToolPlanRuntime(LoopGraphRuntime):
         graph_state.loop_state.scratchpad.pop("_tool_plan_phase", None)
         await prepare_loop_step(graph_state, self.deps)
         return serialize_runtime_state(graph_state)
+
+    async def _after_run(self, harness: Any, result: dict[str, object]) -> None:
+        if str(result.get("status") or "").strip().lower() in {"completed", "success", "ok", "stopped"}:
+            recorder = TrajectoryRecorder()
+            try:
+                recorder.record_tool_plan_trajectory(harness, result)
+            except Exception:
+                pass
 
     def _fallback_to_loop(self, graph_state: GraphRunState, message: str, *, failure_class: str) -> None:
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "fallback"

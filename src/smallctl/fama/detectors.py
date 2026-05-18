@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from ..diagnostic_tasks import diagnostic_failure_task
 from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state
 
 _LOOP_COUNTERS = ("no_progress", "no_actionable_progress", "repeat_command", "repeat_patch")
@@ -10,7 +11,6 @@ _READ_LOOP_TOOLS = {"artifact_read", "file_read", "dir_list", "ssh_file_read", "
 _REMOTE_CONFUSION_REASONS = {
     "remote_path_requires_ssh_exec",
     "remote_path_requires_typed_ssh_file_tool",
-    "remote_mutation_requires_verification",
 }
 _BAD_ARG_ERROR_MARKERS = (
     "tool arguments must be an object",
@@ -112,6 +112,12 @@ def detect_repeated_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal |
         evidence_bits.append(f"repeated_tool={repeated_tool}")
     if repeated_fingerprint:
         evidence_bits.append(f"repeated_fingerprint={repeated_fingerprint[:160]}")
+    if repeated_tool in _READ_LOOP_TOOLS:
+        _record_read_loop_recovery_payload(
+            state,
+            tool_name=repeated_tool,
+            fingerprint=repeated_fingerprint,
+        )
     return FamaSignal(
         kind=FamaFailureKind.LOOPING,
         severity=2,
@@ -156,6 +162,45 @@ def detect_remote_local_confusion(
         operation_id=operation_id,
         failure_class="wrong_path",
         next_safe_action="Verify the correct local or remote path/scope, then retry with the verified target.",
+    )
+
+
+def detect_remote_verification_pending(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    reason = str(metadata.get("reason") or "").strip()
+    if reason != "remote_mutation_requires_verification":
+        return None
+    if bool(getattr(result, "success", False)):
+        return None
+    if str(tool_name or "").strip() != "task_complete":
+        return None
+    host = str(metadata.get("host") or "").strip()
+    pending = metadata.get("pending_paths")
+    if not isinstance(pending, list):
+        pending = metadata.get("guessed_paths")
+    pending_paths = [str(path).strip() for path in pending or [] if str(path).strip()]
+    evidence = "remote mutation completion blocked until remote read-back verification"
+    if host:
+        evidence += f"; host={host}"
+    if pending_paths:
+        evidence += f"; pending_path={pending_paths[0]}"
+    return FamaSignal(
+        kind=FamaFailureKind.REMOTE_VERIFICATION_PENDING,
+        severity=2,
+        source="tool_result",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name="task_complete",
+        operation_id=operation_id,
+        failure_class="remote_verification_pending",
+        next_safe_action="Use the required remote read-back verification tool/path to verify the mutation, then retry completion.",
     )
 
 
@@ -319,6 +364,8 @@ def detect_verifier_failure_from_result(
         return None
     verifier = _verifier_from_result_or_state(state, result=result)
     if not _verifier_failed(verifier):
+        return None
+    if diagnostic_failure_task(state):
         return None
     failure_class = detect_test_failure_from_verdict(verifier) or "verifier_failed"
     return FamaSignal(
@@ -540,6 +587,59 @@ def _repeated_tool_from_history(state: Any, *, threshold: int) -> tuple[str | No
         if tool_name:
             return tool_name, fingerprint
     return None, None
+
+
+def _record_read_loop_recovery_payload(
+    state: Any,
+    *,
+    tool_name: str,
+    fingerprint: str | None,
+) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    target = _read_loop_target_from_fingerprint(fingerprint)
+    scratchpad["_read_loop_recovery_payload"] = {
+        "tool_name": tool_name,
+        "fingerprint": str(fingerprint or "")[:240],
+        "target": target,
+        "created_at_step": current_step(state),
+        "last_evidence_summary": _read_loop_evidence_summary(state, tool_name=tool_name, target=target),
+        "allowed_next_action": (
+            f"Do not call {tool_name} with the same target again. Use visible evidence to patch, "
+            "run a focused verifier, inspect a different missing target, or complete if enough evidence is present."
+        ),
+    }
+
+
+def _read_loop_target_from_fingerprint(fingerprint: str | None) -> str:
+    text = str(fingerprint or "").strip()
+    if not text:
+        return ""
+    if "|" in text:
+        parts = [part.strip() for part in text.split("|") if part.strip()]
+        if len(parts) >= 2:
+            return parts[1][:180]
+    return text[:180]
+
+
+def _read_loop_evidence_summary(state: Any, *, tool_name: str, target: str) -> str:
+    if tool_name == "artifact_read":
+        artifacts = getattr(state, "artifacts", None)
+        if isinstance(artifacts, dict) and target:
+            artifact = artifacts.get(target)
+            title = str(getattr(artifact, "title", "") or "").strip()
+            metadata = getattr(artifact, "metadata", None)
+            if isinstance(metadata, dict):
+                lines = metadata.get("line_count") or metadata.get("total_lines")
+                if title and lines:
+                    return f"Artifact {target} ({title}) has {lines} lines; use already-read preview/coverage before rereading."
+                if title:
+                    return f"Artifact {target} ({title}) was already read recently."
+        return f"Recent artifact_read calls already targeted {target or 'the same artifact/range'}."
+    if target:
+        return f"Recent {tool_name} calls already targeted {target}."
+    return f"Recent {tool_name} calls repeated without producing new evidence."
 
 
 def _next_action_for_repeated_loop(
@@ -765,3 +865,41 @@ def _path_from_metadata_or_args(metadata: dict[str, Any]) -> str:
             if value:
                 return value
     return ""
+
+def detect_tool_plan_hard_route(state: Any) -> bool:
+    """Set scratchpad flag when evidence-starved conditions warrant hard-routing to ToolPlan."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    metrics = scratchpad.get("_recovery_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+
+    # Condition 1: model tried patch before reading (evidence_before_patch)
+    if int(metrics.get("tool_plan_evidence_before_patch_count", 0) or 0) > 0:
+        scratchpad["_fama_force_tool_plan_next_turn"] = True
+        return True
+
+    # Condition 2: repeated reads without progress
+    if int(metrics.get("tool_plan_repeated_read_count", 0) or 0) > 1:
+        scratchpad["_fama_force_tool_plan_next_turn"] = True
+        return True
+
+    # Condition 3: wrong path count > 0
+    if int(metrics.get("tool_plan_wrong_path_count", 0) or 0) > 0:
+        scratchpad["_fama_force_tool_plan_next_turn"] = True
+        return True
+
+    # Condition 4: active subtask evidence_count < 2 and failure_count > 0
+    subtask_ledger = getattr(state, "subtask_ledger", None)
+    if subtask_ledger is not None:
+        try:
+            active = subtask_ledger.infer_or_create_active_subtask()
+            evidence_count = len(getattr(active, "evidence_items", []) or [])
+            failure_count = len(getattr(active, "failure_events", []) or [])
+            if evidence_count < 2 and failure_count > 0:
+                scratchpad["_fama_force_tool_plan_next_turn"] = True
+                return True
+        except Exception:
+            pass
+
+    return False

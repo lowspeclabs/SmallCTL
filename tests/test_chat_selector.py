@@ -19,6 +19,7 @@ from smallctl.ui.chat_sessions import (
     load_chat_session_summaries,
     record_chat_session_prompt,
 )
+from smallctl.ui.harness_bridge import _serialize_recent_messages
 
 
 def test_chat_session_index_records_first_message_and_updates_timestamp(tmp_path) -> None:
@@ -318,3 +319,68 @@ def test_smallctl_app_chat_resume_falls_back_to_saved_state(monkeypatch, tmp_pat
             return list(restored_states)
 
     assert asyncio.run(_run()) == ["thread-1"]
+
+
+def test_resume_serializes_full_transcript_not_trimmed_hot_window(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.recent_message_limit = 3
+    state.append_message(ConversationMessage(role="user", content="message 0"))
+    state.append_message(ConversationMessage(role="assistant", content="message 1"))
+    state.append_message(ConversationMessage(role="tool", content="internal tool result"))
+    state.append_message(ConversationMessage(role="user", content="message 2"))
+    state.append_message(ConversationMessage(role="system", content="internal system note"))
+    state.append_message(ConversationMessage(role="assistant", content="message 3"))
+
+    restored = LoopState.from_dict(state.to_dict())
+
+    assert [message["role"] for message in _serialize_recent_messages(restored)] == [
+        "user",
+        "assistant",
+        "tool",
+        "user",
+        "system",
+        "assistant",
+    ]
+    assert [message["content"] for message in _serialize_recent_messages(restored)] == [
+        "message 0",
+        "message 1",
+        "internal tool result",
+        "message 2",
+        "internal system note",
+        "message 3",
+    ]
+    assert len(restored.recent_messages) == 3
+
+
+def test_resume_serializes_assistant_tool_calls_without_assistant_text(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    tool_call = {
+        "id": "call_weather",
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "arguments": "{\"location\":\"Boston\"}",
+        },
+    }
+    state.append_message(
+        ConversationMessage(role="assistant", content=None, tool_calls=[tool_call])
+    )
+    state.append_message(
+        ConversationMessage(
+            role="tool",
+            name="weather",
+            tool_call_id="call_weather",
+            content="72F and clear",
+            metadata={"artifact_id": "A1"},
+        )
+    )
+
+    serialized = _serialize_recent_messages(LoopState.from_dict(state.to_dict()))
+
+    assert serialized[0]["role"] == "assistant"
+    assert serialized[0]["content"] == ""
+    assert serialized[0]["tool_calls"] == [tool_call]
+    assert serialized[1]["role"] == "tool"
+    assert serialized[1]["name"] == "weather"
+    assert serialized[1]["tool_call_id"] == "call_weather"
+    assert serialized[1]["metadata"] == {"artifact_id": "A1"}

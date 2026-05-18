@@ -10,9 +10,12 @@ from smallctl.graph.model_call_nodes import _conversation_tool_calls_from_pendin
 from smallctl.graph.model_stream_fallback import StreamProcessingResult
 from smallctl.graph.model_stream_loop_rendering import StreamTagState, flush_model_stream_buffer, handle_model_stream_chunk
 from smallctl.graph.state import GraphRunState, PendingToolCall
+from smallctl.harness.memory import MemoryService
 from smallctl.graph.tool_call_parser import parse_tool_calls
 from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
 from smallctl.models.events import UIEventType
+from smallctl.models.conversation import ConversationMessage
+from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState, WriteSession
 from smallctl.tools.base import ToolSpec
 from smallctl.tools.dispatcher import ToolDispatcher, normalize_tool_request
@@ -30,11 +33,27 @@ class _FakeStream:
         return b""
 
 
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeProc:
-    def __init__(self, *, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(self, *, returncode: int, stdout: bytes = b"", stderr: bytes = b"", stdin: _FakeStdin | None = None) -> None:
         self.stdout = _FakeStream([stdout, b""])
         self.stderr = _FakeStream([stderr, b""])
         self.returncode = returncode
+        self.stdin = stdin
 
     async def wait(self) -> int:
         return self.returncode
@@ -922,12 +941,117 @@ def test_ssh_exec_distinguishes_remote_exit_from_transport_failure() -> None:
     assert result["success"] is False
     assert result["error"] == "Remote SSH command exited with code 1"
     assert result["metadata"]["failure_kind"] == "remote_command"
+    assert result["metadata"]["failure_mode"] == "remote_exit_nonzero"
+    assert result["metadata"]["ssh_error_class"] == "remote_exit_nonzero"
     assert result["metadata"]["ssh_transport_succeeded"] is True
     assert result["metadata"]["ssh_auth_mode"] == "password"
     assert result["metadata"]["ssh_auth_transport"] == "sshpass_env"
     assert result["metadata"]["ssh_password_provided"] is True
     assert result["metadata"]["output"]["exit_code"] == 1
     assert not any("username/password" in hint.lower() for hint in result["metadata"]["hints"])
+
+
+def test_ssh_exec_diagnostic_not_found_returns_success() -> None:
+    state = LoopState(cwd="/tmp")
+
+    with patch.object(
+        network,
+        "create_process",
+        AsyncMock(return_value=_FakeProc(returncode=1, stderr=b"Unit fog-pxe.service could not be found.\n")),
+    ):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command="systemctl status fog-pxe || service fog-pxe status",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
+    assert result["output"]["exit_code"] == 1
+
+
+def test_ssh_exec_diagnostic_empty_output_still_fails() -> None:
+    """Implicit empty-output probes (e.g. which, grep) still return fail from network.py;
+    the verifier handles them separately."""
+    state = LoopState(cwd="/tmp")
+
+    with patch.object(
+        network,
+        "create_process",
+        AsyncMock(return_value=_FakeProc(returncode=1)),
+    ):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command="which nonexistent-binary",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is False
+
+
+def test_ssh_remote_nonzero_memory_label_is_not_unknown_failure() -> None:
+    state = LoopState(cwd="/tmp")
+    state.thread_id = "thread-ssh-memory"
+    state.current_phase = "execute"
+    state.active_intent = "requested_ssh_exec"
+    state.intent_tags = ["ssh_exec", "phase_execute"]
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = "ssh into 192.168.1.63 and inspect a service"
+    store = SimpleNamespace(upsert=lambda memory: None)
+    harness = SimpleNamespace(
+        state=state,
+        warm_memory_store=store,
+        cold_memory_store=store,
+    )
+    result = ToolEnvelope(
+        success=False,
+        error="Remote SSH command exited with code 1",
+        metadata={
+            "arguments": {"host": "192.168.1.63", "user": "root", "command": "systemctl status missing"},
+            "failure_mode": "remote_exit_nonzero",
+            "ssh_error_class": "remote_exit_nonzero",
+            "ssh_transport_succeeded": True,
+        },
+    )
+
+    memory = MemoryService(harness).record_experience(tool_name="ssh_exec", result=result)
+
+    assert memory.failure_mode == "remote_exit_nonzero"
+    assert "SSH reached the remote host" in memory.notes
+    assert "remote command exited non-zero" in memory.notes
+
+
+def test_ssh_exec_writes_stdin_data_to_remote_command() -> None:
+    state = LoopState(cwd="/tmp")
+    fake_stdin = _FakeStdin()
+    create_process = AsyncMock(return_value=_FakeProc(returncode=0, stdout=b"done\n", stdin=fake_stdin))
+
+    with patch.object(network, "create_process", create_process):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command="cd /root/fogproject/bin && ./installfog.sh",
+                stdin_data="n\n\n2\nN\nY\n",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
+    assert fake_stdin.writes == [b"n\n\n2\nN\nY\n"]
+    assert fake_stdin.closed is True
+    assert create_process.await_args.kwargs["stdin"] is asyncio.subprocess.PIPE
 
 
 def test_ssh_exec_retries_when_accept_new_is_rejected() -> None:
@@ -1021,6 +1145,62 @@ def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     assert metadata["ssh_auth_transport"] == "sshpass_env"
     assert metadata["ssh_password_origin"] == "explicit"
     assert metadata["ssh_password_recovered"] is False
+
+
+def test_ssh_exec_blocks_harness_tool_name_as_remote_shell_command() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and fix service files'
+
+    tool_name, args, intercepted, _metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "Temp@Pass",
+            "command": (
+                "ssh_file_write host='192.168.1.89' path='/lib/systemd/system/mysql.service' "
+                "content='bad idea'"
+            ),
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_exec"
+    assert args["command"].startswith("ssh_file_write")
+    assert intercepted is not None
+    assert intercepted.success is False
+    assert intercepted.metadata["reason"] == "harness_tool_as_remote_shell_command"
+    assert intercepted.metadata["suggested_tool"] == "ssh_file_write"
+    assert "Call `ssh_file_write` directly" in (intercepted.error or "")
+
+
+def test_ssh_exec_blocks_nested_raw_ssh_command() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and run whoami'
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "Temp@Pass",
+            "command": "ssh root@192.168.1.89 -o PreferredAuthentications=password whoami",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_exec"
+    assert args["command"].startswith("ssh root@192.168.1.89")
+    assert intercepted is not None
+    assert intercepted.success is False
+    assert intercepted.metadata["reason"] == "nested_raw_ssh_in_ssh_exec"
+    assert "already opens the SSH connection" in (intercepted.error or "")
+    assert metadata == {}
+    assert "_ssh_auth_recovery_state" not in state.scratchpad
 
 
 def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
@@ -1240,6 +1420,75 @@ def test_normalize_tool_request_allows_ssh_auth_retry_with_corrected_password() 
     assert intercepted is None
     assert args["password"] == "new-secret"
     assert metadata["ssh_auth_recovery_branch"] == "retry_with_password"
+
+
+def test_normalize_tool_request_pins_confirmed_ssh_password_over_stale_explicit_password() -> None:
+    state = LoopState(cwd=".")
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "confirmed-password",
+            "confirmed": True,
+        }
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_file_read",
+        {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "stale-memory-password",
+            "path": "/var/www/turbquant.html",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_file_read"
+    assert intercepted is None
+    assert args["password"] == "confirmed-password"
+    assert metadata["pinned_ssh_password"] is True
+    assert metadata["pinned_ssh_password_overrode_mismatch"] is True
+    assert metadata["pinned_ssh_password_overrode_origin"] == "explicit"
+
+
+def test_normalize_tool_request_allows_fresh_user_ssh_password_rotation_candidate() -> None:
+    state = LoopState(cwd=".")
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.89": {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "old-confirmed-password",
+            "confirmed": True,
+        }
+    }
+    state.recent_messages.append(
+        ConversationMessage(
+            role="user",
+            content='ssh root@192.168.1.89 with password "fresh-user-password" and read /var/www/turbquant.html',
+        )
+    )
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_file_read",
+        {
+            "host": "192.168.1.89",
+            "user": "root",
+            "password": "fresh-user-password",
+            "path": "/var/www/turbquant.html",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_file_read"
+    assert intercepted is None
+    assert args["password"] == "fresh-user-password"
+    assert metadata["ssh_credential_rotation_candidate"] is True
+    assert "pinned_ssh_password_overrode_mismatch" not in metadata
 
 
 def test_normalize_tool_request_repairs_small_model_tool_aliases() -> None:
@@ -1744,6 +1993,41 @@ def test_build_repair_recovery_message_no_schema_hint_when_args_valid() -> None:
 
     assert "Repair loop stalled" in message
     assert "Required ssh_exec fields" not in message
+
+
+def test_build_repair_recovery_message_detects_interactive_ssh_script() -> None:
+    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.state import ToolExecutionRecord
+    from smallctl.models.tool_result import ToolEnvelope
+
+    harness = SimpleNamespace(
+        state=LoopState(cwd="."),
+    )
+    harness.state.stagnation_counters = {"repeat_command": 2}
+    record = ToolExecutionRecord(
+        operation_id="op1",
+        tool_name="ssh_exec",
+        args={"target": "root@192.168.1.89", "command": "cd /root/fogproject/bin && echo \"y\" | ./installfog.sh"},
+        tool_call_id="call_1",
+        result=ToolEnvelope(
+            success=False,
+            error="Remote SSH command exited with code 1",
+            metadata={
+                "output": {
+                    "stdout": "Should the installer try to disable the local firewall for you now? (y/N)\n"
+                    "Are you sure you wish to continue (Y/N)\n"
+                    "Sorry, answer not recognized",
+                    "stderr": "",
+                    "exit_code": 1,
+                },
+            },
+        ),
+    )
+    message = _build_repair_recovery_message(harness, record)
+
+    assert "interactive script prompt" in message
+    assert "stdin_data" in message
+    assert "Do not retry a single" in message
 
 
 def test_normalize_tool_request_repairs_patch_argument_aliases() -> None:

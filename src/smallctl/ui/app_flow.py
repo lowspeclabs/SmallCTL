@@ -14,7 +14,11 @@ from ..harness import Harness
 from ..logging_utils import RunLogger
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType, UIStatusSnapshot
-from ..chat_sessions import record_chat_session_prompt
+from ..chat_sessions import (
+    load_chat_session_state,
+    load_chat_session_summaries,
+    record_chat_session_prompt,
+)
 from .app_approvals import handle_approval_prompt
 from .app_approvals import handle_sudo_password_prompt
 from .app_approvals import maybe_handle_plan_approval_result
@@ -30,7 +34,7 @@ from .display import (
 )
 from .input import InputPane
 from .chat_selector import ChatSelectButton
-from .harness_bridge import HarnessBridge
+from .harness_bridge import HarnessBridge, _serialize_recent_messages
 from .model_selector import ModelSelectButton
 from .statusbar import StatusBar
 
@@ -551,15 +555,23 @@ class SmallctlAppFlowMixin:
     async def _maybe_restore_harness_state(self) -> dict[str, Any] | None:
         if self.fresh_run or not self.restore_graph_state_on_startup or self.harness is None:
             return None
+        cwd = str(getattr(getattr(self.harness, "state", None), "cwd", ".") or ".")
+        requested_thread_id = str(self.restore_thread_id or "").strip()
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
             result = await bridge.restore_graph_state(thread_id=self.restore_thread_id)
             restored = bool(result.get("restored"))
             if not restored:
-                return {
-                    "status": "not_found",
-                    "thread_id": self.restore_thread_id,
-                }
+                fallback = self._resolve_saved_chat_state(cwd=cwd, thread_id=requested_thread_id)
+                if fallback is None:
+                    return {
+                        "status": "not_found",
+                        "thread_id": self.restore_thread_id,
+                    }
+                fallback_thread_id, state_payload = fallback
+                result = await bridge.replace_state_from_payload(state_payload)
+                restored = True
+                self.restore_thread_id = fallback_thread_id
             snapshot = result.get("snapshot")
             if isinstance(snapshot, dict):
                 self._latest_status_snapshot = dict(snapshot)
@@ -568,6 +580,9 @@ class SmallctlAppFlowMixin:
                 "thread_id": str(result.get("thread_id") or self.restore_thread_id or ""),
                 "has_pending_interrupt": bool(result.get("has_pending_interrupt")),
             }
+            restored_messages = result.get("recent_messages")
+            if isinstance(restored_messages, list):
+                payload["recent_messages"] = restored_messages
             interrupt = result.get("interrupt")
             if isinstance(interrupt, dict):
                 payload["interrupt"] = interrupt
@@ -575,19 +590,55 @@ class SmallctlAppFlowMixin:
 
         restored = self.harness.restore_graph_state(thread_id=self.restore_thread_id)
         if not restored:
-            return {
-                "status": "not_found",
-                "thread_id": self.restore_thread_id,
-            }
+            fallback = self._resolve_saved_chat_state(cwd=cwd, thread_id=requested_thread_id)
+            if fallback is None:
+                return {
+                    "status": "not_found",
+                    "thread_id": self.restore_thread_id,
+                }
+            fallback_thread_id, state_payload = fallback
+            from ..state import LoopState
+
+            self.harness.state = LoopState.from_dict(state_payload)
+            if isinstance(getattr(self.harness.state, "scratchpad", None), dict):
+                self.harness.state.scratchpad["_session_restored"] = True
+                self.harness.state.scratchpad["_resume_contract"] = {
+                    "kind": "chat_session_resume",
+                    "thread_id": str(getattr(self.harness.state, "thread_id", "") or fallback_thread_id),
+                }
+            self.harness._sync_run_logger_session_id()
         payload: dict[str, Any] = {
             "status": "restored",
             "thread_id": self.harness.state.thread_id,
             "has_pending_interrupt": self.harness.has_pending_interrupt(),
         }
+        payload["recent_messages"] = _serialize_recent_messages(self.harness.state)
         interrupt = self.harness.get_pending_interrupt()
         if interrupt is not None:
             payload["interrupt"] = interrupt
         return payload
+
+    @staticmethod
+    def _resolve_saved_chat_state(
+        *,
+        cwd: str,
+        thread_id: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        candidate_ids: list[str] = []
+        if thread_id:
+            candidate_ids.append(thread_id)
+        else:
+            summaries = load_chat_session_summaries(cwd=cwd)
+            candidate_ids.extend(summary.thread_id for summary in summaries)
+        seen: set[str] = set()
+        for candidate_id in candidate_ids:
+            if not candidate_id or candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            state_payload = load_chat_session_state(cwd=cwd, thread_id=candidate_id)
+            if isinstance(state_payload, dict):
+                return candidate_id, state_payload
+        return None
 
     @staticmethod
     def _format_restore_status(status: dict[str, Any]) -> str:

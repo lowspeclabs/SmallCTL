@@ -78,7 +78,12 @@ def format_tool_result_display(
 
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     if not result.success:
-        return _clip_error_display(str(result.error or "Tool failed."), limit=400)
+        error_text = str(result.error or "Tool failed.")
+        if tool_name == "ssh_exec" and bool(metadata.get("ssh_transport_succeeded")):
+            failure_mode = str(metadata.get("failure_mode") or metadata.get("ssh_error_class") or "").strip()
+            if failure_mode == "remote_exit_nonzero":
+                error_text = f"SSH reached the remote host; remote command exited non-zero. {error_text}"
+        return _clip_error_display(error_text, limit=400)
 
     if tool_name == "artifact_read":
         return format_artifact_read_display(result=result, request_text=request_text)

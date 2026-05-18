@@ -215,6 +215,48 @@ def test_fama_done_gate_dispatch_blocks_hidden_task_complete() -> None:
     assert blocked.metadata["reason"] == "fama_done_gate"
 
 
+def test_fama_done_gate_allows_diagnostic_failure_completion() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "rca why fog install is not working"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "curl -Is https://192.168.1.89:8080/fog/",
+        "key_stdout": "curl: (7) Failed to connect to 192.168.1.89 port 8080",
+    }
+    state.scratchpad["_fama"] = {
+        "version": 1,
+        "signals": [],
+        "active_mitigations": [
+            {
+                "name": "done_gate",
+                "reason": "verifier failed",
+                "source_signal": "early_stop:0",
+                "activated_step": 0,
+                "expires_after_step": 2,
+                "priority": 50,
+            }
+        ],
+        "last_observed_step": 0,
+    }
+    harness = _harness(state)
+
+    async def _dispatch(tool_name, args):
+        return ToolEnvelope(success=True, output={"status": "complete"})
+
+    harness.dispatcher = SimpleNamespace(dispatch=_dispatch)
+
+    result = asyncio.run(
+        dispatch_tool_call(
+            harness,
+            "task_complete",
+            {"message": "RCA: site verification failed; port 8080 is not responding."},
+        )
+    )
+
+    assert result.success is True
+    assert not any(event == "fama_tool_call_blocked" for event, _ in harness._events)
+
+
 def test_fama_passing_verifier_clears_done_gate(monkeypatch) -> None:
     state = LoopState()
     state.scratchpad["_fama"] = {

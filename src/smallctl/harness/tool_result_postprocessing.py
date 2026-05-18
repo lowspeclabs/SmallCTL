@@ -19,7 +19,7 @@ async def apply_persisted_artifact_outcome(
     arguments: dict[str, Any] | None,
     operation_id: str | None,
 ) -> Any:
-    if artifact:
+    if artifact or tool_name == "ssh_exec":
         _apply_artifact_success_outcome(
             service,
             tool_name=tool_name,

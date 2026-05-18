@@ -739,6 +739,39 @@ def test_repeated_inline_contextual_followups_do_not_keep_growing_resolved_task_
     assert query_after_second == query_after_first
 
 
+def test_continue_web_research_directives_preserve_prior_research_goal() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "Do research on game of thrones and return back with a bulleted summary of its main plot points"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "task_mode": "analysis",
+    }
+    state.recent_messages = [
+        ConversationMessage(
+            role="assistant",
+            content="I need to start with a web search before summarizing the main plot points.",
+        )
+    ]
+    harness = _make_harness(state)
+
+    for raw in (
+        "continue, start with a web search",
+        "go ahead and search the web",
+        "yes, do the web search",
+        "start the web lookup",
+        "search the web first",
+    ):
+        resolved = Harness._resolve_followup_task(harness, raw)
+
+        assert "game of thrones" in resolved.lower()
+        assert raw in resolved
+        assert state.scratchpad["_task_transaction"]["turn_type"] == "ITERATION"
+
+
 def test_unrelated_task_hard_resets_guard_state_and_durable_memory() -> None:
     state = LoopState(cwd="/tmp")
     prior = "read temp/logwatch.py and identify the required fix"

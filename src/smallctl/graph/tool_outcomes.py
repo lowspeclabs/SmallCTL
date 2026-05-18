@@ -149,13 +149,45 @@ def _maybe_emit_missing_requested_output_file_nudge(
         harness,
         PendingToolCall(tool_name="file_read", args={"path": raw_path}),
     )
-    if "requested output file" not in message:
-        return False
-
     scratchpad = getattr(harness.state, "scratchpad", None)
     if not isinstance(scratchpad, dict):
         scratchpad = {}
         harness.state.scratchpad = scratchpad
+
+    if "requested output file" not in message:
+        if "required input file" not in message:
+            return False
+        nudge_key = f"missing-input-file:{raw_path}"
+        if scratchpad.get("_missing_input_file_nudged") == nudge_key:
+            return False
+        scratchpad["_missing_input_file_nudged"] = nudge_key
+        scratchpad["_unresolved_missing_input_file"] = {
+            "path": raw_path,
+            "message": message,
+            "operation_id": str(record.operation_id or ""),
+            "tool_call_id": str(record.tool_call_id or ""),
+        }
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=message,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "missing_required_input_file",
+                    "path": raw_path,
+                },
+            )
+        )
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "missing_required_input_file_nudge",
+                "blocked completion after required input file was missing",
+                path=raw_path,
+                run_mode=graph_state.run_mode,
+            )
+        return True
+
     nudge_key = f"missing-output-file:{raw_path}"
     if scratchpad.get("_missing_output_file_write_nudged") == nudge_key:
         return False

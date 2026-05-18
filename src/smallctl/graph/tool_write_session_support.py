@@ -394,6 +394,13 @@ def _build_schema_repair_message(
 ) -> str:
     field_names = [str(field) for field in required_fields if str(field).strip()]
     required_text = ", ".join(field_names) or "path, content"
+    schema_hint = compact_tool_schema_hint(harness, pending.tool_name)
+
+    def _with_schema_hint(message: str) -> str:
+        if schema_hint:
+            return message.rstrip() + "\n\n" + schema_hint
+        return message
+
     if pending.tool_name in {"file_patch", "ast_patch"}:
         target_path = str(pending.args.get("path") or primary_task_target_path(harness) or "").strip()
         target_hint = f" Target path for this task: `{target_path}`." if target_path else ""
@@ -410,7 +417,7 @@ def _build_schema_repair_message(
             "than once, read the smallest relevant slice first and make the target text more specific."
         )
         if session is not None:
-            return (
+            return _with_schema_hint(
                 f"Tool call '{pending.tool_name}' was emitted without arguments. "
                 f"Continue with Write Session `{session.write_session_id}` for `{session.write_target_path}` if this is the current target. "
                 "The active staged copy is the read/verify source. "
@@ -418,7 +425,7 @@ def _build_schema_repair_message(
                 f"{target_hint} "
                 f"{structural_hint} The target path remains the canonical destination while the staged copy is the read/verify source."
             )
-        return (
+        return _with_schema_hint(
             f"Tool call '{pending.tool_name}' was emitted without arguments. "
             f"Please resend the tool call with these required fields: {required_text}."
             f"{target_hint} "
@@ -439,7 +446,7 @@ def _build_schema_repair_message(
             )
             if session.write_sections_completed and not session.write_next_section:
                 next_hint = " Omit `next_section_name` on the final chunk to finalize the session."
-            return (
+            return _with_schema_hint(
                 f"Tool call '{pending.tool_name}' was emitted without arguments. "
                 f"Continue Write Session `{session.write_session_id}` for `{session.write_target_path}`. "
                 f"Resend `file_write` with these required fields: {required_text}, plus "
@@ -447,7 +454,7 @@ def _build_schema_repair_message(
                 f"{next_hint} Do not switch away from `file_write` or `file_read` unless you truly need local context for a repair."
                 " For a narrow repair inside the staged copy, use `file_patch` for exact text or `ast_patch` for structural edits instead of `file_write`."
             )
-        return (
+        return _with_schema_hint(
             f"Tool call '{pending.tool_name}' was emitted without arguments. "
             f"Please resend the tool call with these required fields: {required_text}."
             f"{target_hint} "
@@ -455,7 +462,142 @@ def _build_schema_repair_message(
             "then extend it with later writes. If this is a localized edit to an existing file, switch to "
             "`file_patch` or `ast_patch` instead of retrying a full `file_write`."
         )
-    return (
+    return _with_schema_hint(
         f"Tool call '{pending.tool_name}' was emitted without arguments. "
         f"Please resend the tool call with these required fields: {required_text}."
     )
+
+
+def compact_tool_schema_hint(harness: Any, tool_name: str, *, max_chars: int = 900) -> str:
+    schema = _tool_schema_for_hint(harness, tool_name)
+    function = schema.get("function") if isinstance(schema, dict) else None
+    function = function if isinstance(function, dict) else {}
+    parameters = function.get("parameters")
+    parameters = parameters if isinstance(parameters, dict) else {}
+    properties = parameters.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = [str(item) for item in parameters.get("required", []) if str(item).strip()]
+    if not properties and not required:
+        return ""
+
+    tool = str(function.get("name") or tool_name or "").strip()
+    prop_bits: list[str] = []
+    for name, spec in properties.items():
+        if not str(name).strip():
+            continue
+        spec = spec if isinstance(spec, dict) else {}
+        type_name = spec.get("type")
+        if isinstance(type_name, list):
+            type_text = "/".join(str(item) for item in type_name if str(item).strip())
+        else:
+            type_text = str(type_name or "any")
+        bit = f"{name}:{type_text}"
+        enum_values = spec.get("enum")
+        if isinstance(enum_values, list) and 0 < len(enum_values) <= 8:
+            enum_text = ", ".join(json.dumps(item) for item in enum_values)
+            if len(enum_text) <= 120:
+                bit += f" enum=[{enum_text}]"
+        prop_bits.append(bit)
+
+    minimal = _minimal_schema_example(required, properties)
+    lines = [f"Compact schema for `{tool}`:"]
+    if required:
+        lines.append("Required fields: " + ", ".join(required))
+    if prop_bits:
+        lines.append("Allowed properties: " + "; ".join(prop_bits))
+    if minimal:
+        lines.append("Minimal valid call arguments: " + json.dumps(minimal, sort_keys=True))
+    hint = "\n".join(lines)
+    if len(hint) > max_chars:
+        hint = hint[: max(0, max_chars - 3)].rstrip() + "..."
+    _remember_schema_validation_hint(
+        harness,
+        tool_name=tool,
+        required_fields=required,
+        schema_excerpt=hint,
+    )
+    return hint
+
+
+def _tool_schema_for_hint(harness: Any, tool_name: str) -> dict[str, Any]:
+    name = str(tool_name or "").strip()
+    registry = getattr(harness, "registry", None)
+    get_fn = getattr(registry, "get", None) if registry is not None else None
+    spec = get_fn(name) if callable(get_fn) and name else None
+    openai_schema = getattr(spec, "openai_schema", None) if spec is not None else None
+    if callable(openai_schema):
+        try:
+            schema = openai_schema()
+            if isinstance(schema, dict):
+                return schema
+        except Exception:
+            pass
+    export_fn = getattr(registry, "export_openai_tools", None) if registry is not None else None
+    if callable(export_fn):
+        for kwargs in ({"mode": "loop"}, {}):
+            try:
+                schemas = export_fn(**kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                break
+            for entry in schemas or []:
+                function = entry.get("function") if isinstance(entry, dict) else None
+                if isinstance(function, dict) and str(function.get("name") or "").strip() == name:
+                    return entry
+    return {}
+
+
+def _minimal_schema_example(required: list[str], properties: dict[str, Any]) -> dict[str, Any]:
+    example: dict[str, Any] = {}
+    for field in required:
+        spec = properties.get(field)
+        spec = spec if isinstance(spec, dict) else {}
+        value = _placeholder_for_schema(spec)
+        if value is _NO_PLACEHOLDER:
+            return {}
+        example[field] = value
+    return example
+
+
+_NO_PLACEHOLDER = object()
+
+
+def _placeholder_for_schema(spec: dict[str, Any]) -> Any:
+    enum_values = spec.get("enum")
+    if isinstance(enum_values, list) and enum_values:
+        return enum_values[0]
+    type_name = spec.get("type")
+    if isinstance(type_name, list):
+        type_name = next((item for item in type_name if item != "null"), type_name[0] if type_name else "")
+    if type_name == "string":
+        return "..."
+    if type_name in {"integer", "number"}:
+        return 1
+    if type_name == "boolean":
+        return False
+    if type_name == "array":
+        return []
+    if type_name == "object":
+        return {}
+    return "..."
+
+
+def _remember_schema_validation_hint(
+    harness: Any,
+    *,
+    tool_name: str,
+    required_fields: list[str],
+    schema_excerpt: str,
+) -> None:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    step = int(getattr(state, "step_count", 0) or 0)
+    scratchpad["_last_schema_validation_hint"] = {
+        "tool_name": tool_name,
+        "required_fields": required_fields,
+        "schema_excerpt": schema_excerpt,
+        "created_at_step": step,
+    }

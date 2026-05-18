@@ -10,6 +10,7 @@ from .config import (
     signal_window,
 )
 from .detectors import detect_early_stop_from_result, latest_verifier_passed
+from .fingerprints import active_done_gate_fingerprints, passing_verifier_fingerprint
 from .detectors import (
     detect_backend_stream_halt,
     detect_bad_tool_args,
@@ -17,6 +18,8 @@ from .detectors import (
     detect_empty_write,
     detect_repeated_tool_loop,
     detect_remote_local_confusion,
+    detect_remote_verification_pending,
+    detect_tool_plan_hard_route,
     detect_verifier_failure_from_result,
     detect_tool_output_misread,
     detect_wrong_path,
@@ -111,6 +114,21 @@ async def observe_tool_result(
         if output_misread is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=output_misread, dedupe=True)
 
+        remote_verification = detect_remote_verification_pending(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if remote_verification is not None:
+            await _handle_observed_signal(
+                harness,
+                state=state,
+                config=config,
+                signal=remote_verification,
+                dedupe=True,
+            )
+
         empty_write = detect_empty_write(
             state,
             tool_name=tool_name,
@@ -154,7 +172,8 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
     config = getattr(harness, "config", None)
     if state is None or not fama_enabled(config):
         return
-    expired = expire_mitigations(state, step=current_step(state))
+    step = current_step(state)
+    expired = expire_mitigations(state, step=step)
     for mitigation in expired:
         _runlog(
             harness,
@@ -162,7 +181,19 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
             "FAMA mitigation expired",
             mitigation=mitigation.name,
             reason="ttl",
-            step=current_step(state),
+            step=step,
+            mode=mode,
+        )
+    for mitigation in active_mitigations(state):
+        _runlog(
+            harness,
+            "fama_mitigation_ttl",
+            "FAMA mitigation active",
+            mitigation=mitigation.name,
+            activated_step=mitigation.activated_step,
+            expires_after_step=mitigation.expires_after_step,
+            remaining_steps=max(0, mitigation.expires_after_step - step),
+            reason=mitigation.reason,
             mode=mode,
         )
     threshold = int(getattr(config, "loop_guard_stagnation_threshold", 3) or 3)
@@ -174,6 +205,7 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
     ):
         if signal is not None:
             _handle_signal(harness, state=state, config=config, signal=signal, dedupe=True)
+    detect_tool_plan_hard_route(state)
 
 
 def _handle_signal(
@@ -184,10 +216,23 @@ def _handle_signal(
     signal: FamaSignal,
     dedupe: bool,
 ) -> bool:
-    if dedupe and _signature_seen(state, _signal_signature(signal)):
+    signature = _signal_signature(signal)
+    if dedupe and _signature_seen(state, signature):
+        _runlog(
+            harness,
+            "fama_signal_suppressed",
+            "FAMA signal suppressed by deduplication",
+            signature=signature,
+            kind=signal.kind.value,
+            severity=signal.severity,
+            source=signal.source,
+            step=signal.step,
+            tool_name=signal.tool_name,
+            evidence=signal.evidence,
+        )
         return False
     push_fama_signal(state, signal, window=signal_window(config))
-    _mark_signature_seen(state, _signal_signature(signal))
+    _mark_signature_seen(state, signature)
     increment_metric_bucket(state, "fama_signals_by_kind", signal.kind.value)
     if signal.failure_class == "repeated_action" or signal.kind.value == "looping":
         increment_metric(state, "repeated_action_count")
@@ -215,6 +260,17 @@ def _handle_signal(
         state,
         mitigations,
         max_active=max_active_mitigations(config),
+    )
+    _runlog(
+        harness,
+        "fama_signal_to_mitigation",
+        "FAMA signal routed to mitigations",
+        signal_kind=signal.kind.value,
+        signal_source=signal.source,
+        signal_evidence=signal.evidence,
+        signal_step=signal.step,
+        activated_mitigations=[mitigation.name for mitigation in activated],
+        active_mitigations=[mitigation.name for mitigation in active_mitigations(state)],
     )
     for mitigation in activated:
         _runlog(
@@ -311,56 +367,13 @@ def _signal_paths(signal: FamaSignal) -> list[str]:
 
 
 def _verifier_pass_matches_active_done_gate(state: Any, *, result: Any | None) -> bool:
-    fingerprints = _active_done_gate_fingerprints(state)
+    fingerprints = active_done_gate_fingerprints(state)
     if not fingerprints:
         return True
-    verifier_fingerprint = _passing_verifier_fingerprint(state, result=result)
+    verifier_fingerprint = passing_verifier_fingerprint(state, result=result)
     if not verifier_fingerprint:
         return True
     return verifier_fingerprint in fingerprints
-
-
-def _active_done_gate_fingerprints(state: Any) -> set[str]:
-    fingerprints: set[str] = set()
-    for mitigation in active_mitigations(state):
-        if mitigation.name not in {"done_gate", "acceptance_checklist_capsule"}:
-            continue
-        fingerprint = _fingerprint_from_reason(mitigation.reason)
-        if fingerprint:
-            fingerprints.add(fingerprint)
-    return fingerprints
-
-
-def _fingerprint_from_reason(reason: str) -> str:
-    text = str(reason or "").strip()
-    marker = "verifier verdict "
-    if marker not in text:
-        return ""
-    tail = text.split(marker, 1)[1]
-    if ":" not in tail:
-        return ""
-    return _normalize_verifier_target(tail.split(":", 1)[1])
-
-
-def _passing_verifier_fingerprint(state: Any, *, result: Any | None) -> str:
-    metadata = getattr(result, "metadata", None) if result is not None else None
-    metadata = metadata if isinstance(metadata, dict) else {}
-    verifier = metadata.get("last_verifier_verdict")
-    if not isinstance(verifier, dict) or not verifier:
-        current_verifier = getattr(state, "current_verifier_verdict", None)
-        verifier = current_verifier() if callable(current_verifier) else getattr(state, "last_verifier_verdict", None)
-    if isinstance(verifier, dict) and str(verifier.get("verdict") or "").strip().lower() == "pass":
-        return _normalize_verifier_target(str(verifier.get("command") or verifier.get("target") or ""))
-    if str(metadata.get("verifier_verdict") or "").strip().lower() == "pass":
-        return _normalize_verifier_target(
-            str(metadata.get("verifier_command") or metadata.get("verifier_target") or "")
-        )
-    return ""
-
-
-def _normalize_verifier_target(value: str) -> str:
-    text = " ".join(str(value or "").strip().split())
-    return text.casefold()
 
 
 def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:

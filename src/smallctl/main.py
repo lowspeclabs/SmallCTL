@@ -208,6 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Minimum required steps in DISCOVERY phase before allowing task completion",
     )
+    parser.add_argument("--rewoo-lane-frames", dest="rewoo_lane_frames_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--rewoo-planner-frame", dest="rewoo_planner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--rewoo-solver-frame", dest="rewoo_solver_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--rewoo-refiner-frame", dest="rewoo_refiner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--rewoo-frame-token-budget", type=int, help=argparse.SUPPRESS)
     
     # Subcommands
     subparsers = parser.add_subparsers(dest="command")
@@ -350,12 +355,18 @@ def cli(argv: list[str] | None = None) -> int:
             "tool_plan_readonly_only": getattr(config, "tool_plan_readonly_only", True),
             "tool_plan_max_steps": getattr(config, "tool_plan_max_steps", 6),
             "tool_plan_max_repair_attempts": getattr(config, "tool_plan_max_repair_attempts", 1),
+            "schema_validation_max_repair_attempts": getattr(config, "schema_validation_max_repair_attempts", 2),
             "tool_plan_observation_token_limit": getattr(config, "tool_plan_observation_token_limit", 900),
             "tool_plan_max_observation_chars_per_step": getattr(config, "tool_plan_max_observation_chars_per_step", 600),
             "tool_plan_solver_fresh_output_limit": getattr(config, "tool_plan_solver_fresh_output_limit", 1200),
             "tool_plan_allow_web": getattr(config, "tool_plan_allow_web", True),
             "tool_plan_allow_artifact_read": getattr(config, "tool_plan_allow_artifact_read", True),
             "tool_plan_fallback_to_loop_on_invalid_plan": getattr(config, "tool_plan_fallback_to_loop_on_invalid_plan", True),
+            "rewoo_lane_frames_enabled": getattr(config, "rewoo_lane_frames_enabled", False),
+            "rewoo_planner_frame_enabled": getattr(config, "rewoo_planner_frame_enabled", False),
+            "rewoo_solver_frame_enabled": getattr(config, "rewoo_solver_frame_enabled", False),
+            "rewoo_refiner_frame_enabled": getattr(config, "rewoo_refiner_frame_enabled", False),
+            "rewoo_frame_token_budget": getattr(config, "rewoo_frame_token_budget", 1200),
             "run_logger": run_logger,
             "task": config.task,
             "fama_enabled": getattr(config, "fama_enabled", True),
@@ -453,12 +464,18 @@ def cli(argv: list[str] | None = None) -> int:
             tool_plan_readonly_only=getattr(config, "tool_plan_readonly_only", True),
             tool_plan_max_steps=getattr(config, "tool_plan_max_steps", 6),
             tool_plan_max_repair_attempts=getattr(config, "tool_plan_max_repair_attempts", 1),
+            schema_validation_max_repair_attempts=getattr(config, "schema_validation_max_repair_attempts", 2),
             tool_plan_observation_token_limit=getattr(config, "tool_plan_observation_token_limit", 900),
             tool_plan_max_observation_chars_per_step=getattr(config, "tool_plan_max_observation_chars_per_step", 600),
             tool_plan_solver_fresh_output_limit=getattr(config, "tool_plan_solver_fresh_output_limit", 1200),
             tool_plan_allow_web=getattr(config, "tool_plan_allow_web", True),
             tool_plan_allow_artifact_read=getattr(config, "tool_plan_allow_artifact_read", True),
             tool_plan_fallback_to_loop_on_invalid_plan=getattr(config, "tool_plan_fallback_to_loop_on_invalid_plan", True),
+            rewoo_lane_frames_enabled=getattr(config, "rewoo_lane_frames_enabled", False),
+            rewoo_planner_frame_enabled=getattr(config, "rewoo_planner_frame_enabled", False),
+            rewoo_solver_frame_enabled=getattr(config, "rewoo_solver_frame_enabled", False),
+            rewoo_refiner_frame_enabled=getattr(config, "rewoo_refiner_frame_enabled", False),
+            rewoo_frame_token_budget=getattr(config, "rewoo_frame_token_budget", 1200),
             run_logger=run_logger,
             fama_enabled=getattr(config, "fama_enabled", True),
             fama_mode=getattr(config, "fama_mode", "lite"),

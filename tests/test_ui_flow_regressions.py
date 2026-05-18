@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 from textual.css.query import NoMatches
 
+from smallctl.chat_sessions import persist_chat_session_state
+from smallctl.models.conversation import ConversationMessage
 from smallctl.models.events import UIEvent, UIEventType
+from smallctl.state import LoopState
 from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_approvals import handle_approval_prompt, handle_sudo_password_prompt
 from smallctl.ui.approval import ShellApprovalDecision
@@ -168,6 +171,58 @@ def test_maybe_restore_harness_state_prefers_bridge_payload() -> None:
         "interrupt": {"kind": "plan_execute_approval"},
     }
     assert flow._latest_status_snapshot == {"model": "bridge-model", "phase": "explore", "step": 0}
+
+
+def test_maybe_restore_harness_state_falls_back_to_saved_chat_state(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-saved"
+    state.append_message(ConversationMessage(role="user", content="saved question"))
+    state.append_message(ConversationMessage(role="assistant", content="saved answer"))
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-saved",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+
+    class _Bridge:
+        async def restore_graph_state(self, thread_id: str | None = None) -> dict[str, object]:
+            return {"restored": False, "thread_id": str(thread_id or "")}
+
+        async def replace_state_from_payload(self, state_payload: dict[str, object]) -> dict[str, object]:
+            restored = LoopState.from_dict(state_payload)
+            return {
+                "thread_id": restored.thread_id,
+                "snapshot": {"model": "test-model", "phase": restored.current_phase, "step": restored.step_count},
+                "recent_messages": [
+                    {"role": message.role, "content": message.content or ""}
+                    for message in restored.transcript_messages
+                ],
+            }
+
+    class _Harness:
+        state = SimpleNamespace(cwd=str(tmp_path))
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.fresh_run = False
+            self.restore_graph_state_on_startup = True
+            self.restore_thread_id = "thread-saved"
+            self.harness = _Harness()
+            self._harness_bridge = _Bridge()
+            self._latest_status_snapshot = None
+
+    flow = _Flow()
+
+    result = asyncio.run(flow._maybe_restore_harness_state())
+
+    assert result is not None
+    assert result["status"] == "restored"
+    assert result["thread_id"] == "thread-saved"
+    assert result["recent_messages"] == [
+        {"role": "user", "content": "saved question"},
+        {"role": "assistant", "content": "saved answer"},
+    ]
 
 
 def test_refresh_status_updates_model_button_and_status_details() -> None:
@@ -447,7 +502,6 @@ def test_render_restored_chat_uses_serialized_messages_without_harness_state_rea
     assert rendered == [
         (UIEventType.USER, "hello"),
         (UIEventType.ASSISTANT, "hi"),
-        (UIEventType.SYSTEM, "note"),
     ]
 
 

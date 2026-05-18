@@ -117,6 +117,29 @@ def test_fama_remote_local_confusion_hides_local_mutation_and_renders_capsule() 
     ]
 
 
+def test_fama_remote_verification_pending_does_not_hide_local_mutations() -> None:
+    state = LoopState(step_count=4)
+    result = ToolEnvelope(
+        success=False,
+        error="Remote mutation needs verification.",
+        metadata={"reason": "remote_mutation_requires_verification", "host": "192.0.2.10"},
+    )
+
+    asyncio.run(
+        observe_tool_result(
+            SimpleNamespace(harness=_harness(state)),
+            tool_name="task_complete",
+            result=result,
+            operation_id="op-verify",
+        )
+    )
+
+    active = active_mitigation_names(state)
+    assert "remote_verification_pending_capsule" in active
+    assert "remote_tool_exposure_guard" not in active
+    assert state.scratchpad["_fama"]["signals"][-1]["failure_class"] == "remote_verification_pending"
+
+
 def test_fama_local_patch_target_miss_does_not_hide_local_repair_tools() -> None:
     state = LoopState(step_count=7)
     result = ToolEnvelope(

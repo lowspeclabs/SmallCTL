@@ -36,7 +36,6 @@ from .write_session_outcomes import (
 from .tool_call_parser import (
     _artifact_read_recovery_hint,
     _artifact_read_synthesis_hint,
-    _build_schema_repair_message,
     _clear_artifact_read_guard_state,
     _clear_tool_attempt_history,
     _detect_empty_file_write_payload,
@@ -52,6 +51,7 @@ from .tool_call_parser import (
     _fallback_repeated_file_read,
     _recover_declared_read_before_write,
     _record_tool_attempt,
+    _repair_empty_target_file_patch_to_file_write,
     _repair_active_write_session_args,
     _salvage_active_write_session_append,
     _should_enter_chunk_mode,
@@ -478,6 +478,29 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             return
 
     drain_durable_autocontinue(graph_state, harness)
+    deferred_schema_repairs = harness.state.scratchpad.pop("_deferred_schema_validation_repair_messages", None)
+    if isinstance(deferred_schema_repairs, list):
+        for item in deferred_schema_repairs:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=content,
+                    metadata=metadata,
+                )
+            )
+            harness._runlog(
+                "tool_call_repair_deferred_delivered",
+                "delivered deferred schema repair nudge",
+                tool_name=metadata.get("tool_name"),
+                tool_call_id=metadata.get("tool_call_id"),
+                required_fields=metadata.get("required_fields", []),
+            )
 
     # Safety-net: directly finalize any session that is still stranded.
     if graph_state.final_result is None:
@@ -660,6 +683,81 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     if graph_state.pending_tool_calls and not guard_error:
         for pending in graph_state.pending_tool_calls:
+            _repair_active_write_session_args(
+                harness,
+                pending,
+                assistant_text=str(graph_state.last_assistant_text or ""),
+            )
+            _repair_empty_target_file_patch_to_file_write(harness, pending)
+
+            missing_args = _detect_placeholder_tool_call(harness, pending)
+            if missing_args is None:
+                missing_args = _detect_empty_file_write_payload(harness, pending)
+            if missing_args is None:
+                missing_args = _detect_missing_required_tool_arguments(harness, pending)
+            if missing_args is None:
+                missing_args = _detect_patch_existing_stage_read_contract_violation(harness, pending)
+            if missing_args is not None:
+                err_msg, details = missing_args
+                target_path = None
+                if pending.tool_name in {"file_write", "file_patch", "ast_patch"}:
+                    target_path = primary_task_target_path(harness)
+                    if pending.tool_name == "file_write" and target_path:
+                        _ensure_chunk_write_session(harness, target_path)
+                    if target_path:
+                        details = dict(details)
+                        details["target_path"] = target_path
+
+                repair_decision = _nodes.schema_validation_repair_decision(
+                    harness,
+                    pending,
+                    err_msg,
+                    details,
+                    target_path=target_path,
+                )
+                if repair_decision.status == "fail":
+                    harness.state.recent_errors.append(err_msg)
+                    harness._runlog(
+                        "tool_call_validation_error",
+                        "tool call missing required arguments",
+                        **repair_decision.runlog_data,
+                    )
+                    await harness._emit(
+                        deps.event_handler,
+                        UIEvent(
+                            event_type=UIEventType.ERROR,
+                            content=err_msg,
+                            data=repair_decision.alert_data,
+                        ),
+                    )
+                    graph_state.pending_tool_calls = []
+                    graph_state.final_result = harness._failure(
+                        err_msg,
+                        error_type="schema_validation_error",
+                        details=repair_decision.details,
+                    )
+                    graph_state.error = graph_state.final_result["error"]
+                    return
+
+                harness.state.recent_errors.append(err_msg)
+                if repair_decision.conversation_message is not None:
+                    harness.state.append_message(repair_decision.conversation_message)
+                harness._runlog(
+                    "tool_call_repair",
+                    "injected schema repair nudge",
+                    **repair_decision.runlog_data,
+                )
+                await harness._emit(
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content=repair_decision.repair_message,
+                        data=repair_decision.alert_data,
+                    ),
+                )
+                graph_state.pending_tool_calls = []
+                return
+
             if _should_enter_chunk_mode(harness, pending):
                 target_path = str(pending.args.get("path") or "")
                 content = str(pending.args.get("content") or "")

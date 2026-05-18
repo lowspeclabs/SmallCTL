@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,33 @@ _WRITE_OUTPUT_KEYWORDS = (
     "persist",
     "record",
 )
+
+
+def _path_mentions_in_task_text(harness: Any, raw_path: str) -> bool:
+    normalized_path = raw_path.strip().lower()
+    path_name = Path(raw_path).name.lower()
+    task_text = _merged_task_text(harness)
+    if not task_text or not normalized_path:
+        return False
+    return normalized_path in task_text or (path_name and path_name in task_text)
+
+
+def _nearby_missing_input_candidates(harness: Any, raw_path: str) -> list[str]:
+    path = Path(raw_path)
+    cwd = getattr(getattr(harness, "state", None), "cwd", None)
+    base = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+    search_dir = path.parent if str(path.parent) not in {"", "."} else Path(".")
+    if not search_dir.is_absolute():
+        search_dir = base / search_dir
+    try:
+        names = [item.name for item in search_dir.iterdir() if item.is_file()]
+    except OSError:
+        return []
+    matches = get_close_matches(path.name, names, n=3, cutoff=0.72)
+    if not matches:
+        return []
+    prefix = "" if str(path.parent) in {"", "."} else f"{path.parent}/"
+    return [f"{prefix}{name}" for name in matches]
 
 
 def recent_assistant_texts(harness: Any, *, limit: int = 2) -> list[str]:
@@ -116,7 +144,10 @@ def task_prefers_summary_synthesis(harness: Any) -> bool:
     if not merged:
         return False
     asks_for_summary = any(keyword in merged for keyword in ("table", "summary", "summarize", "report", "overview", "present"))
-    asks_about_listing = any(keyword in merged for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env"))
+    asks_about_listing = any(
+        keyword in merged
+        for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env", "cron", "job")
+    )
     return asks_for_summary and asks_about_listing
 
 
@@ -271,10 +302,44 @@ def build_artifact_summary_exit_message(harness: Any, *, artifact_id: str = "") 
     objective = str(getattr(getattr(harness, "state", None), "run_brief", None).original_task or "").strip()
     artifact_note = f" from artifact {artifact_id}" if artifact_id else ""
     objective_note = f" for `{objective}`" if objective else ""
-    return (
+    evidence = _small_artifact_evidence_block(harness, artifact_id=artifact_id)
+    message = (
         f"You already have enough evidence{artifact_note}{objective_note}. "
         "Produce the requested table or summary now with `task_complete(message='...')` "
         "instead of rereading or printing the same artifact again."
+    )
+    if evidence:
+        message = f"{message}\n\n{evidence}"
+    return message
+
+
+def _small_artifact_evidence_block(harness: Any, *, artifact_id: str = "") -> str:
+    if not artifact_id:
+        return ""
+    state = getattr(harness, "state", None)
+    artifacts = getattr(state, "artifacts", {}) if state is not None else {}
+    artifact = artifacts.get(artifact_id) if isinstance(artifacts, dict) else None
+    if artifact is None:
+        return ""
+    metadata = getattr(artifact, "metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if bool(metadata.get("truncated")):
+        return ""
+    text = str(getattr(artifact, "inline_content", "") or "")
+    content_path = str(getattr(artifact, "content_path", "") or "").strip()
+    if not text and content_path:
+        try:
+            text = Path(content_path).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    text = text.rstrip("\n")
+    if not text or len(text) > 4096 or len(text.splitlines()) > 100:
+        return ""
+    return (
+        f"Full content of {artifact_id} is pinned for this recovery turn. "
+        "Use this text directly:\n\n"
+        f"```text\n{text}\n```"
     )
 
 
@@ -342,13 +407,10 @@ def build_artifact_evidence_unavailable_message(harness: Any, *, artifact_id: st
 def _task_requests_written_output_path(harness: Any, raw_path: str) -> bool:
     if not raw_path:
         return False
-    normalized_path = raw_path.strip().lower()
-    path_name = Path(raw_path).name.lower()
     task_text = _merged_task_text(harness)
     if not task_text:
         return False
-    mentions_path = normalized_path in task_text or (path_name and path_name in task_text)
-    if not mentions_path:
+    if not _path_mentions_in_task_text(harness, raw_path):
         return False
     return any(keyword in task_text for keyword in _WRITE_OUTPUT_KEYWORDS)
 
@@ -404,6 +466,21 @@ def build_file_read_recovery_message(harness: Any, pending: PendingToolCall) -> 
             f"Do not call `file_read` on it again. Create it with "
             f"`file_write(path='{raw_path}', content='...')`."
             f"{evidence_note} Do not call `task_complete` until the `file_write` succeeds."
+            f"{tx_note}"
+        )
+
+    if _path_mentions_in_task_text(harness, raw_path):
+        candidates = _nearby_missing_input_candidates(harness, raw_path)
+        candidate_note = ""
+        if len(candidates) == 1:
+            candidate_note = f" A nearby file exists: `{candidates[0]}`. If that is the intended input, read it next."
+        elif candidates:
+            formatted = ", ".join(f"`{candidate}`" for candidate in candidates)
+            candidate_note = f" Nearby files exist: {formatted}. Ask which input to use before proceeding."
+        return (
+            f"`{path}` is a required input file from the task, but it does not exist. "
+            "Do not claim the task is complete and do not infer the file contents from memory or directory listings."
+            f"{candidate_note} If no nearby file is the intended input, ask the user for the correct path or call `task_fail`."
             f"{tx_note}"
         )
 

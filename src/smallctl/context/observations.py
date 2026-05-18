@@ -15,6 +15,7 @@ _ADAPTER_KIND_MAP = {
     "web_fetch_observation": "web_observation",
     "artifact_observation_list": "observation_list",
     "shell_observation": "shell_observation",
+    "tool_plan_observation": "tool_plan_observation",
 }
 
 
@@ -114,6 +115,8 @@ def _packet_from_evidence(record: EvidenceRecord) -> ObservationPacket | None:
 
 def _classify_observation_kind(record: EvidenceRecord, *, adapter: str) -> str:
     metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    if adapter == "tool_plan_observation" and record.negative:
+        return "tool_plan_negative_observation"
     if adapter in _ADAPTER_KIND_MAP:
         return _ADAPTER_KIND_MAP[adapter]
     observation_kind = str(metadata.get("observation_kind") or "").strip().lower()
@@ -201,6 +204,15 @@ def _normalize_observation_summary(
         if observation_items:
             return f"Negative observation: {observation_items[0]}"[:320]
         return ""
+    if kind in {"tool_plan_observation", "tool_plan_negative_observation"}:
+        prefix = "ToolPlan failed observation" if negative or kind == "tool_plan_negative_observation" else "ToolPlan observation"
+        target = path or query
+        body = statement or (observation_items[0] if observation_items else "")
+        if not body:
+            return ""
+        if target:
+            return f"{prefix} ({target}): {body}"[:360]
+        return f"{prefix}: {body}"[:340]
     if statement:
         return statement[:320]
     if observation_items:

@@ -218,7 +218,11 @@ class ContextSummarizer:
             "  \"new_facts\": [\"...\", ...],            // Newly established facts in this span\n"
             "  \"invalidated_facts\": [\"...\", ...],    // Facts that were invalidated\n"
             "  \"state_changes\": [\"...\", ...],        // Important state transitions\n"
-            "  \"decision_deltas\": [\"...\", ...]       // Decision-level updates\n"
+            "  \"decision_deltas\": [\"...\", ...],      // Decision-level updates\n"
+            "  \"plan_state\": {\"goal\": \"...\", \"active_step\": \"...\", \"open_questions\": [], \"prior_failures\": [], \"next_actions\": []},\n"
+            "  \"evidence_refs\": [\"...\", ...],        // Evidence or observation ids preserved from state\n"
+            "  \"observation_refs\": [\"...\", ...],     // Observation ids preserved from state\n"
+            "  \"experience_candidates\": [\"...\", ...] // Reusable lessons or failure patterns\n"
             "}"
         )
         
@@ -268,6 +272,23 @@ class ContextSummarizer:
             if art and art.source:
                 files_touched.append(art.source)
         files_touched = _dedupe(files_touched)
+        observation_packets = build_observation_packets(state, limit=12)
+        lane_metadata = extract_rewoo_lanes_from_messages(
+            state=state,
+            messages=messages,
+            observation_packets=observation_packets,
+        )
+        evidence_refs = _dedupe(
+            _string_list(data.get("evidence_refs"))
+            + lane_metadata["evidence_refs"]
+            + artifact_ids
+        )
+        observation_refs = _dedupe(_string_list(data.get("observation_refs", data.get("evidence_refs", []))) + lane_metadata["evidence_refs"])
+        plan_state = data.get("plan_state")
+        if not isinstance(plan_state, dict):
+            plan_state = {}
+        plan_state = {**lane_metadata["plan_state"], **plan_state}
+        experience_candidates = _dedupe(_string_list(data.get("experience_candidates")) + lane_metadata["experience_candidates"])
 
         brief = ContextBrief(
             brief_id=brief_id,
@@ -289,13 +310,15 @@ class ContextSummarizer:
             candidate_causes=data.get("candidate_causes", []),
             disproven_causes=data.get("disproven_causes", []),
             next_observations_needed=data.get("next_observations_needed", []),
-            evidence_refs=data.get("evidence_refs", artifact_ids),
-            observation_refs=data.get("observation_refs", data.get("evidence_refs", [])),
+            evidence_refs=evidence_refs[:12],
+            observation_refs=observation_refs[:12],
             claim_refs=data.get("claim_refs", []),
             new_facts=data.get("new_facts", data.get("facts_confirmed", data.get("key_discoveries", []))),
             invalidated_facts=data.get("invalidated_facts", []),
             state_changes=data.get("state_changes", []),
             decision_deltas=data.get("decision_deltas", []),
+            plan_state=plan_state,
+            experience_candidates=experience_candidates[:6],
         )
         
         if artifact_store:
@@ -311,6 +334,10 @@ class ContextSummarizer:
                 full_text += "State Changes:\n- " + "\n- ".join(brief.state_changes) + "\n\n"
             if brief.decision_deltas:
                 full_text += "Decision Deltas:\n- " + "\n- ".join(brief.decision_deltas) + "\n\n"
+            if brief.plan_state:
+                full_text += "Plan State:\n" + json.dumps(brief.plan_state, indent=2, sort_keys=True) + "\n\n"
+            if brief.experience_candidates:
+                full_text += "Experience Candidates:\n- " + "\n- ".join(brief.experience_candidates) + "\n\n"
             full_text += "Blockers:\n- " + "\n- ".join(brief.blockers) + "\n\n"
             full_text += f"Next Action Hint: {brief.next_action_hint}\n"
             
@@ -398,6 +425,12 @@ class ContextSummarizer:
             observation_refs
             + [record.evidence_id for record in state.reasoning_graph.evidence_records[-6:] if record.evidence_id]
         )[:12]
+        lane_metadata = extract_rewoo_lanes_from_messages(
+            state=state,
+            messages=messages,
+            observation_packets=selected_packets,
+        )
+        evidence_refs = _dedupe(evidence_refs + lane_metadata["evidence_refs"])[:12]
         return TurnBundle(
             bundle_id=bundle_id,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -411,6 +444,9 @@ class ContextSummarizer:
             observation_refs=observation_refs,
             observation_summaries=observation_summary_lines,
             observation_kinds=observation_kinds,
+            plan_state=lane_metadata["plan_state"],
+            decision_deltas=lane_metadata["decision_deltas"],
+            experience_candidates=lane_metadata["experience_candidates"],
             compaction_strategy=compaction_strategy,
             transcript_fallback_used=transcript_fallback_used,
             source_message_count=len(messages),
@@ -432,12 +468,20 @@ class ContextSummarizer:
         artifact_ids: list[str] = []
         evidence_refs: list[str] = []
         observation_refs: list[str] = []
+        decision_deltas: list[str] = []
+        experience_candidates: list[str] = []
+        plan_state: dict[str, Any] = {}
         for bundle in bundles:
             summary_lines.extend(bundle.summary_lines)
             files_touched.extend(bundle.files_touched)
             artifact_ids.extend(bundle.artifact_ids)
             evidence_refs.extend(bundle.evidence_refs)
             observation_refs.extend(bundle.observation_refs)
+            decision_deltas.extend(bundle.decision_deltas)
+            experience_candidates.extend(bundle.experience_candidates)
+            for key, value in bundle.plan_state.items():
+                if value not in ("", [], {}, None):
+                    plan_state[key] = value
         summary_lines = _dedupe(summary_lines)
         files_touched = _dedupe(files_touched)
         artifact_ids = _dedupe(artifact_ids)
@@ -468,7 +512,9 @@ class ContextSummarizer:
             observation_refs=observation_refs[:12],
             new_facts=key_discoveries[:4],
             state_changes=_dedupe([f"Compacted turn bundle {bundle.bundle_id}" for bundle in bundles])[:4],
-            decision_deltas=summary_lines[:4],
+            decision_deltas=_dedupe(decision_deltas)[:8] or summary_lines[:4],
+            plan_state=plan_state,
+            experience_candidates=_dedupe(experience_candidates)[:6],
         )
         if artifact_store is not None:
             lines = [
@@ -544,6 +590,58 @@ class ContextSummarizer:
         
         result = OpenAICompatClient.collect_stream(chunks)
         return result.assistant_text.strip()
+
+
+def extract_rewoo_lanes_from_messages(
+    state: LoopState,
+    messages: list[ConversationMessage],
+    observation_packets: list[ObservationPacket],
+) -> dict[str, Any]:
+    """Extract lane-shaped compaction hints without depending on transcript summaries."""
+    del messages
+    active_step = ""
+    if state.active_plan is not None:
+        step = state.active_plan.find_step(state.active_step_id) if state.active_step_id else state.active_plan.active_step()
+        if step is not None:
+            active_step = step.compact_label()
+    plan_state = {
+        "goal": state.working_memory.current_goal
+        or state.run_brief.current_phase_objective
+        or state.run_brief.original_task,
+        "active_step": active_step,
+        "open_questions": _dedupe(state.working_memory.open_questions[-6:]),
+        "prior_failures": _dedupe(state.working_memory.failures[-6:]),
+        "next_actions": _dedupe(state.working_memory.next_actions[-6:]),
+    }
+    evidence_refs = _dedupe(
+        [
+            str(packet.observation_id or "").strip()
+            for packet in observation_packets
+            if str(packet.observation_id or "").strip()
+        ]
+    )
+    decision_deltas = _dedupe(
+        state.working_memory.decisions[-6:]
+        + [
+            record.rationale_summary or record.intent_label or record.requested_tool
+            for record in state.reasoning_graph.decision_records[-6:]
+            if (record.rationale_summary or record.intent_label or record.requested_tool)
+        ]
+    )[:8]
+    experience_candidates = _dedupe(
+        [
+            packet.summary
+            for packet in observation_packets
+            if packet.failure_mode or packet.kind in {"negative_observation", "tool_plan_negative_observation"}
+        ]
+        + list(state.working_memory.failures[-4:])
+    )[:6]
+    return {
+        "plan_state": plan_state,
+        "evidence_refs": evidence_refs[:12],
+        "decision_deltas": decision_deltas,
+        "experience_candidates": experience_candidates,
+    }
 
 
 def _select_compaction_observation_packets(
@@ -673,3 +771,13 @@ def _dedupe(values: list[str]) -> list[str]:
         if value and value not in deduped:
             deduped.append(value)
     return deduped
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, tuple):
+        return [str(item) for item in value if item]
+    if value:
+        return [str(value)]
+    return []

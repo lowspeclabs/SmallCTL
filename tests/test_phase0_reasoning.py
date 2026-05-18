@@ -27,6 +27,32 @@ def test_prompt_assembler_build_messages_preserves_core_state() -> None:
     assert any(message["role"] == "user" and message["content"] == state.run_brief.original_task for message in assembly.messages)
 
 
+def test_prompt_assembler_includes_model_visible_resume_contract() -> None:
+    state = LoopState(cwd="/tmp")
+    state.thread_id = "thread-1"
+    state.run_brief.original_task = "Continue the previous investigation"
+    state.scratchpad["_resume_contract"] = {
+        "kind": "chat_session_resume",
+        "thread_id": "thread-1",
+    }
+    state.recent_messages = [
+        ConversationMessage(role="user", content="previous request"),
+        ConversationMessage(role="assistant", content="previous answer"),
+    ]
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assert any(
+        message["role"] == "user"
+        and "<resume-contract>" in str(message.get("content") or "")
+        and "thread-1" in str(message.get("content") or "")
+        for message in assembly.messages
+    )
+
+
 def test_shell_approval_request_emits_payload_and_resolves() -> None:
     events: list[object] = []
 

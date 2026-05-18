@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Any
 
@@ -41,6 +42,10 @@ _MUTATION_TOOL_NAMES = {
     "ast_patch",
 }
 _PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
+_OPTIMISTIC_STATEMENT_RE = re.compile(
+    r"(?<![@\w])(pass(?:ed|es|ing)?|verified|success(?:ful(?:ly)?)?|fixed|resolved)(?![@\w])",
+    re.IGNORECASE,
+)
 
 
 class PromptStateFrameCompiler:
@@ -308,11 +313,15 @@ class PromptStateFrameCompiler:
         observations: list[Any],
     ) -> tuple[list[Any], list[str], int]:
         stale_ids = cls._durably_stale_observation_ids(state)
+        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_observation_ids")
         kept: list[Any] = []
         dropped_ids: list[str] = []
         dropped_count = 0
         for packet in observations:
             observation_id = str(getattr(packet, "observation_id", "") or "").strip()
+            if observation_id and observation_id in guard_preserved_ids:
+                kept.append(packet)
+                continue
             if observation_id and observation_id in stale_ids:
                 dropped_count += 1
                 dropped_ids.append(observation_id)
@@ -360,6 +369,7 @@ class PromptStateFrameCompiler:
     ) -> tuple[list[EpisodicSummary], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
         stale_ids = cls._durably_stale_summary_ids(state)
+        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_summary_ids")
         if not summaries:
             return summaries, []
         if not invalidations and not stale_ids:
@@ -367,6 +377,9 @@ class PromptStateFrameCompiler:
         kept: list[EpisodicSummary] = []
         dropped_ids: list[str] = []
         for summary in summaries:
+            if summary.summary_id and summary.summary_id in guard_preserved_ids:
+                kept.append(summary)
+                continue
             if summary.summary_id and summary.summary_id in stale_ids:
                 dropped_ids.append(summary.summary_id)
                 continue
@@ -409,6 +422,7 @@ class PromptStateFrameCompiler:
     ) -> tuple[list[ArtifactSnippet], list[str]]:
         invalidations = cls._recent_invalidation_events(state)
         stale_ids = cls._durably_stale_artifact_ids(state)
+        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_artifact_ids")
         if not snippets:
             return snippets, []
         if not invalidations and not stale_ids:
@@ -417,6 +431,9 @@ class PromptStateFrameCompiler:
         kept: list[ArtifactSnippet] = []
         dropped_ids: list[str] = []
         for snippet in snippets:
+            if snippet.artifact_id and snippet.artifact_id in guard_preserved_ids:
+                kept.append(snippet)
+                continue
             if snippet.artifact_id and snippet.artifact_id in stale_ids:
                 dropped_ids.append(snippet.artifact_id)
                 continue
@@ -448,6 +465,13 @@ class PromptStateFrameCompiler:
             if bool(marker.get("stale", False)):
                 ids.add(normalized_id)
         return ids
+
+    @staticmethod
+    def _guard_trip_preserved_ids(state: LoopState, key: str) -> set[str]:
+        payload = state.scratchpad.get(key)
+        if not isinstance(payload, list):
+            return set()
+        return {str(item).strip() for item in payload if str(item).strip()}
 
     @classmethod
     def _durably_stale_experience_ids(cls, state: LoopState) -> set[str]:
@@ -587,7 +611,11 @@ class PromptStateFrameCompiler:
         invalidations: list[dict[str, Any]],
     ) -> bool:
         failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        summary_created_at = cls._coerce_datetime(getattr(summary, "created_at", None))
         for event in invalidations:
+            event_created_at = cls._coerce_datetime(event.get("created_at"))
+            if summary_created_at is not None and event_created_at is not None and event_created_at <= summary_created_at:
+                continue
             reason = str(event.get("reason") or "").strip().lower()
             paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
             if reason in {"file_changed", "write_session_target_changed"} and paths:
@@ -722,10 +750,22 @@ class PromptStateFrameCompiler:
 
     @staticmethod
     def _is_optimistic_statement(value: str) -> bool:
-        lowered = str(value or "").strip().lower()
-        if not lowered:
-            return False
-        return any(token in lowered for token in ("pass", "verified", "success", "fixed", "resolved"))
+        return bool(_OPTIMISTIC_STATEMENT_RE.search(str(value or "")))
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
     @staticmethod
     def _coding_anchor_lines(state: LoopState) -> list[str]:
@@ -1135,10 +1175,14 @@ class PromptStateFrameCompiler:
             and not state.reflexion_memory
             and not state.last_failure_class
             and state.write_session is None
+            and not isinstance(state.scratchpad.get("_last_schema_validation_hint"), dict)
+            and not isinstance(state.scratchpad.get("_read_loop_recovery_payload"), dict)
         ):
             return []
 
         lines: list[str] = []
+        lines.extend(PromptStateFrameCompiler._fresh_schema_validation_hint_lines(state))
+        lines.extend(PromptStateFrameCompiler._fresh_read_loop_recovery_lines(state))
         if active_subtask is not None:
             line = f"Active subtask {active_subtask.subtask_id} [{active_subtask.status}]: {active_subtask.title}"
             if active_subtask.attempts:
@@ -1204,6 +1248,112 @@ class PromptStateFrameCompiler:
         return clipped
 
     @staticmethod
+    def _fresh_schema_validation_hint_lines(state: LoopState) -> list[str]:
+        payload = state.scratchpad.get("_last_schema_validation_hint")
+        if not isinstance(payload, dict):
+            return []
+        created = int(payload.get("created_at_step", 0) or 0)
+        if int(state.step_count or 0) - created > 6:
+            return []
+        excerpt = str(payload.get("schema_excerpt") or "").strip()
+        if not excerpt:
+            return []
+        return ["Latest tool schema hint: " + excerpt.replace("\n", " | ")]
+
+    @staticmethod
+    def _fresh_read_loop_recovery_lines(state: LoopState) -> list[str]:
+        payload = state.scratchpad.get("_read_loop_recovery_payload")
+        if not isinstance(payload, dict):
+            return []
+        created = int(payload.get("created_at_step", 0) or 0)
+        if int(state.step_count or 0) - created > 6:
+            return []
+        tool_name = str(payload.get("tool_name") or "").strip()
+        target = str(payload.get("target") or "").strip()
+        summary = str(payload.get("last_evidence_summary") or "").strip()
+        action = str(payload.get("allowed_next_action") or "").strip()
+        line = "Read-loop recovery"
+        if tool_name:
+            line += f" for {tool_name}"
+        if target:
+            line += f" target={target}"
+        lines = [line + "."]
+        if summary:
+            lines.append("Prior evidence: " + summary)
+        if action:
+            lines.append("Allowed next action: " + action)
+        return lines
+
+    @staticmethod
+    def _repair_continuity_lines(state: LoopState) -> list[str]:
+        capsule = state.scratchpad.get("_repair_continuity_capsule")
+        if not isinstance(capsule, dict):
+            return []
+        created_at_step = int(capsule.get("created_at_step", 0) or 0)
+        current_step = int(state.step_count or 0)
+        if current_step - created_at_step > 5:
+            return []
+        lines: list[str] = []
+        command = str(capsule.get("command") or "").strip()
+        if command:
+            lines.append(f"Failed command: {command}")
+        verdict = str(capsule.get("verdict") or "").strip()
+        exit_code = capsule.get("exit_code")
+        if verdict or exit_code is not None:
+            parts: list[str] = []
+            if verdict:
+                parts.append(f"verdict={verdict}")
+            if exit_code is not None:
+                parts.append(f"exit={exit_code}")
+            lines.append(f"Result: {' | '.join(parts)}")
+        failure_mode = str(capsule.get("failure_mode") or "").strip()
+        if failure_mode:
+            lines.append(f"Suspected cause: {failure_mode}")
+        last_attempted_fix = str(capsule.get("last_attempted_fix") or "").strip()
+        if last_attempted_fix:
+            lines.append(f"Last attempted fix: {last_attempted_fix}")
+        next_action = str(
+            capsule.get("next_suggested_action") or capsule.get("suggested_next_action") or ""
+        ).strip()
+        if next_action:
+            lines.append(f"Next suggested action: {next_action}")
+        return lines
+
+    @staticmethod
+    def _guard_trip_recovery_lines(state: LoopState) -> list[str]:
+        capsule = state.scratchpad.get("_guard_trip_recovery_capsule")
+        if not isinstance(capsule, dict):
+            return []
+        created_at_step = int(capsule.get("created_at_step", 0) or 0)
+        current_step = int(state.step_count or 0)
+        if current_step - created_at_step > 8:
+            return []
+        lines: list[str] = []
+        goal = str(capsule.get("goal") or "").strip()
+        if goal:
+            clipped_goal, _ = clip_text_value(goal, limit=220)
+            lines.append(f"Interrupted goal: {clipped_goal}")
+        failed_tool = str(capsule.get("failed_tool") or "").strip()
+        if failed_tool:
+            lines.append(f"Guard stopped repeated tool: {failed_tool}")
+            lines.append(f"Do not retry {failed_tool} with the same arguments; continue from preserved progress.")
+        reason = str(capsule.get("reason") or "").strip()
+        if reason and not failed_tool:
+            clipped_reason, _ = clip_text_value(reason, limit=220)
+            lines.append(f"Guard reason: {clipped_reason}")
+        artifact_ids = [
+            str(item).strip()
+            for item in (capsule.get("preserved_artifact_ids") or [])
+            if str(item).strip()
+        ]
+        if artifact_ids:
+            lines.append("Preserved progress artifacts: " + ", ".join(artifact_ids[:6]))
+        summary_id = str(capsule.get("summary_id") or "").strip()
+        if summary_id:
+            lines.append(f"Preserved task summary: {summary_id}")
+        return lines
+
+    @staticmethod
     def _render_working_memory(
         state: LoopState,
         *,
@@ -1236,6 +1386,7 @@ class PromptStateFrameCompiler:
                 bool(fama_capsule_lines),
                 bool(recovery_guidance_lines),
                 bool(PromptStateFrameCompiler._run_boundary_lines(state)),
+                bool(PromptStateFrameCompiler._guard_trip_recovery_lines(state)),
             ]
         )
         if not has_content:
@@ -1258,6 +1409,14 @@ class PromptStateFrameCompiler:
         if recovery_guidance_lines:
             sections.append("Recovery guidance:")
             sections.extend(f"  {line}" for line in recovery_guidance_lines[:8])
+        repair_continuity_lines = PromptStateFrameCompiler._repair_continuity_lines(state)
+        if repair_continuity_lines:
+            sections.append("Repair continuity:")
+            sections.extend(f"  {line}" for line in repair_continuity_lines[:6])
+        guard_trip_recovery_lines = PromptStateFrameCompiler._guard_trip_recovery_lines(state)
+        if guard_trip_recovery_lines:
+            sections.append("Guard trip recovery:")
+            sections.extend(f"  {line}" for line in guard_trip_recovery_lines[:6])
         current_goal = LexicalRetriever._effective_current_goal(state)
         if current_goal:
             sections.append("Current goal: " + current_goal)

@@ -37,6 +37,7 @@ from .tool_call_parser import (
     _ensure_chunk_write_session,
     _fallback_repeated_artifact_read,
     _fallback_repeated_file_read,
+    _repair_empty_target_file_patch_to_file_write,
     _repair_active_write_session_args,
     _salvage_active_write_session_append,
     _tool_call_fingerprint,
@@ -45,6 +46,7 @@ from .tool_outcomes import apply_chat_tool_outcomes, apply_planning_tool_outcome
 from .tool_execution_nodes import dispatch_tools, persist_tool_results
 from .node_support import (
     HALLUCINATION_MAP,
+    SchemaValidationRepairDecision,
     ToolNotFoundError,
     _WRITE_SESSION_SCHEMA_FAILURE_KEY,
     apply_declared_read_before_write_reroute as _apply_declared_read_before_write_reroute,
@@ -68,7 +70,12 @@ from .node_support import (
     planner_speaker_data as _planner_speaker_data,
     recent_assistant_texts as _recent_assistant_texts,
     record_empty_write_retry_metric as _record_empty_write_retry_metric,
+    record_schema_validation_repair_attempt,
     remember_write_session_schema_failure as _remember_write_session_schema_failure,
+    schema_validation_repair_decision,
+    schema_validation_repair_attempts,
+    schema_validation_retry_budget,
+    defer_schema_validation_repair_message,
     should_pause_repeated_tool_loop as _should_pause_repeated_tool_loop,
     task_prefers_summary_synthesis as _task_prefers_summary_synthesis,
 )

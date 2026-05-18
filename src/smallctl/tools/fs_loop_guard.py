@@ -9,6 +9,7 @@ from typing import Any
 
 from ..state import LoopState
 from .common import fail
+from .fs_sessions import _write_session_can_finalize
 
 _LOOP_GUARD_STATE_KEY = "_chunk_write_loop_guard"
 _LOOP_GUARD_CONFIG_KEY = "_chunk_write_loop_guard_config"
@@ -931,6 +932,17 @@ def outline_mode_violation(
     )
     if requirement is None:
         return None
+
+    if normalized_tool == "task_complete":
+        session = getattr(state, "write_session", None) if state is not None else None
+        if (
+            session is not None
+            and str(getattr(session, "status", "") or "open").strip().lower() in {"open", "verifying"}
+            and not str(getattr(session, "write_next_section", "") or "").strip()
+            and bool(getattr(session, "write_sections_completed", []) or [])
+            and _write_session_can_finalize(session)
+        ):
+            return None
 
     path = str(requirement.get("path") or "").strip()
     read_step = (

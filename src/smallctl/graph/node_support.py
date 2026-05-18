@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from ..guards import is_small_model_name
@@ -102,6 +103,176 @@ def increment_run_metric(
     updated = current + delta
     graph_state.latency_metrics[name] = updated
     return updated
+
+
+def schema_validation_retry_budget(harness: Any) -> int:
+    config = getattr(harness, "config", None)
+    raw = getattr(config, "schema_validation_max_repair_attempts", None)
+    if raw is None:
+        raw = getattr(harness, "schema_validation_max_repair_attempts", None)
+    if raw is None:
+        raw = 2
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 2
+
+
+def schema_validation_signature(pending: PendingToolCall, details: dict[str, Any]) -> str:
+    required = ",".join(str(item) for item in (details.get("required_fields") or []))
+    offending = str(details.get("offending_field") or "")
+    raw_arguments = str(getattr(pending, "raw_arguments", "") or details.get("raw_arguments") or "")
+    return "|".join(
+        [
+            str(pending.tool_name or ""),
+            required,
+            offending,
+            raw_arguments[:120],
+        ]
+    )
+
+
+def schema_validation_repair_attempts(harness: Any, pending: PendingToolCall, details: dict[str, Any]) -> tuple[int, str]:
+    signature = schema_validation_signature(pending, details)
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+    attempts_by_signature = scratchpad.get("_schema_validation_nudges_by_signature")
+    if not isinstance(attempts_by_signature, dict):
+        attempts_by_signature = {}
+        scratchpad["_schema_validation_nudges_by_signature"] = attempts_by_signature
+    return int(attempts_by_signature.get(signature, 0) or 0), signature
+
+
+def record_schema_validation_repair_attempt(harness: Any, signature: str) -> int:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+    attempts_by_signature = scratchpad.get("_schema_validation_nudges_by_signature")
+    if not isinstance(attempts_by_signature, dict):
+        attempts_by_signature = {}
+        scratchpad["_schema_validation_nudges_by_signature"] = attempts_by_signature
+    updated = int(attempts_by_signature.get(signature, 0) or 0) + 1
+    attempts_by_signature[signature] = updated
+    scratchpad["_schema_validation_nudges"] = int(scratchpad.get("_schema_validation_nudges", 0) or 0) + 1
+    return updated
+
+
+@dataclass(frozen=True)
+class SchemaValidationRepairDecision:
+    status: str
+    repair_message: str
+    conversation_message: ConversationMessage | None
+    retry_count: int
+    details: dict[str, Any]
+    tool_name: str
+    tool_call_id: str
+    required_fields: list[Any]
+    target_path: str | None
+    alert_data: dict[str, Any]
+    runlog_data: dict[str, Any]
+
+
+def schema_validation_repair_decision(
+    harness: Any,
+    pending: PendingToolCall,
+    err_msg: str,
+    details: dict[str, Any],
+    *,
+    target_path: str | None = None,
+    remember_write_session_failure: bool = True,
+) -> SchemaValidationRepairDecision:
+    details = dict(details or {})
+    resolved_target_path = str(target_path or details.get("target_path") or "").strip() or None
+    required_fields = list(details.get("required_fields") or [])
+    retry_count, signature = schema_validation_repair_attempts(harness, pending, details)
+    if remember_write_session_failure:
+        remember_write_session_schema_failure(
+            harness,
+            pending,
+            details,
+            error_message=err_msg,
+            nudge_count=retry_count + 1,
+        )
+
+    tool_name = str(pending.tool_name or "")
+    tool_call_id = str(pending.tool_call_id or "")
+    raw_preview = str(getattr(pending, "raw_arguments", "") or details.get("raw_arguments") or "")[:500]
+    base_runlog_data = {
+        "tool_name": pending.tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "required_fields": required_fields,
+        "raw_arguments_preview": raw_preview,
+    }
+    details["raw_arguments_preview"] = raw_preview
+    error_data = {"error_type": "schema_validation_error", **details, "raw_arguments_preview": raw_preview}
+    if retry_count >= schema_validation_retry_budget(harness):
+        return SchemaValidationRepairDecision(
+            status="fail",
+            repair_message=err_msg,
+            conversation_message=None,
+            retry_count=retry_count,
+            details=details,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            required_fields=required_fields,
+            target_path=resolved_target_path,
+            alert_data=error_data,
+            runlog_data=base_runlog_data,
+        )
+
+    updated_retry_count = record_schema_validation_repair_attempt(harness, signature)
+    repair_message = err_msg
+    if not details.get("offending_field"):
+        repair_message = _build_schema_repair_message(
+            harness,
+            pending,
+            required_fields,
+        )
+    conversation_message = ConversationMessage(
+        role="user",
+        content=repair_message,
+        metadata={
+            "is_recovery_nudge": True,
+            "recovery_kind": "schema_validation",
+            "tool_name": pending.tool_name,
+            "required_fields": required_fields,
+            "tool_call_id": pending.tool_call_id,
+            "target_path": resolved_target_path,
+        },
+    )
+    alert_data = {
+        "repair_kind": "schema_validation",
+        "tool_name": pending.tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "required_fields": required_fields,
+        "retry_count": updated_retry_count,
+        "target_path": resolved_target_path,
+        "raw_arguments_preview": raw_preview,
+    }
+    return SchemaValidationRepairDecision(
+        status="repair",
+        repair_message=repair_message,
+        conversation_message=conversation_message,
+        retry_count=updated_retry_count,
+        details=details,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        required_fields=required_fields,
+        target_path=resolved_target_path,
+        alert_data=alert_data,
+        runlog_data={**base_runlog_data, "retry_count": updated_retry_count},
+    )
+
+
+def defer_schema_validation_repair_message(harness: Any, message: ConversationMessage) -> None:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+    queued = scratchpad.get("_deferred_schema_validation_repair_messages")
+    if not isinstance(queued, list):
+        queued = []
+        scratchpad["_deferred_schema_validation_repair_messages"] = queued
+    queued.append(
+        {
+            "content": message.content,
+            "metadata": dict(message.metadata or {}),
+        }
+    )
 
 
 def record_empty_write_retry_metric(

@@ -38,8 +38,24 @@ def _section_name_allows_full_file_finalization(section_name: str) -> bool:
 
 
 def _looks_like_full_script_content(content: str, section_name: str) -> bool:
-    normalized_section = str(section_name or "").strip().lower()
-    if normalized_section not in {"imports", "helpers", "helper", "utils", "utilities", "constants", "types"}:
+    normalized_section = str(section_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+    likely_scaffold_sections = {
+        "imports",
+        "imports_and_class",
+        "imports_and_classes",
+        "imports_and_core",
+        "imports_and_implementation",
+        "helpers",
+        "helper",
+        "utils",
+        "utilities",
+        "constants",
+        "types",
+        "implementation",
+        "core",
+        "body",
+    }
+    if normalized_section not in likely_scaffold_sections:
         return False
     text = str(content or "")
     if len(text) < 300 and text.count("\n") < 12:

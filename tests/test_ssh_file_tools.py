@@ -504,6 +504,36 @@ def test_795c2db6_regression_bad_grep_verifier_stays_blocked() -> None:
     assert "ssh_file_replace_between" in result["error"]
 
 
+def test_simple_ssh_exec_cat_readback_clears_path_based_remote_requirement() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.89",
+        "user": "root",
+        "guessed_paths": ["/home/stephen/Scripts/Harness-Redo/temp/user_audit.txt"],
+    }
+
+    tool_result_artifact_updates._handle_remote_mutation_verifier_result(
+        service,
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "stdout": "USER ACCOUNT SECURITY AUDIT REPORT\nroot:x:0:0:root:/root:/bin/bash\n",
+                "stderr": "",
+                "exit_code": 0,
+            },
+        ),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "cat /home/stephen/Scripts/Harness-Redo/temp/user_audit.txt",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
 def test_ssh_file_replace_between_success_allows_completion() -> None:
     state = LoopState(cwd=".")
     state.acceptance_waived = True

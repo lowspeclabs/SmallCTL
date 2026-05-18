@@ -432,6 +432,12 @@ async def handle_repeated_tool_loop(
 
         if artifact_prefers_summary_synthesis(harness, pending):
             nudge_key = f"{pending.tool_name}:{summary_exit_artifact_id or 'summary_exit'}"
+            if summary_exit_artifact_id:
+                existing_cache = list(getattr(harness.state, "retrieval_cache", []) or [])
+                harness.state.retrieval_cache = [
+                    summary_exit_artifact_id,
+                    *[item for item in existing_cache if item != summary_exit_artifact_id],
+                ][:8]
             if harness.state.scratchpad.get("_artifact_summary_exit_nudged") != nudge_key:
                 harness.state.scratchpad["_artifact_summary_exit_nudged"] = nudge_key
                 harness.state.append_message(
@@ -453,9 +459,9 @@ async def handle_repeated_tool_loop(
                     artifact_id=summary_exit_artifact_id,
                     guard_error=repeat_error,
                 )
-                graph_state.pending_tool_calls = []
-                graph_state.last_tool_results = []
-                return None
+            graph_state.pending_tool_calls = []
+            graph_state.last_tool_results = []
+            return None
 
         synthesis_artifact_id = _artifact_read_synthesis_hint(harness, repeat_error)
         if synthesis_artifact_id is not None and pending.tool_name == "artifact_read":

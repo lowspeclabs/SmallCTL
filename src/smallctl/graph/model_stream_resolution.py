@@ -4,8 +4,10 @@ import time
 from typing import Any
 
 from ..client import OpenAICompatClient
+from ..client.chunk_parser import chunk_contains_tool_call_delta
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
+from ..state import json_safe_value
 from .model_stream_fallback import (
     StreamProcessingResult,
     _attempt_remote_write_fallback,
@@ -22,6 +24,44 @@ from .deps import GraphRuntimeDeps
 from .tool_call_parser import _detect_empty_file_write_payload
 
 _STREAM_CHUNK_ERROR_AUTO_RESUME_SIGNATURE = "_stream_chunk_error_auto_resume_signature"
+
+
+def _provider_chunk_data(item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "chunk":
+        data = item.get("data", {})
+        return data if isinstance(data, dict) else None
+    if isinstance(item.get("choices"), list):
+        return item
+    return None
+
+
+def _tool_call_stream_boundary(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    saw_delta = False
+    saw_finish = False
+    finish_reasons: list[str] = []
+    chunk_count = 0
+    for item in chunks:
+        data = _provider_chunk_data(item)
+        if data is None:
+            continue
+        chunk_count += 1
+        saw_delta = saw_delta or chunk_contains_tool_call_delta(data)
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            continue
+        finish_reason = choices[0].get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            finish_reasons.append(finish_reason)
+            if finish_reason == "tool_calls":
+                saw_finish = True
+    return {
+        "saw_tool_call_delta": saw_delta,
+        "saw_tool_calls_finish": saw_finish,
+        "finish_reasons": finish_reasons,
+        "chunk_count": chunk_count,
+    }
 
 
 def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
@@ -244,6 +284,63 @@ async def resolve_model_stream_result(
             thinking_start_tag=harness.thinking_start_tag,
             thinking_end_tag=harness.thinking_end_tag,
         )
+        tool_call_boundary = _tool_call_stream_boundary(chunks)
+        observed_tool_call_boundary = (
+            bool(tool_call_boundary.get("saw_tool_call_delta"))
+            or bool(tool_call_boundary.get("saw_tool_calls_finish"))
+        )
+        if observed_tool_call_boundary and not stream.tool_calls:
+            details = {
+                "reason": "tool_call_aggregation_failure",
+                **tool_call_boundary,
+            }
+            harness.state.scratchpad["_last_tool_call_aggregation_failure"] = details
+            harness._runlog(
+                "tool_call_aggregation_failure",
+                "stream advertised tool calls but collector produced none",
+                details=details,
+            )
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=(
+                        "[HARNESS NOTICE]: The prior model stream ended with tool_calls metadata, "
+                        "but the harness could not reconstruct any callable tool payloads. Retry the "
+                        "tool call now using the available structured tool interface. Do not answer "
+                        "with prose unless no tool is needed."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "tool_call_aggregation_failure",
+                        "details": json_safe_value(details),
+                    },
+                )
+            )
+            await harness._emit(
+                deps.event_handler,
+                UIEvent(
+                    event_type=UIEventType.ALERT,
+                    content="Tool-call stream could not be reconstructed; retrying with a structured tool nudge.",
+                    data=json_safe_value(details),
+                ),
+            )
+            usage_payload = stream.usage
+            if not isinstance(usage_payload, dict):
+                usage_payload = {}
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            ttft = (first_token_time - start_time) if first_token_time else duration
+            return StreamProcessingResult(
+                chunks=chunks,
+                stream=stream,
+                timeline=timeline,
+                usage=usage_payload,
+                duration=duration,
+                ttft=ttft,
+                halted=True,
+                halt_reason="tool_call_aggregation_failure",
+                halt_details=details,
+            )
         write_calls_with_empty_payload = [
             pending
             for pending in (PendingToolCall.from_payload(tool_call) for tool_call in stream.tool_calls)

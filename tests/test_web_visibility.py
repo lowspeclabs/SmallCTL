@@ -39,3 +39,9 @@ def test_web_search_visible_in_chat_mode_for_current_info_tasks(tmp_path) -> Non
     assert "http_get" not in names
     assert "web_search" in exposure["names"]
     assert "web_fetch" in exposure["names"]
+
+
+def test_weather_queries_enable_network_read_profile() -> None:
+    profiles = classify_tool_profiles("what is the weather in jacksonville, fl?")
+
+    assert "network_read" in profiles

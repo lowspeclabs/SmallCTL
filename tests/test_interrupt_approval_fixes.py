@@ -22,6 +22,7 @@ from smallctl.harness.runtime_facade import (
 )
 from smallctl.harness.run_mode import (
     ModeDecisionService,
+    has_active_remote_handoff,
     is_contextual_affirmative_execution_continuation,
 )
 from smallctl.harness.task_boundary import TaskBoundaryService
@@ -251,6 +252,43 @@ class TestInterruptApprovalFixes:
         )
 
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_fix_approved_proceed_preserves_remote_handoff_without_live_interrupt(self):
+        """Blended approval phrases should continue the active SSH task, not fall into chat."""
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = None
+        mock_harness.state.planner_interrupt = None
+        mock_harness.state.active_plan = None
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planning_mode_enabled = False
+        mock_harness.state.recent_messages = []
+        mock_harness.state.cwd = "/home/stephen/Scripts/Harness-Redo"
+        mock_harness.state.task_mode = ""
+        mock_harness.state.active_tool_profiles = ["core"]
+        mock_harness.state.scratchpad = {
+            "_last_task_handoff": {
+                "task_mode": "remote_execute",
+                "ssh_target": {"host": "192.168.1.89", "user": "root"},
+            }
+        }
+        mock_harness.client = Mock()
+        mock_harness.client.model = "test-model"
+        mock_harness._runlog = Mock()
+        mock_harness._emit = Mock()
+
+        assert has_active_remote_handoff(mock_harness) is True
+        assert is_contextual_affirmative_execution_continuation(
+            mock_harness,
+            raw_task="fix approved proceed",
+            resolved_task="fix approved proceed",
+        ) is True
+
+        mode = await ModeDecisionService(mock_harness).decide("fix approved proceed")
+
+        assert mode == "loop"
+        assert "network" in mock_harness.state.active_tool_profiles
 
     @pytest.mark.asyncio
     async def test_original_scenario_prevented(self):

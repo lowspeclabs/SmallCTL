@@ -642,6 +642,25 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return exhausted_docker_error
     if _consume_repeat_guard_one_shot_allowance(harness, pending):
         return None
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    if pending.tool_name == "web_fetch" and isinstance(scratchpad, dict):
+        exhausted = scratchpad.get("_web_fetch_budget_exhausted")
+        if isinstance(exhausted, dict) and exhausted.get("terminal"):
+            detail = str(exhausted.get("error") or "web_fetch budget exhausted for this run").strip()
+            return _format_repeated_tool_loop_message(
+                harness,
+                pending,
+                f"Guard tripped: {detail}. Do not retry web_fetch in this run; use existing search results, artifacts, or another strategy.",
+            )
+    if isinstance(scratchpad, dict):
+        nudge_key = f"generic_loop:{pending.tool_name}:{json.dumps(json_safe_value(pending.args), sort_keys=True)}"
+        if scratchpad.get("_generic_loop_nudged") == nudge_key:
+            return _format_repeated_tool_loop_message(
+                harness,
+                pending,
+                f"Guard tripped: repeated tool call loop ({pending.tool_name} repeated with identical arguments after prior nudge)",
+            )
     if _repair_phase_mutation_tool_repeat_is_loop(harness, pending):
         return _format_repeated_tool_loop_message(
             harness,

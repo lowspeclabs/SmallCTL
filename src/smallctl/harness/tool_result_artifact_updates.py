@@ -32,6 +32,122 @@ from ..shell_utils import (
 from ..tools.fs import is_file_mutating_tool
 from ..tools.ssh_files import SSH_FILE_MUTATING_TOOLS
 
+_ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
+
+
+def _coerce_int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_artifact_read_ranges(ranges: Any) -> list[tuple[int, int]]:
+    normalized: list[tuple[int, int]] = []
+    if not isinstance(ranges, list):
+        return normalized
+    for item in ranges:
+        if isinstance(item, dict):
+            start_line = _coerce_int_or_none(item.get("start_line"))
+            end_line = _coerce_int_or_none(item.get("end_line"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            start_line = _coerce_int_or_none(item[0])
+            end_line = _coerce_int_or_none(item[1])
+        else:
+            continue
+        if start_line is None or end_line is None or start_line < 1 or end_line < start_line:
+            continue
+        normalized.append((start_line, end_line))
+    normalized.sort()
+    merged: list[tuple[int, int]] = []
+    for start_line, end_line in normalized:
+        if not merged or start_line > merged[-1][1] + 1:
+            merged.append((start_line, end_line))
+            continue
+        prior_start, prior_end = merged[-1]
+        merged[-1] = (prior_start, max(prior_end, end_line))
+    return merged
+
+
+def _artifact_read_coverage_is_complete(*, ranges: Any, total_lines: int) -> bool:
+    if total_lines < 1:
+        return False
+    normalized = _normalize_artifact_read_ranges(ranges)
+    return bool(normalized and normalized[0][0] <= 1 and normalized[0][1] >= total_lines)
+
+
+def _record_artifact_read_ledger(
+    service: Any,
+    *,
+    result: ToolEnvelope,
+    arguments: dict[str, Any] | None,
+    artifact: Any,
+) -> None:
+    state = getattr(service.harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None) if state is not None else None
+    if not isinstance(scratchpad, dict):
+        return
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    artifact_id = str(metadata.get("artifact_id") or getattr(artifact, "artifact_id", "") or "").strip()
+    if not artifact_id:
+        return
+
+    args = arguments if isinstance(arguments, dict) else {}
+    requested_start = _coerce_int_or_none(args.get("start_line"))
+    requested_end = _coerce_int_or_none(args.get("end_line"))
+    start_line = _coerce_int_or_none(metadata.get("line_start", metadata.get("requested_start_line", requested_start)))
+    end_line = _coerce_int_or_none(metadata.get("line_end", metadata.get("requested_end_line", requested_end)))
+    total_lines = _coerce_int_or_none(metadata.get("total_lines", metadata.get("artifact_total_lines")))
+    if start_line is None:
+        return
+    if end_line is None and total_lines is not None and not bool(metadata.get("truncated")):
+        end_line = total_lines
+    if end_line is None:
+        return
+    if total_lines is not None:
+        end_line = min(end_line, total_lines)
+    if start_line < 1 or end_line < start_line:
+        return
+
+    coverage = scratchpad.setdefault(_ARTIFACT_COVERAGE_SCRATCHPAD_KEY, {})
+    if not isinstance(coverage, dict):
+        coverage = {}
+        scratchpad[_ARTIFACT_COVERAGE_SCRATCHPAD_KEY] = coverage
+    entry = coverage.setdefault(artifact_id, {"ranges": []})
+    if not isinstance(entry, dict):
+        entry = {"ranges": []}
+        coverage[artifact_id] = entry
+
+    if total_lines is not None:
+        entry["total_lines"] = total_lines
+    entry["last_read_step"] = int(getattr(state, "step_count", 0) or 0)
+    entry["truncated"] = bool(metadata.get("truncated"))
+    if getattr(artifact, "source", ""):
+        entry["source"] = str(getattr(artifact, "source", ""))
+    output = result.output if isinstance(result.output, str) else ""
+    if output:
+        entry["preview"] = output[:1200]
+
+    if bool(metadata.get("eof_overread")):
+        entry["eof_overread"] = True
+        return
+
+    ranges = _normalize_artifact_read_ranges(entry.get("ranges", []))
+    ranges.append((start_line, end_line))
+    entry["ranges"] = [
+        {"start_line": merged_start, "end_line": merged_end}
+        for merged_start, merged_end in _normalize_artifact_read_ranges(ranges)
+    ]
+    total = _coerce_int_or_none(entry.get("total_lines"))
+    if total is not None and total > 0:
+        entry["complete"] = _artifact_read_coverage_is_complete(
+            ranges=entry["ranges"],
+            total_lines=total,
+        )
+
+
 def _supersede_prior_read_artifacts(
     service: Any,
     *,
@@ -1429,8 +1545,10 @@ def apply_artifact_success_outcome(
     arguments: dict[str, Any] | None,
     operation_id: str | None,
 ) -> Any:
-    service.harness.state.artifacts[artifact.artifact_id] = artifact
-    service.harness.state.retrieval_cache = [artifact.artifact_id]
+    artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip() if artifact else ""
+    if artifact:
+        service.harness.state.artifacts[artifact.artifact_id] = artifact
+        service.harness.state.retrieval_cache = [artifact.artifact_id]
     if _is_dry_run_invariant_violation(tool_name, result):
         result.success = False
         result.status = "failed"
@@ -1442,8 +1560,8 @@ def apply_artifact_success_outcome(
             "SSH mutating tool returned dry_run=true and changed=yes; treating as failure",
             tool_name=tool_name,
         )
-    if tool_name in {"shell_exec", "ssh_exec"}:
-        _consolidate_shell_attempt_family(state=service.harness.state, artifact_id=artifact.artifact_id, result=result)
+    if tool_name in {"shell_exec", "ssh_exec"} and artifact_id:
+        _consolidate_shell_attempt_family(state=service.harness.state, artifact_id=artifact_id, result=result)
     if tool_name == "ssh_exec":
         _remember_session_ssh_target(
             service,
@@ -1515,7 +1633,7 @@ def apply_artifact_success_outcome(
             )
     if artifact and isinstance(verifier_verdict, dict) and verifier_verdict:
         _annotate_verifier_artifact(artifact, verifier_verdict=verifier_verdict)
-    if tool_name == "file_read" and result.success:
+    if tool_name == "file_read" and result.success and artifact:
         cache_key = _file_read_cache_key(service.harness.state.cwd, result.metadata)
         if cache_key:
             cache = service.harness.state.scratchpad.setdefault("file_read_cache", {})
@@ -1532,7 +1650,7 @@ def apply_artifact_success_outcome(
                 tool_name="file_read",
                 path=read_path,
             )
-    elif tool_name == "ssh_file_read" and result.success:
+    elif tool_name == "ssh_file_read" and result.success and artifact:
         cache_key = _ssh_file_read_cache_key(result.metadata)
         if cache_key:
             cache = service.harness.state.scratchpad.setdefault("ssh_file_read_cache", {})
@@ -1658,7 +1776,7 @@ def apply_artifact_success_outcome(
         if section == "plan":
             service.harness.state.plan_artifact_id = artifact.artifact_id
             service.harness.state.plan_resolved = True
-    elif tool_name == "artifact_read" and result.success:
+    elif tool_name == "artifact_read" and result.success and artifact:
         artifact_id = str(result.metadata.get("artifact_id", "")).strip()
         if artifact_id:
             if artifact_id == service.harness.state.plan_artifact_id:
@@ -1679,6 +1797,21 @@ def apply_artifact_success_outcome(
                     )
                 else:
                     service.harness.state.scratchpad["suppressed_truncated_artifact_ids"] = [artifact_id]
+                service.harness._runlog(
+                    "artifact_read_truncated",
+                    "artifact_read returned a truncated slice",
+                    artifact_id=artifact_id,
+                    total_lines=result.metadata.get("total_lines"),
+                    start_line=result.metadata.get("start_line"),
+                    end_line=result.metadata.get("end_line"),
+                    marker_included=True,
+                )
+        _record_artifact_read_ledger(
+            service,
+            result=result,
+            arguments=arguments,
+            artifact=artifact,
+        )
         _maybe_emit_artifact_read_eof_overread_nudge(
             service,
             result=result,
@@ -1703,7 +1836,7 @@ def apply_artifact_success_outcome(
     _auto_mirror_session_anchor(service.harness, tool_name=tool_name, result=result, arguments=arguments)
 
     if tool_name != "shell_exec" and not result.metadata.get("skip_auto_fact_record"):
-        fact_label = evidence.statement or artifact.summary or tool_name
+        fact_label = evidence.statement or (artifact.summary if artifact else "") or tool_name
         prefix = f"{tool_name}: "
         if fact_label.startswith(prefix):
             fact_label = fact_label[len(prefix):]

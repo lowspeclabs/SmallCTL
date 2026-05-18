@@ -162,6 +162,8 @@ class PromptBuilderService:
             refinement_reason=retrieval_bundle.refinement_reason,
             best_scores=retrieval_bundle.best_scores,
             candidate_counts=retrieval_bundle.candidate_counts,
+            ranked_candidates=retrieval_bundle.ranked_candidates,
+            miss_reasons=retrieval_bundle.miss_reasons,
             summaries=[
                 {
                     "summary_id": summary.summary_id,
@@ -205,6 +207,8 @@ class PromptBuilderService:
             lane_routes=retrieval_bundle.lane_routes,
             score_gaps=retrieval_bundle.score_gaps,
             best_scores=retrieval_bundle.best_scores,
+            ranked_candidates=retrieval_bundle.ranked_candidates,
+            miss_reasons=retrieval_bundle.miss_reasons,
             stale_lane_counts=stale_lane_counts,
             selected_artifact_ids=[artifact.artifact_id for artifact in artifacts],
             selected_summary_ids=[summary.summary_id for summary in summaries],
@@ -222,6 +226,7 @@ class PromptBuilderService:
         )
         soft_limit = self.harness.context_policy.soft_prompt_token_limit
         
+        previous_sections = dict(getattr(getattr(self.harness.state, "prompt_budget", None), "sections", {}) or {})
         assembly = self.harness.prompt_assembler.build_messages(
             state=self.harness.state,
             system_prompt=system_prompt,
@@ -232,6 +237,24 @@ class PromptBuilderService:
             include_structured_sections=include_structured_sections,
             token_budget=soft_limit,
         )
+        current_sections = dict(assembly.section_tokens)
+        deltas = {
+            key: {
+                "before": previous_sections.get(key, 0),
+                "after": value,
+                "delta": value - previous_sections.get(key, 0),
+            }
+            for key, value in current_sections.items()
+            if value != previous_sections.get(key, 0)
+        }
+        if previous_sections and deltas:
+            self.harness._runlog(
+                "prompt_section_delta",
+                "prompt section token changes since previous prompt",
+                deltas=deltas,
+                total_before=sum(previous_sections.values()),
+                total_after=sum(current_sections.values()),
+            )
         
         if fresh_run_active and self.harness._fresh_run_turns_remaining > 0:
             self.harness._fresh_run_turns_remaining -= 1

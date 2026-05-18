@@ -14,6 +14,7 @@ class FamaFailureKind(str, Enum):
     EARLY_STOP = "early_stop"
     LOOPING = "looping"
     REMOTE_LOCAL_CONFUSION = "remote_local_confusion"
+    REMOTE_VERIFICATION_PENDING = "remote_verification_pending"
     TOOL_OUTPUT_MISREAD = "tool_output_misread"
     BAD_TOOL_ARGS = "bad_tool_args"
     WRITE_SESSION_STALL = "write_session_stall"
@@ -26,6 +27,7 @@ FAILURE_CLASSES = {
     "tool_execution_failed": "Tool ran but returned success=false or exception.",
     "completion_blocked": "Model attempted to finish while completion gates were still blocked.",
     "wrong_path": "Path does not exist, wrong cwd, absolute path issue, remote/local mismatch, or stale file path.",
+    "remote_verification_pending": "Remote mutation appears complete but still needs remote read-back verification.",
     "empty_write": "file_write/file_append/SSH write produced empty or near-empty content unexpectedly.",
     "write_session_stall": "Chunked write session repeated or failed to progress.",
     "repeated_action": "Same or near-same tool call repeated without new evidence.",
@@ -44,6 +46,7 @@ DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.EARLY_STOP: "completion_blocked",
     FamaFailureKind.LOOPING: "repeated_action",
     FamaFailureKind.REMOTE_LOCAL_CONFUSION: "wrong_path",
+    FamaFailureKind.REMOTE_VERIFICATION_PENDING: "remote_verification_pending",
     FamaFailureKind.TOOL_OUTPUT_MISREAD: "hallucinated_assumption",
     FamaFailureKind.BAD_TOOL_ARGS: "tool_schema_invalid",
     FamaFailureKind.WRITE_SESSION_STALL: "write_session_stall",

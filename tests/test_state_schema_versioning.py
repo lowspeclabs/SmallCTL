@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from smallctl.graph.state import inflate_graph_state, serialize_graph_state
+from smallctl.models.conversation import ConversationMessage
 from smallctl.state import (
     ContextBrief,
     ExperienceMemory,
@@ -242,3 +243,32 @@ def test_loop_state_from_dict_preserves_legacy_history_when_recent_limit_missing
 
     assert len(restored.recent_messages) == 8
     assert restored.recent_message_limit == 8
+
+
+def test_loop_state_round_trip_preserves_full_transcript_when_recent_messages_trim() -> None:
+    state = LoopState(cwd="/tmp")
+    state.recent_message_limit = 3
+    for index in range(6):
+        role = "user" if index % 2 == 0 else "assistant"
+        state.append_message(ConversationMessage(role=role, content=f"message {index}"))
+
+    payload = state.to_dict()
+    restored = LoopState.from_dict(payload)
+
+    assert [message.content for message in restored.transcript_messages] == [
+        "message 0",
+        "message 1",
+        "message 2",
+        "message 3",
+        "message 4",
+        "message 5",
+    ]
+    assert len(restored.recent_messages) == 3
+    assert [message["content"] for message in payload["conversation_history"]] == [
+        "message 0",
+        "message 1",
+        "message 2",
+        "message 3",
+        "message 4",
+        "message 5",
+    ]

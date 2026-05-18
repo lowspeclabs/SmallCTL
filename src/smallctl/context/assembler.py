@@ -107,6 +107,7 @@ class PromptAssembler:
             "recovery_guidance": recovery_guidance_tokens,
             "normalized_observations": 0,
             "fresh_tool_outputs": 0,
+            "active_artifact_reads": 0,
             "turn_bundles": 0,
             "warm_briefs": 0,
             "episodic_summaries": 0,
@@ -232,6 +233,16 @@ class PromptAssembler:
         if fresh_tool_output_text:
             section_tokens["fresh_tool_outputs"] = fresh_tool_output_t
             remaining_budget -= fresh_tool_output_t
+
+        active_artifact_read_text = (
+            self._render_active_artifact_reads(state, token_budget=max(0, int(remaining_budget * 0.25)))
+            if include_structured_sections
+            else ""
+        )
+        active_artifact_read_t = estimate_text_tokens(active_artifact_read_text)
+        if active_artifact_read_text:
+            section_tokens["active_artifact_reads"] = active_artifact_read_t
+            remaining_budget -= active_artifact_read_t
 
         turn_bundle_items = list(frame.evidence_packet.turn_bundles)
         winners_turn_bundles: list[TurnBundle] = []
@@ -367,10 +378,15 @@ class PromptAssembler:
             if frame.experience_packet.memories
             else ""
         )
+        resume_contract_text = self._render_resume_contract(state)
+        if resume_contract_text:
+            section_tokens["resume_contract"] = estimate_text_tokens(resume_contract_text)
 
         messages = [
             ConversationMessage(role="system", content=system_msg_text).to_dict()
         ]
+        if resume_contract_text:
+            messages.append(ConversationMessage(role="user", content=resume_contract_text).to_dict())
 
         user_contents: set[str] = set()
         for message in final_transcript:
@@ -468,6 +484,8 @@ class PromptAssembler:
             ephemeral_sections.append(observation_text)
         if include_structured_sections and fresh_tool_output_text:
             ephemeral_sections.append(fresh_tool_output_text)
+        if include_structured_sections and active_artifact_read_text:
+            ephemeral_sections.append(active_artifact_read_text)
         if include_structured_sections and turn_bundle_text:
             ephemeral_sections.append(turn_bundle_text)
         if include_structured_sections and experience_text:
@@ -575,6 +593,31 @@ class PromptAssembler:
     @staticmethod
     def _render_session_notepad(state: LoopState) -> str:
         return PromptStateFrameCompiler._render_session_notepad(state)
+
+    @staticmethod
+    def _render_resume_contract(state: LoopState) -> str:
+        scratchpad = getattr(state, "scratchpad", None)
+        if not isinstance(scratchpad, dict):
+            return ""
+        contract = scratchpad.get("_resume_contract")
+        restored = bool(scratchpad.get("_session_restored"))
+        if not isinstance(contract, dict) and not restored:
+            return ""
+        thread_id = ""
+        if isinstance(contract, dict):
+            thread_id = str(contract.get("thread_id") or "").strip()
+        if not thread_id:
+            thread_id = str(getattr(state, "thread_id", "") or "").strip()
+        label = f" `{thread_id}`" if thread_id else ""
+        return (
+            "<resume-contract>\n"
+            f"This chat session was restored from saved thread{label}. "
+            "Continue the same conversation using the restored transcript and state. "
+            "Do not treat this as a brand-new task unless the user explicitly changes tasks. "
+            "The user-facing restored transcript contains only prior user and assistant chat messages; "
+            "tool and system records may still appear in model-visible state as execution context.\n"
+            "</resume-contract>"
+        )
 
     @staticmethod
     def _render_write_session(state: LoopState) -> str:
@@ -745,6 +788,113 @@ class PromptAssembler:
             deduped.append(record)
         return deduped
 
+    def _render_active_artifact_reads(self, state: LoopState, *, token_budget: int) -> str:
+        scratchpad = getattr(state, "scratchpad", {})
+        if not isinstance(scratchpad, dict):
+            return ""
+        coverage = scratchpad.get("_artifact_read_coverage")
+        if not isinstance(coverage, dict):
+            return ""
+
+        rows: list[tuple[int, str, str]] = []
+        for artifact_id, entry in coverage.items():
+            artifact_key = str(artifact_id or "").strip()
+            if not artifact_key or not isinstance(entry, dict):
+                continue
+            ranges = self._format_artifact_read_ranges(entry.get("ranges"))
+            if not ranges:
+                continue
+            artifact = state.artifacts.get(artifact_key)
+            source = (
+                str(entry.get("source") or "").strip()
+                or str(getattr(artifact, "source", "") or "").strip()
+                or str(getattr(artifact, "summary", "") or "").strip()
+                or "artifact"
+            )
+            total_lines = self._coerce_int_or_none(entry.get("total_lines"))
+            complete = bool(entry.get("complete"))
+            status = "COMPLETE" if complete else "PARTIAL"
+            if bool(entry.get("truncated")) and not complete:
+                status += ", TRUNCATED"
+            line_note = f"{ranges}"
+            if total_lines is not None:
+                line_note += f" of {total_lines}"
+            last_step = self._coerce_int_or_none(entry.get("last_read_step"))
+            step_note = f" | last_read_step={last_step}" if last_step is not None else ""
+            header = f"[ARTIFACT {artifact_key} | source: {source} | lines {line_note} | {status}{step_note}]"
+            preview = str(entry.get("preview") or "").strip()
+            body = ""
+            if preview and (complete or estimate_text_tokens(preview) <= max(64, token_budget)):
+                body = preview
+                if len(body) > 1200:
+                    body = body[:1190].rstrip() + " [truncated]"
+            rows.append((last_step if last_step is not None else -1, artifact_key, f"{header}\n{body}".rstrip()))
+
+        if not rows:
+            return ""
+        rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected: list[str] = []
+        used = 0
+        budget = max(128, token_budget)
+        for _step, _artifact_id, rendered in rows[:6]:
+            tokens = estimate_text_tokens(rendered)
+            if selected and used + tokens > budget:
+                break
+            used += tokens
+            selected.append(rendered)
+        if not selected:
+            return ""
+        return (
+            "Active artifact reads (durable read ledger; avoid rereading COMPLETE artifacts unless you need unseen lines or fresh state):\n"
+            + "\n\n".join(selected)
+        )
+
+    @classmethod
+    def _format_artifact_read_ranges(cls, ranges: Any) -> str:
+        normalized = cls._normalize_artifact_read_ranges(ranges)
+        if not normalized:
+            return ""
+        return ", ".join(
+            f"{start_line}-{end_line}" if start_line != end_line else str(start_line)
+            for start_line, end_line in normalized
+        )
+
+    @classmethod
+    def _normalize_artifact_read_ranges(cls, ranges: Any) -> list[tuple[int, int]]:
+        normalized: list[tuple[int, int]] = []
+        if not isinstance(ranges, list):
+            return normalized
+        for item in ranges:
+            if isinstance(item, dict):
+                start_line = cls._coerce_int_or_none(item.get("start_line"))
+                end_line = cls._coerce_int_or_none(item.get("end_line"))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                start_line = cls._coerce_int_or_none(item[0])
+                end_line = cls._coerce_int_or_none(item[1])
+            else:
+                continue
+            if start_line is None or end_line is None or start_line < 1 or end_line < start_line:
+                continue
+            normalized.append((start_line, end_line))
+        normalized.sort()
+        merged: list[tuple[int, int]] = []
+        for start_line, end_line in normalized:
+            if not merged or start_line > merged[-1][1] + 1:
+                merged.append((start_line, end_line))
+                continue
+            prior_start, prior_end = merged[-1]
+            merged[-1] = (prior_start, max(prior_end, end_line))
+        return merged
+
+    @staticmethod
+    def _coerce_int_or_none(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _render_observation_item(packet: ObservationPacket) -> str:
         bits: list[str] = []
@@ -911,6 +1061,11 @@ class PromptAssembler:
 
         summary = artifact.summary or artifact.source or artifact.kind or "tool result"
         if message.metadata.get("cache_hit"):
+            from .messages import format_reused_artifact_message
+
+            reused = format_reused_artifact_message(artifact, tool_name=message.name)
+            if "\n```text\n" in reused:
+                return reused
             if artifact.kind == "file_read":
                 return (
                     f"Reused Artifact {artifact.artifact_id}: {summary}. "

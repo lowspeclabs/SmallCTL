@@ -18,6 +18,7 @@ from ..models.conversation import ConversationMessage
 from .followup_signals import (
     assistant_message_proposes_concrete_implementation,
     is_affirmative_followup,
+    normalize_followup_text,
     recent_assistant_requested_action_confirmation,
 )
 from .task_classifier import (
@@ -119,6 +120,66 @@ def _has_single_confirmed_session_ssh_target(harness: Any) -> bool:
     return confirmed == 1
 
 
+def has_active_remote_handoff(harness: Any) -> bool:
+    state = getattr(harness, "state", None)
+    if str(getattr(state, "task_mode", "") or "").strip() == "remote_execute":
+        return True
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    handoff = scratchpad.get("_last_task_handoff")
+    if isinstance(handoff, dict):
+        if str(handoff.get("task_mode") or "").strip() == "remote_execute":
+            return True
+        ssh_target = handoff.get("ssh_target")
+        if isinstance(ssh_target, dict) and str(ssh_target.get("host") or "").strip():
+            return True
+        ssh_targets = handoff.get("ssh_targets")
+        if isinstance(ssh_targets, list) and any(
+            isinstance(item, dict) and str(item.get("host") or "").strip()
+            for item in ssh_targets
+        ):
+            return True
+        next_required_tool = handoff.get("next_required_tool")
+        if isinstance(next_required_tool, dict) and str(next_required_tool.get("tool_name") or "").strip() in {
+            "ssh_exec",
+            "ssh_file_read",
+            "ssh_file_write",
+            "ssh_file_patch",
+            "ssh_file_replace_between",
+        }:
+            return True
+    targets = scratchpad.get("_session_ssh_targets")
+    return isinstance(targets, dict) and any(
+        isinstance(value, dict) and str(value.get("host") or "").strip()
+        for value in targets.values()
+    )
+
+
+def ensure_remote_tool_profile(harness: Any) -> None:
+    state = getattr(harness, "state", None)
+    raw_profiles = getattr(state, "active_tool_profiles", [])
+    profiles = list(raw_profiles) if isinstance(raw_profiles, (list, tuple, set)) else []
+    if "network" in profiles:
+        return
+    profiles.append("network")
+    try:
+        state.active_tool_profiles = profiles
+    except Exception:
+        return
+
+
+def _looks_like_execution_approval_reply(task: str) -> bool:
+    if is_plan_approval_reply(task) or is_affirmative_followup(task):
+        return True
+    tokens = set(normalize_followup_text(task).split())
+    if not tokens:
+        return False
+    approval_tokens = {"approve", "approved", "proceed", "continue", "execute", "run"}
+    action_tokens = {"fix", "repair", "apply", "implement", "update", "change", "install", "deploy"}
+    return bool(tokens & approval_tokens) and bool(tokens & action_tokens)
+
+
 def _recent_assistant_proposed_concrete_implementation(messages: list[ConversationMessage]) -> bool:
     for message in reversed(messages[-4:]):
         if getattr(message, "role", "") != "assistant":
@@ -165,34 +226,37 @@ def is_contextual_affirmative_execution_continuation(
     pending_interrupt = getattr(getattr(harness, "state", None), "pending_interrupt", None)
     if is_interrupt_affirmative_response(pending_interrupt, raw_task):
         return True
-    if not _is_affirmative_confirmation_reply(raw_task):
+    if not _looks_like_execution_approval_reply(raw_task):
         return False
 
     recent_messages = list(getattr(getattr(harness, "state", None), "recent_messages", []) or [])
     has_recent_confirmation = _recent_assistant_requested_action_confirmation(recent_messages)
     if classify_task_mode(resolved_task) == "remote_execute":
+        ensure_remote_tool_profile(harness)
         return True
 
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
     handoff = scratchpad.get("_last_task_handoff") if isinstance(scratchpad, dict) else None
     if not isinstance(handoff, dict):
+        if has_active_remote_handoff(harness):
+            ensure_remote_tool_profile(harness)
+            return True
         return False
-    handoff_is_remote = False
-    if str(handoff.get("task_mode") or "").strip() == "remote_execute":
-        handoff_is_remote = True
-    ssh_target = handoff.get("ssh_target")
-    if isinstance(ssh_target, dict) and str(ssh_target.get("host") or "").strip():
-        handoff_is_remote = True
-    next_required_tool = handoff.get("next_required_tool")
-    if isinstance(next_required_tool, dict) and str(next_required_tool.get("tool_name") or "").strip() == "ssh_exec":
-        handoff_is_remote = True
+    handoff_is_remote = has_active_remote_handoff(harness)
 
     if handoff_is_remote and _has_plan_execution_approval_context(harness):
+        ensure_remote_tool_profile(harness)
         return True
     if has_recent_confirmation:
+        if handoff_is_remote:
+            ensure_remote_tool_profile(harness)
         return handoff_is_remote
     if handoff_is_remote and _has_single_confirmed_session_ssh_target(harness):
+        ensure_remote_tool_profile(harness)
         return _recent_assistant_proposed_concrete_implementation(recent_messages)
+    if handoff_is_remote:
+        ensure_remote_tool_profile(harness)
+        return True
     return False
 
 
@@ -220,6 +284,16 @@ class ModeDecisionService:
         raw_task, resolved_task = resolve_mode_task(self.harness, task)
         mode_task = resolved_task or raw_task
         scratchpad = getattr(getattr(self.harness, "state", None), "scratchpad", None)
+        if isinstance(scratchpad, dict) and scratchpad.pop("_fama_force_tool_plan_next_turn", False):
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="tool_plan",
+                raw="fama_hard_route",
+                raw_task=raw_task,
+                effective_task=mode_task,
+            )
+            return "tool_plan"
         transaction = scratchpad.get("_task_transaction") if isinstance(scratchpad, dict) else None
         if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
             self.harness._runlog(

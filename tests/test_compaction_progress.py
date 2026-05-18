@@ -330,6 +330,8 @@ def test_compact_to_turn_bundle_prefers_normalized_observation_packets() -> None
     assert "File fact" in bundle.summary_lines[0]
     assert "Verifier verdict" in bundle.summary_lines[1]
     assert all("transcript-only" not in line for line in bundle.summary_lines)
+    assert bundle.plan_state["goal"] == ""
+    assert bundle.evidence_refs == ["E-file", "E-verifier"]
 
 
 def test_compact_to_turn_bundle_prioritizes_file_and_verifier_observations_under_pressure() -> None:
@@ -488,6 +490,149 @@ def test_compact_to_turn_bundle_falls_back_to_transcript_without_observations() 
     assert bundle.observation_refs == []
     assert bundle.summary_lines[0] == "Investigating failing parser tests."
     assert "pytest output: 2 failed, 120 passed." in bundle.summary_lines
+    assert bundle.plan_state["goal"] == ""
+    assert bundle.experience_candidates == []
+
+
+def test_extract_rewoo_lanes_from_messages_preserves_lane_metadata() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Repair parser"
+    state.working_memory.open_questions = ["Which parser branch fails?"]
+    state.working_memory.failures = ["Patched formatter instead of parser"]
+    state.working_memory.decisions = ["Keep changes scoped to parser"]
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="TP-E4-E1",
+            kind="tool_plan_negative_observation",
+            statement="missing execution record",
+            phase="tool_plan",
+            tool_name="file_read",
+            negative=True,
+            metadata={
+                "observation_adapter": "tool_plan_observation",
+                "observation_kind": "tool_plan_negative_observation",
+                "path": "src/parser.py",
+            },
+        )
+    ]
+    bundle = ContextSummarizer(ContextPolicy()).compact_to_turn_bundle(
+        state=state,
+        messages=[ConversationMessage(role="assistant", content="transcript noise")],
+        step_range=(1, 1),
+    )
+
+    assert bundle is not None
+    assert bundle.plan_state["goal"] == "Repair parser"
+    assert bundle.plan_state["open_questions"] == ["Which parser branch fails?"]
+    assert bundle.decision_deltas == ["Keep changes scoped to parser"]
+    assert bundle.experience_candidates
+    assert "TP-E4-E1" in bundle.evidence_refs
+
+
+def test_structured_compaction_demotion_records_lane_counts_and_fallback_reason() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 10
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content="old transcript"),
+        ConversationMessage(role="assistant", content="hot transcript"),
+    ]
+    state.working_memory.decisions = ["Use parser evidence"]
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="E-parser",
+            tool_name="file_read",
+            statement="file_read: parser evidence",
+            metadata={"path": "src/parser.py", "observation_adapter": "file_read_fact"},
+        )
+    ]
+    manager = MessageTierManager(ContextPolicy(hot_message_limit=1))
+
+    asyncio.run(
+        manager.compact_to_warm(
+            state=state,
+            summarizer=ContextSummarizer(ContextPolicy()),
+            client=None,
+            artifact_store=None,
+        )
+    )
+
+    demotion = state.scratchpad["_last_compaction_demotion"]
+    assert demotion["lane_counts"]["plan_state"] > 0
+    assert demotion["lane_counts"]["evidence_refs"] == 1
+    assert demotion["lane_counts"]["decision_deltas"] == 1
+    assert demotion["fallback_reason"] == ""
+
+
+def test_turn_bundle_brief_preserves_lane_metadata() -> None:
+    state = LoopState(cwd="/tmp")
+    summarizer = ContextSummarizer(ContextPolicy())
+    bundle = TurnBundle(
+        bundle_id="TB1",
+        created_at="2026-05-17T00:00:00+00:00",
+        summary_lines=["Read parser evidence"],
+        evidence_refs=["TP-E4-E1"],
+        observation_refs=["TP-E4-E1"],
+        plan_state={"goal": "Repair parser", "active_step": "S1: read parser"},
+        decision_deltas=["Keep parser changes scoped"],
+        experience_candidates=["Missing readbacks cause false completion"],
+    )
+
+    brief = summarizer.compact_turn_bundles_to_brief(
+        state=state,
+        bundles=[bundle],
+        step_range=(1, 4),
+    )
+
+    assert brief is not None
+    assert brief.plan_state["goal"] == "Repair parser"
+    assert brief.decision_deltas == ["Keep parser changes scoped"]
+    assert brief.experience_candidates == ["Missing readbacks cause false completion"]
+    assert brief.evidence_refs == ["TP-E4-E1"]
+
+
+def test_async_brief_compaction_merges_rewoo_lane_metadata() -> None:
+    class _Client:
+        async def stream_chat(self, *, messages, tools):
+            payload = (
+                '{"key_discoveries":["parser evidence"],'
+                '"tools_tried":["file_read"],'
+                '"blockers":[],'
+                '"next_action_hint":"patch parser",'
+                '"decision_deltas":["Use parser evidence"],'
+                '"plan_state":{"active_step":"patch parser"},'
+                '"experience_candidates":["targeted reads helped"]}'
+            )
+            yield {"choices": [{"delta": {"content": payload}}]}
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Repair parser"
+    state.working_memory.open_questions = ["Which branch fails?"]
+    state.reasoning_graph.evidence_records = [
+        EvidenceRecord(
+            evidence_id="TP-E4-E1",
+            kind="tool_plan_observation",
+            statement="parser evidence",
+            tool_name="file_read",
+            metadata={"observation_adapter": "tool_plan_observation", "path": "src/parser.py"},
+        )
+    ]
+    summarizer = ContextSummarizer(ContextPolicy())
+
+    brief = asyncio.run(
+        summarizer.compact_to_brief_async(
+            state=state,
+            client=_Client(),
+            messages=[ConversationMessage(role="assistant", content="read parser")],
+            step_range=(1, 2),
+        )
+    )
+
+    assert brief is not None
+    assert brief.plan_state["goal"] == "Repair parser"
+    assert brief.plan_state["active_step"] == "patch parser"
+    assert brief.plan_state["open_questions"] == ["Which branch fails?"]
+    assert "TP-E4-E1" in brief.evidence_refs
+    assert "targeted reads helped" in brief.experience_candidates
 
 
 def test_fallback_compaction_records_no_compactable_messages_stop_reason() -> None:

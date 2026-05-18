@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ..state import WriteSession, json_safe_value
@@ -179,6 +180,105 @@ def _detect_empty_file_write_payload(
         "reason": "empty_payload",
         "required_fields": required_fields,
     }
+
+
+def _repair_empty_target_file_patch_to_file_write(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "file_patch":
+        return False
+    target_text = str(pending.args.get("target_text") or "")
+    replacement_text = str(pending.args.get("replacement_text") or "")
+    if target_text != "" or not replacement_text.strip():
+        return False
+
+    state = getattr(harness, "state", None)
+    cwd = getattr(state, "cwd", None) if state is not None else None
+    path = str(pending.args.get("path") or "").strip()
+    if not path:
+        return False
+
+    try:
+        from ..tools.fs import _resolve, _same_target_path
+
+        target = _resolve(path, cwd)
+    except Exception:
+        target = Path(path)
+
+    target_missing = False
+    target_empty = False
+    try:
+        target_missing = not target.exists()
+        if not target_missing and target.is_file():
+            target_empty = target.read_text(encoding="utf-8") == ""
+    except OSError:
+        target_missing = False
+        target_empty = False
+
+    session = getattr(state, "write_session", None) if state is not None else None
+    active_session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    supplied_session_id = str(pending.args.get("write_session_id") or "").strip()
+    session_status = str(getattr(session, "status", "") or "").strip().lower()
+    active_session = session is not None and session_status not in {"complete", "finalized", "aborted"}
+    if supplied_session_id and active_session_id and supplied_session_id != active_session_id:
+        active_session = False
+
+    session_matches_target = False
+    staged_empty = False
+    no_completed_sections = False
+    if active_session:
+        session_target = str(getattr(session, "write_target_path", "") or "").strip()
+        try:
+            session_matches_target = bool(session_target) and _same_target_path(session_target, path, cwd)
+        except Exception:
+            session_matches_target = False
+
+        if session_matches_target:
+            no_completed_sections = not bool(getattr(session, "write_sections_completed", []) or [])
+            staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
+            if staging_path:
+                try:
+                    staged_empty = Path(staging_path).read_text(encoding="utf-8") == ""
+                except Exception:
+                    staged_empty = False
+
+    if not (target_missing or target_empty or (session_matches_target and (no_completed_sections or staged_empty))):
+        return False
+
+    repaired_args: dict[str, Any] = {
+        "path": path,
+        "content": replacement_text,
+        "replace_strategy": "overwrite",
+    }
+    if session_matches_target and active_session_id:
+        repaired_args["write_session_id"] = active_session_id
+        repaired_args["section_name"] = (
+            str(getattr(session, "write_next_section", "") or "").strip() or "initial_content"
+        )
+    elif supplied_session_id:
+        repaired_args["write_session_id"] = supplied_session_id
+
+    pending.tool_name = "file_write"
+    pending.args = repaired_args
+    pending.raw_arguments = json.dumps(repaired_args, ensure_ascii=True, sort_keys=True)
+    pending.parser_metadata = {
+        **(pending.parser_metadata or {}),
+        "auto_repaired_from_tool": "file_patch",
+        "auto_repair_reason": "empty_target_patch_initial_authoring",
+    }
+
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "tool_call_auto_repaired",
+            "converted empty-target file_patch into initial file_write",
+            from_tool="file_patch",
+            to_tool="file_write",
+            tool_call_id=pending.tool_call_id,
+            path=path,
+            write_session_id=str(repaired_args.get("write_session_id") or ""),
+            section_name=str(repaired_args.get("section_name") or ""),
+            reason="empty_target_patch_initial_authoring",
+        )
+    return True
 
 
 def _detect_patch_existing_stage_read_contract_violation(

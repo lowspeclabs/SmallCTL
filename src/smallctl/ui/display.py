@@ -100,6 +100,14 @@ def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool
         return False
     if event.event_type in {UIEventType.SYSTEM, UIEventType.METRICS} and not show_system_messages:
         return False
+    # Treat most ALERTs as system-level noise, but preserve interactive prompts
+    # (plan approvals/interrupts) that require user action or record a question.
+    if event.event_type == UIEventType.ALERT and not show_system_messages:
+        if event.data.get("ui_kind") in {"approve_prompt", "sudo_password_prompt"}:
+            return True
+        if "interrupt" in event.data:
+            return True
+        return False
     if event.event_type in {UIEventType.TOOL_CALL, UIEventType.TOOL_RESULT} and not show_tool_calls:
         return False
     return True

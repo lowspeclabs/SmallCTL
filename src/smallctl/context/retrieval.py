@@ -96,6 +96,22 @@ _MUTATION_RESULT_TOOLS = {
     "file_patch",
     "ast_patch",
 }
+_DIAGNOSTIC_FAILURE_TOOL_PENALTIES = {
+    "artifact_grep": 24.0,
+    "artifact_read": 18.0,
+    "web_search": 12.0,
+}
+_INTERACTIVE_PROMPT_MARKERS = (
+    "(y/n)",
+    "[y/n]",
+    "[y/n",
+    "choice: [",
+    "hit enter",
+    "hit [enter]",
+    "are you sure you wish to continue",
+    "answer not recognized",
+    "sorry, answer not recognized",
+)
 _FILE_LIKE_PATH_RE = re.compile(r"(?:^|\s)(?:\.{0,2}/|/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*(?:\.[A-Za-z0-9_.-]+)")
 
 @dataclass
@@ -112,6 +128,8 @@ class RetrievalBundle:
     best_scores: dict[str, float] = field(default_factory=dict)
     score_gaps: dict[str, float] = field(default_factory=dict)
     lane_routes: dict[str, list[str]] = field(default_factory=dict)
+    ranked_candidates: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    miss_reasons: dict[str, list[str]] = field(default_factory=dict)
 
 
 class LexicalRetriever:
@@ -175,6 +193,10 @@ class LexicalRetriever:
                 refinement_reason=reason,
                 candidate_counts=first_pass.candidate_counts,
                 best_scores=first_pass.best_scores,
+                score_gaps=first_pass.score_gaps,
+                lane_routes=first_pass.lane_routes,
+                ranked_candidates=first_pass.ranked_candidates,
+                miss_reasons={**first_pass.miss_reasons, "refinement": [f"refinement_triggered:{reason}"]},
             )
 
         second_pass = self._retrieve_pass(
@@ -192,11 +214,13 @@ class LexicalRetriever:
             second_pass.refined_query = refined_query
             second_pass.refined = True
             second_pass.refinement_reason = reason
+            second_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
             state.retrieval_cache = [snippet.artifact_id for snippet in second_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in second_pass.experiences]
             return second_pass
 
         first_pass.refinement_reason = reason
+        first_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
         state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
         state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
         return first_pass
@@ -279,6 +303,16 @@ class LexicalRetriever:
         if update_state:
             state.retrieval_cache = [snippet.artifact_id for snippet in artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in experiences]
+        miss_reasons = self._retrieval_miss_reasons(
+            state=state,
+            ranked_artifacts=ranked_artifacts,
+            ranked_summaries=ranked_summaries,
+            ranked_experiences=ranked_experiences,
+            artifacts=artifacts,
+            summaries=summaries,
+            experiences=experiences,
+            include_experiences=include_experiences,
+        )
         return RetrievalBundle(
             query=query,
             initial_query=query,
@@ -305,7 +339,69 @@ class LexicalRetriever:
                 "artifact_packet": [snippet.artifact_id for snippet in artifacts if snippet.artifact_id],
                 "experience_packet": [memory.memory_id for memory in experiences if memory.memory_id],
             },
+            ranked_candidates={
+                "artifacts": [self._artifact_candidate_preview(score, artifact) for score, artifact in ranked_artifacts[:5]],
+                "summaries": [self._summary_candidate_preview(score, summary) for score, summary in ranked_summaries[:5]],
+                "experiences": [
+                    self._experience_candidate_preview(score, memory) for score, memory in ranked_experiences[:5]
+                ],
+            },
+            miss_reasons=miss_reasons,
         )
+
+    def _retrieval_miss_reasons(
+        self,
+        *,
+        state: LoopState,
+        ranked_artifacts: list[tuple[float, ArtifactRecord]],
+        ranked_summaries: list[tuple[float, EpisodicSummary]],
+        ranked_experiences: list[tuple[float, ExperienceMemory]],
+        artifacts: list[ArtifactSnippet],
+        summaries: list[EpisodicSummary],
+        experiences: list[ExperienceMemory],
+        include_experiences: bool,
+    ) -> dict[str, list[str]]:
+        reasons: dict[str, list[str]] = {}
+        if not ranked_artifacts and getattr(state, "artifacts", None):
+            reasons.setdefault("artifacts", []).append("no_candidates_after_filtering")
+        if ranked_artifacts and not artifacts:
+            top_score, top_artifact = ranked_artifacts[0]
+            if self._artifact_category(top_artifact) != "verifier" and top_score < self._artifact_signal_threshold(state):
+                reasons.setdefault("artifacts", []).append("below_artifact_signal_threshold")
+        if not ranked_summaries and getattr(state, "episodic_summaries", None):
+            reasons.setdefault("summaries", []).append("no_candidates_after_filtering")
+        if not include_experiences:
+            reasons.setdefault("experiences", []).append("experiences_disabled")
+        elif not ranked_experiences and getattr(state, "warm_experiences", None):
+            reasons.setdefault("experiences", []).append("no_candidates_after_filtering")
+        return reasons
+
+    def _artifact_candidate_preview(self, score: float, artifact: ArtifactRecord) -> dict[str, Any]:
+        return {
+            "artifact_id": artifact.artifact_id,
+            "score": score,
+            "category": self._artifact_category(artifact),
+            "source": artifact.source,
+            "tool_name": artifact.tool_name,
+        }
+
+    @staticmethod
+    def _summary_candidate_preview(score: float, summary: EpisodicSummary) -> dict[str, Any]:
+        return {
+            "summary_id": summary.summary_id,
+            "score": score,
+            "files_touched": list(summary.files_touched),
+        }
+
+    @staticmethod
+    def _experience_candidate_preview(score: float, memory: ExperienceMemory) -> dict[str, Any]:
+        return {
+            "memory_id": memory.memory_id,
+            "score": score,
+            "intent": memory.intent,
+            "tool_name": memory.tool_name,
+            "outcome": memory.outcome,
+        }
 
     def _rank_artifacts(self, *, state: LoopState, query: str) -> list[tuple[float, ArtifactRecord]]:
         query_tokens = _tokens(query)
@@ -315,6 +411,8 @@ class LexicalRetriever:
             if isinstance(message.metadata, dict) and message.metadata.get("artifact_id")
         }
         recently_retrieved_ids = set(state.retrieval_cache)
+        detail_requested = self._query_requests_specific_detail(query)
+        fully_read_artifact_ids = self._fully_read_artifact_ids(state)
         stale_artifact_ids = self._durably_stale_ids(state, key="_artifact_staleness")
         suppressed_raw = state.scratchpad.get("suppressed_truncated_artifact_ids", [])
         if isinstance(suppressed_raw, (list, tuple, set)):
@@ -327,15 +425,25 @@ class LexicalRetriever:
             suppressed_truncated_ids = set()
 
         scored: list[tuple[float, ArtifactRecord]] = []
+        latest_causal_remote_artifact_id = self._latest_causal_remote_failure_artifact_id(state)
         for index, artifact_id in enumerate(state.artifacts.keys()):
+            artifact = state.artifacts[artifact_id]
+            force_include_remote_repair_artifact = (
+                self._is_remote_repair_state(state)
+                and artifact_id == latest_causal_remote_artifact_id
+                and self._is_causal_remote_failure_artifact(artifact)
+            )
             if (
-                artifact_id in recent_artifact_ids
-                or artifact_id in recently_retrieved_ids
-                or artifact_id in suppressed_truncated_ids
-                or artifact_id in stale_artifact_ids
+                (
+                    artifact_id in recent_artifact_ids
+                    or artifact_id in recently_retrieved_ids
+                    or (artifact_id in fully_read_artifact_ids and not detail_requested)
+                    or artifact_id in suppressed_truncated_ids
+                    or artifact_id in stale_artifact_ids
+                )
+                and not force_include_remote_repair_artifact
             ):
                 continue
-            artifact = state.artifacts[artifact_id]
             if is_superseded_artifact(artifact):
                 continue
             if not _is_retrieval_visible_artifact(artifact):
@@ -347,6 +455,8 @@ class LexicalRetriever:
                 recency=index,
                 state=state,
             )
+            if force_include_remote_repair_artifact:
+                score = max(score, 32.0 + index * 0.05)
             if score > 0:
                 scored.append((score, artifact))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -360,6 +470,22 @@ class LexicalRetriever:
                 seen_keys.add(dedupe_key)
             deduped.append((score, artifact))
         return deduped
+
+    @staticmethod
+    def _fully_read_artifact_ids(state: LoopState) -> set[str]:
+        scratchpad = getattr(state, "scratchpad", {})
+        if not isinstance(scratchpad, dict):
+            return set()
+        coverage = scratchpad.get("_artifact_read_coverage")
+        if not isinstance(coverage, dict):
+            return set()
+        return {
+            str(artifact_id).strip()
+            for artifact_id, entry in coverage.items()
+            if str(artifact_id).strip()
+            and isinstance(entry, dict)
+            and bool(entry.get("complete"))
+        }
 
     def _rank_summaries(
         self,
@@ -1271,6 +1397,83 @@ class LexicalRetriever:
         return False
 
     @staticmethod
+    def _artifact_tool_name(artifact: ArtifactRecord) -> str:
+        return str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
+
+    @staticmethod
+    def _artifact_failure_text(artifact: ArtifactRecord) -> str:
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        output = metadata.get("output")
+        output_bits: list[str] = []
+        if isinstance(output, dict):
+            output_bits.extend([
+                str(output.get("stdout") or ""),
+                str(output.get("stderr") or ""),
+            ])
+        return "\n".join(
+            bit
+            for bit in [
+                str(artifact.summary or ""),
+                str(artifact.preview_text or ""),
+                str(artifact.inline_content or ""),
+                str(metadata.get("error") or ""),
+                str(metadata.get("failure_mode") or ""),
+                str(metadata.get("failure_kind") or ""),
+                *output_bits,
+            ]
+            if bit
+        )
+
+    @classmethod
+    def _artifact_contains_interactive_prompt(cls, artifact: ArtifactRecord) -> bool:
+        text = cls._artifact_failure_text(artifact).lower()
+        return bool(text and any(marker in text for marker in _INTERACTIVE_PROMPT_MARKERS))
+
+    @classmethod
+    def _is_remote_repair_state(cls, state: LoopState) -> bool:
+        phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+        intent_tags = {
+            str(tag or "").strip().lower()
+            for tag in getattr(state, "intent_tags", []) or []
+            if str(tag or "").strip()
+        }
+        return (
+            phase == "repair"
+            and (
+                task_mode == "remote_execute"
+                or active_intent == "requested_ssh_exec"
+                or "ssh_exec" in intent_tags
+            )
+        )
+
+    @classmethod
+    def _is_causal_remote_failure_artifact(cls, artifact: ArtifactRecord) -> bool:
+        if cls._artifact_tool_name(artifact) != "ssh_exec":
+            return False
+        if cls._artifact_success(artifact):
+            return False
+        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+        failure_kind = str(metadata.get("failure_kind") or "").strip().lower()
+        ssh_transport_succeeded = bool(metadata.get("ssh_transport_succeeded"))
+        output_received = bool(metadata.get("output_received"))
+        return (
+            failure_kind == "remote_command"
+            or ssh_transport_succeeded
+            or output_received
+            or cls._artifact_contains_interactive_prompt(artifact)
+        )
+
+    @classmethod
+    def _latest_causal_remote_failure_artifact_id(cls, state: LoopState) -> str:
+        latest = ""
+        for artifact_id, artifact in getattr(state, "artifacts", {}).items():
+            if cls._is_causal_remote_failure_artifact(artifact):
+                latest = str(artifact_id or "")
+        return latest
+
+    @staticmethod
     def _score_artifact(
         *,
         artifact: ArtifactRecord,
@@ -1382,6 +1585,28 @@ class LexicalRetriever:
             artifact=artifact,
         ):
             resolved_failure_penalty = 10.0
+        diagnostic_failure_penalty = 0.0
+        tool_name = LexicalRetriever._artifact_tool_name(artifact)
+        if not LexicalRetriever._artifact_success(artifact):
+            diagnostic_failure_penalty = _DIAGNOSTIC_FAILURE_TOOL_PENALTIES.get(tool_name, 0.0)
+            if diagnostic_failure_penalty:
+                query_text = str(query or "").lower()
+                if (
+                    "artifact_grep" in query_text
+                    or "artifact_read" in query_text
+                    or "debug retrieval" in query_text
+                    or "debug artifact" in query_text
+                    or "tool failure" in query_text
+                ):
+                    diagnostic_failure_penalty *= 0.25
+        causal_remote_bonus = 0.0
+        if (
+            LexicalRetriever._is_remote_repair_state(state)
+            and LexicalRetriever._is_causal_remote_failure_artifact(artifact)
+        ):
+            causal_remote_bonus += 8.0
+            if LexicalRetriever._artifact_contains_interactive_prompt(artifact):
+                causal_remote_bonus += 8.0
 
         relevance = (
             overlap
@@ -1397,7 +1622,9 @@ class LexicalRetriever:
             + entity_bonus
             + failure_bonus
             + touched_symbol_bonus
+            + causal_remote_bonus
             - resolved_failure_penalty
+            - diagnostic_failure_penalty
         ) * terminal_claim_penalty
         if relevance <= 0:
             return 0.0

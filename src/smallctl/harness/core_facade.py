@@ -97,6 +97,15 @@ def build_status_snapshot(
     ).to_dict()
 
 
+def _inject_recovery_metrics(result: dict[str, Any], state: Any) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    metrics = scratchpad.get("_recovery_metrics")
+    if isinstance(metrics, dict) and metrics:
+        result["recovery_metrics"] = dict(metrics)
+
+
 def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     status = str((result or {}).get("status") or "").strip().lower()
     task_summary = None
@@ -127,6 +136,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     result["step_count"] = self.state.step_count
     result["inactive_steps"] = self.state.inactive_steps
     result["token_usage"] = self.state.token_usage
+    _inject_recovery_metrics(result, self.state)
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..models.tool_result import ToolEnvelope
 from ..state import ArtifactRecord
@@ -10,6 +11,8 @@ from .rendering import render_shell_failure, render_shell_output
 _LISTING_PREVIEW_ENTRY_LIMIT = 50
 _ARTIFACT_PREVIEW_CHAR_LIMIT = 4000
 _SHELL_EXEC_INLINE_CHAR_LIMIT = 1600
+_REUSED_ARTIFACT_INLINE_CHAR_LIMIT = 4096
+_REUSED_ARTIFACT_INLINE_LINE_LIMIT = 100
 _WRITE_OUTPUT_KEYWORDS = (
     "save",
     "write",
@@ -108,7 +111,10 @@ def _request_prefers_summary_exit(request_text: str | None) -> bool:
     if _request_requires_saved_output(text):
         return False
     asks_for_summary = any(keyword in text for keyword in ("table", "summary", "summarize", "report", "overview", "present"))
-    asks_about_listing = any(keyword in text for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env"))
+    asks_about_listing = any(
+        keyword in text
+        for keyword in ("list", "listing", "files", "directories", "artifact", "results", "output", "current env", "cron", "job")
+    )
     return asks_for_summary and asks_about_listing
 
 
@@ -288,6 +294,10 @@ def _format_shell_exec_message(
             strip_whitespace=False,
         )
         msg = transcript or "Shell command failed."
+        if artifact.kind == "ssh_exec" and bool(metadata.get("ssh_transport_succeeded")):
+            failure_mode = str(metadata.get("failure_mode") or metadata.get("ssh_error_class") or "").strip()
+            if failure_mode == "remote_exit_nonzero":
+                msg = f"SSH reached the remote host; remote command exited non-zero.\n\n{msg}"
     else:
         transcript = render_shell_output(
             output,
@@ -326,6 +336,16 @@ def _format_shell_exec_message(
 def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str | None = None) -> str:
     summary = artifact.summary or artifact.source or artifact.kind or "cached artifact"
     normalized_tool = str(tool_name or "").strip().lower()
+    inline_content = _small_complete_artifact_content(artifact)
+    if inline_content:
+        path = str(artifact.source or artifact.metadata.get("path") or "").strip()
+        path_note = f" ({path})" if path else ""
+        return (
+            f"Reused Artifact {artifact.artifact_id}: {summary}{path_note}.\n"
+            "Full cached content is visible below. Use it to answer now; do not call "
+            "`artifact_read`, `artifact_print`, or reread the same file unless the user asks for fresh state.\n\n"
+            f"```text\n{inline_content}\n```"
+        )
     if normalized_tool == "artifact_print":
         return (
             f"Reused Artifact {artifact.artifact_id}: {summary}. "
@@ -342,6 +362,31 @@ def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str |
             "Work from this artifact, patch the file, or use `artifact_read` if you need paging."
         )
     return f"Reused Artifact {artifact.artifact_id}: {summary}"
+
+
+def _small_complete_artifact_content(artifact: ArtifactRecord) -> str:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    if bool(metadata.get("truncated")):
+        return ""
+    complete = bool(metadata.get("complete_file")) or str(artifact.summary or "").lower().find("full file") >= 0
+    if artifact.kind == "ssh_file_read":
+        complete = complete or bool(metadata.get("path"))
+    if not complete and artifact.kind not in {"file_read", "ssh_file_read"}:
+        return ""
+
+    text = str(artifact.inline_content or "")
+    if not text and artifact.content_path:
+        try:
+            text = Path(artifact.content_path).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    text = text.rstrip("\n")
+    if not text:
+        return ""
+    line_count = len(text.splitlines())
+    if len(text) > _REUSED_ARTIFACT_INLINE_CHAR_LIMIT or line_count > _REUSED_ARTIFACT_INLINE_LINE_LIMIT:
+        return ""
+    return text
 
 
 def _artifact_read_hint(

@@ -363,7 +363,16 @@ def _make_graph_state(*, tool_results: list[ToolExecutionRecord] | None = None, 
     )
 
 
-def _make_record(tool_name: str, args: dict, *, success: bool = True, metadata: dict | None = None, changed: bool | None = None) -> ToolExecutionRecord:
+def _make_record(
+    tool_name: str,
+    args: dict,
+    *,
+    success: bool = True,
+    metadata: dict | None = None,
+    changed: bool | None = None,
+    output: object | None = None,
+    error: str | None = None,
+) -> ToolExecutionRecord:
     meta = dict(metadata or {})
     if changed is not None:
         meta["changed"] = changed
@@ -372,7 +381,7 @@ def _make_record(tool_name: str, args: dict, *, success: bool = True, metadata: 
         tool_name=tool_name,
         args=args,
         tool_call_id=None,
-        result=ToolEnvelope(success=success, metadata=meta),
+        result=ToolEnvelope(success=success, metadata=meta, output=output, error=error),
     )
 
 
@@ -638,6 +647,42 @@ def test_three_no_progress_cycles_inject_nudge() -> None:
     assert last_msg.role == "user"
     assert "no actionable progress" in last_msg.content.lower()
     assert last_msg.metadata.get("recovery_kind") == "no_actionable_progress"
+
+
+def test_no_progress_nudge_pins_last_failed_verifier_summary() -> None:
+    harness = _FakeHarness()
+    harness.state.current_phase = "author"
+    harness.state.run_brief.original_task = "Fix ./temp/ssh_known_hosts_checker.py and run unit tests"
+    stderr = """
+ERROR: test_hashed_host_placeholder_handling
+  File "/home/stephen/Scripts/Harness-Redo/temp/ssh_known_hosts_checker.py", line 211, in test_hashed_host_placeholder_handling
+AttributeError: 'KnownHostsChecker' object has no attribute 'checker'
+FAIL: test_malformed_line_skipping
+  File "/home/stephen/Scripts/Harness-Redo/temp/ssh_known_hosts_checker.py", line 204, in test_malformed_line_skipping
+AssertionError: 0 != 2
+FAILED (failures=2, errors=2)
+"""
+    failed_verifier = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "shell_exec",
+                {"command": "python3 -m unittest ./temp/ssh_known_hosts_checker.py -v"},
+                success=False,
+                output={"stderr": stderr, "stdout": ""},
+            )
+        ],
+    )
+
+    _update_progress_tracking(harness, failed_verifier)
+    harness.state.stagnation_counters["no_actionable_progress"] = 3
+    guard = _check_progress_stagnation(harness, _make_graph_state())
+
+    assert guard is None
+    message = harness.state.recent_messages[-1]
+    assert "Last verifier failed: `python3 -m unittest ./temp/ssh_known_hosts_checker.py -v`" in message.content
+    assert "AttributeError: 'KnownHostsChecker' object has no attribute 'checker'" in message.content
+    assert "AssertionError: 0 != 2" in message.content
+    assert "Do not reread unchanged evidence" in message.content
 
 
 def test_five_no_progress_cycles_trip_guard() -> None:
@@ -928,3 +973,23 @@ def test_range_read_after_full_file_read_counts_as_progress() -> None:
     )
     _update_progress_tracking(harness, graph_state)
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+
+
+def test_repeated_tool_loop_after_nudge_is_blocked_even_with_interleaving() -> None:
+    """If a model was already nudged for repeating a specific tool call,
+    repeating that exact call again should be blocked immediately,
+    even if other tools were called in between."""
+    harness = _FakeHarness()
+    args = {"command": "curl -s https://example.com", "host": "192.168.1.1", "user": "root", "password": "secret"}
+    pending = PendingToolCall(tool_name="ssh_exec", args=args)
+
+    # Simulate that a generic loop nudge was already sent for this exact call.
+    import json
+    from smallctl.state import json_safe_value
+    nudge_key = f"generic_loop:ssh_exec:{json.dumps(json_safe_value(args), sort_keys=True)}"
+    harness.state.scratchpad["_generic_loop_nudged"] = nudge_key
+
+    repeat_error = _detect_repeated_tool_loop(harness, pending)
+
+    assert repeat_error is not None
+    assert "after prior nudge" in repeat_error

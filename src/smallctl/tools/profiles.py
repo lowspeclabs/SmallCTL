@@ -125,6 +125,11 @@ def classify_tool_profiles(
             "choose one",
             "find out",
             "search",
+            "weather",
+            "forecast",
+            "temperature",
+            "radar",
+            "conditions",
         ),
     ):
         profiles.add(NETWORK_READ_PROFILE)

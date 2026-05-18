@@ -131,12 +131,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
     tool_plan_readonly_only = params.get("tool_plan_readonly_only", True)
     tool_plan_max_steps = params.get("tool_plan_max_steps", 6)
     tool_plan_max_repair_attempts = params.get("tool_plan_max_repair_attempts", 1)
+    schema_validation_max_repair_attempts = params.get("schema_validation_max_repair_attempts", 2)
     tool_plan_observation_token_limit = params.get("tool_plan_observation_token_limit", 900)
     tool_plan_max_observation_chars_per_step = params.get("tool_plan_max_observation_chars_per_step", 600)
     tool_plan_solver_fresh_output_limit = params.get("tool_plan_solver_fresh_output_limit", 1200)
     tool_plan_allow_web = params.get("tool_plan_allow_web", True)
     tool_plan_allow_artifact_read = params.get("tool_plan_allow_artifact_read", True)
     tool_plan_fallback_to_loop_on_invalid_plan = params.get("tool_plan_fallback_to_loop_on_invalid_plan", True)
+    rewoo_lane_frames_enabled = params.get("rewoo_lane_frames_enabled", False)
+    rewoo_planner_frame_enabled = params.get("rewoo_planner_frame_enabled", False)
+    rewoo_solver_frame_enabled = params.get("rewoo_solver_frame_enabled", False)
+    rewoo_refiner_frame_enabled = params.get("rewoo_refiner_frame_enabled", False)
+    rewoo_frame_token_budget = params.get("rewoo_frame_token_budget", 1200)
 
     normalized_phase = normalize_phase(phase)
     self._initial_phase = normalized_phase
@@ -261,12 +267,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
         tool_plan_readonly_only=bool(tool_plan_readonly_only),
         tool_plan_max_steps=int(tool_plan_max_steps),
         tool_plan_max_repair_attempts=int(tool_plan_max_repair_attempts),
+        schema_validation_max_repair_attempts=int(schema_validation_max_repair_attempts),
         tool_plan_observation_token_limit=int(tool_plan_observation_token_limit),
         tool_plan_max_observation_chars_per_step=int(tool_plan_max_observation_chars_per_step),
         tool_plan_solver_fresh_output_limit=int(tool_plan_solver_fresh_output_limit),
         tool_plan_allow_web=bool(tool_plan_allow_web),
         tool_plan_allow_artifact_read=bool(tool_plan_allow_artifact_read),
         tool_plan_fallback_to_loop_on_invalid_plan=bool(tool_plan_fallback_to_loop_on_invalid_plan),
+        rewoo_lane_frames_enabled=bool(rewoo_lane_frames_enabled),
+        rewoo_planner_frame_enabled=bool(rewoo_planner_frame_enabled),
+        rewoo_solver_frame_enabled=bool(rewoo_solver_frame_enabled),
+        rewoo_refiner_frame_enabled=bool(rewoo_refiner_frame_enabled),
+        rewoo_frame_token_budget=int(rewoo_frame_token_budget),
         fama_enabled=bool(fama_enabled),
         fama_mode=str(fama_mode or "lite"),
         fama_default_ttl_steps=int(fama_default_ttl_steps),
@@ -357,14 +369,14 @@ def initialize_harness(self: Any, **params: Any) -> None:
     self.discovered_server_context_limit = known_server_context_limit
     self.server_context_limit = known_server_context_limit
 
-    if self.configured_max_prompt_tokens is not None:
+    effective_max_prompt_tokens = self._resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=self.configured_max_prompt_tokens,
+        configured_max_prompt_tokens_explicit=self.configured_max_prompt_tokens_explicit,
+        server_context_limit=known_server_context_limit,
+        provider_profile=self.provider_profile,
+    )
+    if effective_max_prompt_tokens is None and self.configured_max_prompt_tokens is not None:
         effective_max_prompt_tokens = max(64, int(self.configured_max_prompt_tokens))
-    else:
-        effective_max_prompt_tokens = self._resolve_effective_prompt_budget(
-            configured_max_prompt_tokens=self.configured_max_prompt_tokens,
-            configured_max_prompt_tokens_explicit=self.configured_max_prompt_tokens_explicit,
-            server_context_limit=known_server_context_limit,
-        )
 
     configured_prompt_budget = self.configured_max_prompt_tokens
     if configured_prompt_budget is None and policy is not None:

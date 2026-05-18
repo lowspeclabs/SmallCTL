@@ -19,10 +19,15 @@ _YES_PIPE_PATTERN = re.compile(
     r"(?:^|[;&(]\s*)yes(?:\s+[^|;&]+)?\s*\|\s*(?P<target>[^;&|]+)",
     re.IGNORECASE | re.DOTALL,
 )
+_SINGLE_ANSWER_PIPE_PATTERN = re.compile(
+    r"(?:^|[;&(]\s*)echo\s+(?P<answer>(?:-[A-Za-z]+\s+)?(?:['\"]?\s*[YyNn](?:[Ee][Ss]|[Oo])?\s*['\"]?))\s*\|\s*(?P<target>[^;&|]+)",
+    re.IGNORECASE | re.DOTALL,
+)
 _INVALID_INPUT_MARKERS = (
     "invalid input, please try again",
     "answer not recognized",
 )
+_REMOTE_INSTALLER_PREFLIGHT_KEY = "_remote_installer_preflight"
 
 
 def _interactive_installer_yes_pipe_guard(
@@ -57,7 +62,152 @@ def _interactive_installer_yes_pipe_guard(
                 },
             },
         )
+    for match in _SINGLE_ANSWER_PIPE_PATTERN.finditer(raw):
+        target = " ".join(str(match.group("target") or "").split())
+        target_lower = target.lower()
+        if not _looks_like_interactive_installer_target(target_lower):
+            continue
+        return fail(
+            f"`{tool_name}` blocked single-answer `echo |` automation for an interactive installer: `{raw}`. "
+            "A lone Y/N answer is brittle for multi-prompt installers. Use the installer's non-interactive mode "
+            "when available, such as `--autoaccept` or `-y`; otherwise use a config/preseed file or an explicit "
+            "`printf` script with the complete known answer stream.",
+            metadata={
+                "command": raw,
+                "reason": "unsafe_single_answer_pipe_interactive_installer",
+                "detected_target": target,
+                "detected_answer": " ".join(str(match.group("answer") or "").split()),
+                "next_required_action": {
+                    "strategy": "use_structured_noninteractive_install",
+                    "preferred_inputs": [
+                        "--autoaccept or -y if the installer documents it",
+                        "a preseed/config file such as .fogsettings",
+                        "an explicit printf script with the complete known prompt answers",
+                    ],
+                },
+            },
+        )
     return None
+
+
+def _installer_command_suggested_timeout(command: str, timeout_sec: int) -> int:
+    raw = str(command or "")
+    try:
+        current_timeout = int(timeout_sec)
+    except (TypeError, ValueError):
+        current_timeout = 60
+    words = _split_shell_words(raw.lower())
+    if any(_looks_like_interactive_installer_word(word) for word in words) and current_timeout <= 60:
+        return 600
+    return max(1, current_timeout)
+
+
+def _remote_installer_preflight_guard(
+    command: str,
+    *,
+    host: str,
+    user: str | None,
+    state: LoopState | None,
+) -> dict[str, Any] | None:
+    raw = str(command or "").strip()
+    if state is None or not raw or not _looks_like_remote_installer_mutation(raw):
+        return None
+    cwd, script_path = _remote_installer_cwd_and_script(raw)
+    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd, script_path])
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
+    if not isinstance(preflights, dict):
+        preflights = {}
+        scratchpad[_REMOTE_INSTALLER_PREFLIGHT_KEY] = preflights
+    entry = preflights.get(key)
+    if isinstance(entry, dict):
+        status = str(entry.get("status") or "").strip()
+        created = int(entry.get("created_at_step", 0) or 0)
+        if status == "clean" and int(getattr(state, "step_count", 0) or 0) - created <= 8:
+            return None
+        if status in {"missing_critical_files", "corrupt"}:
+            return fail(
+                "Remote installer preflight found missing or corrupted critical installer files. "
+                "Repair the environment with a fresh clone or clean reset before running the installer.",
+                metadata={
+                    "reason": "remote_installer_preflight_failed",
+                    "host": host,
+                    "user": user,
+                    "command": raw,
+                    "cwd": cwd,
+                    "script_path": script_path,
+                    "preflight": entry,
+                    "next_required_action": "fresh clone or clean reset; do not patch individual installer files",
+                },
+            )
+    checks = _remote_installer_preflight_checks(cwd=cwd, script_path=script_path)
+    preflights[key] = {
+        "host": host,
+        "user": user or "",
+        "cwd": cwd,
+        "script_path": script_path,
+        "checks": checks,
+        "created_at_step": int(getattr(state, "step_count", 0) or 0),
+        "status": "required",
+    }
+    return fail(
+        "Remote installer preflight required before running this high-risk installer mutation. "
+        "Run narrow repo/integrity checks first, then retry the installer after the preflight is clean.",
+        metadata={
+            "reason": "remote_installer_preflight_required",
+            "host": host,
+            "user": user,
+            "command": raw,
+            "cwd": cwd,
+            "script_path": script_path,
+            "required_checks": checks,
+            "next_required_action": " && ".join(checks),
+        },
+    )
+
+
+def _looks_like_remote_installer_mutation(command: str) -> bool:
+    lowered = str(command or "").lower()
+    if "installfog.sh" in lowered:
+        return True
+    if re.search(r"\bmake\s+install\b", lowered):
+        return True
+    if re.search(r"\b(?:bash|sh|\./)[^\s;&|]*(?:install|bootstrap)[^\s;&|]*\.sh\b", lowered):
+        return True
+    return False
+
+
+def _remote_installer_cwd_and_script(command: str) -> tuple[str, str]:
+    raw = str(command or "").strip()
+    cwd = ""
+    cd_match = re.search(r"(?:^|[;&]\s*)cd\s+([^;&|]+?)\s*&&", raw)
+    if cd_match:
+        cwd = str(cd_match.group(1) or "").strip().strip("'\"")
+    script = ""
+    script_match = re.search(r"(?:^|\s)(?:bash|sh)?\s*(\.?/[\w./-]*installfog\.sh|[\w./-]*installfog\.sh)\b", raw)
+    if script_match:
+        script = str(script_match.group(1) or "").strip()
+    elif "make install" in raw:
+        script = "make install"
+    if script.startswith("./") and cwd:
+        script = cwd.rstrip("/") + "/" + script[2:]
+    elif script and not script.startswith("/") and cwd and script != "make install":
+        script = cwd.rstrip("/") + "/" + script
+    return cwd, script
+
+
+def _remote_installer_preflight_checks(*, cwd: str, script_path: str) -> list[str]:
+    prefix = f"cd {shlex.quote(cwd)} && " if cwd else ""
+    checks = ["pwd"]
+    if cwd:
+        checks.append(f"cd {shlex.quote(cwd)} && git rev-parse --show-toplevel")
+        checks.append(f"cd {shlex.quote(cwd)} && git status --short")
+    script = script_path or "./bin/installfog.sh"
+    if script != "make install":
+        checks.append(f"test -x {shlex.quote(script)}")
+    elif cwd:
+        checks.append(prefix + "test -f Makefile")
+    return checks
 
 
 def _looks_like_interactive_installer_target(target_lower: str) -> bool:

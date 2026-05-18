@@ -92,6 +92,37 @@ def test_fama_done_gate_dispatch_blocks_hidden_task_complete() -> None:
     assert blocked.metadata["active_mitigation"] == "done_gate"
 
 
+def test_fama_done_gate_block_metadata_includes_fingerprints() -> None:
+    state = LoopState()
+    state.last_verifier_verdict = {"verdict": "fail", "command": "pytest tests/test_other.py"}
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier verdict fail: pytest tests/test_target.py",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            )
+        ],
+        max_active=2,
+    )
+
+    blocked = enforce_fama_tool_call(
+        "task_complete",
+        {"message": "done"},
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    assert blocked is not None
+    assert blocked.metadata["required_fingerprints"] == ["pytest tests/test_target.py"]
+    assert blocked.metadata["actual_fingerprint"] == "pytest tests/test_other.py"
+    assert blocked.metadata["fingerprint_match"] is False
+
+
 def test_fama_done_gate_does_not_block_task_fail() -> None:
     state = LoopState()
     _activate_done_gate(state)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from smallctl.context import ContextPolicy, PromptAssembler, build_retrieval_query
 from smallctl.context.frame import PromptStateFrame
-from smallctl.context.retrieval import RetrievalBundle
+from smallctl.context.retrieval import LexicalRetriever, RetrievalBundle
 from smallctl.evidence import normalize_tool_result
 from smallctl.fama.signals import ActiveMitigation
 from smallctl.fama.state import activate_mitigations
@@ -87,6 +87,68 @@ def test_prompt_assembler_builds_prompt_state_frame_and_spine_fields() -> None:
     assert "Frame compiles before rendering" in assembly.frame.spine.unmet_acceptance_criteria
     assert "Run brief:" in assembly.messages[0]["content"]
     assert "Working memory:" in assembly.messages[0]["content"]
+
+
+def test_prompt_assembler_renders_active_artifact_read_ledger() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Summarize cron jobs"
+    state.artifacts["A0027"] = ArtifactRecord(
+        artifact_id="A0027",
+        kind="ssh_file_read",
+        source="/etc/crontab",
+        created_at="2026-05-12T19:24:00+00:00",
+        size_bytes=400,
+        summary="Remote crontab content",
+        tool_name="ssh_file_read",
+    )
+    state.scratchpad["_artifact_read_coverage"] = {
+        "A0027": {
+            "ranges": [{"start_line": 1, "end_line": 22}],
+            "total_lines": 22,
+            "complete": True,
+            "last_read_step": 7,
+            "preview": "SHELL=/bin/sh\n24 * * * * root run-parts --report /etc/cron.hourly",
+        }
+    }
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=4096, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+    content = "\n\n".join(str(message.get("content") or "") for message in assembly.messages)
+
+    assert "Active artifact reads" in content
+    assert "[ARTIFACT A0027 | source: /etc/crontab | lines 1-22 of 22 | COMPLETE" in content
+    assert "SHELL=/bin/sh" in content
+    assert assembly.section_tokens["active_artifact_reads"] > 0
+
+
+def test_lexical_retriever_suppresses_fully_read_artifact_snippet() -> None:
+    state = LoopState(cwd="/tmp")
+    state.artifacts["A0027"] = ArtifactRecord(
+        artifact_id="A0027",
+        kind="ssh_file_read",
+        source="/etc/crontab",
+        created_at="2026-05-12T19:24:00+00:00",
+        size_bytes=400,
+        summary="cron jobs crontab schedule",
+        keywords=["cron", "crontab"],
+        tool_name="ssh_file_read",
+    )
+    state.scratchpad["_artifact_read_coverage"] = {
+        "A0027": {
+            "ranges": [{"start_line": 1, "end_line": 22}],
+            "total_lines": 22,
+            "complete": True,
+        }
+    }
+
+    snippets = LexicalRetriever().retrieve_artifacts(
+        state=state,
+        query="cron jobs crontab schedule",
+    )
+
+    assert snippets == []
 
 
 def test_prompt_assembler_renders_fama_capsules_in_working_memory() -> None:
@@ -547,6 +609,28 @@ class _Retriever:
                 "experience_packet": ["mem-lane"],
                 "evidence_packet": [],
             },
+            ranked_candidates={
+                "artifacts": [
+                    {
+                        "artifact_id": "A-lane",
+                        "score": 8.0,
+                        "category": "other",
+                        "source": "tool",
+                        "tool_name": "artifact_read",
+                    }
+                ],
+                "summaries": [],
+                "experiences": [
+                    {
+                        "memory_id": "mem-lane",
+                        "score": 4.0,
+                        "intent": "requested_shell_exec",
+                        "tool_name": "shell_exec",
+                        "outcome": "success",
+                    }
+                ],
+            },
+            miss_reasons={"summaries": ["no_candidates_after_filtering"]},
         )
 
 
@@ -618,6 +702,8 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     assert "context_lane_dropped" in events
     assert "retrieval_ranked_with_intent" in events
     assert retrieval_entry["data"]["lane_routes"]["artifact_packet"] == ["A-lane"]
+    assert retrieval_entry["data"]["ranked_candidates"]["artifacts"][0]["artifact_id"] == "A-lane"
+    assert retrieval_entry["data"]["miss_reasons"]["summaries"] == ["no_candidates_after_filtering"]
     assert retrieval_entry["data"]["selected_artifact_ids"] == ["A-lane"]
     assert retrieval_entry["data"]["selected_experience_ids"] == ["mem-lane"]
     assert "stale_lane_counts" in retrieval_entry["data"]
@@ -694,6 +780,40 @@ def test_prompt_state_frame_surfaces_pending_remote_mutation_verifier() -> None:
     assert "ssh_exec(host='192.168.1.89', user='root', command='find /var/www -mindepth 1 -maxdepth 1 -print -quit')" in assembly.frame.spine.next_allowed_action
     assert "Remote mutation verification is pending before completion." in assembly.frame.spine.current_blockers
     assert "Remote mutation verification pending:" in assembly.messages[0]["content"]
+
+
+def test_recovery_guidance_renders_fresh_schema_hint_and_expires() -> None:
+    state = LoopState(cwd="/tmp", step_count=10)
+    state.scratchpad["_last_schema_validation_hint"] = {
+        "tool_name": "artifact_read",
+        "required_fields": ["artifact_id"],
+        "schema_excerpt": "Compact schema for `artifact_read`: Required fields: artifact_id",
+        "created_at_step": 10,
+    }
+
+    lines = PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).frame_compiler.render_recovery_guidance(state)
+
+    assert any("artifact_read" in line and "artifact_id" in line for line in lines)
+
+    state.step_count = 17
+    assert PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).frame_compiler.render_recovery_guidance(state) == []
+
+
+def test_recovery_guidance_renders_read_loop_payload() -> None:
+    state = LoopState(cwd="/tmp", step_count=4)
+    state.scratchpad["_read_loop_recovery_payload"] = {
+        "tool_name": "artifact_read",
+        "target": "A1",
+        "created_at_step": 4,
+        "last_evidence_summary": "Recent artifact_read calls already targeted A1.",
+        "allowed_next_action": "Do not call artifact_read with the same target again.",
+    }
+
+    lines = PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).frame_compiler.render_recovery_guidance(state)
+
+    joined = "\n".join(lines)
+    assert "Read-loop recovery for artifact_read target=A1" in joined
+    assert "Recent artifact_read calls already targeted A1" in joined
 
 
 def test_remote_repair_phase_does_not_reduce_recent_window_without_prompt_pressure() -> None:

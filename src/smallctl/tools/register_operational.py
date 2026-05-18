@@ -21,9 +21,10 @@ def register_operational_tools(
             make_registration(
                 name="ssh_exec",
                 description=(
-                    "Execute a command on a remote host via SSH with live streaming support. "
+                    "Execute a REMOTE command on a remote host via SSH with live streaming support. "
                     "Prefer `target='user@host'` when a username is known, for example "
-                    "`target='root@192.168.1.63'`, rather than splitting identity across separate fields."
+                    "`target='root@192.168.1.63'`, rather than splitting identity across separate fields. "
+                    "Exit code 1 from diagnostic probes (systemctl status, dpkg -l, apt list, which, etc.) that report 'not found' is valid negative intelligence, not an error."
                 ),
                 schema={
                     "type": "object",
@@ -37,6 +38,10 @@ def register_operational_tools(
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
                         "timeout_sec": {"type": "integer", "default": 60},
+                        "stdin_data": {
+                            "type": "string",
+                            "description": "Optional data to write to the remote command's stdin, for commands that read a finite answer stream.",
+                        },
                     },
                     "required": ["command"],
                     "additionalProperties": False,
@@ -50,8 +55,9 @@ def register_operational_tools(
             make_registration(
                 name="ssh_file_read",
                 description=(
-                    "Read a remote file over SSH with structured output. Prefer this over `ssh_exec` with cat/head/sed "
-                    "for remote file inspection."
+                    "Read a REMOTE file over SSH with structured output. Prefer this over `ssh_exec` with cat/head/sed "
+                    "for remote file inspection. "
+                    "This tool operates on the REMOTE host filesystem ONLY. After writing a file remotely with `ssh_file_write`, verify it with `ssh_file_read`, never with `file_read`."
                 ),
                 schema={
                     "type": "object",
@@ -81,8 +87,9 @@ def register_operational_tools(
             make_registration(
                 name="ssh_file_write",
                 description=(
-                    "Write or overwrite a remote file over SSH with atomic replace and readback hash verification. "
-                    "Prefer this over `ssh_exec` with here-docs, tee, or shell redirection for remote file writes."
+                    "Write or overwrite a REMOTE file over SSH with atomic replace and readback hash verification. "
+                    "Prefer this over `ssh_exec` with here-docs, tee, or shell redirection for remote file writes. "
+                    "This tool operates on the REMOTE host filesystem ONLY. After writing, verify the file with `ssh_file_read`, never with `file_read`."
                 ),
                 schema={
                     "type": "object",
@@ -116,8 +123,9 @@ def register_operational_tools(
             make_registration(
                 name="ssh_file_patch",
                 description=(
-                    "Patch a remote file over SSH by replacing exact target text with replacement text. "
-                    "Prefer this over `ssh_exec` with sed/perl for precise remote edits."
+                    "Patch a REMOTE file over SSH by replacing exact target text with replacement text. "
+                    "Prefer this over `ssh_exec` with sed/perl for precise remote edits. "
+                    "This tool operates on the REMOTE host filesystem ONLY."
                 ),
                 schema={
                     "type": "object",
@@ -153,8 +161,9 @@ def register_operational_tools(
             make_registration(
                 name="ssh_file_replace_between",
                 description=(
-                    "Replace a bounded remote file block over SSH using exact start_text and end_text. "
-                    "Use this for multiline blocks such as `<style>...</style>` instead of shell regex."
+                    "Replace a bounded REMOTE file block over SSH using exact start_text and end_text. "
+                    "Use this for multiline blocks such as `<style>...</style>` instead of shell regex. "
+                    "This tool operates on the REMOTE host filesystem ONLY."
                 ),
                 schema={
                     "type": "object",

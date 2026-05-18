@@ -14,6 +14,8 @@ from .task_classifier import (
     runtime_policy_for_intent,
 )
 from .run_mode import (
+    ensure_remote_tool_profile,
+    has_active_remote_handoff,
     is_contextual_affirmative_execution_continuation,
     resolve_mode_task,
     should_enable_complex_write_chat_draft,
@@ -192,6 +194,9 @@ def chat_mode_requires_tools(harness: Any, task: str) -> bool:
     if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
         return False
     _refresh_task_mode(harness, task)
+    if has_active_remote_handoff(harness):
+        ensure_remote_tool_profile(harness)
+        return True
     runtime_intent = classify_runtime_intent(
         task,
         recent_messages=getattr(harness.state, "recent_messages", []),
@@ -225,7 +230,11 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
         task = harness._current_user_task()
         runtime_intent_label, task_mode = _refresh_runtime_intent(harness, task)
         selection_phase = "requires_tools"
-        if runtime_intent_label == "smalltalk":
+        if has_active_remote_handoff(harness):
+            ensure_remote_tool_profile(harness)
+            runtime_intent_label = "remote_handoff"
+            task_mode = "remote_execute"
+        elif runtime_intent_label == "smalltalk":
             terminal_tools = _chat_terminal_tools(harness)
             _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
             _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_terminal_only"
@@ -362,6 +371,9 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
             "FAMA blocked tool call",
             tool_name=tool_name,
             active_mitigation=blocked.metadata.get("active_mitigation"),
+            required_fingerprints=blocked.metadata.get("required_fingerprints", []),
+            actual_fingerprint=blocked.metadata.get("actual_fingerprint", ""),
+            fingerprint_match=blocked.metadata.get("fingerprint_match"),
             mode=getattr(harness.state, "run_mode", "loop"),
         )
         return blocked

@@ -4,11 +4,31 @@ import json
 import logging
 from typing import Any
 
+from ..context.rendering import render_shell_failure, render_shell_output
 from ..models.conversation import ConversationMessage
 from ..models.tool_result import ToolEnvelope
 from .tool_result_support import is_small_model as _is_small_model
 
 logger = logging.getLogger("smallctl.harness.tool_results")
+
+
+def _compact_shell_without_artifact(result: ToolEnvelope, *, preview_chars: int) -> str:
+    output = result.output if isinstance(result.output, dict) else {}
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if not output:
+        metadata_output = metadata.get("output")
+        if isinstance(metadata_output, dict):
+            output = metadata_output
+    if isinstance(output, dict):
+        if result.success:
+            return render_shell_output(output, preview_limit=preview_chars, strip_whitespace=False)
+        return render_shell_failure(
+            error=result.error,
+            output=output,
+            preview_limit=preview_chars,
+            strip_whitespace=False,
+        )
+    return str(result.error or result.output or "").strip() or ("ok" if result.success else "Tool failed.")
 
 
 async def build_tool_result_message(
@@ -34,6 +54,8 @@ async def build_tool_result_message(
                 inline_full_file=not compact_full_file,
                 full_file_preview_chars=preview_chars if compact_full_file else None,
             )
+        elif tool_name in {"shell_exec", "ssh_exec"}:
+            compact_content = _compact_shell_without_artifact(result, preview_chars=preview_chars)
         else:
             compact_content = str(result.error or result.output or "Tool failed.")
     elif tool_name == "artifact_read" and isinstance(result.output, str):
@@ -48,7 +70,11 @@ async def build_tool_result_message(
                 full_file_preview_chars=preview_chars if compact_full_file else None,
             )
             if artifact
-            else str(result.output)
+            else (
+                _compact_shell_without_artifact(result, preview_chars=preview_chars)
+                if tool_name in {"shell_exec", "ssh_exec"}
+                else str(result.output)
+            )
         )
 
     if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
@@ -56,15 +82,22 @@ async def build_tool_result_message(
         if playbook_artifact_id:
             compact_content = f"Plan playbook captured as Artifact {playbook_artifact_id}.\n\n{compact_content}"
 
-    service.harness._runlog(
-        "artifact_created",
-        "tool result processed",
-        artifact_id=artifact.artifact_id if artifact else None,
-        tool_name=tool_name,
-        source=artifact.source if artifact else tool_name,
-        size_bytes=artifact.size_bytes if artifact else 0,
-        inline=bool(artifact and artifact.inline_content is not None),
-    )
+    if artifact:
+        service.harness._runlog(
+            "artifact_created",
+            "tool result processed",
+            artifact_id=artifact.artifact_id,
+            tool_name=tool_name,
+            source=artifact.source,
+            size_bytes=artifact.size_bytes,
+            inline=bool(artifact.inline_content is not None),
+        )
+    else:
+        service.harness._runlog(
+            "tool_result_inlined",
+            "tool result kept inline without artifact",
+            tool_name=tool_name,
+        )
 
     msg_metadata: dict[str, Any] = {"artifact_id": artifact.artifact_id} if artifact else {}
     if tool_name == "artifact_read" and result.success and isinstance(result.metadata, dict):

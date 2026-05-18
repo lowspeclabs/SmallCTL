@@ -52,6 +52,18 @@ class TimelineEntry:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+def _stream_chunk_data(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return provider chunk data from either harness-wrapped or raw chunks."""
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "chunk":
+        data = item.get("data", {})
+        return data if isinstance(data, dict) else None
+    if isinstance(item.get("choices"), list):
+        return item
+    return None
+
+
 def collect_stream(
     chunks: list[dict[str, Any]],
     *,
@@ -66,10 +78,8 @@ def collect_stream(
     usage: dict[str, Any] = {}
 
     for item in chunks:
-        if not isinstance(item, dict) or item.get("type") != "chunk":
-            continue
-        data = item.get("data", {})
-        if not isinstance(data, dict):
+        data = _stream_chunk_data(item)
+        if data is None:
             continue
         next_usage = data.get("usage")
         if isinstance(next_usage, dict):
@@ -174,10 +184,8 @@ class _TimelineCollector:
         self._auto_used_tag_thinking = False
 
     def feed(self, item: dict[str, Any]) -> None:
-        if not isinstance(item, dict) or item.get("type") != "chunk":
-            return
-        data = item.get("data", {})
-        if not isinstance(data, dict):
+        data = _stream_chunk_data(item)
+        if data is None:
             return
         choices = data.get("choices") or []
         if not choices:

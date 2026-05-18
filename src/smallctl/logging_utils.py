@@ -84,6 +84,19 @@ class RunLogger:
                 self.run_dir = candidate
             return self.run_dir
 
+    def set_extra_field(self, key: str, value: Any) -> None:
+        normalized = str(key or "").strip()
+        if not normalized:
+            return
+        with self._lock:
+            if value in (None, ""):
+                self.extra_fields.pop(normalized, None)
+            else:
+                self.extra_fields[normalized] = value
+
+    def set_trace_id(self, trace_id: str) -> None:
+        self.set_extra_field("trace_id", str(trace_id or "").strip())
+
     @staticmethod
     def _token_stream_fragment(
         event: str,

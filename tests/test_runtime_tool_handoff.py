@@ -280,6 +280,67 @@ def test_loop_runtime_promotes_terminal_prose_task_complete_after_tool_evidence(
     )
 
 
+def test_loop_runtime_promotes_raw_task_complete_json_after_tool_evidence(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "visible.txt").write_text("hello\n", encoding="utf-8")
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled",
+        provider_profile="llamacpp",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    final_answer = (
+        "visible.txt exists.\n\n"
+        "```json\n"
+        "{\"task_complete\": \"Listed the directory and found visible.txt.\"}\n"
+        "```"
+    )
+    stream_sequences = [
+        _tool_call_stream(
+            tool_name="dir_list",
+            args={"path": str(tmp_path)},
+            tool_call_id="tool-list-before-raw-terminal-json",
+        ),
+        _assistant_text_stream(final_answer),
+    ]
+    observed_prompts: list[list[dict[str, object]]] = []
+
+    async def fake_stream_chat(*, messages, tools):
+        del tools
+        observed_prompts.append(messages)
+        if not stream_sequences:
+            raise AssertionError("unexpected extra model call")
+        for event in stream_sequences.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = LoopGraphRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("list files and summarize the findings"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["assistant"] == final_answer
+    assert stream_sequences == []
+    assert harness.state.scratchpad["_terminal_prose_task_complete_autopromoted"]["message_preview"] == (
+        "Listed the directory and found visible.txt."
+    )
+    assert not any(
+        message.get("metadata", {}).get("recovery_kind") == "missing_task_complete"
+        for prompt in observed_prompts
+        for message in prompt
+    )
+
+
 def test_loop_runtime_does_not_promote_plain_nonterminal_summary(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 

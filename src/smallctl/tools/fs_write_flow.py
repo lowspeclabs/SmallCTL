@@ -237,6 +237,14 @@ def handle_file_write_session(
             },
         )
 
+    if (
+        normalized_next_section
+        and strategy == "overwrite"
+        and not previous_sections
+        and _looks_like_full_script_content(content, normalized_section_name)
+    ):
+        normalized_next_section = ""
+
     final_chunk = not normalized_next_section and _write_session_can_finalize(session)
 
     append_overlap_ratio = 0.0

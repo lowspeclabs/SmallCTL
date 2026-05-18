@@ -382,6 +382,30 @@ def test_web_budget_exhaustion_returns_clean_tool_error(tmp_path) -> None:
     assert "budget exhausted" in result["error"].lower()
 
 
+def test_web_fetch_budget_exhaustion_marks_terminal_fetch_budget(tmp_path) -> None:
+    harness = _make_harness(tmp_path)
+    harness.state.scratchpad["_web_result_index"] = {
+        "r1": {"url": "https://example.com/article", "canonical_result_id": "webres-test-1", "fetch_id": "r1"}
+    }
+    harness.state.scratchpad["_web_budget"] = {
+        "searches_used": 0,
+        "fetches_used": 4,
+        "total_fetched_chars": 0,
+    }
+
+    result = asyncio.run(
+        web_fetch(
+            harness=harness,
+            state=harness.state,
+            result_id="r1",
+        )
+    )
+
+    assert result["success"] is False
+    assert "budget exhausted" in result["error"].lower()
+    assert harness.state.scratchpad["_web_fetch_budget_exhausted"]["terminal"] is True
+
+
 def test_web_fetch_artifact_pages_full_body_and_keeps_preview_metadata(monkeypatch, tmp_path) -> None:
     harness = _make_harness(tmp_path)
     runtime = FakeRuntime(

@@ -9,7 +9,7 @@ from smallctl.search_server.citations import now_iso
 from smallctl.search_server.config import SearchServerConfig
 from smallctl.search_server.fetch import FetchedDocument
 from smallctl.search_server.models import CitationSource, WebFetchRequest, WebFetchResponse, WebSearchRequest, WebSearchResult
-from smallctl.search_server.providers import SearxNGProvider, _parse_duckduckgo_html, normalize_search_results
+from smallctl.search_server.providers import SearxNGProvider, _normalize_items, _parse_duckduckgo_html, normalize_search_results
 
 
 def _make_service(tmp_path, **config_overrides) -> SearchServerService:
@@ -220,3 +220,30 @@ def test_parse_duckduckgo_html_unwraps_redirect_urls() -> None:
     assert results[0].url == "https://example.com/forecast?day=1"
     assert results[0].canonical_url == "https://example.com/forecast?day=1"
     assert results[0].domain == "example.com"
+
+
+def test_normalize_items_prefers_searxng_content_key() -> None:
+    items = [
+        {
+            "url": "https://example.com/page",
+            "title": "Example",
+            "content": "SearXNG snippet",
+        }
+    ]
+    results = _normalize_items(items, provider="searxng", request=WebSearchRequest(query="test", limit=5))
+    assert len(results) == 1
+    assert results[0].snippet == "SearXNG snippet"
+
+
+def test_normalize_items_fallback_chain_for_snippets() -> None:
+    items = [
+        {"url": "https://a.com", "title": "A", "description": "desc"},
+        {"url": "https://b.com", "title": "B", "snippet": "snip"},
+        {"url": "https://c.com", "title": "C", "body": "body text"},
+        {"url": "https://d.com", "title": "D"},
+    ]
+    results = _normalize_items(items, provider="stub", request=WebSearchRequest(query="test", limit=5))
+    assert results[0].snippet == "desc"
+    assert results[1].snippet == "snip"
+    assert results[2].snippet == "body text"
+    assert results[3].snippet == ""

@@ -28,6 +28,41 @@ class FetchedDocument:
     warnings: list[str]
 
 
+def _smart_excerpt(text: str, max_len: int) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    boilerplate = {
+        "advertisement",
+        "cookie policy",
+        "accept cookies",
+        "sign in",
+        "log in",
+        "subscribe",
+        "skip to content",
+        "click for",
+        "chevron",
+        "mapbox",
+        "openstreetmap",
+        "improve this map",
+        "search for a location",
+    }
+    filtered: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if any(kw in lowered for kw in boilerplate):
+            continue
+        filtered.append(stripped)
+    # If filtering stripped out too much, fall back to the original prefix
+    if len("".join(filtered)) < 50:
+        return text[:max_len].rstrip()
+    result = "\n".join(filtered)
+    return result[:max_len].rstrip()
+
+
 async def fetch_document(
     request: WebFetchRequest,
     *,
@@ -85,7 +120,10 @@ async def fetch_document(
         content_type=content_type,
     )
     full_text = extracted.full_text[: config.max_fetch_chars]
-    excerpt = full_text[: max(1, min(request.max_chars, config.max_fetch_chars))]
+    excerpt = _smart_excerpt(
+        full_text,
+        max_len=max(1, min(request.max_chars, config.max_fetch_chars)),
+    )
     truncated = len(full_text) > len(excerpt)
     content_hash = content_sha256(full_text)
     canonical_url = canonicalize_url(str(response.url))

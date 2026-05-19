@@ -35,7 +35,10 @@ class _BasicTextExtractor(HTMLParser):
         self._skip_depth = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
-        if self.ignore_boilerplate and tag in {"script", "style", "nav", "header", "footer", "aside"}:
+        if tag in {"script", "style", "noscript", "iframe"}:
+            self._skip_depth += 1
+            return
+        if self.ignore_boilerplate and tag in {"nav", "header", "footer", "aside"}:
             self._skip_depth += 1
             return
         if self._skip_depth:
@@ -48,8 +51,12 @@ class _BasicTextExtractor(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
         if self._skip_depth:
-            if self.ignore_boilerplate and tag in {"script", "style", "nav", "header", "footer", "aside"}:
+            if tag in {"script", "style", "noscript", "iframe"}:
                 self._skip_depth = max(0, self._skip_depth - 1)
+                return
+            if self.ignore_boilerplate and tag in {"nav", "header", "footer", "aside"}:
+                self._skip_depth = max(0, self._skip_depth - 1)
+                return
             return
         if tag == "title":
             self._capture_title = False

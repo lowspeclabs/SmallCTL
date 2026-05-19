@@ -133,11 +133,27 @@ def _env_config() -> dict[str, Any]:
         "tool_plan_allow_web": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_ALLOW_WEB"),
         "tool_plan_allow_artifact_read": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_ALLOW_ARTIFACT_READ"),
         "tool_plan_fallback_to_loop_on_invalid_plan": env_or_dotenv(f"{ENV_PREFIX}TOOL_PLAN_FALLBACK_TO_LOOP_ON_INVALID_PLAN"),
+        "tool_dag_enabled": env_or_dotenv(f"{ENV_PREFIX}TOOL_DAG_ENABLED"),
+        "tool_dag_max_parallel": env_or_dotenv(f"{ENV_PREFIX}TOOL_DAG_MAX_PARALLEL"),
+        "tool_dag_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}TOOL_DAG_TIMEOUT_SEC"),
+        "tool_dag_preserve_result_order": env_or_dotenv(f"{ENV_PREFIX}TOOL_DAG_PRESERVE_RESULT_ORDER"),
         "rewoo_lane_frames_enabled": env_or_dotenv(f"{ENV_PREFIX}REWOO_LANE_FRAMES_ENABLED"),
         "rewoo_planner_frame_enabled": env_or_dotenv(f"{ENV_PREFIX}REWOO_PLANNER_FRAME_ENABLED"),
         "rewoo_solver_frame_enabled": env_or_dotenv(f"{ENV_PREFIX}REWOO_SOLVER_FRAME_ENABLED"),
         "rewoo_refiner_frame_enabled": env_or_dotenv(f"{ENV_PREFIX}REWOO_REFINER_FRAME_ENABLED"),
         "rewoo_frame_token_budget": env_or_dotenv(f"{ENV_PREFIX}REWOO_FRAME_TOKEN_BUDGET"),
+        "test_time_scaling_enabled": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_ENABLED"),
+        "test_time_scaling_runtimes": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_RUNTIMES"),
+        "test_time_scaling_trigger": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_TRIGGER"),
+        "test_time_scaling_max_candidates": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_MAX_CANDIDATES"),
+        "test_time_scaling_min_candidates": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_MIN_CANDIDATES"),
+        "test_time_scaling_policy": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_POLICY"),
+        "test_time_scaling_strategy": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_STRATEGY"),
+        "test_time_scaling_score_threshold": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_SCORE_THRESHOLD"),
+        "test_time_scaling_parallel_max": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_PARALLEL_MAX"),
+        "test_time_scaling_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_TIMEOUT_SEC"),
+        "test_time_scaling_mutating_parallel_enabled": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_MUTATING_PARALLEL_ENABLED"),
+        "test_time_scaling_all_fail_action": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_ALL_FAIL_ACTION"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -266,15 +282,25 @@ def _env_config() -> dict[str, Any]:
         "tool_plan_allow_web",
         "tool_plan_allow_artifact_read",
         "tool_plan_fallback_to_loop_on_invalid_plan",
+        "tool_dag_enabled",
+        "tool_dag_preserve_result_order",
         "rewoo_lane_frames_enabled",
         "rewoo_planner_frame_enabled",
         "rewoo_solver_frame_enabled",
         "rewoo_refiner_frame_enabled",
+        "test_time_scaling_enabled",
+        "test_time_scaling_mutating_parallel_enabled",
     ):
         if key in cfg:
             cfg[key] = _to_bool(cfg[key])
     if "chunk_mode_supported_models" in cfg:
         cfg["chunk_mode_supported_models"] = [s.strip() for s in str(cfg["chunk_mode_supported_models"]).split(",") if s.strip()]
+    if "test_time_scaling_runtimes" in cfg and isinstance(cfg["test_time_scaling_runtimes"], str):
+        cfg["test_time_scaling_runtimes"] = [
+            s.strip()
+            for s in cfg["test_time_scaling_runtimes"].split(",")
+            if s.strip()
+        ]
     if "graph_checkpointer" in cfg:
         cfg["graph_checkpointer"] = _normalize_graph_checkpointer(cfg["graph_checkpointer"])
     if "graph_checkpoint_path" in cfg and "graph_checkpointer" not in cfg:
@@ -333,7 +359,13 @@ def _env_config() -> dict[str, Any]:
         "tool_plan_observation_token_limit",
         "tool_plan_max_observation_chars_per_step",
         "tool_plan_solver_fresh_output_limit",
+        "tool_dag_max_parallel",
+        "tool_dag_timeout_sec",
         "rewoo_frame_token_budget",
+        "test_time_scaling_max_candidates",
+        "test_time_scaling_min_candidates",
+        "test_time_scaling_parallel_max",
+        "test_time_scaling_timeout_sec",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])
@@ -341,6 +373,12 @@ def _env_config() -> dict[str, Any]:
                 cfg.pop(key, None)
             else:
                 cfg[key] = parsed_limit
+    if "test_time_scaling_score_threshold" in cfg:
+        parsed_ratio = _to_float(cfg["test_time_scaling_score_threshold"])
+        if parsed_ratio is None:
+            cfg.pop("test_time_scaling_score_threshold", None)
+        else:
+            cfg["test_time_scaling_score_threshold"] = parsed_ratio
     if "summarize_at_ratio" in cfg:
         parsed_ratio = _to_float(cfg["summarize_at_ratio"])
         if parsed_ratio is None:

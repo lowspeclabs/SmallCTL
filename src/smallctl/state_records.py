@@ -231,6 +231,7 @@ def _coerce_plan_step(value: Any) -> Any | None:
     payload["evidence_refs"] = _coerce_string_list(payload.get("evidence_refs"))
     payload["claim_refs"] = _coerce_string_list(payload.get("claim_refs"))
     payload["task"] = str(payload.get("task", "") or "")
+    payload["difficulty"] = str(payload.get("difficulty", "") or "").strip().lower()
     payload["tool_allowlist"] = _coerce_string_list(payload.get("tool_allowlist"))
     payload["prompt_token_budget"] = max(0, _coerce_int(payload.get("prompt_token_budget"), default=0))
     payload["acceptance"] = _coerce_string_list(payload.get("acceptance"))

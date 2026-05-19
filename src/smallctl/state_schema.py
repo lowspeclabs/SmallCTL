@@ -86,6 +86,7 @@ class PlanStep:
     evidence_refs: list[str] = field(default_factory=list)
     claim_refs: list[str] = field(default_factory=list)
     task: str = ""
+    difficulty: str = ""
     tool_allowlist: list[str] = field(default_factory=list)
     prompt_token_budget: int = 0
     acceptance: list[str] = field(default_factory=list)

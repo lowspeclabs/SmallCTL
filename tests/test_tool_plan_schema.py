@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from smallctl.graph.tool_plan_schema import (
     MUTATING_TOOL_PLAN_BLOCKLIST,
+    PARALLELIZABLE_TOOL_PLAN_TOOLS,
     READONLY_TOOL_PLAN_TOOLS,
     TOOL_PLAN_ALIASES,
     ToolPlan,
@@ -18,6 +19,14 @@ def test_readonly_tool_plan_tools_contains_expected_primitives() -> None:
     assert "artifact_grep" in READONLY_TOOL_PLAN_TOOLS
     assert "web_search" in READONLY_TOOL_PLAN_TOOLS
     assert "web_fetch" in READONLY_TOOL_PLAN_TOOLS
+    assert "ssh_file_read" in READONLY_TOOL_PLAN_TOOLS
+
+
+def test_parallelizable_tool_plan_tools_is_positive_allowlist() -> None:
+    assert "ssh_file_read" in PARALLELIZABLE_TOOL_PLAN_TOOLS
+    assert "shell_exec" not in PARALLELIZABLE_TOOL_PLAN_TOOLS
+    assert "file_write" not in PARALLELIZABLE_TOOL_PLAN_TOOLS
+    assert READONLY_TOOL_PLAN_TOOLS == set(PARALLELIZABLE_TOOL_PLAN_TOOLS)
 
 
 def test_mutating_blocklist_contains_write_and_exec_tools() -> None:

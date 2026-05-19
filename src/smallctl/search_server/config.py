@@ -18,7 +18,7 @@ class SearchServerConfig:
     allow_private_network_targets: tuple[str, ...] = ()
     max_redirects: int = 5
     max_searches_per_run: int = 6
-    max_fetches_per_run: int = 4
+    max_fetches_per_run: int = 6
     max_total_fetched_chars: int = 30000
     search_ttl_seconds: int = 900
     fetch_ttl_seconds: int = 3600

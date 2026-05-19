@@ -67,6 +67,9 @@ async def test_dispatch_tool_dag_runs_independent_steps_concurrently() -> None:
     assert len(records) == 2
     # Both should have started before either finished (concurrent)
     assert elapsed < 0.15  # serial would be ~0.10; concurrent should be ~0.05 + overhead
+    assert all(record.result.metadata["dag_batch_index"] == 0 for record in records)
+    assert all(record.result.metadata["dag_batch_size"] == 2 for record in records)
+    assert all(record.result.metadata["dag_latency_ms"] > 0 for record in records)
 
 
 @pytest.mark.asyncio

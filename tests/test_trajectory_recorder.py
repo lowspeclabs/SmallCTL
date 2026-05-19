@@ -32,9 +32,11 @@ def test_record_tool_plan_trajectory_writes_jsonl(tmp_path) -> None:
                 ]
             },
             "_tool_plan_observations_text": "read a.py -> ok",
+            "_tool_plan_refine_verdict": "revise",
             "_recovery_metrics": {
                 "tool_plan_invocations": 1,
                 "tool_plan_total_tokens": 400,
+                "tool_plan_refine_verdict": "revise",
             },
         }
     )
@@ -47,6 +49,7 @@ def test_record_tool_plan_trajectory_writes_jsonl(tmp_path) -> None:
     payload = json.loads(lines[0])
     assert payload["runtime"] == "tool_plan"
     assert payload["success"] is True
+    assert payload["refine_verdict"] == "revise"
     assert payload["metrics"]["tool_plan_total_tokens"] == 400
     assert payload["tool_plan"][0]["tool"] == "file_read"
 

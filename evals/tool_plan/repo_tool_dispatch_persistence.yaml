@@ -1,0 +1,24 @@
+id: repo_tool_dispatch_persistence
+task: >-
+  Inspect src/smallctl/harness/tool_dispatch.py,
+  src/smallctl/graph/tool_execution_nodes.py,
+  src/smallctl/graph/tool_execution_persistence.py, and
+  src/smallctl/tools/artifact.py. Find where tool calls are dispatched, where
+  result envelopes are created, and where tool execution records or artifacts
+  are persisted for later inspection.
+tags:
+  - repo_analysis
+  - tools
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/harness/tool_dispatch.py
+    - src/smallctl/graph/tool_execution_nodes.py
+    - src/smallctl/graph/tool_execution_persistence.py
+    - src/smallctl/tools/artifact.py
+  required_terms:
+    - dispatch_tool
+    - ToolExecutionRecord
+    - artifact

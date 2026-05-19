@@ -175,7 +175,13 @@ def _normalize_items(items: list[dict[str, Any]], *, provider: str, request: Web
         raw_url = str(item.get("url") or item.get("link") or "").strip()
         url = _normalize_result_url(raw_url)
         title = str(item.get("title") or item.get("name") or url).strip()
-        snippet = str(item.get("description") or item.get("snippet") or item.get("body") or "").strip()
+        snippet = str(
+            item.get("content")
+            or item.get("description")
+            or item.get("snippet")
+            or item.get("body")
+            or ""
+        ).strip()
         published = str(item.get("published_at") or item.get("date") or item.get("published") or "").strip() or None
         canonical_url = canonicalize_url(url)
         normalized.append(

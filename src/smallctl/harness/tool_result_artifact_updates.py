@@ -12,6 +12,7 @@ from ..normalization import dedupe_keep_tail
 from ..recovery_metrics import increment_metric
 from ..state_schema import MemoryEntry
 from .artifact_tracking import consolidate_shell_attempt_family as _consolidate_shell_attempt_family
+from ..tools.shell_support import _REMOTE_INSTALLER_PREFLIGHT_KEY
 from .tool_result_evidence import record_evidence as _record_evidence
 from .tool_result_support import (
     auto_mirror_session_anchor as _auto_mirror_session_anchor,
@@ -328,6 +329,88 @@ def _mark_verifier_stale_after_file_change(
         "paths": clean_paths,
         "prior_verdict": dict(verifier),
     }
+
+
+def _observe_remote_installer_preflight_check(
+    service: Any,
+    *,
+    result: ToolEnvelope,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Observe successful ssh_exec results and transition preflight status
+    from 'required' to 'clean' when all integrity checks have passed.
+
+    The preflight guard in shell_support._remote_installer_preflight_guard()
+    blocks high-risk installer commands (e.g. installfog.sh) and records a
+    set of required check commands in the scratchpad.  This observer watches
+    for successful execution of those check commands and marks the preflight
+    as clean once every required check has been observed passing.
+    """
+    if not result.success:
+        return
+    if not isinstance(arguments, dict):
+        return
+
+    command = str(arguments.get("command") or "").strip()
+    host = str(arguments.get("host") or "").strip().lower()
+    if not command or not host:
+        return
+
+    # Check exit code — only exit_code == 0 counts as a passing check.
+    output = result.output if isinstance(result.output, dict) else {}
+    exit_code = output.get("exit_code")
+    if exit_code is not None and int(exit_code) != 0:
+        return
+
+    scratchpad = getattr(service.harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
+    if not isinstance(preflights, dict):
+        return
+
+    for key, entry in preflights.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "").strip() != "required":
+            continue
+        if str(entry.get("host") or "").strip().lower() != host:
+            continue
+
+        checks = entry.get("checks")
+        if not isinstance(checks, list) or not checks:
+            continue
+
+        completed = entry.get("completed_checks")
+        if not isinstance(completed, list):
+            completed = []
+            entry["completed_checks"] = completed
+
+        # Match the executed command against required checks.  The agent
+        # may run individual checks or combine them with '&&', so we
+        # check both exact match and substring containment.
+        for check in checks:
+            if check in completed:
+                continue
+            if command == check or check in command:
+                completed.append(check)
+
+        if all(check in completed for check in checks):
+            entry["status"] = "clean"
+            entry["created_at_step"] = int(
+                getattr(service.harness.state, "step_count", 0) or 0
+            )
+            runlog = getattr(service.harness, "_runlog", None)
+            if callable(runlog):
+                runlog(
+                    "remote_installer_preflight_cleared",
+                    "remote installer preflight checks passed",
+                    host=host,
+                    key=key,
+                    checks=checks,
+                    completed_checks=completed,
+                )
+            break
 
 
 def _remember_session_ssh_target(
@@ -1566,6 +1649,11 @@ def apply_artifact_success_outcome(
         _remember_session_ssh_target(
             service,
             tool_name=tool_name,
+            result=result,
+            arguments=arguments,
+        )
+        _observe_remote_installer_preflight_check(
+            service,
             result=result,
             arguments=arguments,
         )

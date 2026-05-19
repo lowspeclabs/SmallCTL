@@ -43,7 +43,33 @@ tool_plan_max_observation_chars_per_step: 600
 tool_plan_solver_fresh_output_limit: 1200
 tool_plan_allow_web: true
 tool_plan_allow_artifact_read: true
+tool_plan_allow_git: false
 tool_plan_fallback_to_loop_on_invalid_plan: true
+tool_dag_enabled: true
+tool_dag_max_parallel: 4
+tool_dag_timeout_sec: 30
+tool_dag_preserve_result_order: true
+# Runtime-only test-time scaling for hard staged steps. Disabled by default.
+test_time_scaling_enabled: false
+test_time_scaling_runtimes:
+  - staged_execution
+test_time_scaling_trigger: retry_or_explicit
+test_time_scaling_max_candidates: 3
+test_time_scaling_min_candidates: 2
+# Policies:
+# - proposal_then_execute: generate N proposals, score cheaply, dispatch only the best.
+# - first_pass: stop proposal generation when a clean candidate clears the score threshold.
+# - sequential_branch: run read-only branches in parallel; keep mutating branches sequential with rollback.
+test_time_scaling_policy: proposal_then_execute
+test_time_scaling_strategy: diverse_nudges
+test_time_scaling_score_threshold: 0.85
+# Candidate proposal generation and read-only branch execution may run in parallel.
+# Mutating branch execution stays sequential unless stronger isolation is added and explicitly enabled.
+test_time_scaling_parallel_max: 1
+test_time_scaling_timeout_sec: 120
+test_time_scaling_mutating_parallel_enabled: false
+# All sequential branches failed: fallback_normal_retry (default) or fail_step.
+test_time_scaling_all_fail_action: fallback_normal_retry
 summarize_at_ratio: 0.8
 recent_message_limit: 6
 max_summary_items: 3

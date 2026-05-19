@@ -90,6 +90,20 @@ def _render_web_search_output(output: dict[str, Any]) -> str | None:
         return None
 
     lines: list[str] = []
+    budget = output.get("budget_remaining")
+    if isinstance(budget, dict):
+        fetches_left = int(budget.get("fetches_remaining") or 0)
+        searches_left = int(budget.get("searches_remaining") or 0)
+        chars_left = int(budget.get("chars_remaining") or 0)
+        lines.append(
+            f"Budget remaining: {fetches_left} fetches, "
+            f"{searches_left} searches, "
+            f"{chars_left} chars"
+        )
+        if fetches_left <= 1 or chars_left <= 5000:
+            lines.append("WARNING: Web budget is critically low. Plan remaining fetches carefully.")
+        lines.append("")
+
     query = _clean_text(output.get("query"))
     provider = _clean_text(output.get("provider"))
     recency_support = _clean_text(output.get("recency_support"))
@@ -153,6 +167,15 @@ def _render_web_fetch_output(output: dict[str, Any]) -> str | None:
         return None
 
     lines: list[str] = []
+    budget = output.get("budget_remaining")
+    if isinstance(budget, dict):
+        fetches_left = int(budget.get("fetches_remaining") or 0)
+        chars_left = int(budget.get("chars_remaining") or 0)
+        lines.append(f"Budget remaining: {fetches_left} fetches, {chars_left} chars")
+        if fetches_left <= 1 or chars_left <= 5000:
+            lines.append("WARNING: Web budget is critically low. Plan remaining fetches carefully.")
+        lines.append("")
+
     title = _clean_text(output.get("title"))
     url = _clean_text(output.get("url"))
     domain = _clean_text(output.get("domain"))

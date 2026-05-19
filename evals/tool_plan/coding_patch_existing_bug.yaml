@@ -1,0 +1,20 @@
+id: coding_patch_existing_bug
+task: >-
+  Inspect the file-read cache and write-session invalidation paths. Identify a
+  plausible existing bug where stale cached reads could survive a mutation, and
+  summarize the narrow patch without editing files.
+tags:
+  - coding
+  - read_path
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/harness/tool_dispatch.py
+    - src/smallctl/harness/tool_result_support.py
+    - src/smallctl/tools/fs_write_flow.py
+  required_terms:
+    - invalidate_file_read_cache
+    - maybe_reuse_file_read
+    - stale

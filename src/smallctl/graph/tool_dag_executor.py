@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import perf_counter
 from typing import Any
 
 from ..logging_utils import log_kv
@@ -10,6 +11,7 @@ from ..state import json_safe_value
 from ..tools.dispatcher import normalize_tool_request
 from .node_support import HALLUCINATION_MAP, ToolNotFoundError
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
+from .tool_execution_support import _store_tool_execution_record
 
 
 async def dispatch_tool_dag(
@@ -30,13 +32,18 @@ async def dispatch_tool_dag(
     harness = deps.harness
     all_records: list[ToolExecutionRecord] = []
 
-    for batch in batches:
+    for batch_index, batch in enumerate(batches):
         semaphore = asyncio.Semaphore(max_parallel)
 
         async def _run_one(pending: PendingToolCall) -> ToolExecutionRecord:
             async with semaphore:
                 return await _dispatch_single_tool(
-                    graph_state, harness, pending, timeout_sec=timeout_sec
+                    graph_state,
+                    harness,
+                    pending,
+                    timeout_sec=timeout_sec,
+                    batch_index=batch_index,
+                    batch_size=len(batch),
                 )
 
         coros = [_run_one(p) for p in batch]
@@ -57,6 +64,8 @@ async def dispatch_tool_dag(
                         "tool_name": pending.tool_name,
                         "reason": "dag_dispatch_exception",
                         "exception_type": type(exc).__name__,
+                        "dag_batch_index": batch_index,
+                        "dag_batch_size": len(batch),
                     },
                 )
                 operation_id = build_operation_id(
@@ -64,6 +73,14 @@ async def dispatch_tool_dag(
                     step_count=harness.state.step_count,
                     tool_call_id=pending.tool_call_id,
                     tool_name=pending.tool_name,
+                )
+                _store_tool_execution_record(
+                    harness,
+                    operation_id=operation_id,
+                    thread_id=graph_state.thread_id,
+                    step_count=harness.state.step_count,
+                    pending=pending,
+                    result=envelope,
                 )
                 all_records.append(
                     ToolExecutionRecord(
@@ -84,8 +101,35 @@ async def _dispatch_single_tool(
     pending: PendingToolCall,
     *,
     timeout_sec: int,
+    batch_index: int = 0,
+    batch_size: int = 1,
 ) -> ToolExecutionRecord:
     """Dispatch a single read-only tool call with timeout."""
+    started = perf_counter()
+
+    def _record(envelope: ToolEnvelope) -> ToolExecutionRecord:
+        elapsed_ms = max(0.0, (perf_counter() - started) * 1000.0)
+        metadata = dict(getattr(envelope, "metadata", {}) or {})
+        metadata["dag_latency_ms"] = round(elapsed_ms, 3)
+        metadata["dag_batch_index"] = batch_index
+        metadata["dag_batch_size"] = batch_size
+        envelope.metadata = metadata
+        _store_tool_execution_record(
+            harness,
+            operation_id=operation_id,
+            thread_id=graph_state.thread_id,
+            step_count=harness.state.step_count,
+            pending=pending,
+            result=envelope,
+        )
+        return ToolExecutionRecord(
+            operation_id=operation_id,
+            tool_name=pending.tool_name,
+            args=pending.args,
+            tool_call_id=pending.tool_call_id,
+            result=envelope,
+        )
+
     registry = getattr(harness, "registry", None)
     if registry is not None:
         normalized_tool_name, normalized_args, intercepted_result, _ = normalize_tool_request(
@@ -109,13 +153,7 @@ async def _dispatch_single_tool(
     )
 
     if intercepted_result is not None:
-        return ToolExecutionRecord(
-            operation_id=operation_id,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            tool_call_id=pending.tool_call_id,
-            result=intercepted_result,
-        )
+        return _record(intercepted_result)
 
     # Registry check
     names_fn = getattr(registry, "names", None) if registry is not None else None
@@ -147,13 +185,7 @@ async def _dispatch_single_tool(
                 error=f"Unknown tool: {pending.tool_name}",
                 metadata={"tool_name": pending.tool_name},
             )
-        return ToolExecutionRecord(
-            operation_id=operation_id,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            tool_call_id=pending.tool_call_id,
-            result=envelope,
-        )
+        return _record(envelope)
 
     dispatch_fn = getattr(harness, "_dispatch_tool_call", None)
     if not callable(dispatch_fn):
@@ -162,13 +194,7 @@ async def _dispatch_single_tool(
             error="Tool dispatcher is unavailable in the current harness context.",
             metadata={"tool_name": pending.tool_name, "reason": "dispatcher_unavailable"},
         )
-        return ToolExecutionRecord(
-            operation_id=operation_id,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            tool_call_id=pending.tool_call_id,
-            result=envelope,
-        )
+        return _record(envelope)
 
     try:
         result = await asyncio.wait_for(
@@ -185,13 +211,7 @@ async def _dispatch_single_tool(
                 "timeout_sec": timeout_sec,
             },
         )
-        return ToolExecutionRecord(
-            operation_id=operation_id,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            tool_call_id=pending.tool_call_id,
-            result=envelope,
-        )
+        return _record(envelope)
     except Exception as exc:
         envelope = ToolEnvelope(
             success=False,
@@ -202,18 +222,6 @@ async def _dispatch_single_tool(
                 "exception_type": type(exc).__name__,
             },
         )
-        return ToolExecutionRecord(
-            operation_id=operation_id,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            tool_call_id=pending.tool_call_id,
-            result=envelope,
-        )
+        return _record(envelope)
 
-    return ToolExecutionRecord(
-        operation_id=operation_id,
-        tool_name=pending.tool_name,
-        args=pending.args,
-        tool_call_id=pending.tool_call_id,
-        result=result,
-    )
+    return _record(result)

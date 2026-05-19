@@ -8,9 +8,11 @@ from smallctl.graph.state import inflate_graph_state, serialize_graph_state
 from smallctl.models.conversation import ConversationMessage
 from smallctl.state import (
     ContextBrief,
+    ExecutionPlan,
     ExperienceMemory,
     LOOP_STATE_SCHEMA_VERSION,
     LoopState,
+    PlanStep,
     PromptBudgetSnapshot,
     TurnBundle,
 )
@@ -38,6 +40,22 @@ def test_loop_state_round_trip_preserves_task_mode() -> None:
     restored = LoopState.from_dict(state.to_dict())
 
     assert restored.task_mode == "analysis"
+
+
+def test_plan_step_difficulty_round_trips() -> None:
+    state = LoopState(
+        cwd="/tmp",
+        active_plan=ExecutionPlan(
+            plan_id="plan-1",
+            goal="goal",
+            steps=[PlanStep(step_id="S1", title="Hard step", difficulty="hard")],
+        ),
+    )
+
+    restored = LoopState.from_dict(state.to_dict())
+
+    assert restored.active_plan is not None
+    assert restored.active_plan.steps[0].difficulty == "hard"
 
 
 def test_loop_state_round_trip_preserves_warm_experience_namespace() -> None:

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 ToolPlanMode = Literal["tool_plan"]
 
-READONLY_TOOL_PLAN_TOOLS = {
+PARALLELIZABLE_TOOL_PLAN_TOOLS = frozenset({
     "file_read",
     "dir_list",
     "grep",
@@ -15,7 +15,13 @@ READONLY_TOOL_PLAN_TOOLS = {
     "artifact_grep",
     "web_search",
     "web_fetch",
-}
+    "ssh_file_read",
+    "git_status",
+    "git_diff",
+    "read_log",
+})
+
+READONLY_TOOL_PLAN_TOOLS = set(PARALLELIZABLE_TOOL_PLAN_TOOLS)
 
 MUTATING_TOOL_PLAN_BLOCKLIST = {
     "file_write",
@@ -61,4 +67,3 @@ class ToolPlan:
     objective: str
     steps: list[ToolPlanStep]
     max_steps: int = 6
-

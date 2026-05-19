@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import py_compile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -8,6 +9,16 @@ from typing import Any, Awaitable, Callable
 from ..state import PlanStep, StepEvidenceArtifact, StepVerificationResult, StepVerifierSpec, json_safe_value
 
 VerifierFn = Callable[[Any, StepVerifierSpec, PlanStep], Awaitable[dict[str, Any]]]
+
+
+@dataclass(slots=True)
+class CandidateScore:
+    passed: bool
+    score: float
+    failed_criteria: list[str] = field(default_factory=list)
+    verifier_breakdown: list[dict[str, Any]] = field(default_factory=list)
+    token_cost: int = 0
+    latency_ms: float = 0.0
 
 
 async def verify_artifact_exists(harness: Any, spec: StepVerifierSpec, step: PlanStep) -> dict[str, Any]:
@@ -179,6 +190,34 @@ class StepCompletionGate:
         )
         harness.state.step_verification_result = result
         return result
+
+    async def score_step(self, harness: Any, step: PlanStep) -> CandidateScore:
+        result = await self.verify_step(harness, step)
+        verifier_results = [json_safe_value(item) for item in result.verifier_results]
+        failed_required = list(result.failed_criteria)
+        optional_failures = [
+            str(item.get("kind") or "optional")
+            for item in verifier_results
+            if isinstance(item, dict)
+            and item.get("required") is False
+            and not bool(item.get("passed"))
+        ]
+        if result.passed and not optional_failures:
+            score = 1.0
+        elif result.passed:
+            score = max(0.7, 0.9 - 0.05 * len(optional_failures))
+        else:
+            total = max(1, len(verifier_results))
+            passed_count = sum(1 for item in verifier_results if isinstance(item, dict) and bool(item.get("passed")))
+            score = min(0.6, 0.15 + 0.45 * (passed_count / total))
+        token_cost = int(getattr(getattr(harness, "state", None), "last_completion_tokens", 0) or 0)
+        return CandidateScore(
+            passed=result.passed,
+            score=round(max(0.0, min(1.0, score)), 3),
+            failed_criteria=failed_required + optional_failures,
+            verifier_breakdown=verifier_results,
+            token_cost=token_cost,
+        )
 
 
 def compact_step_evidence(

@@ -74,6 +74,15 @@ def _budget_state(state: Any) -> dict[str, Any]:
     return budget
 
 
+def _budget_remaining(state: Any, config: SearchServerConfig) -> dict[str, int]:
+    budget = _budget_state(state)
+    return {
+        "searches_remaining": max(0, config.max_searches_per_run - int(budget.get("searches_used", 0))),
+        "fetches_remaining": max(0, config.max_fetches_per_run - int(budget.get("fetches_used", 0))),
+        "chars_remaining": max(0, config.max_total_fetched_chars - int(budget.get("total_fetched_chars", 0))),
+    }
+
+
 def _load_result_index(state: Any) -> dict[str, dict[str, Any]]:
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):
@@ -107,17 +116,29 @@ def _config_for_harness(harness: Any) -> SearchServerConfig:
 def _ensure_budget(state: Any, *, config: SearchServerConfig, action: str, chars: int = 0) -> None:
     budget = _budget_state(state)
     if action == "search":
-        if int(budget.get("searches_used", 0)) >= config.max_searches_per_run:
-            raise SearchServerError("Web search budget exhausted for this run.")
-        budget["searches_used"] = int(budget.get("searches_used", 0)) + 1
+        used = int(budget.get("searches_used", 0))
+        if used >= config.max_searches_per_run:
+            raise SearchServerError(
+                f"Web search budget exhausted for this run ({used}/{config.max_searches_per_run} searches used)."
+            )
+        budget["searches_used"] = used + 1
     elif action == "fetch":
-        if int(budget.get("fetches_used", 0)) >= config.max_fetches_per_run:
-            raise SearchServerError("Web fetch budget exhausted for this run.")
-        budget["fetches_used"] = int(budget.get("fetches_used", 0)) + 1
+        used = int(budget.get("fetches_used", 0))
+        if used >= config.max_fetches_per_run:
+            raise SearchServerError(
+                f"Web fetch budget exhausted for this run ({used}/{config.max_fetches_per_run} fetches used)."
+            )
+        budget["fetches_used"] = used + 1
     elif action == "fetch_chars":
-        if int(budget.get("total_fetched_chars", 0)) + int(chars) > config.max_total_fetched_chars:
-            raise SearchServerError("Web fetch character budget exhausted for this run.")
-        budget["total_fetched_chars"] = int(budget.get("total_fetched_chars", 0)) + int(chars)
+        used = int(budget.get("total_fetched_chars", 0))
+        if used + int(chars) > config.max_total_fetched_chars:
+            remaining = max(0, config.max_total_fetched_chars - used)
+            raise SearchServerError(
+                f"Web fetch character budget exhausted for this run. "
+                f"Requested {int(chars)} chars but only {remaining} chars remain "
+                f"({used}/{config.max_total_fetched_chars} total chars used)."
+            )
+        budget["total_fetched_chars"] = used + int(chars)
 
 
 def _normalize_domains(domains: list[str] | None) -> list[str] | None:
@@ -437,6 +458,7 @@ async def web_search(
         payload = response.to_dict()
         payload["results"] = _assign_fetch_ids(state, payload["results"])
         _update_result_index(state, payload["results"])
+        payload["budget_remaining"] = _budget_remaining(state, config)
         return ok(
             payload,
             metadata={
@@ -468,10 +490,31 @@ async def web_fetch(
     requested_url = str(url or "").strip() or None
     requested_result_id = str(result_id or "").strip() or None
     requested_fetch_id = str(fetch_id or "").strip() or None
-    requested_result_token = requested_result_id or requested_fetch_id
     selector_count = sum(1 for value in (requested_url, requested_result_id, requested_fetch_id) if value)
-    if selector_count != 1:
+    toleration_warnings: list[str] = []
+    if selector_count == 0:
         return fail("Provide exactly one of url, result_id, or fetch_id.")
+    elif selector_count > 1:
+        # Prefer fetch_id > result_id > url to avoid hard failures from over-eager models.
+        if requested_fetch_id:
+            requested_url = None
+            requested_result_id = None
+            toleration_warnings.append(
+                "Warning: Multiple target arguments provided. Using fetch_id and ignoring others."
+            )
+        elif requested_result_id:
+            requested_url = None
+            requested_fetch_id = None
+            toleration_warnings.append(
+                "Warning: Multiple target arguments provided. Using result_id and ignoring others."
+            )
+        else:
+            requested_result_id = None
+            requested_fetch_id = None
+            toleration_warnings.append(
+                "Warning: Multiple target arguments provided. Using url and ignoring others."
+            )
+    requested_result_token = requested_result_id or requested_fetch_id
     try:
         bounded_max_chars = min(max(1, int(max_chars or config.default_fetch_chars)), min(config.max_fetch_chars, _MAX_TOOL_FETCH_CHARS))
         invented_url_error = _reject_invented_result_domain_url(state, url=requested_url, result_id=requested_result_token)
@@ -518,6 +561,8 @@ async def web_fetch(
             extract_mode=extract_mode,
         )
         response, full_text, citation = await runtime.fetch(request, token=runtime.token)
+        if toleration_warnings:
+            response.warnings.extend(toleration_warnings)
         charged_chars = min(len(full_text), bounded_max_chars)
         _ensure_budget(state, config=config, action="fetch_chars", chars=charged_chars)
         if requested_result_token:
@@ -595,6 +640,7 @@ async def web_fetch(
             payload["artifact_id"] = artifact_id
             payload["body_artifact_id"] = artifact_id
             payload["body_available_via_artifact"] = True
+        payload["budget_remaining"] = _budget_remaining(state, config)
         return ok(
             payload,
             metadata={

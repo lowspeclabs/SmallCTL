@@ -157,8 +157,16 @@ def test_web_search_result_shape_and_result_id_fetch(monkeypatch, tmp_path) -> N
     assert fetch_result["metadata"]["untrusted"] is True
 
 
-def test_web_fetch_rejects_both_url_and_result_id(monkeypatch, tmp_path) -> None:
+def test_web_fetch_tolerates_both_url_and_result_id_prefers_result_id(monkeypatch, tmp_path) -> None:
     harness = _make_harness(tmp_path)
+    harness.state.scratchpad["_web_result_index"] = {
+        "webres-test-1": {
+            "url": "https://example.com/article",
+            "canonical_url": "https://example.com/article",
+            "canonical_result_id": "webres-test-1",
+            "result_id": "webres-test-1",
+        }
+    }
     runtime = FakeRuntime()
     monkeypatch.setattr("smallctl.tools.web.get_search_runtime", lambda harness, config=None: runtime)
 
@@ -171,8 +179,37 @@ def test_web_fetch_rejects_both_url_and_result_id(monkeypatch, tmp_path) -> None
         )
     )
 
-    assert result["success"] is False
-    assert "exactly one" in result["error"].lower()
+    assert result["success"] is True
+    assert runtime.fetch_calls[0][0].url == "https://example.com/article"
+    assert any("Warning: Multiple target arguments provided" in w for w in result["output"].get("warnings", []))
+
+
+def test_web_fetch_tolerates_both_url_and_fetch_id_prefers_fetch_id(monkeypatch, tmp_path) -> None:
+    harness = _make_harness(tmp_path)
+    harness.state.scratchpad["_web_result_index"] = {
+        "r1": {
+            "url": "https://example.com/article",
+            "canonical_url": "https://example.com/article",
+            "canonical_result_id": "webres-test-1",
+            "result_id": "webres-test-1",
+            "fetch_id": "r1",
+        }
+    }
+    runtime = FakeRuntime()
+    monkeypatch.setattr("smallctl.tools.web.get_search_runtime", lambda harness, config=None: runtime)
+
+    result = asyncio.run(
+        web_fetch(
+            harness=harness,
+            state=harness.state,
+            url="https://example.com/",
+            fetch_id="r1",
+        )
+    )
+
+    assert result["success"] is True
+    assert runtime.fetch_calls[0][0].url == "https://example.com/article"
+    assert any("Warning: Multiple target arguments provided" in w for w in result["output"].get("warnings", []))
 
 
 def test_normalize_web_fetch_repairs_artifact_rank_alias_to_result_id() -> None:
@@ -384,6 +421,7 @@ def test_web_budget_exhaustion_returns_clean_tool_error(tmp_path) -> None:
 
 def test_web_fetch_budget_exhaustion_marks_terminal_fetch_budget(tmp_path) -> None:
     harness = _make_harness(tmp_path)
+    harness.config.max_fetches_per_run = 4
     harness.state.scratchpad["_web_result_index"] = {
         "r1": {"url": "https://example.com/article", "canonical_result_id": "webres-test-1", "fetch_id": "r1"}
     }

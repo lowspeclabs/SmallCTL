@@ -28,10 +28,10 @@ class TrajectoryRecorder:
         plan = scratchpad.get("_tool_plan")
         observations_text = str(scratchpad.get("_tool_plan_observations_text") or "").strip()
         refine_passes = int(scratchpad.get("_tool_plan_refine_passes", 0) or 0)
-        refine_verdict = "pass"
-        if refine_passes > 0:
-            # We don't store the exact verdict in scratchpad today; default to pass
-            refine_verdict = "pass"
+        refine_verdict = str(
+            scratchpad.get("_tool_plan_refine_verdict")
+            or getattr(state, "scratchpad", {}).get("_recovery_metrics", {}).get("tool_plan_refine_verdict", "pass")
+        ).strip() or "pass"
 
         session_id = str(getattr(state, "thread_id", "") or getattr(harness, "conversation_id", "") or "unknown")
         task = str(

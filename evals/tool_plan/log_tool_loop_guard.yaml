@@ -1,0 +1,19 @@
+id: log_tool_loop_guard
+task: >-
+  Inspect the code paths that detect repeated tool loops and model-stream halts.
+  If logs are present, use them; otherwise, explain the code-level guard chain.
+tags:
+  - log_investigation
+  - guards
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/graph/tool_loop_guards.py
+    - src/smallctl/graph/tool_execution_recovery.py
+    - src/smallctl/graph/model_stream_loop.py
+  required_terms:
+    - repeated tool call loop
+    - model_stream_halt_count
+    - loop_guard

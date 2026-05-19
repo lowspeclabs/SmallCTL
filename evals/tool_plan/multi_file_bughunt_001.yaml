@@ -1,0 +1,20 @@
+id: multi_file_bughunt_001
+task: >-
+  There is a bug where file reads return empty content for symlinks.
+  Find all files involved in the read path, identify the root cause,
+  and summarize the fix.
+tags:
+  - multi_file_bughunt
+  - read_path
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/tools/fs.py
+    - src/smallctl/harness/tool_dispatch.py
+    - src/smallctl/harness/tool_results.py
+  required_terms:
+    - symlink
+    - file_read
+    - maybe_reuse_file_read

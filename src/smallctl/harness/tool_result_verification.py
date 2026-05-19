@@ -31,6 +31,8 @@ _BINARY_PROBE_RE = re.compile(
     r"|apt\s+(?:list|show|search)\s+\S+"
     r"|rpm\s+-q\s+\S+"
     r"|apk\s+info\s+\S+"
+    r"|pgrep\b"
+    r"|pidof\b"
     r")"
     r"(?:.*)?$",
     re.IGNORECASE,

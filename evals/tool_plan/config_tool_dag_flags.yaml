@@ -1,0 +1,25 @@
+id: config_tool_dag_flags
+task: >-
+  Inspect src/smallctl/config.py, src/smallctl/config_support.py,
+  src/smallctl/main.py, src/smallctl/harness/initialization.py, and
+  src/smallctl/graph/runtime_tool_plan.py. Find every ToolPlan DAG config flag,
+  where it is parsed from environment or CLI config, and where the runtime reads
+  it to decide whether to execute a DAG.
+tags:
+  - config
+  - tool_dag
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/config.py
+    - src/smallctl/config_support.py
+    - src/smallctl/main.py
+    - src/smallctl/harness/initialization.py
+    - src/smallctl/graph/runtime_tool_plan.py
+  required_terms:
+    - tool_dag_enabled
+    - tool_dag_max_parallel
+    - tool_dag_timeout_sec
+    - tool_dag_preserve_result_order

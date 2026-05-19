@@ -1,4 +1,10 @@
 evals/
+!evals/
+!evals/tool_plan/
+!evals/tool_plan/*.yaml
+!evals/tool_plan/*.yml
+!evals/tool_plan/*.jsonl
+!evals/tool_plan/README.md
 .venv/
 __pycache__/
 *.pyc

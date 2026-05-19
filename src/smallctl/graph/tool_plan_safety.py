@@ -6,11 +6,13 @@ from urllib.parse import urlparse
 
 from .tool_plan_schema import MUTATING_TOOL_PLAN_BLOCKLIST, READONLY_TOOL_PLAN_TOOLS, ToolPlan, ToolPlanStep
 
-_LOCAL_PATH_TOOLS = {"file_read", "dir_list", "grep", "find_files"}
+_LOCAL_PATH_TOOLS = {"file_read", "dir_list", "grep", "find_files", "read_log", "git_status", "git_diff"}
+_REMOTE_PATH_TOOLS = {"ssh_file_read"}
 _PATH_ARG_KEYS = ("path", "target_path")
 _STRING_LIMITS = {
     "path": 600,
     "target_path": 600,
+    "target": 600,
     "pattern": 500,
     "query": 500,
     "url": 2000,
@@ -58,7 +60,7 @@ def _url_is_safe(raw_url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def _validate_args(step: ToolPlanStep, *, harness: Any, allow_web: bool, allow_artifact_read: bool) -> list[str]:
+def _validate_args(step: ToolPlanStep, *, harness: Any, allow_web: bool, allow_artifact_read: bool, allow_git: bool = False) -> list[str]:
     errors: list[str] = []
     for key, limit in _STRING_LIMITS.items():
         value = step.args.get(key)
@@ -70,10 +72,20 @@ def _validate_args(step: ToolPlanStep, *, harness: Any, allow_web: bool, allow_a
             value = step.args.get(key)
             if value is not None and (not isinstance(value, str) or not _path_within_cwd(value, cwd=cwd)):
                 errors.append(f"{step.id}: {key} must be a relative path inside the workspace.")
+        if step.tool == "git_diff":
+            target = step.args.get("target")
+            if target is not None and (not isinstance(target, str) or not _path_within_cwd(target, cwd=cwd)):
+                errors.append(f"{step.id}: target must be a relative path inside the workspace.")
+    if step.tool in _REMOTE_PATH_TOOLS:
+        value = step.args.get("path")
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{step.id}: ssh_file_read requires a non-empty remote path.")
     if step.tool in {"web_search", "web_fetch"} and not allow_web:
         errors.append(f"{step.id}: web tools are disabled for ToolPlan.")
     if step.tool in {"artifact_read", "artifact_grep"} and not allow_artifact_read:
         errors.append(f"{step.id}: artifact reads are disabled for ToolPlan.")
+    if step.tool in {"git_status", "git_diff"} and not allow_git:
+        errors.append(f"{step.id}: git tools are disabled for ToolPlan.")
     if step.tool == "web_fetch":
         has_prior_id = any(str(step.args.get(key) or "").strip() for key in ("result_id", "fetch_id"))
         raw_url = str(step.args.get("url") or "").strip()
@@ -91,6 +103,7 @@ def validate_tool_plan(
     max_steps: int = 6,
     allow_web: bool = True,
     allow_artifact_read: bool = True,
+    allow_git: bool = False,
 ) -> tuple[ToolPlan | None, list[str]]:
     errors: list[str] = []
     if len(plan.steps) > max_steps:
@@ -112,6 +125,5 @@ def validate_tool_plan(
             errors.append(f"{step.id}: tool `{step.tool}` is not allowed in ToolPlan.")
         if names and step.tool not in names:
             errors.append(f"{step.id}: tool `{step.tool}` is not registered.")
-        errors.extend(_validate_args(step, harness=harness, allow_web=allow_web, allow_artifact_read=allow_artifact_read))
+        errors.extend(_validate_args(step, harness=harness, allow_web=allow_web, allow_artifact_read=allow_artifact_read, allow_git=allow_git))
     return (None, errors) if errors else (plan, [])
-

@@ -138,6 +138,10 @@ def initialize_harness(self: Any, **params: Any) -> None:
     tool_plan_allow_web = params.get("tool_plan_allow_web", True)
     tool_plan_allow_artifact_read = params.get("tool_plan_allow_artifact_read", True)
     tool_plan_fallback_to_loop_on_invalid_plan = params.get("tool_plan_fallback_to_loop_on_invalid_plan", True)
+    tool_dag_enabled = params.get("tool_dag_enabled", False)
+    tool_dag_max_parallel = params.get("tool_dag_max_parallel", 4)
+    tool_dag_timeout_sec = params.get("tool_dag_timeout_sec", 30)
+    tool_dag_preserve_result_order = params.get("tool_dag_preserve_result_order", True)
     rewoo_lane_frames_enabled = params.get("rewoo_lane_frames_enabled", False)
     rewoo_planner_frame_enabled = params.get("rewoo_planner_frame_enabled", False)
     rewoo_solver_frame_enabled = params.get("rewoo_solver_frame_enabled", False)
@@ -274,6 +278,10 @@ def initialize_harness(self: Any, **params: Any) -> None:
         tool_plan_allow_web=bool(tool_plan_allow_web),
         tool_plan_allow_artifact_read=bool(tool_plan_allow_artifact_read),
         tool_plan_fallback_to_loop_on_invalid_plan=bool(tool_plan_fallback_to_loop_on_invalid_plan),
+        tool_dag_enabled=bool(tool_dag_enabled),
+        tool_dag_max_parallel=int(tool_dag_max_parallel),
+        tool_dag_timeout_sec=int(tool_dag_timeout_sec),
+        tool_dag_preserve_result_order=bool(tool_dag_preserve_result_order),
         rewoo_lane_frames_enabled=bool(rewoo_lane_frames_enabled),
         rewoo_planner_frame_enabled=bool(rewoo_planner_frame_enabled),
         rewoo_solver_frame_enabled=bool(rewoo_solver_frame_enabled),

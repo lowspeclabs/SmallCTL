@@ -1,0 +1,21 @@
+id: debug_provider_timeout
+task: >-
+  Trace how provider or model-stream timeouts are configured, detected, surfaced
+  in recovery metrics, and represented in final runtime payloads.
+tags:
+  - config
+  - debug
+  - robustness
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/config.py
+    - src/smallctl/client/client_transport.py
+    - src/smallctl/graph/model_call_nodes.py
+    - src/smallctl/graph/runtime_payloads.py
+  required_terms:
+    - first_token_timeout_sec
+    - model_stream_halt_count
+    - latency_metrics

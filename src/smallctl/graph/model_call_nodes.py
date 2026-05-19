@@ -85,6 +85,9 @@ async def model_call(
             harness.state.scratchpad["_last_stream_halt_reason"] = halt_reason
         if isinstance(halt_details, dict):
             harness.state.scratchpad["_last_stream_halt_details"] = halt_details
+        from ..recovery_metrics import increment_metric
+
+        increment_metric(harness.state, "model_stream_halt_count")
     else:
         harness.state.scratchpad.pop("_last_stream_halted_without_done", None)
         harness.state.scratchpad.pop("_last_stream_halt_reason", None)

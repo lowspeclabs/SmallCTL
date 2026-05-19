@@ -1,21 +1,33 @@
 from __future__ import annotations
 
-from typing import Any
-
-from .tool_plan_schema import MUTATING_TOOL_PLAN_BLOCKLIST, ToolPlanStep
+from .tool_plan_schema import PARALLELIZABLE_TOOL_PLAN_TOOLS, ToolPlanStep
 
 
-class MutatingStepInDAGError(Exception):
-    """Raised when a DAG batch contains a mutating tool."""
+class NonParallelizableStepInDAGError(Exception):
+    """Raised when a DAG batch contains a tool outside the parallel allowlist."""
 
     pass
 
 
-def assert_no_mutating_steps(batches: list[list[ToolPlanStep]]) -> None:
-    """Hard-abort if any step in any batch touches a mutating tool."""
+class MutatingStepInDAGError(NonParallelizableStepInDAGError):
+    """Compatibility alias for callers that still catch the old safety error."""
+
+    pass
+
+
+def assert_parallelizable_steps(batches: list[list[ToolPlanStep]]) -> None:
+    """Hard-abort if any step is outside the parallel ToolPlan allowlist."""
     for batch in batches:
         for step in batch:
-            if step.tool in MUTATING_TOOL_PLAN_BLOCKLIST:
-                raise MutatingStepInDAGError(
-                    f"DAG batch contains mutating tool '{step.tool}' in step '{step.id}'"
+            if step.tool not in PARALLELIZABLE_TOOL_PLAN_TOOLS:
+                raise NonParallelizableStepInDAGError(
+                    f"DAG batch contains non-parallelizable tool '{step.tool}' in step '{step.id}'"
                 )
+
+
+def assert_no_mutating_steps(batches: list[list[ToolPlanStep]]) -> None:
+    """Compatibility wrapper for the old blocklist-only DAG safety API."""
+    try:
+        assert_parallelizable_steps(batches)
+    except NonParallelizableStepInDAGError as exc:
+        raise MutatingStepInDAGError(str(exc)) from exc

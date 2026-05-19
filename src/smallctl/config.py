@@ -96,8 +96,9 @@ class SmallctlConfig:
     tool_plan_solver_fresh_output_limit: int = 1200
     tool_plan_allow_web: bool = True
     tool_plan_allow_artifact_read: bool = True
+    tool_plan_allow_git: bool = False
     tool_plan_fallback_to_loop_on_invalid_plan: bool = True
-    tool_dag_enabled: bool = False
+    tool_dag_enabled: bool = True
     tool_dag_max_parallel: int = 4
     tool_dag_timeout_sec: int = 30
     tool_dag_preserve_result_order: bool = True
@@ -112,6 +113,18 @@ class SmallctlConfig:
     rewoo_solver_frame_enabled: bool = False
     rewoo_refiner_frame_enabled: bool = False
     rewoo_frame_token_budget: int = 1200
+    test_time_scaling_enabled: bool = False
+    test_time_scaling_runtimes: list[str] = field(default_factory=lambda: ["staged_execution"])
+    test_time_scaling_trigger: str = "retry_or_explicit"
+    test_time_scaling_max_candidates: int = 3
+    test_time_scaling_min_candidates: int = 2
+    test_time_scaling_policy: str = "proposal_then_execute"
+    test_time_scaling_strategy: str = "diverse_nudges"
+    test_time_scaling_score_threshold: float = 0.85
+    test_time_scaling_parallel_max: int = 1
+    test_time_scaling_timeout_sec: int = 120
+    test_time_scaling_mutating_parallel_enabled: bool = False
+    test_time_scaling_all_fail_action: str = "fallback_normal_retry"
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -265,6 +278,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "tool_plan_readonly_only",
         "tool_plan_allow_web",
         "tool_plan_allow_artifact_read",
+        "tool_plan_allow_git",
         "tool_plan_fallback_to_loop_on_invalid_plan",
         "tool_dag_enabled",
         "tool_dag_preserve_result_order",
@@ -276,6 +290,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "rewoo_planner_frame_enabled",
         "rewoo_solver_frame_enabled",
         "rewoo_refiner_frame_enabled",
+        "test_time_scaling_enabled",
+        "test_time_scaling_mutating_parallel_enabled",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -340,6 +356,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "solver_refine_max_passes",
         "solver_refine_token_budget",
         "rewoo_frame_token_budget",
+        "test_time_scaling_max_candidates",
+        "test_time_scaling_min_candidates",
+        "test_time_scaling_parallel_max",
+        "test_time_scaling_timeout_sec",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -359,6 +379,18 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
             cli_clean.pop("loop_guard_similarity_threshold", None)
         else:
             cli_clean["loop_guard_similarity_threshold"] = parsed_ratio
+    if "test_time_scaling_score_threshold" in cli_clean:
+        parsed_ratio = _to_float(cli_clean["test_time_scaling_score_threshold"])
+        if parsed_ratio is None:
+            cli_clean.pop("test_time_scaling_score_threshold", None)
+        else:
+            cli_clean["test_time_scaling_score_threshold"] = parsed_ratio
+    if "test_time_scaling_runtimes" in cli_clean and isinstance(cli_clean["test_time_scaling_runtimes"], str):
+        cli_clean["test_time_scaling_runtimes"] = [
+            item.strip()
+            for item in cli_clean["test_time_scaling_runtimes"].split(",")
+            if item.strip()
+        ]
     if "healthcheck_url" not in cli_clean and "backend_healthcheck_url" in cli_clean:
         cli_clean["healthcheck_url"] = cli_clean["backend_healthcheck_url"]
     if "restart_command" not in cli_clean and "backend_restart_command" in cli_clean:
@@ -396,6 +428,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "tool_plan_readonly_only",
         "tool_plan_allow_web",
         "tool_plan_allow_artifact_read",
+        "tool_plan_allow_git",
         "tool_plan_fallback_to_loop_on_invalid_plan",
         "tool_dag_enabled",
         "tool_dag_preserve_result_order",
@@ -407,6 +440,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "rewoo_planner_frame_enabled",
         "rewoo_solver_frame_enabled",
         "rewoo_refiner_frame_enabled",
+        "test_time_scaling_enabled",
+        "test_time_scaling_mutating_parallel_enabled",
     ):
         if key in merged:
             merged[key] = _to_bool(merged[key])
@@ -432,6 +467,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "solver_refine_max_passes",
         "solver_refine_token_budget",
         "rewoo_frame_token_budget",
+        "test_time_scaling_max_candidates",
+        "test_time_scaling_min_candidates",
+        "test_time_scaling_parallel_max",
+        "test_time_scaling_timeout_sec",
     ):
         if key in merged:
             parsed_limit = _to_int(merged[key])
@@ -439,6 +478,18 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
                 merged.pop(key, None)
             else:
                 merged[key] = parsed_limit
+    if "test_time_scaling_score_threshold" in merged:
+        parsed_ratio = _to_float(merged["test_time_scaling_score_threshold"])
+        if parsed_ratio is None:
+            merged.pop("test_time_scaling_score_threshold", None)
+        else:
+            merged["test_time_scaling_score_threshold"] = parsed_ratio
+    if "test_time_scaling_runtimes" in merged and isinstance(merged["test_time_scaling_runtimes"], str):
+        merged["test_time_scaling_runtimes"] = [
+            item.strip()
+            for item in merged["test_time_scaling_runtimes"].split(",")
+            if item.strip()
+        ]
 
     explicit_prompt_budget = "max_prompt_tokens" in explicit_merged
     merged["max_prompt_tokens_explicit"] = explicit_prompt_budget

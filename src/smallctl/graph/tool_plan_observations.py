@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..context.policy import estimate_text_tokens
@@ -16,12 +17,26 @@ class ToolPlanObservation:
     tool: str
     success: bool
     summary: str
+    excerpt: str = ""
     artifact_id: str = ""
     operation_id: str = ""
     path: str = ""
     query: str = ""
     error: str = ""
     duplicate_of: str = ""
+
+
+@dataclass(slots=True)
+class ToolPlanObservationStats:
+    requested_steps: int = 0
+    executed_steps: int = 0
+    successful_steps: int = 0
+    failed_steps: int = 0
+    missing_record_count: int = 0
+    duplicate_read_count: int = 0
+    artifact_yield_count: int = 0
+    success_rate: float | None = None
+    tool_failure_classes: list[str] = field(default_factory=list)
 
 
 def _step_id_from_record(record: ToolExecutionRecord) -> str:
@@ -57,16 +72,91 @@ def _bounded_text(value: Any, *, limit: int) -> str:
     return text
 
 
-def _summary_from_record(record: ToolExecutionRecord, *, max_chars: int) -> str:
-    result = record.result
-    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+def _metadata_summary(metadata: dict[str, Any], *, max_chars: int) -> str:
     pieces: list[str] = []
-    for key in ("path", "query", "pattern", "matches", "line_count", "truncated", "url", "title"):
+    for key in ("path", "query", "pattern", "matches", "count", "line_count", "truncated", "url", "title"):
         value = metadata.get(key)
         if value not in (None, "", [], {}):
             pieces.append(f"{key}={_bounded_text(value, limit=140)}")
     if pieces:
         return _bounded_text("; ".join(pieces), limit=max_chars)
+    return ""
+
+
+def _hint_terms(text: str) -> list[str]:
+    terms: set[str] = set()
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text or ""):
+        pieces = [raw]
+        pieces.extend(part for part in raw.split("_") if part)
+        pieces.extend(re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)", raw))
+        for piece in pieces:
+            term = piece.lower().strip("_")
+            if len(term) < 4:
+                continue
+            terms.add(term)
+            for suffix in ("ing", "ed", "es", "s"):
+                if term.endswith(suffix) and len(term) > len(suffix) + 3:
+                    terms.add(term[: -len(suffix)])
+                    break
+    return sorted(terms, key=lambda value: (-len(value), value))[:32]
+
+
+def _relevant_text_excerpt(text: str, *, hint_text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return _bounded_text(text, limit=max_chars)
+
+    terms = _hint_terms(hint_text)
+    if not terms:
+        return _bounded_text(text, limit=max_chars)
+
+    selected: list[str] = []
+    seen_lines: set[int] = set()
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        normalized = line.lower()
+        if not any(term in normalized for term in terms):
+            continue
+        rendered = f"L{line_no}: {line.strip()}"
+        if line_no in seen_lines or not rendered.strip():
+            continue
+        selected.append(rendered)
+        seen_lines.add(line_no)
+        if len(" ".join(selected)) >= max_chars:
+            break
+
+    if not selected:
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not re.match(r"^(async\s+def|def|class)\s+", stripped):
+                continue
+            selected.append(f"L{line_no}: {stripped}")
+            if len(" ".join(selected)) >= max_chars:
+                break
+
+    if selected:
+        return _bounded_text("\n".join(selected), limit=max_chars)
+    return _bounded_text(text, limit=max_chars)
+
+
+def _output_excerpt(record: ToolExecutionRecord, *, max_chars: int, hint_text: str = "") -> str:
+    result = record.result
+    output = result.output
+    if output in (None, "", [], {}):
+        return ""
+    if isinstance(output, dict) and str(output.get("status") or "").strip().lower() == "cached":
+        summary = output.get("summary")
+        if summary not in (None, "", [], {}):
+            return _bounded_text(summary, limit=max_chars)
+    if isinstance(output, str) and hint_text:
+        return _relevant_text_excerpt(output, hint_text=hint_text, max_chars=max_chars)
+    return _bounded_text(output, limit=max_chars)
+
+
+def _summary_from_record(record: ToolExecutionRecord, *, max_chars: int) -> str:
+    result = record.result
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    metadata_text = _metadata_summary(metadata, max_chars=max_chars)
+    if metadata_text:
+        return metadata_text
     if result.error:
         return _bounded_text(result.error, limit=max_chars)
     if result.output not in (None, "", [], {}):
@@ -94,8 +184,14 @@ def _render_observation_lines(observation: ToolPlanObservation) -> list[str]:
         lines.append(f"- artifact: {observation.artifact_id}")
     if observation.operation_id:
         lines.append(f"- operation: {observation.operation_id}")
-    label = "finding" if observation.success else "error"
-    lines.append(f"- {label}: {observation.error or observation.summary}")
+    if observation.summary:
+        lines.append(f"- summary: {observation.summary}")
+    if observation.excerpt:
+        lines.append(f"- excerpt: {observation.excerpt}")
+    if not observation.success:
+        lines.append(f"- error: {observation.error or observation.summary}")
+    elif not observation.summary and not observation.excerpt:
+        lines.append("- summary: success")
     lines.append("")
     return lines
 
@@ -117,9 +213,12 @@ def _fit_observations_to_token_limit(
     fitted: list[ToolPlanObservation] = []
     for observation in observations:
         summary = observation.summary
+        excerpt = observation.excerpt
         error = observation.error
         if len(summary) > current_limit:
             summary = _bounded_text(summary, limit=current_limit)
+        if len(excerpt) > current_limit:
+            excerpt = _bounded_text(excerpt, limit=current_limit)
         if len(error) > current_limit:
             error = _bounded_text(error, limit=current_limit)
         fitted.append(
@@ -128,6 +227,7 @@ def _fit_observations_to_token_limit(
                 tool=observation.tool,
                 success=observation.success,
                 summary=summary,
+                excerpt=excerpt,
                 artifact_id=observation.artifact_id,
                 operation_id=observation.operation_id,
                 path=observation.path,
@@ -140,15 +240,23 @@ def _fit_observations_to_token_limit(
     while fitted and estimate_text_tokens(
         "\n".join(line for observation in fitted for line in _render_observation_lines(observation))
     ) > token_limit:
-        largest_index = max(range(len(fitted)), key=lambda index: len(fitted[index].summary) + len(fitted[index].error))
+        largest_index = max(
+            range(len(fitted)),
+            key=lambda index: len(fitted[index].summary) + len(fitted[index].excerpt) + len(fitted[index].error),
+        )
         largest = fitted[largest_index]
-        if len(largest.summary) <= min_summary_chars and len(largest.error) <= min_summary_chars:
+        if (
+            len(largest.summary) <= min_summary_chars
+            and len(largest.excerpt) <= min_summary_chars
+            and len(largest.error) <= min_summary_chars
+        ):
             break
         fitted[largest_index] = ToolPlanObservation(
             step_id=largest.step_id,
             tool=largest.tool,
             success=largest.success,
             summary=_bounded_text(largest.summary, limit=min_summary_chars),
+            excerpt=_bounded_text(largest.excerpt, limit=min_summary_chars),
             artifact_id=largest.artifact_id,
             operation_id=largest.operation_id,
             path=largest.path,
@@ -182,6 +290,7 @@ def build_tool_plan_observations(
                     tool=step.tool,
                     success=duplicate.success,
                     summary=f"Duplicate of {duplicate.step_id}; reused prior observation.",
+                    excerpt=duplicate.excerpt,
                     artifact_id=duplicate.artifact_id,
                     operation_id=duplicate.operation_id,
                     path=path,
@@ -209,6 +318,15 @@ def build_tool_plan_observations(
             tool=record.tool_name or step.tool,
             success=bool(record.result.success),
             summary=_summary_from_record(record, max_chars=max_chars_per_step),
+            excerpt=_output_excerpt(
+                record,
+                max_chars=max_chars_per_step,
+                hint_text=" ".join(
+                    part
+                    for part in (plan.objective, step.reason, path, query)
+                    if isinstance(part, str) and part.strip()
+                ),
+            ),
             artifact_id=_artifact_id(record),
             operation_id=str(record.operation_id or ""),
             path=path,
@@ -224,6 +342,48 @@ def build_tool_plan_observations(
     )
 
 
+def summarize_tool_plan_observations(
+    plan: ToolPlan,
+    observations: list[ToolPlanObservation],
+) -> ToolPlanObservationStats:
+    failure_classes: set[str] = set()
+    successful_steps = 0
+    failed_steps = 0
+    missing_record_count = 0
+    duplicate_read_count = 0
+    artifact_yield_count = 0
+
+    for observation in observations:
+        if observation.success:
+            successful_steps += 1
+        else:
+            failed_steps += 1
+            failure_classes.add(_normalize_failure_class(observation.error or observation.summary))
+        if observation.error == "missing execution record":
+            missing_record_count += 1
+        if observation.duplicate_of:
+            duplicate_read_count += 1
+        if observation.artifact_id:
+            artifact_yield_count += 1
+
+    executed_steps = len(observations)
+    success_rate = None
+    if executed_steps > 0:
+        success_rate = round(successful_steps / executed_steps, 3)
+
+    return ToolPlanObservationStats(
+        requested_steps=len(plan.steps),
+        executed_steps=executed_steps,
+        successful_steps=successful_steps,
+        failed_steps=failed_steps,
+        missing_record_count=missing_record_count,
+        duplicate_read_count=duplicate_read_count,
+        artifact_yield_count=artifact_yield_count,
+        success_rate=success_rate,
+        tool_failure_classes=sorted(failure_classes),
+    )
+
+
 def render_tool_plan_observations(objective: str, observations: list[ToolPlanObservation]) -> str:
     lines = ["TOOL PLAN OBSERVATIONS"]
     if objective:
@@ -234,6 +394,25 @@ def render_tool_plan_observations(objective: str, observations: list[ToolPlanObs
     return "\n".join(lines).rstrip()
 
 
+def _normalize_failure_class(text: str) -> str:
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return "unknown"
+    if "missing execution record" in normalized:
+        return "missing_execution_record"
+    if "duplicate" in normalized:
+        return "duplicate_read"
+    if "permission" in normalized:
+        return "permission_error"
+    if "not found" in normalized or "missing" in normalized:
+        return "missing"
+    if "timeout" in normalized:
+        return "timeout"
+    if "denied" in normalized:
+        return "permission_denied"
+    return normalized[:64].replace(" ", "_")
+
+
 def observation_to_evidence_record(
     observation: ToolPlanObservation,
     *,
@@ -242,7 +421,7 @@ def observation_to_evidence_record(
     created_at_step: int,
 ) -> EvidenceRecord:
     source = observation.path or observation.query or f"tool_plan:{observation.step_id}"
-    statement = observation.summary if observation.success else (observation.error or observation.summary)
+    statement = observation.excerpt or (observation.summary if observation.success else (observation.error or observation.summary))
     return EvidenceRecord(
         evidence_id=f"TP-E{created_at_step}-{observation.step_id}",
         kind="tool_plan_observation" if observation.success else "tool_plan_negative_observation",
@@ -261,6 +440,7 @@ def observation_to_evidence_record(
             "path": observation.path,
             "query": observation.query,
             "error": observation.error,
+            "excerpt": observation.excerpt,
             "duplicate_of": observation.duplicate_of,
             "objective": objective,
             "observation_adapter": "tool_plan_observation",

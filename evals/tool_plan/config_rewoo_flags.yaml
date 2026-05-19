@@ -1,0 +1,19 @@
+id: config_rewoo_flags
+task: >-
+  Find where the ToolPlan and ReWOO config flags are defined and wired into the
+  runtime. Summarize the config source chain.
+tags:
+  - config
+  - routing
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/config.py
+    - src/smallctl/config_support.py
+    - src/smallctl/harness/initialization.py
+  required_terms:
+    - tool_plan_auto_select
+    - tool_dag_enabled
+    - rewoo_planner_frame_enabled

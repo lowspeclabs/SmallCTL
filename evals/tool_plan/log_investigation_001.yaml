@@ -1,0 +1,19 @@
+id: log_investigation_001
+task: >-
+  Grep the logs directory for ERROR-level entries, identify the most
+  frequent error class, and locate the handler that should catch it.
+tags:
+  - log_investigation
+  - errors
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/logging_utils.py
+    - src/smallctl/graph/error_hardening.py
+    - src/smallctl/recovery_metrics.py
+  required_terms:
+    - ERROR
+    - failure_events_by_class
+    - recovery_metrics

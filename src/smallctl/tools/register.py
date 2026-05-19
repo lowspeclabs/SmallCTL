@@ -20,6 +20,7 @@ from .register_control_planning import register_control_planning_tools
 from .register_filesystem import register_filesystem_tools
 from .register_operational import register_operational_tools
 from .register_content import register_content_tools
+from .register_git_tools import register_git_tools
 from .register_web_tools import register_web_tools
 
 Handler = Callable[..., Awaitable[dict[str, Any]]]
@@ -120,6 +121,13 @@ def build_registry(
         core_profile=CORE_PROFILE,
         data_profile=DATA_PROFILE,
         indexer_profile=INDEXER_PROFILE,
+    )
+
+    register_git_tools(
+        register=_register,
+        make_registration=_make_registration,
+        inject_cwd=_inject_cwd,
+        core_profile=CORE_PROFILE,
     )
 
     register_web_tools(

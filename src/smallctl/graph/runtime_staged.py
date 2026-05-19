@@ -14,6 +14,7 @@ from .nodes import (
     select_staged_tools,
 )
 from .plan_execution import PlanExecutionEngine
+from .hard_step_detector import HardStepDetector
 from .plan_verification import StepCompletionGate, compact_step_evidence
 from .runtime import LoopGraphRuntime
 from .runtime_base import (
@@ -29,6 +30,7 @@ from .runtime_base import (
     route_if_interrupt_else_final_else_pending_else,
     serialize_runtime_state,
 )
+from .test_time_scaling import run_proposal_scaling, run_sequential_branch_scaling
 
 
 class StagedExecutionRuntime(LoopGraphRuntime):
@@ -40,6 +42,7 @@ class StagedExecutionRuntime(LoopGraphRuntime):
         node_map={
             "initialize_run": "_initialize_run_node",
             "activate_or_finalize_step": "_activate_or_finalize_step_node",
+            "maybe_scale_step": "_maybe_scale_step_node",
             "prepare_prompt": "_prepare_staged_prompt_node",
             "model_call": "_staged_model_call_node",
             "interpret_model_output": "_interpret_model_output_node",
@@ -56,7 +59,17 @@ class StagedExecutionRuntime(LoopGraphRuntime):
             ),
             "activate_or_finalize_step": (
                 "_route_after_activate",
-                {"prepare_prompt": "prepare_prompt", "interrupt_for_human": "interrupt_for_human", END: END},
+                {"maybe_scale_step": "maybe_scale_step", "interrupt_for_human": "interrupt_for_human", END: END},
+            ),
+            "maybe_scale_step": (
+                "_route_after_maybe_scale",
+                {
+                    "dispatch_tools": "dispatch_tools",
+                    "activate_or_finalize_step": "activate_or_finalize_step",
+                    "prepare_prompt": "prepare_prompt",
+                    "interrupt_for_human": "interrupt_for_human",
+                    END: END,
+                },
             ),
             "prepare_prompt": ("_route_after_prepare_prompt", {"model_call": "model_call", END: END}),
             "model_call": (
@@ -185,6 +198,56 @@ class StagedExecutionRuntime(LoopGraphRuntime):
     async def _prepare_staged_prompt_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         return await prepare_prompt_node(self, payload, prepare_staged_prompt)
 
+    async def _maybe_scale_step_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
+        graph_state = load_runtime_state(self, payload)
+        harness = self.deps.harness
+        if graph_state.final_result is not None:
+            return serialize_runtime_state(graph_state)
+        plan = harness.state.active_plan or harness.state.draft_plan
+        step = plan.find_step(harness.state.active_step_id) if plan is not None and harness.state.active_step_id else None
+        if step is None:
+            return serialize_runtime_state(graph_state)
+        decision = HardStepDetector().decide(step=step, state=harness.state, config=getattr(harness, "config", None))
+        if not decision.should_scale:
+            harness.state.scratchpad["_test_time_scaling_skip_reason"] = decision.reason
+            return serialize_runtime_state(graph_state)
+        policy = str(
+            getattr(getattr(harness, "config", None), "test_time_scaling_policy", "proposal_then_execute") or ""
+        ).strip()
+        if policy not in {"proposal_then_execute", "best_of_n", "first_pass", "sequential_branch"}:
+            harness.state.scratchpad["_test_time_scaling_skip_reason"] = f"unsupported_policy:{policy}"
+            return serialize_runtime_state(graph_state)
+        base_messages = await prepare_staged_prompt(graph_state, self.deps)
+        if graph_state.final_result is not None or base_messages is None:
+            return serialize_runtime_state(graph_state)
+        tools = select_staged_tools(graph_state, self.deps)
+        if policy == "sequential_branch":
+            selected = await run_sequential_branch_scaling(
+                graph_state,
+                self.deps,
+                plan=plan,
+                step=step,
+                base_messages=base_messages,
+                tools=tools,
+            )
+        else:
+            selected = await run_proposal_scaling(
+                graph_state,
+                self.deps,
+                base_messages=base_messages,
+                tools=tools,
+            )
+        harness.log.info(
+            "staged_test_time_scaling plan_id=%s step_id=%s step_run_id=%s reason=%s selected=%s pending=%d",
+            getattr(plan, "plan_id", ""),
+            step.step_id,
+            harness.state.active_step_run_id,
+            decision.reason,
+            getattr(selected, "candidate_idx", None),
+            len(graph_state.pending_tool_calls),
+        )
+        return serialize_runtime_state(graph_state)
+
     async def _staged_model_call_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         return await model_call_node(self, payload, select_tools_fn=select_staged_tools, model_call_fn=model_call)
 
@@ -260,7 +323,20 @@ class StagedExecutionRuntime(LoopGraphRuntime):
     def _route_after_activate(payload: LoopGraphPayload) -> str:
         if payload.get("interrupt_payload") is not None:
             return "interrupt_for_human"
-        return route_if_final_else(payload, "prepare_prompt")
+        return route_if_final_else(payload, "maybe_scale_step")
+
+    @staticmethod
+    def _route_after_maybe_scale(payload: LoopGraphPayload) -> str:
+        if payload.get("interrupt_payload") is not None:
+            return "interrupt_for_human"
+        if payload.get("final_result") is not None:
+            return END
+        loop_state = payload.get("loop_state", {})
+        if isinstance(loop_state, dict) and not str(loop_state.get("active_step_id") or "").strip():
+            return "activate_or_finalize_step"
+        if payload.get("pending_tool_calls"):
+            return "dispatch_tools"
+        return "prepare_prompt"
 
     @staticmethod
     def _route_after_interpret(payload: LoopGraphPayload) -> str:

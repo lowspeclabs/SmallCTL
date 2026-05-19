@@ -1,0 +1,19 @@
+id: log_model_stream_halt
+task: >-
+  Trace model-stream halt detection from the model call node into recovery
+  metrics and the eval report. Include where the report normalizes the metric.
+tags:
+  - log_investigation
+  - robustness
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/graph/model_call_nodes.py
+    - src/smallctl/recovery_metrics.py
+    - scripts/tool_plan_eval.py
+  required_terms:
+    - model_stream_halt_count
+    - recovery_metrics
+    - RECOVERY_METRIC_KEYS

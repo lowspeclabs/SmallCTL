@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from time import time
+from time import perf_counter, time
 from typing import Any
 
 from langgraph.graph import END
@@ -36,6 +36,7 @@ from .tool_plan_executor import prepare_tool_plan_dispatch
 from .tool_plan_observations import (
     attach_tool_plan_observation_evidence,
     build_tool_plan_observations,
+    summarize_tool_plan_observations,
     render_tool_plan_observations,
 )
 from .tool_plan_parser import parse_tool_plan
@@ -44,7 +45,7 @@ from .tool_plan_safety import validate_tool_plan
 from .tool_plan_schema import ToolPlan, ToolPlanStep
 from .tool_dag import build_execution_dag
 from .tool_dag_executor import dispatch_tool_dag
-from .tool_dag_safety import assert_no_mutating_steps, MutatingStepInDAGError
+from .tool_dag_safety import NonParallelizableStepInDAGError, assert_parallelizable_steps
 from ..harness.refine_service import RefineService
 from ..harness.trajectory_recorder import TrajectoryRecorder
 
@@ -61,6 +62,7 @@ _MUTATING_SOLVER_TOOLS = {
     "ssh_file_patch",
     "ansible",
 }
+_TERMINAL_SOLVER_TOOLS = {"task_complete", "task_fail"}
 
 
 def _tool_plan_config(deps: Any, name: str, default: Any) -> Any:
@@ -78,9 +80,34 @@ def _rewoo_frame_budget(deps: Any) -> int:
     return max(1, int(_tool_plan_config(deps, "rewoo_frame_token_budget", 1200) or 1200))
 
 
+def _tool_plan_observation_budget(deps: Any) -> tuple[int, int]:
+    token_limit = int(_tool_plan_config(deps, "tool_plan_observation_token_limit", 900) or 900)
+    max_chars = int(_tool_plan_config(deps, "tool_plan_max_observation_chars_per_step", 600) or 600)
+    metrics = recovery_metrics(deps.harness.state)
+    try:
+        max_batch = int(metrics.get("tool_plan_dag_max_batch_size", 1) or 1)
+    except (TypeError, ValueError):
+        max_batch = 1
+    if max_batch >= 3:
+        token_limit = int(token_limit * 0.85)
+        max_chars = int(max_chars * 0.80)
+    return max(1, token_limit), max(1, max_chars)
+
+
 def _select_no_tools(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]]:
     del graph_state, deps
     return []
+
+
+def _select_solver_tools(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]]:
+    tools = select_loop_tools(graph_state, deps)
+    selected: list[dict[str, Any]] = []
+    for schema in tools:
+        function = schema.get("function") if isinstance(schema, dict) else None
+        name = str(function.get("name") or "").strip() if isinstance(function, dict) else ""
+        if name in _TERMINAL_SOLVER_TOOLS:
+            selected.append(schema)
+    return selected
 
 
 def _coerce_tool_plan(value: Any) -> ToolPlan | None:
@@ -151,6 +178,15 @@ def _record_tool_plan_tokens(state: Any, metric_name: str, usage: dict[str, Any]
     metrics["tool_plan_total_tokens"] = int(metrics.get("tool_plan_total_tokens", 0) or 0) + tokens
 
 
+def _add_latency_metric(graph_state: GraphRunState, name: str, elapsed_sec: float) -> None:
+    current = graph_state.latency_metrics.get(name, 0.0)
+    try:
+        current_value = float(current or 0.0)
+    except (TypeError, ValueError):
+        current_value = 0.0
+    graph_state.latency_metrics[name] = round(current_value + max(0.0, elapsed_sec), 3)
+
+
 def _attach_tool_plan_evidence(harness: Any, observations_text: str) -> None:
     config = getattr(harness, "config", None)
     if not bool(getattr(config, "subtask_ledger_enabled", True)):
@@ -214,6 +250,13 @@ def _record_tool_plan_failure(harness: Any, message: str, *, failure_class: str)
             pass
 
 
+def _record_tool_plan_planner_metadata(harness: Any, plan: ToolPlan) -> None:
+    metrics = recovery_metrics(harness.state)
+    metrics["tool_plan_planner_valid"] = 1
+    metrics["tool_plan_planner_step_count"] = len(plan.steps)
+    metrics["tool_plan_planner_tools"] = sorted({str(step.tool or "").strip() for step in plan.steps if str(step.tool or "").strip()})
+
+
 async def _prepare_planner_prompt(graph_state: GraphRunState, deps: Any) -> list[dict[str, Any]] | None:
     harness = deps.harness
     task = str(
@@ -242,7 +285,12 @@ async def _prepare_planner_prompt(graph_state: GraphRunState, deps: Any) -> list
         except Exception as exc:
             harness._runlog("rewoo_planner_frame_failed", "planner frame compilation failed", error=str(exc))
             context_frame = ""
-    prompt = build_tool_plan_planner_prompt(task=task, max_steps=max_steps, context_frame=context_frame)
+    prompt = build_tool_plan_planner_prompt(
+        task=task,
+        max_steps=max_steps,
+        max_parallel=int(_tool_plan_config(deps, "tool_dag_max_parallel", 4) or 4),
+        context_frame=context_frame,
+    )
     repair_nudge = str(harness.state.scratchpad.pop("_tool_plan_repair_nudge", "") or "").strip()
     if repair_nudge:
         prompt = f"{prompt}\n\nRepair previous invalid ToolPlan output:\n{repair_nudge}\nReturn ONLY corrected JSON."
@@ -402,7 +450,9 @@ class ToolPlanRuntime(LoopGraphRuntime):
     async def _planner_model_call_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
         messages = graph_state.loop_state.scratchpad.pop("_compiled_prompt_messages", [])
+        started = perf_counter()
         result = await process_model_stream(graph_state, self.deps, messages=messages, tools=[])
+        _add_latency_metric(graph_state, "planner_latency_sec", perf_counter() - started)
         if graph_state.final_result is None:
             usage_payload = result.usage if isinstance(result.usage, dict) else {}
             if usage_payload:
@@ -439,6 +489,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
             max_steps=max_steps,
             allow_web=bool(_tool_plan_config(self.deps, "tool_plan_allow_web", True)),
             allow_artifact_read=bool(_tool_plan_config(self.deps, "tool_plan_allow_artifact_read", True)),
+            allow_git=bool(_tool_plan_config(self.deps, "tool_plan_allow_git", False)),
         )
         if safe_plan is None:
             increment_metric(harness.state, "tool_plan_unsafe_steps_blocked", len(plan.steps))
@@ -458,6 +509,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
             return serialize_runtime_state(graph_state)
         graph_state.loop_state.scratchpad["_tool_plan"] = plan
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "dispatch"
+        _record_tool_plan_planner_metadata(harness, plan)
         harness._runlog("tool_plan_accepted", "ToolPlan accepted", steps=len(plan.steps), objective=plan.objective)
         return serialize_runtime_state(graph_state)
 
@@ -476,15 +528,16 @@ class ToolPlanRuntime(LoopGraphRuntime):
 
     async def _dispatch_tools_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
+        phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
+        started = perf_counter() if phase == "dispatch" else None
         plan = _coerce_tool_plan(graph_state.loop_state.scratchpad.get("_tool_plan"))
-        use_dag = (
-            plan is not None
-            and bool(_tool_plan_config(self.deps, "tool_dag_enabled", False))
+        use_dag = phase == "dispatch" and plan is not None and bool(
+            _tool_plan_config(self.deps, "tool_dag_enabled", False)
         )
         if use_dag:
             try:
                 batches = build_execution_dag(plan)
-                assert_no_mutating_steps(batches)
+                assert_parallelizable_steps(batches)
                 pending_by_id = {pc.tool_call_id: pc for pc in graph_state.pending_tool_calls}
                 pending_batches: list[list[Any]] = []
                 for batch in batches:
@@ -495,8 +548,16 @@ class ToolPlanRuntime(LoopGraphRuntime):
                             pb.append(pc)
                     if pb:
                         pending_batches.append(pb)
+                if plan.steps and not pending_batches:
+                    raise ValueError("DAG setup produced no pending ToolPlan batches.")
+                metrics = recovery_metrics(self.deps.harness.state)
+                batch_sizes = [len(batch) for batch in pending_batches if batch]
+                metrics["tool_plan_dag_batch_count"] = len(batch_sizes)
+                metrics["tool_plan_dag_max_batch_size"] = max(batch_sizes, default=0)
+                metrics["tool_plan_dag_step_count"] = sum(batch_sizes)
                 graph_state.recorded_tool_call_ids = []
                 graph_state.last_tool_results = []
+                dag_started = perf_counter()
                 records = await dispatch_tool_dag(
                     graph_state,
                     self.deps,
@@ -505,13 +566,39 @@ class ToolPlanRuntime(LoopGraphRuntime):
                     timeout_sec=int(_tool_plan_config(self.deps, "tool_dag_timeout_sec", 30)),
                     preserve_result_order=bool(_tool_plan_config(self.deps, "tool_dag_preserve_result_order", True)),
                 )
+                actual_ms = max(0.0, (perf_counter() - dag_started) * 1000.0)
+                estimated_serial_ms = 0.0
+                dispatch_error_count = 0
+                for record in records:
+                    metadata = getattr(record.result, "metadata", {}) or {}
+                    try:
+                        estimated_serial_ms += float(metadata.get("dag_latency_ms", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        pass
+                    if metadata.get("reason") in {"dag_dispatch_exception", "dag_timeout", "dag_exception"}:
+                        dispatch_error_count += 1
+                metrics["tool_plan_dag_actual_ms"] = round(actual_ms, 3)
+                metrics["tool_plan_dag_estimated_serial_ms"] = round(estimated_serial_ms, 3)
+                if actual_ms > 0 and estimated_serial_ms > 0:
+                    metrics["tool_plan_dag_speedup"] = round(estimated_serial_ms / actual_ms, 3)
+                if dispatch_error_count:
+                    increment_metric(self.deps.harness.state, "tool_plan_dag_dispatch_error_count", dispatch_error_count)
                 graph_state.last_tool_results = records
                 graph_state.pending_tool_calls = []
+                if started is not None:
+                    _add_latency_metric(graph_state, "worker_latency_sec", perf_counter() - started)
                 return serialize_runtime_state(graph_state)
-            except MutatingStepInDAGError as exc:
+            except (NonParallelizableStepInDAGError, ValueError, TypeError, RuntimeError) as exc:
+                increment_metric(self.deps.harness.state, "tool_plan_dag_fallback_count")
                 self.deps.harness._runlog("tool_dag_aborted", str(exc))
+                payload = serialize_runtime_state(graph_state)
                 # fall through to serial dispatch
-        return await super()._dispatch_tools_node(payload)
+        next_payload = await super()._dispatch_tools_node(payload)
+        if started is not None:
+            next_state = inflate_graph_state(next_payload)
+            _add_latency_metric(next_state, "worker_latency_sec", perf_counter() - started)
+            return serialize_runtime_state(next_state)
+        return next_payload
 
     async def _compress_observations_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
@@ -521,12 +608,14 @@ class ToolPlanRuntime(LoopGraphRuntime):
         plan = _coerce_tool_plan(graph_state.loop_state.scratchpad.get("_tool_plan"))
         if plan is None:
             return serialize_runtime_state(graph_state)
+        token_limit, max_chars_per_step = _tool_plan_observation_budget(self.deps)
         observations = build_tool_plan_observations(
             plan,
             list(graph_state.last_tool_results),
-            token_limit=int(_tool_plan_config(self.deps, "tool_plan_observation_token_limit", 900) or 900),
-            max_chars_per_step=int(_tool_plan_config(self.deps, "tool_plan_max_observation_chars_per_step", 600) or 600),
+            token_limit=token_limit,
+            max_chars_per_step=max_chars_per_step,
         )
+        observation_stats = summarize_tool_plan_observations(plan, observations)
         rendered = render_tool_plan_observations(plan.objective, observations)
         graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = rendered
         graph_state.loop_state.scratchpad["_tool_plan_observations"] = observations
@@ -536,6 +625,15 @@ class ToolPlanRuntime(LoopGraphRuntime):
             observations=observations,
         )
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "solver"
+        metrics = recovery_metrics(self.deps.harness.state)
+        metrics["tool_plan_worker_steps_requested"] = observation_stats.requested_steps
+        metrics["tool_plan_worker_steps_executed"] = observation_stats.executed_steps
+        metrics["tool_plan_worker_step_failures"] = observation_stats.failed_steps
+        metrics["tool_plan_worker_success_rate"] = observation_stats.success_rate
+        metrics["tool_plan_worker_missing_record_count"] = observation_stats.missing_record_count
+        metrics["tool_plan_worker_duplicate_read_count"] = observation_stats.duplicate_read_count
+        metrics["tool_plan_worker_artifact_yield_count"] = observation_stats.artifact_yield_count
+        metrics["tool_plan_worker_tool_failure_classes"] = observation_stats.tool_failure_classes
         increment_metric(self.deps.harness.state, "tool_plan_steps_executed", len(observations))
         increment_metric(
             self.deps.harness.state,
@@ -560,10 +658,16 @@ class ToolPlanRuntime(LoopGraphRuntime):
         return await prepare_prompt_node(self, payload, _prepare_solver_prompt)
 
     async def _solver_model_call_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
-        next_payload = await model_call_node(self, payload, select_tools_fn=select_loop_tools, model_call_fn=model_call)
+        graph_state = load_runtime_state(self, payload)
+        started = perf_counter() if str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "") == "solver" else None
+        next_payload = await model_call_node(self, payload, select_tools_fn=_select_solver_tools, model_call_fn=model_call)
         graph_state = inflate_graph_state(next_payload)
+        if started is not None:
+            _add_latency_metric(graph_state, "solver_latency_sec", perf_counter() - started)
         if graph_state.last_usage:
             _record_tool_plan_tokens(graph_state.loop_state, "tool_plan_solver_tokens", graph_state.last_usage)
+            return serialize_runtime_state(graph_state)
+        if started is not None:
             return serialize_runtime_state(graph_state)
         return next_payload
 
@@ -610,6 +714,8 @@ class ToolPlanRuntime(LoopGraphRuntime):
                     context_frame=context_frame,
                 )
                 if refine_result is not None:
+                    harness.state.scratchpad["_tool_plan_refine_verdict"] = refine_result.verdict
+                    recovery_metrics(harness.state)["tool_plan_refine_verdict"] = refine_result.verdict
                     if refine_result.verdict == "block":
                         harness.state.append_message(
                             ConversationMessage(
@@ -625,6 +731,31 @@ class ToolPlanRuntime(LoopGraphRuntime):
                         graph_state.last_assistant_text = refine_result.revised_output
                         harness._runlog("solver_refine", "solver draft revised", issues=refine_result.issues)
         await interpret_model_output(graph_state, self.deps)
+        if phase == "solver" and graph_state.pending_tool_calls:
+            terminal_calls = [
+                call for call in graph_state.pending_tool_calls
+                if str(call.tool_name or "").strip() in _TERMINAL_SOLVER_TOOLS
+            ]
+            blocked_calls = [
+                str(call.tool_name or "").strip()
+                for call in graph_state.pending_tool_calls
+                if str(call.tool_name or "").strip() not in _TERMINAL_SOLVER_TOOLS
+            ]
+            if blocked_calls:
+                increment_metric(self.deps.harness.state, "tool_plan_solver_blocked_tool_calls")
+                harness._runlog(
+                    "tool_plan_solver_tool_blocked",
+                    "blocked non-terminal ToolPlan solver tool call",
+                    tools=blocked_calls,
+                )
+                graph_state.pending_tool_calls = terminal_calls
+                if not terminal_calls:
+                    graph_state.final_result = harness._failure(
+                        "ToolPlan solver requested non-terminal tools after evidence was gathered.",
+                        error_type="tool_plan_solver_tool_call",
+                        details={"blocked_tools": blocked_calls},
+                    )
+                    return serialize_runtime_state(graph_state)
         if graph_state.pending_tool_calls:
             graph_state.loop_state.scratchpad["_tool_plan_phase"] = "normal"
             if any(str(call.tool_name or "").strip() in _MUTATING_SOLVER_TOOLS for call in graph_state.pending_tool_calls):
@@ -668,6 +799,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
         if attempts >= max_attempts:
             return False
         graph_state.loop_state.scratchpad["_tool_plan_repair_attempts"] = attempts + 1
+        increment_metric(self.deps.harness.state, "tool_plan_repair_attempts")
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "planning_repair"
         graph_state.loop_state.scratchpad["_tool_plan_repair_nudge"] = message[:1200]
         graph_state.pending_tool_calls = []

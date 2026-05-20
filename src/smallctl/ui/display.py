@@ -167,6 +167,70 @@ def compute_activity_for_event(
     return None
 
 
+def format_test_time_scaling_event(event: UIEvent) -> str:
+    """Format a test-time scaling event as a compact candidate detail panel."""
+    content = str(event.content or event.data.get("status_activity") or "").strip()
+    lines: list[str] = [content] if content else ["Test-time scaling update."]
+    policy = str(event.data.get("policy") or "").strip()
+    phase = str(event.data.get("phase") or "").strip()
+    detail_bits = []
+    if policy:
+        detail_bits.append(f"policy: {policy}")
+    if phase:
+        detail_bits.append(f"phase: {phase}")
+    if event.data.get("candidate_count") is not None:
+        detail_bits.append(f"candidates: {event.data.get('candidate_count')}")
+    if event.data.get("read_only_candidate_count") is not None:
+        detail_bits.append(f"read-only: {event.data.get('read_only_candidate_count')}")
+    if event.data.get("read_only_branch_parallel_count") is not None:
+        detail_bits.append(f"parallel read-only branches: {event.data.get('read_only_branch_parallel_count')}")
+    if event.data.get("all_failed_action"):
+        detail_bits.append(f"all-fail action: {event.data.get('all_failed_action')}")
+    if detail_bits:
+        lines.append(" | ".join(detail_bits))
+
+    history = event.data.get("candidate_history")
+    if isinstance(history, list) and history:
+        lines.append("")
+        lines.append("Candidates:")
+        for raw_candidate in history:
+            if not isinstance(raw_candidate, dict):
+                continue
+            lines.extend(_format_test_time_scaling_candidate(raw_candidate))
+    return "\n".join(lines)
+
+
+def _format_test_time_scaling_candidate(candidate: dict[str, Any]) -> list[str]:
+    idx = candidate.get("candidate")
+    label = f"#{idx}" if idx is not None else "#?"
+    if candidate.get("selected"):
+        label += " selected"
+    bits = [label]
+    if candidate.get("score") is not None:
+        bits.append(f"score {candidate.get('score')}")
+    if candidate.get("token_cost") not in (None, 0, ""):
+        bits.append(f"{candidate.get('token_cost')} tokens")
+    if candidate.get("latency_ms") not in (None, 0, ""):
+        bits.append(f"{candidate.get('latency_ms')} ms")
+    if candidate.get("read_only"):
+        bits.append("read-only")
+    lines = ["- " + " | ".join(bits)]
+    tools = candidate.get("tools")
+    if isinstance(tools, list) and tools:
+        lines.append("  tools: " + ", ".join(str(tool) for tool in tools if str(tool).strip()))
+    prompt_variant = str(candidate.get("prompt_variant") or "").strip()
+    if prompt_variant:
+        lines.append(f"  variant: {prompt_variant}")
+    unsafe_reason = str(candidate.get("unsafe_reason") or "").strip()
+    failed = candidate.get("failed_criteria")
+    failed_items = [str(item) for item in failed if str(item).strip()] if isinstance(failed, list) else []
+    if unsafe_reason and unsafe_reason not in failed_items:
+        failed_items.append(unsafe_reason)
+    if failed_items:
+        lines.append("  failed: " + ", ".join(failed_items))
+    return lines
+
+
 def format_tool_call_for_display(tool_name: str, args: dict[str, Any]) -> str:
     """Format a tool call for display in the UI."""
     display_text = f"**{tool_name}**"

@@ -4,7 +4,8 @@ from typing import Any
 from textual.containers import Vertical, VerticalScroll
 
 from ..models.events import UIEvent, UIEventType
-from .bubbles import AssistantTurnWidget, BubbleWidget
+from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget
+from .display import format_test_time_scaling_event
 
 
 class ConsolePane(VerticalScroll):
@@ -93,6 +94,10 @@ class ConsolePane(VerticalScroll):
                 if nested:
                     self._schedule_autoscroll()
                     return
+
+        if event.event_type == UIEventType.SYSTEM and event.data.get("kind") == "test_time_scaling":
+            await self._append_test_time_scaling_event(event)
+            return
 
         kind_map = {
             UIEventType.USER: "user",
@@ -185,6 +190,20 @@ class ConsolePane(VerticalScroll):
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.mount(bubble)
         return bubble
+
+    async def _append_test_time_scaling_event(self, event: UIEvent) -> None:
+        text = format_test_time_scaling_event(event)
+        title = "Test-Time Scaling"
+        phase = str(event.data.get("phase") or "").strip()
+        if phase:
+            title += f" ({phase})"
+        panel = ArtifactBubbleWidget(title=title, text=text, collapsed=False)
+        panel.add_class("assistant-detail-test-time-scaling")
+        stack = self.query_one("#bubble-stack", Vertical)
+        await stack.mount(panel)
+        self._active_assistant_turn = None
+        self._last_system_message = event.content
+        self._schedule_autoscroll()
 
     async def _ensure_assistant_turn(self, *, speaker: str | None = None) -> AssistantTurnWidget:
         if self._active_assistant_turn is None:

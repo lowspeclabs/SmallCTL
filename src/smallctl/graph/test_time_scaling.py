@@ -369,6 +369,7 @@ async def run_proposal_scaling(
         candidate_count=len(candidates),
         selected_candidate=selected.candidate_idx,
         selected_score=round(selected.score, 3),
+        candidate_history=_candidate_history(candidates, selected=selected),
     )
     return selected
 
@@ -399,6 +400,7 @@ async def run_sequential_branch_scaling(
         phase="branch_start",
         candidate_count=len(candidates),
         read_only_candidate_count=sum(1 for candidate in candidates if candidate_uses_only_read_only_tools(candidate)),
+        candidate_history=_candidate_history(candidates),
     )
 
     state_guard = CandidateStateGuard.capture(harness.state)
@@ -461,6 +463,7 @@ async def run_sequential_branch_scaling(
                     selected_candidate=candidate.candidate_idx,
                     selected_score=round(candidate.score, 3),
                     read_only_branch_parallel_count=len(read_only_results),
+                    candidate_history=_candidate_history(candidates, selected=candidate),
                 )
                 return candidate
 
@@ -514,6 +517,7 @@ async def run_sequential_branch_scaling(
                 candidate_count=len(candidates),
                 selected_candidate=candidate.candidate_idx,
                 selected_score=round(candidate.score, 3),
+                candidate_history=_candidate_history(candidates, selected=candidate),
             )
             return candidate
 
@@ -550,6 +554,7 @@ async def run_sequential_branch_scaling(
         candidate_count=len(candidates),
         selected_candidate=getattr(best_candidate, "candidate_idx", None),
         all_failed_action=all_fail_action,
+        candidate_history=_candidate_history(candidates, selected=best_candidate),
     )
     return None
 
@@ -900,6 +905,33 @@ def unsafe_branch_execution_reason(candidate: ProposalCandidate) -> str:
     if unsafe_shell_tools:
         return "unsafe_branch_tool:" + ",".join(sorted(set(unsafe_shell_tools)))
     return ""
+
+
+def _candidate_history(
+    candidates: list[ProposalCandidate],
+    *,
+    selected: ProposalCandidate | None = None,
+) -> list[dict[str, Any]]:
+    selected_idx = getattr(selected, "candidate_idx", None)
+    history: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: item.candidate_idx):
+        tools = [str(getattr(call, "tool_name", "") or "").strip() for call in candidate.pending_tool_calls]
+        tools = [tool for tool in tools if tool]
+        unsafe_reason = unsafe_branch_execution_reason(candidate)
+        record = {
+            "candidate": candidate.candidate_idx,
+            "selected": selected_idx is not None and candidate.candidate_idx == selected_idx,
+            "prompt_variant": candidate.prompt_variant,
+            "score": round(float(candidate.score or 0.0), 3),
+            "failed_criteria": list(candidate.failed_criteria),
+            "tools": tools,
+            "read_only": candidate_uses_only_read_only_tools(candidate),
+            "unsafe_reason": unsafe_reason,
+            "latency_ms": round(float(candidate.latency_ms or 0.0), 3),
+            "token_cost": _usage_total_tokens(candidate.usage),
+        }
+        history.append(record)
+    return history
 
 
 def _all_fail_action(config: Any) -> str:

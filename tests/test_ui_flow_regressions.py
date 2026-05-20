@@ -14,7 +14,7 @@ from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_approvals import handle_approval_prompt, handle_sudo_password_prompt
 from smallctl.ui.approval import ShellApprovalDecision
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
-from smallctl.ui.display import compute_activity_for_event
+from smallctl.ui.display import compute_activity_for_event, format_test_time_scaling_event
 from smallctl.ui.model_selector import ModelSelectButton
 from smallctl.ui.statusbar import StatusBar
 
@@ -75,6 +75,50 @@ def test_test_time_scaling_event_formats_statusbar_activity() -> None:
     )
 
     assert compute_activity_for_event(event) == "scaling selected #1/2 score 1.0"
+
+
+def test_test_time_scaling_event_formats_candidate_history_panel() -> None:
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        content="Scaled 2 branches; selected #2.",
+        data={
+            "kind": "test_time_scaling",
+            "phase": "branch_selected",
+            "policy": "sequential_branch",
+            "candidate_count": 2,
+            "selected_candidate": 2,
+            "selected_score": 0.95,
+            "read_only_branch_parallel_count": 1,
+            "candidate_history": [
+                {
+                    "candidate": 1,
+                    "score": 0.0,
+                    "tools": ["ssh_file_write"],
+                    "failed_criteria": ["unsafe_branch_tool:ssh_file_write"],
+                    "prompt_variant": "minimal",
+                    "read_only": False,
+                },
+                {
+                    "candidate": 2,
+                    "selected": True,
+                    "score": 0.95,
+                    "tools": ["file_read", "step_complete"],
+                    "token_cost": 123,
+                    "latency_ms": 45.5,
+                    "prompt_variant": "verify-first",
+                    "read_only": True,
+                },
+            ],
+        },
+    )
+
+    text = format_test_time_scaling_event(event)
+
+    assert "policy: sequential_branch" in text
+    assert "parallel read-only branches: 1" in text
+    assert "#2 selected | score 0.95 | 123 tokens | 45.5 ms | read-only" in text
+    assert "tools: file_read, step_complete" in text
+    assert "failed: unsafe_branch_tool:ssh_file_write" in text
 
 
 def test_on_harness_event_queues_same_thread_work_before_rendering() -> None:

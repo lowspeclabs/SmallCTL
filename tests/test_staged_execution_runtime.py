@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from smallctl.graph.runtime_staged import StagedExecutionRuntime
-from smallctl.graph.test_time_scaling import FileSnapshotGuard
+from smallctl.graph.state import PendingToolCall
+from smallctl.graph.test_time_scaling import FileSnapshotGuard, ProposalCandidate, _candidate_history
 from smallctl.harness import Harness
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.models.tool_result import ToolEnvelope
@@ -103,6 +104,43 @@ def test_file_snapshot_guard_keeps_existing_parent_directories(tmp_path: Path) -
 
     assert existing.exists()
     assert not target.exists()
+
+
+def test_test_time_scaling_candidate_history_includes_tools_scores_and_safety() -> None:
+    candidates = [
+        ProposalCandidate(
+            candidate_idx=1,
+            prompt_variant="remote",
+            pending_tool_calls=[
+                PendingToolCall(
+                    tool_name="ssh_file_write",
+                    args={"target": "root@example.test", "path": "/tmp/answer.py", "content": "x"},
+                )
+            ],
+            score=0.0,
+            failed_criteria=["unsafe_branch_tool:ssh_file_write"],
+            usage={"total_tokens": 10},
+            latency_ms=12.25,
+        ),
+        ProposalCandidate(
+            candidate_idx=2,
+            prompt_variant="read-only",
+            pending_tool_calls=[PendingToolCall(tool_name="file_read", args={"path": "README.md"})],
+            score=0.9,
+            usage={"total_tokens": 20},
+            latency_ms=30.0,
+        ),
+    ]
+
+    history = _candidate_history(candidates, selected=candidates[1])
+
+    assert history[0]["candidate"] == 1
+    assert history[0]["tools"] == ["ssh_file_write"]
+    assert history[0]["unsafe_reason"] == "unsafe_branch_tool:ssh_file_write"
+    assert history[0]["token_cost"] == 10
+    assert history[1]["selected"] is True
+    assert history[1]["read_only"] is True
+    assert history[1]["score"] == 0.9
 
 
 def test_three_step_plan_runs_in_dependency_order(tmp_path: Path, monkeypatch) -> None:

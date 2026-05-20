@@ -4,6 +4,8 @@ import asyncio
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+import shutil
+import tempfile
 import time
 from typing import Any
 
@@ -11,6 +13,7 @@ from ..models.events import UIEvent, UIEventType
 from ..recovery_metrics import increment_metric, recovery_metrics
 from ..state import json_safe_value
 from ..shell_utils import is_read_only_shell_evidence_action
+from ..tools import ToolDispatcher, build_registry
 from .model_call_nodes import _conversation_tool_calls_from_pending, model_call
 from .plan_execution import PlanExecutionEngine
 from .plan_verification import StepCompletionGate, compact_step_evidence
@@ -68,6 +71,7 @@ class ProposalCandidate:
     latency_ms: float = 0.0
     score: float = 0.0
     failed_criteria: list[str] = field(default_factory=list)
+    isolated: bool = False
 
 
 @dataclass(slots=True)
@@ -414,6 +418,7 @@ async def run_sequential_branch_scaling(
     best_candidate: ProposalCandidate | None = None
     best_score = -1.0
     threshold = float(getattr(config, "test_time_scaling_score_threshold", 0.85) or 0.85)
+    isolated_branch_attempts = 0
 
     increment_metric(harness.state, "test_time_scaling_branch_attempts")
     read_only_candidates = [
@@ -478,6 +483,21 @@ async def run_sequential_branch_scaling(
                 best_score = candidate.score
                 best_candidate = candidate
             continue
+        if candidate_uses_local_file_mutation_tools(candidate):
+            isolated_result = await _run_isolated_local_branch_candidate(
+                graph_state,
+                deps,
+                candidate=candidate,
+                step=step,
+                original_step_run_id=original_step_run_id,
+                threshold=threshold,
+            )
+            isolated_branch_attempts += 1
+            if isolated_result.score_value > best_score:
+                best_score = isolated_result.score_value
+                best_candidate = candidate
+            if not isolated_result.passed_threshold:
+                continue
         state_guard.restore(harness.state)
         file_guard.restore()
         branch_run_id = f"{original_step_run_id}-cand{candidate.candidate_idx}"
@@ -509,6 +529,8 @@ async def run_sequential_branch_scaling(
             evidence = compact_step_evidence(harness, step, result)
             engine.complete_step(plan, step.step_id, evidence)
             _record_branch_metrics(harness, candidates, candidate)
+            if isolated_branch_attempts:
+                increment_metric(harness.state, "test_time_scaling_isolated_branch_attempts", isolated_branch_attempts)
             await _emit_scaling_status(
                 deps,
                 f"Scaled {len(candidates)} branches; selected #{candidate.candidate_idx}.",
@@ -539,6 +561,8 @@ async def run_sequential_branch_scaling(
             parallel_read_only_count=len(read_only_results),
             all_failed_action=all_fail_action,
         )
+        if isolated_branch_attempts:
+            increment_metric(harness.state, "test_time_scaling_isolated_branch_attempts", isolated_branch_attempts)
     if all_fail_action == "fail_step":
         reason = "Test-time scaling failed all candidate branches."
         if best_candidate is not None and best_candidate.failed_criteria:
@@ -888,6 +912,13 @@ def candidate_uses_only_read_only_tools(candidate: ProposalCandidate) -> bool:
     return bool(candidate.pending_tool_calls) and all(is_read_only_tool_call(call) for call in candidate.pending_tool_calls)
 
 
+def candidate_uses_local_file_mutation_tools(candidate: ProposalCandidate) -> bool:
+    return any(
+        str(getattr(call, "tool_name", "") or "").strip() in LOCAL_FILE_MUTATION_TOOLS
+        for call in candidate.pending_tool_calls
+    )
+
+
 def unsafe_branch_execution_reason(candidate: ProposalCandidate) -> str:
     remote_mutation_tools = [
         str(getattr(call, "tool_name", "") or "").strip()
@@ -927,11 +958,84 @@ def _candidate_history(
             "tools": tools,
             "read_only": candidate_uses_only_read_only_tools(candidate),
             "unsafe_reason": unsafe_reason,
+            "isolated": bool(candidate.isolated),
             "latency_ms": round(float(candidate.latency_ms or 0.0), 3),
             "token_cost": _usage_total_tokens(candidate.usage),
         }
         history.append(record)
     return history
+
+
+async def _run_isolated_local_branch_candidate(
+    graph_state: GraphRunState,
+    deps: Any,
+    *,
+    candidate: ProposalCandidate,
+    step: Any,
+    original_step_run_id: str,
+    threshold: float,
+) -> BranchExecutionResult:
+    harness = deps.harness
+    candidate.isolated = True
+    root = Path(str(getattr(harness.state, "cwd", ".") or ".")).resolve()
+    try:
+        with tempfile.TemporaryDirectory(prefix="smallctl-tts-candidate-") as tmpdir:
+            sandbox = Path(tmpdir) / "workspace"
+            _copy_workspace_for_candidate(root, sandbox)
+            branch_harness = _clone_harness_for_candidate(harness)
+            branch_harness.state.cwd = str(sandbox)
+            branch_deps = copy(deps)
+            branch_deps.harness = branch_harness
+            branch_deps.event_handler = None
+            branch_run_id = f"{original_step_run_id}-cand{candidate.candidate_idx}-isolated"
+            branch_harness.state.active_step_run_id = branch_run_id
+            branch_graph_state = GraphRunState(
+                loop_state=branch_harness.state,
+                thread_id=graph_state.thread_id,
+                run_mode=graph_state.run_mode,
+                pending_tool_calls=list(candidate.pending_tool_calls),
+                last_assistant_text=candidate.assistant_text,
+                last_thinking_text=candidate.thinking_text,
+                last_usage=dict(candidate.usage or {}),
+            )
+            _commit_selected_proposal(branch_graph_state, branch_harness, candidate)
+            await dispatch_tools(branch_graph_state, branch_deps)
+            await persist_tool_results(branch_graph_state, branch_deps)
+            await apply_tool_outcomes(branch_graph_state, branch_deps)
+            if branch_graph_state.final_result is not None or branch_graph_state.interrupt_payload is not None:
+                candidate.score = 0.0
+                candidate.failed_criteria = ["branch_interrupted_or_final"]
+                return BranchExecutionResult(candidate=candidate, state=branch_harness.state)
+            score = await StepCompletionGate().score_step(branch_harness, step)
+            candidate.score = score.score
+            candidate.failed_criteria = list(score.failed_criteria)
+            return BranchExecutionResult(
+                candidate=candidate,
+                state=branch_harness.state,
+                score_value=score.score,
+                passed_threshold=score.score >= threshold,
+            )
+    except Exception as exc:
+        candidate.score = 0.0
+        candidate.failed_criteria = ["isolated_branch_error"]
+        return BranchExecutionResult(candidate=candidate, state=harness.state, error=str(exc))
+
+
+def _copy_workspace_for_candidate(root: Path, sandbox: Path) -> None:
+    ignore = shutil.ignore_patterns(
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".smallctl",
+        "node_modules",
+    )
+    shutil.copytree(root, sandbox, ignore=ignore)
 
 
 def _all_fail_action(config: Any) -> str:
@@ -967,13 +1071,26 @@ def _clone_harness_for_candidate(harness: Any) -> Any:
     branch_harness = copy(harness)
     branch_harness.state = deepcopy(harness.state)
     dispatcher = getattr(harness, "dispatcher", None)
-    if dispatcher is not None:
-        branch_dispatcher = copy(dispatcher)
-        try:
-            branch_dispatcher.state = branch_harness.state
-        except Exception:
-            pass
-        branch_harness.dispatcher = branch_dispatcher
+    try:
+        branch_harness.registry = build_registry(branch_harness)
+        branch_harness.dispatcher = ToolDispatcher(
+            registry=branch_harness.registry,
+            state=branch_harness.state,
+            phase=str(
+                getattr(dispatcher, "phase", "")
+                or getattr(harness.state, "current_phase", "execute")
+                or "execute"
+            ),
+            run_logger=None,
+        )
+    except Exception:
+        if dispatcher is not None:
+            branch_dispatcher = copy(dispatcher)
+            try:
+                branch_dispatcher.state = branch_harness.state
+            except Exception:
+                pass
+            branch_harness.dispatcher = branch_dispatcher
     return branch_harness
 
 

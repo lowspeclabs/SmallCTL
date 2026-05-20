@@ -143,6 +143,82 @@ def test_test_time_scaling_candidate_history_includes_tools_scores_and_safety() 
     assert history[1]["score"] == 0.9
 
 
+def test_sequential_branch_scaling_isolates_failed_local_file_mutation(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+    harness.config.staged_execution_enabled = True
+    harness.config.test_time_scaling_enabled = True
+    harness.config.test_time_scaling_policy = "sequential_branch"
+    harness.config.test_time_scaling_max_candidates = 2
+    harness.config.test_time_scaling_min_candidates = 2
+    harness.state.active_plan = ExecutionPlan(
+        plan_id="plan-1",
+        goal="scaled branch local isolation goal",
+        approved=True,
+        steps=[
+            PlanStep(
+                step_id="S1",
+                title="write valid python",
+                task="write answer.py",
+                difficulty="hard",
+                tool_allowlist=["file_write"],
+                outputs_expected=[StepOutputSpec(kind="file", ref="answer.py", required=True)],
+                verifiers=[StepVerifierSpec(kind="syntax_ok", args={"path": "answer.py"}, required=True)],
+            ),
+        ],
+    )
+
+    call_count = 0
+    stream_sequences = [
+        _tool_call_stream(
+            "file_write",
+            {"path": "answer.py", "content": "def broken(:\n"},
+            tool_call_id="tc-bad-write",
+        ),
+        _tool_call_stream(
+            "file_write",
+            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            tool_call_id="tc-good-write",
+        ),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del messages, tools
+        nonlocal call_count
+        call_count += 1
+        if call_count > len(stream_sequences):
+            raise AssertionError(f"unexpected extra model call #{call_count}")
+        for event in stream_sequences[call_count - 1]:
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = StagedExecutionRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("execute staged plan"),
+            timeout=10,
+        )
+    )
+
+    assert result["status"] == "complete"
+    assert call_count == 2
+    assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "def answer():\n    return 42\n"
+    metrics = harness.state.scratchpad["_recovery_metrics"]
+    assert metrics["test_time_scaling_isolated_branch_attempts"] == 2
+    last = metrics["test_time_scaling_last"]
+    assert last["selected_candidate"] == 2
+
+
 def test_three_step_plan_runs_in_dependency_order(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 

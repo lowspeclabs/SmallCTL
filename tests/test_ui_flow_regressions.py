@@ -14,6 +14,7 @@ from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_approvals import handle_approval_prompt, handle_sudo_password_prompt
 from smallctl.ui.approval import ShellApprovalDecision
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
+from smallctl.ui.display import compute_activity_for_event
 from smallctl.ui.model_selector import ModelSelectButton
 from smallctl.ui.statusbar import StatusBar
 
@@ -58,6 +59,22 @@ def test_on_harness_event_uses_lazy_harness_event_import_for_cross_thread_postin
 
     assert len(posted) == 1
     assert posted[0].__class__.__name__ == "HarnessEvent"
+
+
+def test_test_time_scaling_event_formats_statusbar_activity() -> None:
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        content="Scaled 2 candidates; selected #1.",
+        data={
+            "kind": "test_time_scaling",
+            "phase": "proposal_selected",
+            "candidate_count": 2,
+            "selected_candidate": 1,
+            "selected_score": 1.0,
+        },
+    )
+
+    assert compute_activity_for_event(event) == "scaling selected #1/2 score 1.0"
 
 
 def test_on_harness_event_queues_same_thread_work_before_rendering() -> None:

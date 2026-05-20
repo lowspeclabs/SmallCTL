@@ -85,6 +85,8 @@ def initialize_harness(self: Any, **params: Any) -> None:
     fresh_run_turns = params.get("fresh_run_turns", 1)
     planning_mode = params.get("planning_mode", False)
     contract_flow_ui = params.get("contract_flow_ui", False)
+    staged_execution_enabled = params.get("staged_execution_enabled", False)
+    staged_step_prompt_tokens = params.get("staged_step_prompt_tokens", 4096)
     summarizer_endpoint = params.get("summarizer_endpoint")
     summarizer_model = params.get("summarizer_model")
     summarizer_api_key = params.get("summarizer_api_key")
@@ -147,6 +149,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
     rewoo_solver_frame_enabled = params.get("rewoo_solver_frame_enabled", False)
     rewoo_refiner_frame_enabled = params.get("rewoo_refiner_frame_enabled", False)
     rewoo_frame_token_budget = params.get("rewoo_frame_token_budget", 1200)
+    test_time_scaling_enabled = params.get("test_time_scaling_enabled", False)
+    test_time_scaling_runtimes = params.get("test_time_scaling_runtimes", ["staged_execution"])
+    test_time_scaling_trigger = params.get("test_time_scaling_trigger", "retry_or_explicit")
+    test_time_scaling_max_candidates = params.get("test_time_scaling_max_candidates", 3)
+    test_time_scaling_min_candidates = params.get("test_time_scaling_min_candidates", 2)
+    test_time_scaling_policy = params.get("test_time_scaling_policy", "proposal_then_execute")
+    test_time_scaling_strategy = params.get("test_time_scaling_strategy", "diverse_nudges")
+    test_time_scaling_score_threshold = params.get("test_time_scaling_score_threshold", 0.85)
+    test_time_scaling_parallel_max = params.get("test_time_scaling_parallel_max", 1)
+    test_time_scaling_timeout_sec = params.get("test_time_scaling_timeout_sec", 120)
+    test_time_scaling_mutating_parallel_enabled = params.get("test_time_scaling_mutating_parallel_enabled", False)
+    test_time_scaling_all_fail_action = params.get("test_time_scaling_all_fail_action", "fallback_normal_retry")
 
     normalized_phase = normalize_phase(phase)
     self._initial_phase = normalized_phase
@@ -234,6 +248,8 @@ def initialize_harness(self: Any, **params: Any) -> None:
         fresh_run_turns=fresh_run_turns,
         planning_mode=planning_mode,
         contract_flow_ui=contract_flow_ui,
+        staged_execution_enabled=bool(staged_execution_enabled),
+        staged_step_prompt_tokens=int(staged_step_prompt_tokens),
         context_limit=context_limit,
         max_prompt_tokens=max_prompt_tokens,
         max_prompt_tokens_explicit=bool(max_prompt_tokens_explicit),
@@ -287,6 +303,18 @@ def initialize_harness(self: Any, **params: Any) -> None:
         rewoo_solver_frame_enabled=bool(rewoo_solver_frame_enabled),
         rewoo_refiner_frame_enabled=bool(rewoo_refiner_frame_enabled),
         rewoo_frame_token_budget=int(rewoo_frame_token_budget),
+        test_time_scaling_enabled=bool(test_time_scaling_enabled),
+        test_time_scaling_runtimes=list(test_time_scaling_runtimes or ["staged_execution"]),
+        test_time_scaling_trigger=str(test_time_scaling_trigger or "retry_or_explicit"),
+        test_time_scaling_max_candidates=int(test_time_scaling_max_candidates),
+        test_time_scaling_min_candidates=int(test_time_scaling_min_candidates),
+        test_time_scaling_policy=str(test_time_scaling_policy or "proposal_then_execute"),
+        test_time_scaling_strategy=str(test_time_scaling_strategy or "diverse_nudges"),
+        test_time_scaling_score_threshold=float(test_time_scaling_score_threshold),
+        test_time_scaling_parallel_max=int(test_time_scaling_parallel_max),
+        test_time_scaling_timeout_sec=int(test_time_scaling_timeout_sec),
+        test_time_scaling_mutating_parallel_enabled=bool(test_time_scaling_mutating_parallel_enabled),
+        test_time_scaling_all_fail_action=str(test_time_scaling_all_fail_action or "fallback_normal_retry"),
         fama_enabled=bool(fama_enabled),
         fama_mode=str(fama_mode or "lite"),
         fama_default_ttl_steps=int(fama_default_ttl_steps),

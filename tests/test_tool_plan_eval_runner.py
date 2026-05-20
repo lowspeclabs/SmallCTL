@@ -24,9 +24,12 @@ _summary = _tool_plan_eval._summary
 _load_tasks = _tool_plan_eval._load_tasks
 _filter_tasks = _tool_plan_eval._filter_tasks
 _command_for = _tool_plan_eval._command_for
+_run_task = _tool_plan_eval._run_task
+_ChildRunResult = _tool_plan_eval._ChildRunResult
 _text_output = _tool_plan_eval._text_output
 _prompt_shape_assertions = _tool_plan_eval._prompt_shape_assertions
 _last_json_object = _tool_plan_eval._last_json_object
+_test_time_scaling_env_for_task = _tool_plan_eval._test_time_scaling_env_for_task
 
 
 def test_extract_metrics_reads_recovery_metrics() -> None:
@@ -412,6 +415,114 @@ def test_rewoo_eval_flag_only_adds_frame_flags_to_tool_plan_command() -> None:
     assert "--rewoo-refiner-frame" in tool_plan_command
 
 
+def test_test_time_scaling_modes_use_planning_with_staged_execution() -> None:
+    baseline_command = _command_for("inspect", mode="staged_baseline")
+    scaled_command = _command_for("inspect", mode="staged_scaled")
+
+    assert baseline_command[baseline_command.index("--run-mode") + 1] == "planning"
+    assert scaled_command[scaled_command.index("--run-mode") + 1] == "planning"
+    assert "--staged-execution" in baseline_command
+    assert "--staged-execution" in scaled_command
+
+
+def test_test_time_scaling_run_auto_approves_staged_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run_child_process(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        task_id: str,
+        mode: str,
+        timeout_sec: int,
+    ) -> object:
+        calls.append((command, env))
+        if len(calls) == 1:
+            return _ChildRunResult(
+                duration_sec=1.25,
+                returncode=0,
+                timed_out=False,
+                stdout=(
+                    '{"status":"needs_human",'
+                    '"interrupt":{"kind":"plan_execute_approval","plan_id":"plan-1"}}\n'
+                ),
+                stderr="initial stderr",
+            )
+        return _ChildRunResult(
+            duration_sec=2.5,
+            returncode=0,
+            timed_out=False,
+            stdout=(
+                '{"status":"completed","token_usage":42,'
+                '"recovery_metrics":{"test_time_scaling_attempts":1,'
+                '"test_time_scaling_candidates":2}}\n'
+            ),
+            stderr="resume stderr",
+        )
+
+    monkeypatch.setattr(_tool_plan_eval, "_run_child_process", fake_run_child_process)
+
+    result = _run_task(
+        {"id": "hard step", "task": "inspect hard staged step", "tags": ["test_time_scaling"]},
+        mode="staged_scaled",
+        timeout_sec=30,
+        checkpoint_root=tmp_path,
+    )
+
+    assert len(calls) == 2
+    initial_command, initial_env = calls[0]
+    resume_command, resume_env = calls[1]
+    checkpoint_path = tmp_path / "hard_step-staged_scaled-repeat-1.json"
+    assert "--graph-checkpointer" in initial_command
+    assert initial_command[initial_command.index("--graph-checkpoint-path") + 1] == str(checkpoint_path)
+    assert "--resume" in resume_command
+    assert resume_command[resume_command.index("--graph-checkpoint-path") + 1] == str(checkpoint_path)
+    assert resume_command[resume_command.index("--task") + 1] == "approve"
+    assert initial_env["SMALLCTL_TEST_TIME_SCALING_ENABLED"] == "true"
+    assert resume_env["SMALLCTL_TEST_TIME_SCALING_ENABLED"] == "true"
+    assert result["approval_auto_resumed"] is True
+    assert result["approval_initial_duration_sec"] == 1.25
+    assert result["approval_resume_duration_sec"] == 2.5
+    assert result["duration_sec"] == 3.75
+    assert result["final_json"]["status"] == "completed"
+    assert result["test_time_scaling_attempts"] == 1
+    assert result["test_time_scaling_candidates"] == 2
+
+
+def test_test_time_scaling_task_env_maps_fixture_knobs() -> None:
+    task = {
+        "task": "hard step",
+        "test_time_scaling": {
+            "trigger": "any",
+            "policy": "sequential_branch",
+            "max_candidates": 4,
+            "min_candidates": 2,
+            "parallel_max": 2,
+            "score_threshold": 0.8,
+            "all_fail_action": "fail_step",
+        },
+    }
+
+    env = _test_time_scaling_env_for_task(task, mode="staged_scaled")
+
+    assert env["SMALLCTL_TEST_TIME_SCALING_TRIGGER"] == "any"
+    assert env["SMALLCTL_TEST_TIME_SCALING_POLICY"] == "sequential_branch"
+    assert env["SMALLCTL_TEST_TIME_SCALING_MAX_CANDIDATES"] == "4"
+    assert env["SMALLCTL_TEST_TIME_SCALING_MIN_CANDIDATES"] == "2"
+    assert env["SMALLCTL_TEST_TIME_SCALING_PARALLEL_MAX"] == "2"
+    assert env["SMALLCTL_TEST_TIME_SCALING_SCORE_THRESHOLD"] == "0.8"
+    assert env["SMALLCTL_TEST_TIME_SCALING_ALL_FAIL_ACTION"] == "fail_step"
+
+
+def test_test_time_scaling_task_env_ignored_for_other_modes() -> None:
+    env = _test_time_scaling_env_for_task(
+        {"task": "plain", "test_time_scaling": {"trigger": "any"}},
+        mode="tool_plan",
+    )
+
+    assert env == {}
+
+
 def test_text_output_decodes_timeout_bytes() -> None:
     assert _text_output(b"partial output") == "partial output"
     assert _text_output(None) == ""
@@ -541,6 +652,24 @@ def test_report_exit_code_nonzero_when_decision_is_not_continue() -> None:
     assert _report_exit_code({"wrong_path_fallback_ok": True, "summary": {"decision": "narrow rollout"}}) == 1
 
 
+def test_report_exit_code_allows_test_time_scaling_narrow_rollout() -> None:
+    assert _report_exit_code(
+        {
+            "wrong_path_fallback_ok": True,
+            "summary": {"comparison": "test_time_scaling", "decision": "narrow rollout"},
+        }
+    ) == 0
+
+
+def test_report_exit_code_rejects_test_time_scaling_needs_harder_fixtures() -> None:
+    assert _report_exit_code(
+        {
+            "wrong_path_fallback_ok": True,
+            "summary": {"comparison": "test_time_scaling", "decision": "needs harder fixtures"},
+        }
+    ) == 1
+
+
 
 def test_load_tasks_from_yaml_file(tmp_path: Path) -> None:
     yaml_path = tmp_path / "tasks.yaml"
@@ -618,6 +747,28 @@ def test_filter_tasks_by_id_and_max_tasks() -> None:
     assert selected == [{"id": "b", "task": "two"}]
 
 
+def test_filter_tasks_skips_disabled_by_default() -> None:
+    tasks = [
+        {"id": "a", "task": "one"},
+        {"id": "b", "task": "two", "eval_enabled": False},
+        {"id": "c", "task": "three", "disabled": True},
+    ]
+
+    selected = _filter_tasks(tasks)
+
+    assert selected == [{"id": "a", "task": "one"}]
+
+
+def test_filter_tasks_can_include_disabled_or_select_by_id() -> None:
+    tasks = [
+        {"id": "a", "task": "one"},
+        {"id": "b", "task": "two", "eval_enabled": False},
+    ]
+
+    assert _filter_tasks(tasks, include_disabled=True) == tasks
+    assert _filter_tasks(tasks, task_ids=["b"]) == [{"id": "b", "task": "two", "eval_enabled": False}]
+
+
 def test_filter_tasks_missing_id_raises() -> None:
     with pytest.raises(SystemExit, match="No tasks matched"):
         _filter_tasks([{"id": "a", "task": "one"}], task_ids=["missing"])
@@ -661,6 +812,22 @@ def test_tool_plan_fixture_directory_covers_planned_task_classes() -> None:
     assert all(isinstance(by_id[task_id].get("expectations"), dict) for task_id in expected_ids)
 
 
+def test_test_time_scaling_fixture_directory_has_enabled_smoke_gates() -> None:
+    fixture_dir = Path(__file__).resolve().parents[1] / "evals" / "test_time_scaling"
+    all_tasks = _load_tasks(fixture_dir)
+    enabled_tasks = _filter_tasks(all_tasks)
+    by_id = {task["id"]: task for task in all_tasks}
+    enabled_ids = {task["id"] for task in enabled_tasks}
+
+    assert {"staged_explicit_hard_loop_status", "staged_explicit_hard_file_read"} <= enabled_ids
+    assert "staged_read_path_probe" not in enabled_ids
+    assert "staged_scaling_runtime_probe" not in enabled_ids
+    assert by_id["staged_explicit_hard_file_read"]["expectations"]["required_files"] == [
+        "src/smallctl/graph/hard_step_detector.py"
+    ]
+    assert by_id["staged_explicit_hard_file_read"]["test_time_scaling"]["trigger"] == "explicit"
+
+
 def test_build_markdown_report_includes_decision_and_gates() -> None:
     report = {
         "summary": {
@@ -685,3 +852,95 @@ def test_build_markdown_report_includes_decision_and_gates() -> None:
     assert "Decision: **continue**" in markdown
     assert "Planner validity >= 90%" in markdown
     assert "`repo_analysis`" in markdown
+
+
+def test_build_test_time_scaling_report_compares_pass_at_1_to_pass_at_n() -> None:
+    results = [
+        {
+            "task_id": "hard-step",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["coding"],
+            "task": "fix a hard staged step",
+            "mode": "staged_baseline",
+            "duration_sec": 5.0,
+            "returncode": 0,
+            "timed_out": False,
+            "final_success": False,
+            "final_json": {"status": "failed", "token_usage": 100},
+        },
+        {
+            "task_id": "hard-step",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["coding"],
+            "task": "fix a hard staged step",
+            "mode": "staged_scaled",
+            "duration_sec": 12.0,
+            "returncode": 0,
+            "timed_out": False,
+            "final_success": True,
+            "final_json": {
+                "status": "completed",
+                "token_usage": 260,
+                "recovery_metrics": {
+                    "test_time_scaling_attempts": 1,
+                    "test_time_scaling_candidates": 3,
+                    "test_time_scaling_last": {
+                        "policy": "proposal_then_execute",
+                        "selected_candidate": 2,
+                        "selected_score": 0.94,
+                        "failed_criteria": [],
+                    },
+                },
+            },
+        },
+    ]
+
+    report = _build_report(results)
+
+    assert report["summary"]["comparison"] == "test_time_scaling"
+    assert report["summary"]["pass_at_1"] == 0.0
+    assert report["summary"]["pass_at_n"] == 1.0
+    assert report["summary"]["scaled_wins"] == 1
+    assert report["summary"]["scaling_attempts"] == 1
+    assert report["summary"]["candidate_count_total"] == 3
+    assert report["summary"]["decision"] == "continue"
+    comparison = report["comparisons"][0]
+    assert comparison["selected_candidate"] == 2
+    assert comparison["selected_score"] == 0.94
+    assert comparison["token_delta"] == 160
+    assert report["by_tag"]["coding"]["pass_at_n"] == 1.0
+
+
+def test_test_time_scaling_markdown_report_uses_scaling_terms() -> None:
+    report = {
+        "summary": {
+            "comparison": "test_time_scaling",
+            "decision": "continue",
+            "decision_reason": "pass_at_1=0.0; pass_at_n=1.0",
+            "total_comparisons": 1,
+            "scaled_success_not_worse": True,
+            "scaled_abort_not_worse": True,
+            "scaled_latency_reasonable": True,
+        },
+        "by_tag": {"coding": {"total_comparisons": 1, "scaled_wins": 1}},
+        "comparisons": [
+            {
+                "task_id": "hard-step",
+                "repeat_index": 1,
+                "task": "fix a hard staged step",
+                "baseline_success": False,
+                "scaled_success": True,
+                "scaling_attempts": 1,
+                "selected_candidate": 2,
+                "selected_score": 0.94,
+            }
+        ],
+    }
+
+    markdown = _build_markdown_report(report)
+
+    assert "# Test-Time Scaling Eval Report" in markdown
+    assert "Scaled Pass@N no worse than baseline Pass@1" in markdown
+    assert "`coding`" in markdown

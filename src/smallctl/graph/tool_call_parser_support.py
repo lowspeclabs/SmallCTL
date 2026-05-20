@@ -63,6 +63,7 @@ from .tool_write_session_support import (
     _assistant_text_target_paths,
     _build_schema_repair_message,
     _declared_read_before_write_reason,
+    _detect_oversize_patch_payload,
     _detect_oversize_write_payload,
     _infer_write_tool_path,
     _recover_declared_read_before_write,

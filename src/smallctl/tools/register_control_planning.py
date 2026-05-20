@@ -141,7 +141,7 @@ def register_control_planning_tools(
                         "implementation_plan": {"type": "array", "description": "Short implementation stages or ordered authoring plan items."},
                         "steps": {
                             "type": "array",
-                            "description": "Ordered plan steps. Prefer concise step objects with titles over prose paragraphs.",
+                            "description": "Ordered plan steps. Prefer concise step objects with titles over prose paragraphs. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
                             "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                         },
                         "output_path": {"type": "string", "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py."},

@@ -32,6 +32,18 @@ def _conversation_tool_calls_from_pending(
         raw_arguments = str(getattr(pending, "raw_arguments", "") or "").strip()
         if not raw_arguments:
             raw_arguments = json.dumps(json_safe_value(pending.args or {}), ensure_ascii=True, sort_keys=True)
+        else:
+            # Validate that raw_arguments is parseable JSON; if not, replace with a safe
+            # placeholder so downstream servers (e.g. llama.cpp) don't choke on malformed
+            # tool-call arguments in the conversation history.
+            try:
+                json.loads(raw_arguments)
+            except Exception:
+                raw_arguments = json.dumps(
+                    {"_error": "model generated invalid JSON arguments"},
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
         tool_calls.append(
             {
                 "id": call_id,

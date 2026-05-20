@@ -8,7 +8,7 @@ but the system misclassified it as a new chat task, causing catastrophic context
 
 import pytest
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from smallctl.harness.task_classifier import (
     classify_runtime_intent,
@@ -28,6 +28,9 @@ from smallctl.harness.run_mode import (
 from smallctl.harness.task_boundary import TaskBoundaryService
 from smallctl.interrupt_replies import is_interrupt_response, interrupt_response_action
 from smallctl.state_schema import ExecutionPlan
+from smallctl.graph.deps import GraphRuntimeDeps
+from smallctl.graph.lifecycle_nodes import resume_planning_run
+from smallctl.graph.state import GraphRunState
 
 
 class TestInterruptApprovalFixes:
@@ -383,6 +386,50 @@ class TestInterruptApprovalFixes:
 
         assert await run_auto_with_events(mock_harness, "yes", event_handler="handler") == expected
         assert await run_task_with_events(mock_harness, "yes", event_handler="handler") == expected
+
+    @pytest.mark.asyncio
+    async def test_resume_planning_run_persists_playbook_via_node_support(self, monkeypatch):
+        """Approving a plan should persist the playbook without a missing-symbol crash."""
+        plan = ExecutionPlan(plan_id="plan-1", goal="inspect")
+        state = Mock()
+        state.pending_interrupt = {
+            "kind": "plan_execute_approval",
+            "question": "Plan ready. Execute it now?",
+            "plan_id": "plan-1",
+            "response_mode": "yes/no/revise",
+        }
+        state.active_plan = plan
+        state.draft_plan = plan
+        state.planning_mode_enabled = True
+        state.current_phase = "explore"
+        state.planner_resume_target_mode = "loop"
+        state.append_message = Mock()
+        state.sync_plan_mirror = Mock()
+        state.touch = Mock()
+
+        harness = Mock()
+        harness.state = state
+        harness.get_pending_interrupt.return_value = state.pending_interrupt
+        harness._log_conversation_state = Mock()
+        harness._emit = AsyncMock()
+
+        persisted: list[ExecutionPlan] = []
+        monkeypatch.setattr(
+            "smallctl.graph.lifecycle_nodes._nodes._persist_planning_playbook",
+            lambda _harness, persisted_plan: persisted.append(persisted_plan),
+        )
+
+        graph_state = GraphRunState(loop_state=state, thread_id="thread-1", run_mode="planning")
+        await resume_planning_run(
+            graph_state,
+            GraphRuntimeDeps(harness=harness, event_handler=None),
+            human_input="approve",
+        )
+
+        assert graph_state.final_result["status"] == "plan_approved"
+        assert plan.approved is True
+        assert plan.status == "approved"
+        assert persisted == [plan]
 
     @pytest.mark.asyncio
     async def test_facade_does_not_resume_unrelated_reply(self):

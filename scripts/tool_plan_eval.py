@@ -17,6 +17,17 @@ import yaml
 
 
 MODES = ("loop", "tool_plan")
+TEST_TIME_SCALING_MODES = ("staged_baseline", "staged_scaled")
+
+TEST_TIME_SCALING_TASK_ENV_KEYS = {
+    "trigger": "SMALLCTL_TEST_TIME_SCALING_TRIGGER",
+    "policy": "SMALLCTL_TEST_TIME_SCALING_POLICY",
+    "max_candidates": "SMALLCTL_TEST_TIME_SCALING_MAX_CANDIDATES",
+    "min_candidates": "SMALLCTL_TEST_TIME_SCALING_MIN_CANDIDATES",
+    "parallel_max": "SMALLCTL_TEST_TIME_SCALING_PARALLEL_MAX",
+    "score_threshold": "SMALLCTL_TEST_TIME_SCALING_SCORE_THRESHOLD",
+    "all_fail_action": "SMALLCTL_TEST_TIME_SCALING_ALL_FAIL_ACTION",
+}
 
 RECOVERY_METRIC_KEYS = (
     "tool_plan_invocations",
@@ -47,6 +58,16 @@ RECOVERY_METRIC_KEYS = (
     "tool_plan_worker_tool_failure_classes",
     "tool_plan_refine_verdict",
     "model_stream_halt_count",
+    "test_time_scaling_attempts",
+    "test_time_scaling_candidates",
+    "test_time_scaling_clean_selection",
+    "test_time_scaling_selected_with_warnings",
+    "test_time_scaling_parallel_proposal_batches",
+    "test_time_scaling_branch_attempts",
+    "test_time_scaling_branch_successes",
+    "test_time_scaling_branch_failures",
+    "test_time_scaling_parallel_read_only_branch_batches",
+    "test_time_scaling_last",
 )
 
 MEASURED_USAGE_KEYS = ("token_usage",)
@@ -115,7 +136,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional markdown summary path. Defaults to the JSON report path with a .md suffix.",
     )
-    parser.add_argument("--mode", choices=[*MODES, "both"], default="both", help="Runtime mode to run.")
+    parser.add_argument(
+        "--mode",
+        choices=[*MODES, *TEST_TIME_SCALING_MODES, "both"],
+        default="both",
+        help="Runtime mode to run.",
+    )
+    parser.add_argument(
+        "--comparison",
+        choices=["tool_plan", "test_time_scaling"],
+        default="tool_plan",
+        help="Comparison family to run when --mode both is selected.",
+    )
     parser.add_argument("--timeout-sec", type=int, default=900, help="Per-task timeout.")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat the full task set this many times.")
     parser.add_argument(
@@ -126,15 +158,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-tasks", type=int, default=None, help="Run only the first N loaded tasks after filtering.")
     parser.add_argument(
+        "--include-disabled-tasks",
+        action="store_true",
+        help="Include fixtures marked eval_enabled: false or disabled: true in default task selection.",
+    )
+    parser.add_argument(
         "--rewoo-frames",
         action="store_true",
         help="Enable ReWOO planner/solver/refiner lane frames for tool_plan eval runs.",
     )
+    parser.add_argument(
+        "--auto-approve-staged-plan",
+        dest="auto_approve_staged_plan",
+        action="store_true",
+        default=True,
+        help="For test_time_scaling pseudo-modes, auto-approve the staged plan and resume execution.",
+    )
+    parser.add_argument(
+        "--no-auto-approve-staged-plan",
+        dest="auto_approve_staged_plan",
+        action="store_false",
+        help="Disable eval-only staged plan auto-approval.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them.")
     args = parser.parse_args(argv)
 
-    tasks = _filter_tasks(_load_tasks(Path(args.tasks)), task_ids=args.task_id, max_tasks=args.max_tasks)
-    modes = list(MODES if args.mode == "both" else (args.mode,))
+    tasks = _filter_tasks(
+        _load_tasks(Path(args.tasks)),
+        task_ids=args.task_id,
+        max_tasks=args.max_tasks,
+        include_disabled=args.include_disabled_tasks,
+    )
+    modes = list(_comparison_modes(args.comparison) if args.mode == "both" else (args.mode,))
     repeat = max(1, int(args.repeat))
     commands = [
         _command_for(task["task"], mode=mode, rewoo_frames=args.rewoo_frames)
@@ -169,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
                     rewoo_frames=args.rewoo_frames,
                     repeat_index=repeat_index,
                     repeat_total=repeat,
+                    auto_approve_staged_plan=bool(args.auto_approve_staged_plan),
+                    checkpoint_root=output_path.parent / "test_time_scaling_checkpoints",
                 )
                 results.append(result)
                 with output_path.open("a", encoding="utf-8") as handle:
@@ -195,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
         _log_progress(f"wrote markdown report to {markdown_report_path}")
         return _report_exit_code(report)
     return 0
+
+
+def _comparison_modes(comparison: str) -> tuple[str, ...]:
+    if comparison == "test_time_scaling":
+        return TEST_TIME_SCALING_MODES
+    return MODES
 
 
 def _load_tasks(path: Path) -> list[dict[str, Any]]:
@@ -261,6 +324,7 @@ def _filter_tasks(
     *,
     task_ids: list[str] | None = None,
     max_tasks: int | None = None,
+    include_disabled: bool = False,
 ) -> list[dict[str, Any]]:
     selected = list(tasks)
     ids = [str(task_id).strip() for task_id in (task_ids or []) if str(task_id).strip()]
@@ -269,6 +333,8 @@ def _filter_tasks(
         selected = [task for task in selected if str(task.get("id") or "") in wanted]
         if not selected:
             raise SystemExit(f"No tasks matched --task-id: {', '.join(ids)}")
+    elif not include_disabled:
+        selected = [task for task in selected if _task_enabled_by_default(task)]
     if max_tasks is not None:
         max_count = int(max_tasks)
         if max_count <= 0:
@@ -279,17 +345,28 @@ def _filter_tasks(
     return selected
 
 
+def _task_enabled_by_default(task: dict[str, Any]) -> bool:
+    if task.get("disabled") is True:
+        return False
+    if task.get("eval_enabled") is False:
+        return False
+    return True
+
+
 def _command_for(task: str, *, mode: str, rewoo_frames: bool = False) -> list[str]:
+    command_mode = "planning" if mode in TEST_TIME_SCALING_MODES else mode
     command = [
         sys.executable,
         "-m",
         "smallctl.main",
         "--run-mode",
-        mode,
+        command_mode,
         "--fresh-run",
         "--task",
         task,
     ]
+    if mode in TEST_TIME_SCALING_MODES:
+        command.append("--staged-execution")
     if mode == "tool_plan" and rewoo_frames:
         command.extend(
             [
@@ -301,6 +378,22 @@ def _command_for(task: str, *, mode: str, rewoo_frames: bool = False) -> list[st
     return command
 
 
+def _resume_command_for(*, checkpoint_path: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "smallctl.main",
+        "--resume",
+        "--staged-execution",
+        "--graph-checkpointer",
+        "file",
+        "--graph-checkpoint-path",
+        str(checkpoint_path),
+        "--task",
+        "approve",
+    ]
+
+
 def _run_task(
     task: dict[str, Any],
     *,
@@ -309,18 +402,137 @@ def _run_task(
     rewoo_frames: bool = False,
     repeat_index: int = 1,
     repeat_total: int = 1,
+    auto_approve_staged_plan: bool = True,
+    checkpoint_root: Path | None = None,
 ) -> dict[str, Any]:
     command = _command_for(str(task["task"]), mode=mode, rewoo_frames=rewoo_frames)
     env = dict(os.environ)
     repo_src = str((Path(__file__).resolve().parents[1] / "src").resolve())
     env["PYTHONPATH"] = repo_src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    checkpoint_path: Path | None = None
+    if mode in TEST_TIME_SCALING_MODES:
+        checkpoint_root = checkpoint_root or (Path(".smallctl") / "artifacts" / "test_time_scaling_checkpoints")
+        checkpoint_root.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_root / _checkpoint_filename_for(
+            task_id=str(task.get("id") or "task"),
+            mode=mode,
+            repeat_index=repeat_index,
+        )
+        command.extend(
+            [
+                "--graph-checkpointer",
+                "file",
+                "--graph-checkpoint-path",
+                str(checkpoint_path),
+            ]
+        )
+        env["SMALLCTL_STAGED_EXECUTION"] = "true"
+        env["SMALLCTL_TEST_TIME_SCALING_ENABLED"] = "true" if mode == "staged_scaled" else "false"
+        env.setdefault("SMALLCTL_TEST_TIME_SCALING_TRIGGER", "retry_or_explicit")
+        env.setdefault("SMALLCTL_TEST_TIME_SCALING_POLICY", "proposal_then_execute")
+        env.update(_test_time_scaling_env_for_task(task, mode=mode))
+    initial = _run_child_process(
+        command,
+        env=env,
+        task_id=str(task.get("id") or ""),
+        mode=mode,
+        timeout_sec=timeout_sec,
+    )
+    child = initial
+    approval_auto_resumed = False
+    approval_initial_duration_sec: float | None = None
+    approval_resume_duration_sec: float | None = None
+    if (
+        auto_approve_staged_plan
+        and mode in TEST_TIME_SCALING_MODES
+        and checkpoint_path is not None
+        and initial.returncode == 0
+        and not initial.timed_out
+        and _is_plan_approval_interrupt(_last_json_object(initial.stdout))
+    ):
+        approval_auto_resumed = True
+        approval_initial_duration_sec = initial.duration_sec
+        resume_command = _resume_command_for(checkpoint_path=checkpoint_path)
+        _log_progress(
+            f"auto-approving staged plan task={task.get('id')} mode={mode}: {_shell_join(resume_command)}"
+        )
+        resumed = _run_child_process(
+            resume_command,
+            env=env,
+            task_id=str(task.get("id") or ""),
+            mode=mode,
+            timeout_sec=timeout_sec,
+        )
+        approval_resume_duration_sec = resumed.duration_sec
+        child = _merge_child_runs(initial, resumed)
+
+    duration = child.duration_sec
+    stdout = child.stdout
+    stderr = child.stderr
+    returncode = child.returncode
+    timed_out = child.timed_out
+    final_json = _last_json_object(stdout)
+    metrics = _extract_metrics(final_json)
+    prompt_shape = _prompt_shape_assertions(stdout)
+    success = _is_success(final_json, task.get("tags", []))
+    result = {
+        "task_id": task.get("id"),
+        "tags": task.get("tags", []),
+        "mode": mode,
+        "repeat_index": repeat_index,
+        "repeat_total": repeat_total,
+        "task": task["task"],
+        "duration_sec": duration,
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "final_json": final_json,
+        "final_success": success,
+        "expectations": task.get("expectations") if isinstance(task.get("expectations"), dict) else None,
+        **metrics,
+        "prompt_shape": prompt_shape,
+        "stdout": stdout[-12000:],
+        "stderr": stderr[-12000:],
+    }
+    if mode in TEST_TIME_SCALING_MODES:
+        result["approval_auto_resumed"] = approval_auto_resumed
+        result["approval_initial_duration_sec"] = approval_initial_duration_sec
+        result["approval_resume_duration_sec"] = approval_resume_duration_sec
+        result["approval_checkpoint_path"] = str(checkpoint_path) if checkpoint_path is not None else None
+    return result
+
+
+class _ChildRunResult:
+    def __init__(
+        self,
+        *,
+        duration_sec: float,
+        returncode: int,
+        timed_out: bool,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        self.duration_sec = duration_sec
+        self.returncode = returncode
+        self.timed_out = timed_out
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_child_process(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    task_id: str,
+    mode: str,
+    timeout_sec: int,
+) -> _ChildRunResult:
     started = time.perf_counter()
     stdout = ""
     stderr = ""
     returncode = 127
     timed_out = False
     progress_interval = _progress_interval_sec()
-    _log_progress(f"command task={task.get('id')} mode={mode}: {_shell_join(command)}")
+    _log_progress(f"command task={task_id} mode={mode}: {_shell_join(command)}")
     try:
         process = subprocess.Popen(
             command,
@@ -354,7 +566,7 @@ def _run_task(
                     _start_log_file_tailer(
                         Path(run_dir) / log_name,
                         stop_event=stop_tailers,
-                        task_id=str(task.get("id") or ""),
+                        task_id=task_id,
                         mode=mode,
                     )
                 )
@@ -363,7 +575,7 @@ def _run_task(
             process.stdout,
             chunks=stdout_chunks,
             stream_name="stdout",
-            task_id=str(task.get("id") or ""),
+            task_id=task_id,
             mode=mode,
             on_line=_maybe_start_log_tailers,
         )
@@ -371,7 +583,7 @@ def _run_task(
             process.stderr,
             chunks=stderr_chunks,
             stream_name="stderr",
-            task_id=str(task.get("id") or ""),
+            task_id=task_id,
             mode=mode,
             on_line=_maybe_start_log_tailers,
         )
@@ -385,7 +597,7 @@ def _run_task(
                 process.wait()
                 returncode = 124
                 _log_progress(
-                    f"timeout task={task.get('id')} mode={mode} after {round(elapsed, 1)}s"
+                    f"timeout task={task_id} mode={mode} after {round(elapsed, 1)}s"
                 )
                 break
             returncode = process.poll()
@@ -394,7 +606,7 @@ def _run_task(
                 break
             if elapsed >= next_progress_at:
                 _log_progress(
-                    f"still running task={task.get('id')} mode={mode} "
+                    f"still running task={task_id} mode={mode} "
                     f"elapsed={round(elapsed, 1)}s timeout={timeout_sec}s"
                 )
                 next_progress_at += progress_interval
@@ -411,28 +623,45 @@ def _run_task(
             if returncode is None:
                 returncode = 127
     duration = round(time.perf_counter() - started, 3)
-    final_json = _last_json_object(stdout)
-    metrics = _extract_metrics(final_json)
-    prompt_shape = _prompt_shape_assertions(stdout)
-    success = _is_success(final_json, task.get("tags", []))
-    return {
-        "task_id": task.get("id"),
-        "tags": task.get("tags", []),
-        "mode": mode,
-        "repeat_index": repeat_index,
-        "repeat_total": repeat_total,
-        "task": task["task"],
-        "duration_sec": duration,
-        "returncode": returncode,
-        "timed_out": timed_out,
-        "final_json": final_json,
-        "final_success": success,
-        "expectations": task.get("expectations") if isinstance(task.get("expectations"), dict) else None,
-        **metrics,
-        "prompt_shape": prompt_shape,
-        "stdout": stdout[-12000:],
-        "stderr": stderr[-12000:],
-    }
+    return _ChildRunResult(
+        duration_sec=duration,
+        returncode=returncode,
+        timed_out=timed_out,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _checkpoint_filename_for(*, task_id: str, mode: str, repeat_index: int) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{task_id}-{mode}-repeat-{repeat_index}").strip("._-")
+    return f"{stem or 'task'}.json"
+
+
+def _is_plan_approval_interrupt(final_json: dict[str, Any]) -> bool:
+    if not isinstance(final_json, dict):
+        return False
+    if str(final_json.get("status") or "") != "needs_human":
+        return False
+    interrupt = final_json.get("interrupt")
+    return isinstance(interrupt, dict) and str(interrupt.get("kind") or "") == "plan_execute_approval"
+
+
+def _merge_child_runs(initial: _ChildRunResult, resumed: _ChildRunResult) -> _ChildRunResult:
+    stdout = initial.stdout
+    if stdout and resumed.stdout:
+        stdout += "\n"
+    stdout += resumed.stdout
+    stderr = initial.stderr
+    if stderr and resumed.stderr:
+        stderr += "\n"
+    stderr += resumed.stderr
+    return _ChildRunResult(
+        duration_sec=round(initial.duration_sec + resumed.duration_sec, 3),
+        returncode=resumed.returncode,
+        timed_out=bool(initial.timed_out or resumed.timed_out),
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 def _progress_interval_sec() -> float:
@@ -443,6 +672,29 @@ def _progress_interval_sec() -> float:
         return max(1.0, float(raw))
     except ValueError:
         return DEFAULT_PROGRESS_INTERVAL_SEC
+
+
+def _test_time_scaling_env_for_task(task: dict[str, Any], *, mode: str) -> dict[str, str]:
+    if mode not in TEST_TIME_SCALING_MODES:
+        return {}
+    raw = task.get("test_time_scaling")
+    if not isinstance(raw, dict):
+        return {}
+    env: dict[str, str] = {}
+    for key, env_key in TEST_TIME_SCALING_TASK_ENV_KEYS.items():
+        value = raw.get(key)
+        if value is None:
+            continue
+        env[env_key] = _env_string(value)
+    return env
+
+
+def _env_string(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    return str(value)
 
 
 def _log_progress(message: str) -> None:
@@ -787,7 +1039,7 @@ def _is_success(final_json: dict[str, Any] | None, tags: list[str]) -> bool:
     if not isinstance(final_json, dict):
         return False
     status = str(final_json.get("status") or "").strip().lower()
-    if status in ("completed", "success", "ok"):
+    if status in ("complete", "completed", "success", "ok"):
         return True
     if "wrong_path" in tags:
         return status == "stopped" or bool(final_json.get("recovery_metrics", {}).get("tool_plan_fallback_count"))
@@ -1199,6 +1451,10 @@ def _runtime_abort_indicator(result: dict[str, Any]) -> bool:
 
 
 def _build_report(results: list[dict[str, Any]]) -> dict[str, Any]:
+    modes_present = {str(r.get("mode") or "") for r in results}
+    if {"staged_baseline", "staged_scaled"} & modes_present:
+        return _build_test_time_scaling_report(results)
+
     repeat_count = max((int(r.get("repeat_total") or 1) for r in results), default=1)
     by_task: dict[str, dict[str, Any]] = {}
     task_lookup: dict[str, dict[str, Any]] = {}
@@ -1398,6 +1654,253 @@ def _build_report(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _build_test_time_scaling_report(results: list[dict[str, Any]]) -> dict[str, Any]:
+    repeat_count = max((int(r.get("repeat_total") or 1) for r in results), default=1)
+    by_task: dict[str, dict[str, Any]] = {}
+    task_lookup: dict[str, dict[str, Any]] = {}
+    for result in results:
+        tid = str(result.get("task_id") or "unknown")
+        repeat_index = int(result.get("repeat_index") or 1)
+        group_key = f"{tid}::repeat-{repeat_index}"
+        by_task.setdefault(
+            group_key,
+            {
+                "tags": result.get("tags", []),
+                "task": result.get("task", ""),
+                "expectations": result.get("expectations"),
+                "repeat_index": repeat_index,
+                "repeat_total": int(result.get("repeat_total") or 1),
+            },
+        )
+        by_task[group_key][str(result.get("mode") or "")] = result
+        task_lookup[group_key] = {
+            "id": tid,
+            "run_id": group_key,
+            "repeat_index": repeat_index,
+            "repeat_total": int(result.get("repeat_total") or 1),
+            "tags": result.get("tags", []),
+            "task": result.get("task", ""),
+            "expectations": result.get("expectations"),
+        }
+
+    comparisons: list[dict[str, Any]] = []
+    for group_key, data in by_task.items():
+        baseline = data.get("staged_baseline")
+        scaled = data.get("staged_scaled")
+        if baseline is None or scaled is None:
+            continue
+        task_meta = task_lookup[group_key]
+        comparison = _build_test_time_scaling_comparison(
+            baseline=baseline,
+            scaled=scaled,
+            task=task_meta,
+            run_id=group_key,
+        )
+        _normalize_test_time_scaling_values(comparison)
+        comparisons.append(comparison)
+
+    baseline_results = [r for r in results if r.get("mode") == "staged_baseline"]
+    scaled_results = [r for r in results if r.get("mode") == "staged_scaled"]
+    baseline_tokens = [float(c["baseline_tokens"]) for c in comparisons if c.get("baseline_tokens") is not None]
+    scaled_tokens = [float(c["scaled_tokens"]) for c in comparisons if c.get("scaled_tokens") is not None]
+    token_delta_values = [float(c["token_delta"]) for c in comparisons if c.get("token_delta") is not None]
+    token_delta_pct_values = [float(c["token_delta_pct"]) for c in comparisons if c.get("token_delta_pct") is not None]
+    duration_delta_values = [float(c["duration_delta_sec"]) for c in comparisons if c.get("duration_delta_sec") is not None]
+    duration_delta_pct_values = [float(c["duration_delta_pct"]) for c in comparisons if c.get("duration_delta_pct") is not None]
+    baseline_durations = [float(c["baseline_duration_sec"]) for c in comparisons if c.get("baseline_duration_sec") is not None]
+    scaled_durations = [float(c["scaled_duration_sec"]) for c in comparisons if c.get("scaled_duration_sec") is not None]
+
+    by_tag: dict[str, dict[str, Any]] = {}
+    for tag in sorted({tag for comparison in comparisons for tag in comparison.get("tags", [])}):
+        tagged = [comparison for comparison in comparisons if tag in comparison.get("tags", [])]
+        by_tag[tag] = {
+            "total_comparisons": len(tagged),
+            "repeat_count": max((int(c.get("repeat_index") or 1) for c in tagged), default=1),
+            "scaled_wins": sum(1 for c in tagged if c["scaled_success"] and not c["baseline_success"]),
+            "baseline_wins": sum(1 for c in tagged if c["baseline_success"] and not c["scaled_success"]),
+            "both_pass": sum(1 for c in tagged if c["baseline_success"] and c["scaled_success"]),
+            "both_fail": sum(1 for c in tagged if not c["baseline_success"] and not c["scaled_success"]),
+            "pass_at_1": _truthy_rate(tagged, "baseline_success"),
+            "pass_at_n": _truthy_rate(tagged, "scaled_success"),
+            "scaling_attempt_rate": _truthy_rate(tagged, "scaled_attempted"),
+            "token_delta_pct_mean": _mean([float(c["token_delta_pct"]) for c in tagged if c.get("token_delta_pct") is not None]),
+            "duration_delta_pct_mean": _mean([float(c["duration_delta_pct"]) for c in tagged if c.get("duration_delta_pct") is not None]),
+        }
+
+    token_delta_stats = _series_stats(token_delta_values, worst_mode="abs")
+    token_delta_pct_stats = _series_stats(token_delta_pct_values, worst_mode="abs")
+    duration_delta_stats = _series_stats(duration_delta_values, worst_mode="abs")
+    duration_delta_pct_stats = _series_stats(duration_delta_pct_values, worst_mode="abs")
+    pass_at_1 = _truthy_rate(comparisons, "baseline_success")
+    pass_at_n = _truthy_rate(comparisons, "scaled_success")
+    scaled_win_count = sum(1 for c in comparisons if c["scaled_success"] and not c["baseline_success"])
+    baseline_win_count = sum(1 for c in comparisons if c["baseline_success"] and not c["scaled_success"])
+    scaling_attempts = sum(int(c.get("scaling_attempts") or 0) for c in comparisons)
+    summary = {
+        "comparison": "test_time_scaling",
+        "total_comparisons": len(comparisons),
+        "repeat_count": repeat_count,
+        "scaled_wins": scaled_win_count,
+        "baseline_wins": baseline_win_count,
+        "both_pass": sum(1 for c in comparisons if c["baseline_success"] and c["scaled_success"]),
+        "both_fail": sum(1 for c in comparisons if not c["baseline_success"] and not c["scaled_success"]),
+        "pass_at_1": pass_at_1,
+        "pass_at_n": pass_at_n,
+        "pass_delta": _delta(pass_at_1, pass_at_n),
+        "scaling_attempts": scaling_attempts,
+        "scaling_attempt_rate": _truthy_rate(comparisons, "scaled_attempted"),
+        "candidate_count_total": sum(int(c.get("candidate_count") or 0) for c in comparisons),
+        "token_delta_total": sum(token_delta_values) if token_delta_values else None,
+        "token_delta_mean": token_delta_stats["mean"],
+        "token_delta_median": token_delta_stats["median"],
+        "token_delta_worst": token_delta_stats["worst"],
+        "token_delta_pct_mean": token_delta_pct_stats["mean"],
+        "token_delta_pct_median": token_delta_pct_stats["median"],
+        "token_delta_pct_worst": token_delta_pct_stats["worst"],
+        "duration_delta_total_sec": sum(duration_delta_values) if duration_delta_values else None,
+        "duration_delta_mean": duration_delta_stats["mean"],
+        "duration_delta_median": duration_delta_stats["median"],
+        "duration_delta_worst": duration_delta_stats["worst"],
+        "duration_delta_pct_mean": duration_delta_pct_stats["mean"],
+        "duration_delta_pct_median": duration_delta_pct_stats["median"],
+        "duration_delta_pct_worst": duration_delta_pct_stats["worst"],
+        "baseline_tokens_total": sum(baseline_tokens) if baseline_tokens else None,
+        "scaled_tokens_total": sum(scaled_tokens) if scaled_tokens else None,
+        "baseline_duration_sec_median": _series_stats(baseline_durations)["median"],
+        "scaled_duration_sec_median": _series_stats(scaled_durations)["median"],
+        "baseline_abort_rate": _mean([1.0 if _runtime_abort_indicator(r) else 0.0 for r in baseline_results]) if baseline_results else None,
+        "scaled_abort_rate": _mean([1.0 if _runtime_abort_indicator(r) else 0.0 for r in scaled_results]) if scaled_results else None,
+    }
+    summary["scaled_success_not_worse"] = bool(pass_at_1 is not None and pass_at_n is not None and pass_at_n >= pass_at_1)
+    summary["scaled_abort_not_worse"] = bool(
+        summary["baseline_abort_rate"] is not None
+        and summary["scaled_abort_rate"] is not None
+        and summary["scaled_abort_rate"] <= summary["baseline_abort_rate"]
+    )
+    summary["scaled_latency_reasonable"] = bool(
+        summary["baseline_duration_sec_median"] is not None
+        and summary["scaled_duration_sec_median"] is not None
+        and summary["scaled_duration_sec_median"] <= summary["baseline_duration_sec_median"] * 5.0
+    )
+    summary["decision"] = _test_time_scaling_decision(summary)
+    summary["decision_reason"] = _test_time_scaling_decision_reason(summary)
+
+    return {
+        "summary": summary,
+        "by_tag": by_tag,
+        "total_comparisons": summary["total_comparisons"],
+        "scaled_wins": summary["scaled_wins"],
+        "baseline_wins": summary["baseline_wins"],
+        "both_pass": summary["both_pass"],
+        "both_fail": summary["both_fail"],
+        "token_savings": summary["token_delta_total"],
+        "wrong_path_fallback_ok": True,
+        "wrong_path_tasks": 0,
+        "prompt_shape_failures": [],
+        "comparisons": comparisons,
+        "decision": summary["decision"],
+        "decision_reason": summary["decision_reason"],
+    }
+
+
+def _build_test_time_scaling_comparison(
+    *,
+    baseline: dict[str, Any],
+    scaled: dict[str, Any],
+    task: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    baseline_final = baseline.get("final_json") if isinstance(baseline.get("final_json"), dict) else {}
+    scaled_final = scaled.get("final_json") if isinstance(scaled.get("final_json"), dict) else {}
+    baseline_metrics = _extract_metrics(baseline_final)
+    scaled_metrics = _extract_metrics(scaled_final)
+    tts_last = scaled_metrics.get("test_time_scaling_last")
+    if not isinstance(tts_last, dict):
+        tts_last = {}
+    return {
+        "task_id": task["id"],
+        "run_id": run_id,
+        "repeat_index": int(task.get("repeat_index") or 1),
+        "repeat_total": int(task.get("repeat_total") or 1),
+        "tags": list(task.get("tags", []) or []),
+        "task": task.get("task", ""),
+        "expectations": _task_expectations(task) or None,
+        "baseline_success": baseline.get("final_success"),
+        "scaled_success": scaled.get("final_success"),
+        "baseline_status": baseline_final.get("status") if isinstance(baseline_final, dict) else None,
+        "scaled_status": scaled_final.get("status") if isinstance(scaled_final, dict) else None,
+        "baseline_returncode": baseline.get("returncode"),
+        "scaled_returncode": scaled.get("returncode"),
+        "baseline_timed_out": baseline.get("timed_out"),
+        "scaled_timed_out": scaled.get("timed_out"),
+        "baseline_approval_auto_resumed": baseline.get("approval_auto_resumed"),
+        "scaled_approval_auto_resumed": scaled.get("approval_auto_resumed"),
+        "baseline_approval_initial_duration_sec": baseline.get("approval_initial_duration_sec"),
+        "scaled_approval_initial_duration_sec": scaled.get("approval_initial_duration_sec"),
+        "baseline_approval_resume_duration_sec": baseline.get("approval_resume_duration_sec"),
+        "scaled_approval_resume_duration_sec": scaled.get("approval_resume_duration_sec"),
+        "baseline_approval_checkpoint_path": baseline.get("approval_checkpoint_path"),
+        "scaled_approval_checkpoint_path": scaled.get("approval_checkpoint_path"),
+        "baseline_duration_sec": baseline.get("duration_sec"),
+        "scaled_duration_sec": scaled.get("duration_sec"),
+        "duration_delta_sec": _delta(_coerce_optional_float(baseline.get("duration_sec")), _coerce_optional_float(scaled.get("duration_sec"))),
+        "duration_delta_pct": _pct_delta(_coerce_optional_float(baseline.get("duration_sec")), _coerce_optional_float(scaled.get("duration_sec"))),
+        "baseline_tokens": baseline_metrics.get("token_usage"),
+        "scaled_tokens": scaled_metrics.get("token_usage"),
+        "token_delta": _delta(_coerce_optional_float(baseline_metrics.get("token_usage")), _coerce_optional_float(scaled_metrics.get("token_usage"))),
+        "token_delta_pct": _pct_delta(_coerce_optional_float(baseline_metrics.get("token_usage")), _coerce_optional_float(scaled_metrics.get("token_usage"))),
+        "scaled_attempted": bool(scaled_metrics.get("test_time_scaling_attempts")),
+        "scaling_attempts": scaled_metrics.get("test_time_scaling_attempts"),
+        "candidate_count": scaled_metrics.get("test_time_scaling_candidates"),
+        "selected_candidate": tts_last.get("selected_candidate"),
+        "selected_score": tts_last.get("selected_score"),
+        "policy": tts_last.get("policy"),
+        "failed_criteria": tts_last.get("failed_criteria"),
+        "branch_successes": scaled_metrics.get("test_time_scaling_branch_successes"),
+        "branch_failures": scaled_metrics.get("test_time_scaling_branch_failures"),
+        "parallel_proposal_batches": scaled_metrics.get("test_time_scaling_parallel_proposal_batches"),
+        "parallel_read_only_branch_batches": scaled_metrics.get("test_time_scaling_parallel_read_only_branch_batches"),
+    }
+
+
+def _normalize_test_time_scaling_values(comparison: dict[str, Any]) -> None:
+    for key in ("baseline_tokens", "scaled_tokens", "token_delta", "token_delta_pct", "duration_delta_sec", "duration_delta_pct"):
+        if comparison.get(key) is None:
+            continue
+        try:
+            comparison[key] = round(float(comparison[key]), 3)
+        except (TypeError, ValueError):
+            comparison[key] = None
+
+
+def _test_time_scaling_decision(summary: dict[str, Any]) -> str:
+    if not summary.get("scaled_success_not_worse"):
+        return "pause"
+    if not summary.get("scaled_abort_not_worse"):
+        return "narrow rollout"
+    if not summary.get("scaled_latency_reasonable"):
+        return "narrow rollout"
+    if int(summary.get("scaling_attempts") or 0) <= 0:
+        return "needs harder fixtures"
+    if int(summary.get("scaled_wins") or 0) <= 0 and (summary.get("pass_delta") or 0) <= 0:
+        return "narrow rollout"
+    return "continue"
+
+
+def _test_time_scaling_decision_reason(summary: dict[str, Any]) -> str:
+    parts: list[str] = []
+    parts.append(f"pass_at_1={summary.get('pass_at_1')}")
+    parts.append(f"pass_at_n={summary.get('pass_at_n')}")
+    parts.append(f"scaled_wins={summary.get('scaled_wins')}")
+    parts.append(f"baseline_wins={summary.get('baseline_wins')}")
+    parts.append(f"scaling_attempt_rate={summary.get('scaling_attempt_rate')}")
+    parts.append(f"scaled_abort_rate={summary.get('scaled_abort_rate')}")
+    parts.append(f"baseline_abort_rate={summary.get('baseline_abort_rate')}")
+    parts.append(f"scaled_duration_sec_median={summary.get('scaled_duration_sec_median')}")
+    parts.append(f"baseline_duration_sec_median={summary.get('baseline_duration_sec_median')}")
+    return "; ".join(parts)
+
+
 def _decision_from_summary(summary: dict[str, Any]) -> str:
     if not summary.get("wrong_path_fallback_ok", True):
         return "pause"
@@ -1434,6 +1937,8 @@ def _build_markdown_report(report: dict[str, Any]) -> str:
     comparisons = report.get("comparisons") if isinstance(report.get("comparisons"), list) else []
     by_tag = report.get("by_tag") if isinstance(report.get("by_tag"), dict) else {}
     prompt_shape_failures = report.get("prompt_shape_failures") if isinstance(report.get("prompt_shape_failures"), list) else []
+    if summary.get("comparison") == "test_time_scaling":
+        return _build_test_time_scaling_markdown_report(report)
 
     lines: list[str] = []
     lines.append("# ToolPlan Eval Report")
@@ -1529,11 +2034,100 @@ def _build_markdown_report(report: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _build_test_time_scaling_markdown_report(report: dict[str, Any]) -> str:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    comparisons = report.get("comparisons") if isinstance(report.get("comparisons"), list) else []
+    by_tag = report.get("by_tag") if isinstance(report.get("by_tag"), dict) else {}
+
+    lines: list[str] = []
+    lines.append("# Test-Time Scaling Eval Report")
+    lines.append("")
+    lines.append(f"Decision: **{summary.get('decision', 'unknown')}**")
+    if summary.get("decision_reason"):
+        lines.append("")
+        lines.append(str(summary["decision_reason"]))
+    lines.append("")
+    lines.append("## Summary")
+    for key in (
+        "total_comparisons",
+        "repeat_count",
+        "scaled_wins",
+        "baseline_wins",
+        "both_pass",
+        "both_fail",
+        "pass_at_1",
+        "pass_at_n",
+        "pass_delta",
+        "scaling_attempts",
+        "scaling_attempt_rate",
+        "candidate_count_total",
+        "token_delta_total",
+        "token_delta_mean",
+        "token_delta_median",
+        "token_delta_worst",
+        "duration_delta_total_sec",
+        "duration_delta_mean",
+        "duration_delta_median",
+        "duration_delta_worst",
+        "scaled_abort_rate",
+        "baseline_abort_rate",
+    ):
+        lines.append(f"- `{key}`: {summary.get(key)}")
+    lines.append("")
+    lines.append("## Gates")
+    for key, label in (
+        ("scaled_success_not_worse", "Scaled Pass@N no worse than baseline Pass@1"),
+        ("scaled_abort_not_worse", "Scaled abort rate no worse than baseline"),
+        ("scaled_latency_reasonable", "Scaled median duration within 5x baseline"),
+    ):
+        value = summary.get(key)
+        status = "N/A" if value is None else ("PASS" if value else "FAIL")
+        lines.append(f"- {label}: {status}")
+    lines.append("")
+    if by_tag:
+        lines.append("## By Tag")
+        for tag in sorted(by_tag):
+            stats = by_tag[tag]
+            lines.append(f"### `{tag}`")
+            for key in (
+                "total_comparisons",
+                "repeat_count",
+                "scaled_wins",
+                "baseline_wins",
+                "both_pass",
+                "both_fail",
+                "pass_at_1",
+                "pass_at_n",
+                "scaling_attempt_rate",
+                "token_delta_pct_mean",
+                "duration_delta_pct_mean",
+            ):
+                lines.append(f"- `{key}`: {stats.get(key)}")
+            lines.append("")
+    if comparisons:
+        lines.append("## Top Regressions")
+        failing = [c for c in comparisons if c.get("baseline_success") and not c.get("scaled_success")]
+        if not failing:
+            failing = comparisons[:5]
+        for comparison in failing[:5]:
+            lines.append(f"- `{comparison.get('task_id')}` repeat={comparison.get('repeat_index')}")
+            lines.append(f"  - task: {comparison.get('task')}")
+            lines.append(f"  - baseline_success: {comparison.get('baseline_success')}")
+            lines.append(f"  - scaled_success: {comparison.get('scaled_success')}")
+            lines.append(f"  - scaling_attempts: {comparison.get('scaling_attempts')}")
+            lines.append(f"  - selected_candidate: {comparison.get('selected_candidate')}")
+            lines.append(f"  - selected_score: {comparison.get('selected_score')}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _report_exit_code(report: dict[str, Any]) -> int:
     if not report.get("wrong_path_fallback_ok", True):
         return 1
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    if summary and summary.get("decision") not in (None, "continue"):
+    acceptable_decisions = {None, "continue"}
+    if summary.get("comparison") == "test_time_scaling":
+        acceptable_decisions.add("narrow rollout")
+    if summary and summary.get("decision") not in acceptable_decisions:
         return 1
     return 0
 

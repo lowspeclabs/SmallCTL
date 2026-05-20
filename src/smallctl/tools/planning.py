@@ -49,6 +49,7 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
         evidence_refs=[str(item) for item in (value.get("evidence_refs") or []) if str(item).strip()],
         claim_refs=[str(item) for item in (value.get("claim_refs") or []) if str(item).strip()],
         task=str(value.get("task", "") or ""),
+        difficulty=str(value.get("difficulty", "") or "").strip().lower(),
         tool_allowlist=_coerce_string_list(value.get("tool_allowlist")),
         prompt_token_budget=max(0, _coerce_int(value.get("prompt_token_budget"), default=0)),
         acceptance=_coerce_string_list(value.get("acceptance")),

@@ -1,0 +1,24 @@
+id: staged_explicit_hard_loop_status
+task: >-
+  Use staged execution with exactly one plan step. First call plan_set. The
+  single step must have step_id S1, title "Check loop status", difficulty
+  "hard", task "Call loop_status once, then call step_complete with a one-line
+  summary.", and tool_allowlist ["loop_status", "step_complete"]. After the
+  plan is approved, execute only that step and finish.
+tags:
+  - test_time_scaling
+  - staged
+  - explicit_hard
+test_time_scaling:
+  trigger: explicit
+  policy: proposal_then_execute
+  max_candidates: 2
+  min_candidates: 2
+  parallel_max: 2
+expectations:
+  grounding_required: false
+  success_statuses:
+    - complete
+    - completed
+  required_terms:
+    - loop_status

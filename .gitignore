@@ -41,3 +41,8 @@ temp/
 .ssh
 /temp
 *.toml
+!evals/test_time_scaling/
+!evals/test_time_scaling/*.yaml
+!evals/test_time_scaling/*.yml
+!evals/test_time_scaling/*.jsonl
+!evals/test_time_scaling/README.md

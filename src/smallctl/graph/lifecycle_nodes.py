@@ -41,6 +41,7 @@ from .tool_call_parser import (
     _detect_empty_file_write_payload,
     _detect_hallucinated_tool_call,
     _detect_missing_required_tool_arguments,
+    _detect_oversize_patch_payload,
     _detect_oversize_write_payload,
     _detect_patch_existing_stage_read_contract_violation,
     _detect_placeholder_tool_call,
@@ -420,7 +421,7 @@ async def resume_planning_run(
             harness.state.current_phase = "execute"
             harness.state.planner_resume_target_mode = "loop"
             harness.state.sync_plan_mirror()
-            _persist_planning_playbook(harness, plan)
+            _nodes._persist_planning_playbook(harness, plan)
             harness.state.touch()
             if plan.requested_output_path:
                 try:
@@ -831,6 +832,29 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
                 harness._runlog(
                     "oversize_write_intercepted",
                     "rejected one-shot write exceeding hard threshold",
+                    **details,
+                )
+                graph_state.pending_tool_calls = []
+                break
+
+            oversize_patch = _detect_oversize_patch_payload(harness, pending)
+            if oversize_patch:
+                err_msg, details = oversize_patch
+                harness.state.recent_errors.append(err_msg)
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=err_msg,
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "oversize_patch",
+                            **details,
+                        },
+                    )
+                )
+                harness._runlog(
+                    "oversize_patch_intercepted",
+                    "rejected large patch exceeding hard threshold",
                     **details,
                 )
                 graph_state.pending_tool_calls = []

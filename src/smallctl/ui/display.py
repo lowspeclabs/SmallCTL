@@ -130,6 +130,21 @@ def compute_activity_for_event(
     Compute the activity status text for a given UI event.
     Returns None if no activity update is needed.
     """
+    if event.data.get("kind") == "test_time_scaling":
+        phase = str(event.data.get("phase") or "").strip()
+        candidate_count = event.data.get("candidate_count")
+        selected = event.data.get("selected_candidate")
+        score = event.data.get("selected_score")
+        if phase in {"proposal_start", "branch_start"}:
+            policy = str(event.data.get("policy") or "").strip()
+            return f"scaling {policy or 'candidates'}..."
+        if selected is not None:
+            detail = f"scaling selected #{selected}"
+            if candidate_count is not None:
+                detail += f"/{candidate_count}"
+            if score is not None:
+                detail += f" score {score}"
+            return detail
     # Check for explicit status_activity in data
     if "status_activity" in event.data:
         return str(event.data.get("status_activity") or "").strip()

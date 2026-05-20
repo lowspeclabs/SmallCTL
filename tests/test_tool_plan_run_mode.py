@@ -49,6 +49,46 @@ def test_harness_preserves_tool_plan_config_fields(tmp_path) -> None:
     assert harness.config.tool_dag_preserve_result_order is False
 
 
+def test_harness_preserves_test_time_scaling_config_fields(tmp_path) -> None:
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+        staged_execution_enabled=True,
+        staged_step_prompt_tokens=2048,
+        test_time_scaling_enabled=True,
+        test_time_scaling_runtimes=["staged_execution"],
+        test_time_scaling_trigger="explicit",
+        test_time_scaling_max_candidates=4,
+        test_time_scaling_min_candidates=2,
+        test_time_scaling_policy="sequential_branch",
+        test_time_scaling_score_threshold=0.75,
+        test_time_scaling_parallel_max=3,
+        test_time_scaling_timeout_sec=45,
+        test_time_scaling_mutating_parallel_enabled=True,
+        test_time_scaling_all_fail_action="fail_step",
+    )
+    harness.state.cwd = str(tmp_path)
+
+    assert harness.config.staged_execution_enabled is True
+    assert harness.config.staged_step_prompt_tokens == 2048
+    assert harness.config.test_time_scaling_enabled is True
+    assert harness.config.test_time_scaling_runtimes == ["staged_execution"]
+    assert harness.config.test_time_scaling_trigger == "explicit"
+    assert harness.config.test_time_scaling_max_candidates == 4
+    assert harness.config.test_time_scaling_min_candidates == 2
+    assert harness.config.test_time_scaling_policy == "sequential_branch"
+    assert harness.config.test_time_scaling_score_threshold == 0.75
+    assert harness.config.test_time_scaling_parallel_max == 3
+    assert harness.config.test_time_scaling_timeout_sec == 45
+    assert harness.config.test_time_scaling_mutating_parallel_enabled is True
+    assert harness.config.test_time_scaling_all_fail_action == "fail_step"
+
+
 def test_cli_passes_tool_dag_config_to_harness(monkeypatch, tmp_path, capsys) -> None:
     captured_kwargs: dict[str, object] = {}
 
@@ -81,6 +121,59 @@ def test_cli_passes_tool_dag_config_to_harness(monkeypatch, tmp_path, capsys) ->
     assert captured_kwargs["tool_dag_max_parallel"] == 9
     assert captured_kwargs["tool_dag_timeout_sec"] == 13
     assert captured_kwargs["tool_dag_preserve_result_order"] is False
+    capsys.readouterr()
+
+
+def test_cli_passes_test_time_scaling_config_to_harness(monkeypatch, tmp_path, capsys) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    class _Harness:
+        def __init__(self, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+            self.state = SimpleNamespace(thread_id="thread-1")
+            self.conversation_id = "thread-1"
+
+        async def run_auto(self, task: str) -> dict[str, object]:
+            return {"status": "completed", "task": task}
+
+        async def teardown(self) -> None:
+            return None
+
+        def note_task_shutdown(self, reason: str) -> None:
+            del reason
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_ENABLED", "true")
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_TRIGGER", "explicit")
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_POLICY", "sequential_branch")
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_MAX_CANDIDATES", "4")
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_PARALLEL_MAX", "3")
+    monkeypatch.setenv("SMALLCTL_TEST_TIME_SCALING_ALL_FAIL_ACTION", "fail_step")
+    monkeypatch.setattr("smallctl.main.Harness", _Harness)
+
+    exit_code = cli(
+        [
+            "--task",
+            "inspect files",
+            "--endpoint",
+            "http://example.test/v1",
+            "--model",
+            "wrench-9b",
+            "--staged-execution",
+            "--staged-step-prompt-tokens",
+            "2048",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured_kwargs["staged_execution_enabled"] is True
+    assert captured_kwargs["staged_step_prompt_tokens"] == 2048
+    assert captured_kwargs["test_time_scaling_enabled"] is True
+    assert captured_kwargs["test_time_scaling_trigger"] == "explicit"
+    assert captured_kwargs["test_time_scaling_policy"] == "sequential_branch"
+    assert captured_kwargs["test_time_scaling_max_candidates"] == 4
+    assert captured_kwargs["test_time_scaling_parallel_max"] == 3
+    assert captured_kwargs["test_time_scaling_all_fail_action"] == "fail_step"
     capsys.readouterr()
 
 

@@ -1,0 +1,34 @@
+id: staged_read_path_probe
+eval_enabled: false
+disabled_reason: >-
+  Exploratory follow-up fixture. The model can recover from broad plan
+  creation, but this probe is too runtime-dependent for default live gating.
+task: >-
+  Use a staged plan to inspect only these files:
+  src/smallctl/harness/tool_dispatch.py,
+  src/smallctl/harness/tool_result_support.py, and
+  src/smallctl/tools/fs_write_flow.py. Summarize whether stale cached reads can
+  survive a file mutation, cite the relevant functions, do not search outside
+  src/smallctl, and do not edit files.
+tags:
+  - test_time_scaling
+  - staged
+  - read_path
+test_time_scaling:
+  trigger: any
+  policy: proposal_then_execute
+  max_candidates: 2
+  min_candidates: 2
+  parallel_max: 2
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/harness/tool_dispatch.py
+    - src/smallctl/harness/tool_result_support.py
+    - src/smallctl/tools/fs_write_flow.py
+  required_terms:
+    - invalidate_file_read_cache
+    - maybe_reuse_file_read
+    - stale

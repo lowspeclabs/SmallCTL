@@ -1,0 +1,34 @@
+id: staged_scaling_runtime_probe
+eval_enabled: false
+disabled_reason: >-
+  Exploratory follow-up fixture. Keep it available via --task-id or
+  --include-disabled-tasks, but exclude it from the default smoke gate.
+task: >-
+  Use a staged plan to inspect only these files:
+  src/smallctl/graph/test_time_scaling.py,
+  src/smallctl/graph/runtime_staged.py, and
+  src/smallctl/graph/hard_step_detector.py. Explain where candidate prompts are
+  generated, where branch state is restored, and where the staged runtime routes
+  into scaling. Do not search outside src/smallctl/graph, and do not edit files.
+tags:
+  - test_time_scaling
+  - staged
+  - runtime
+test_time_scaling:
+  trigger: any
+  policy: proposal_then_execute
+  max_candidates: 2
+  min_candidates: 2
+  parallel_max: 2
+expectations:
+  grounding_required: true
+  success_statuses:
+    - completed
+  required_files:
+    - src/smallctl/graph/test_time_scaling.py
+    - src/smallctl/graph/runtime_staged.py
+    - src/smallctl/graph/hard_step_detector.py
+  required_terms:
+    - build_candidate_prompts
+    - CandidateStateGuard
+    - maybe_scale_step

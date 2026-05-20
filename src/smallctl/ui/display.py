@@ -214,6 +214,8 @@ def _format_test_time_scaling_candidate(candidate: dict[str, Any]) -> list[str]:
         bits.append(f"{candidate.get('latency_ms')} ms")
     if candidate.get("read_only"):
         bits.append("read-only")
+    if candidate.get("isolated"):
+        bits.append("isolated")
     lines = ["- " + " | ".join(bits)]
     tools = candidate.get("tools")
     if isinstance(tools, list) and tools:

@@ -107,6 +107,7 @@ def test_test_time_scaling_event_formats_candidate_history_panel() -> None:
                     "latency_ms": 45.5,
                     "prompt_variant": "verify-first",
                     "read_only": True,
+                    "isolated": True,
                 },
             ],
         },
@@ -116,7 +117,7 @@ def test_test_time_scaling_event_formats_candidate_history_panel() -> None:
 
     assert "policy: sequential_branch" in text
     assert "parallel read-only branches: 1" in text
-    assert "#2 selected | score 0.95 | 123 tokens | 45.5 ms | read-only" in text
+    assert "#2 selected | score 0.95 | 123 tokens | 45.5 ms | read-only | isolated" in text
     assert "tools: file_read, step_complete" in text
     assert "failed: unsafe_branch_tool:ssh_file_write" in text
 

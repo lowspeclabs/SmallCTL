@@ -66,6 +66,7 @@ RECOVERY_METRIC_KEYS = (
     "test_time_scaling_branch_attempts",
     "test_time_scaling_branch_successes",
     "test_time_scaling_branch_failures",
+    "test_time_scaling_isolated_branch_attempts",
     "test_time_scaling_parallel_read_only_branch_batches",
     "test_time_scaling_last",
 )

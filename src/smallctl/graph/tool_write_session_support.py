@@ -12,6 +12,7 @@ from .tool_write_session_policy import (
     _ensure_chunk_write_session,
     _should_enter_chunk_mode,
     _suggested_chunk_sections,
+    _write_policy_value,
 )
 
 
@@ -384,6 +385,40 @@ def _detect_oversize_write_payload(
             "reason": "payload_too_large",
         }
 
+    return None
+
+
+def _detect_oversize_patch_payload(
+    harness: Any,
+    pending: PendingToolCall,
+) -> tuple[str, dict[str, Any]] | None:
+    """Reject file_patch calls whose target_text + replacement_text exceed a safe limit.
+
+    Large patch payloads make JSON generation unreliable (models drop escapes or
+    truncate closing braces), which causes the downstream server to fail when it
+    re-parses the tool-call arguments on the next turn.
+    """
+    if pending.tool_name != "file_patch":
+        return None
+
+    target_text = str(pending.args.get("target_text", "") or "")
+    replacement_text = str(pending.args.get("replacement_text", "") or "")
+    total_size = len(target_text) + len(replacement_text)
+    max_chars = _write_policy_value(harness, "patch_hard_chars_limit", 4000)
+
+    if total_size > max_chars:
+        message = (
+            f"Patch payload for `{pending.tool_name}` exceeds the hard limit of {max_chars} characters "
+            f"({total_size} chars). Large patches are unreliable. "
+            "Please use `file_write` with chunked authoring or break the edit into smaller `file_patch` calls."
+        )
+        return message, {
+            "tool_name": pending.tool_name,
+            "tool_call_id": pending.tool_call_id,
+            "size": total_size,
+            "threshold": max_chars,
+            "reason": "patch_payload_too_large",
+        }
     return None
 
 

@@ -117,7 +117,13 @@ def test_plan_set_creates_a_playbook_artifact(tmp_path: Path) -> None:
             implementation_plan=["Write the skeleton", "Fill in the logic", "Verify the result"],
             claim_refs=["C1"],
             steps=[
-                {"step_id": "P1", "title": "Create file skeleton", "claim_refs": ["C1"]},
+                {
+                    "step_id": "P1",
+                    "title": "Create file skeleton",
+                    "claim_refs": ["C1"],
+                    "difficulty": "hard",
+                    "tool_allowlist": ["file_write"],
+                },
                 {"step_id": "P2", "title": "Implement functions"},
                 {"step_id": "P3", "title": "Debug and verify"},
             ],
@@ -128,6 +134,8 @@ def test_plan_set_creates_a_playbook_artifact(tmp_path: Path) -> None:
 
     assert result["success"] is True
     assert state.plan_artifact_id
+    assert state.draft_plan.steps[0].difficulty == "hard"
+    assert state.draft_plan.steps[0].tool_allowlist == ["file_write"]
     assert state.plan_artifact_id in state.artifacts
     playbook_artifact = state.artifacts[state.plan_artifact_id]
     assert playbook_artifact.kind == "plan_playbook"

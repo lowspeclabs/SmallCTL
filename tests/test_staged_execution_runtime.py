@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from smallctl.graph.runtime_staged import StagedExecutionRuntime
+from smallctl.graph.test_time_scaling import FileSnapshotGuard
 from smallctl.harness import Harness
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.models.tool_result import ToolEnvelope
@@ -74,6 +75,34 @@ def _tool_call_stream(
         },
         {"type": "done"},
     ]
+
+
+def test_file_snapshot_guard_removes_new_empty_parent_directories(tmp_path: Path) -> None:
+    guard = FileSnapshotGuard.capture(cwd=tmp_path, paths=["generated/nested/answer.py"])
+
+    target = tmp_path / "generated" / "nested" / "answer.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("branch attempt\n", encoding="utf-8")
+
+    guard.restore()
+
+    assert not target.exists()
+    assert not (tmp_path / "generated" / "nested").exists()
+    assert not (tmp_path / "generated").exists()
+
+
+def test_file_snapshot_guard_keeps_existing_parent_directories(tmp_path: Path) -> None:
+    existing = tmp_path / "generated"
+    existing.mkdir()
+    guard = FileSnapshotGuard.capture(cwd=tmp_path, paths=["generated/answer.py"])
+
+    target = existing / "answer.py"
+    target.write_text("branch attempt\n", encoding="utf-8")
+
+    guard.restore()
+
+    assert existing.exists()
+    assert not target.exists()
 
 
 def test_three_step_plan_runs_in_dependency_order(tmp_path: Path, monkeypatch) -> None:
@@ -628,6 +657,155 @@ def test_sequential_branch_scaling_skips_mutating_shell_candidate(tmp_path: Path
     assert not (tmp_path / "shell-side-effect.txt").exists()
     assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "def answer():\n    return 42\n"
     assert "tc-shell-touch" not in str(harness.state.tool_execution_records)
+    metrics = harness.state.scratchpad["_recovery_metrics"]["test_time_scaling_last"]
+    assert metrics["selected_candidate"] == 2
+
+
+def test_sequential_branch_scaling_skips_remote_mutation_candidate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+    harness.config.staged_execution_enabled = True
+    harness.config.test_time_scaling_enabled = True
+    harness.config.test_time_scaling_policy = "sequential_branch"
+    harness.config.test_time_scaling_max_candidates = 2
+    harness.config.test_time_scaling_min_candidates = 2
+    harness.state.active_plan = ExecutionPlan(
+        plan_id="plan-1",
+        goal="scaled branch remote mutation safety goal",
+        approved=True,
+        steps=[
+            PlanStep(
+                step_id="S1",
+                title="write valid python",
+                task="write answer.py",
+                difficulty="hard",
+                tool_allowlist=["ssh_file_write", "file_write"],
+                outputs_expected=[StepOutputSpec(kind="file", ref="answer.py", required=True)],
+                verifiers=[StepVerifierSpec(kind="syntax_ok", args={"path": "answer.py"}, required=True)],
+            ),
+        ],
+    )
+
+    call_count = 0
+    stream_sequences = [
+        _tool_call_stream(
+            "ssh_file_write",
+            {"target": "root@example.test", "path": "/tmp/answer.py", "content": "remote side effect"},
+            tool_call_id="tc-remote-write",
+        ),
+        _tool_call_stream(
+            "file_write",
+            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            tool_call_id="tc-good-write",
+        ),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del messages, tools
+        nonlocal call_count
+        call_count += 1
+        if call_count > len(stream_sequences):
+            raise AssertionError(f"unexpected extra model call #{call_count}")
+        for event in stream_sequences[call_count - 1]:
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = StagedExecutionRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("execute staged plan"),
+            timeout=10,
+        )
+    )
+
+    assert result["status"] == "complete"
+    assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "def answer():\n    return 42\n"
+    assert "tc-remote-write" not in str(harness.state.tool_execution_records)
+    metrics = harness.state.scratchpad["_recovery_metrics"]["test_time_scaling_last"]
+    assert metrics["selected_candidate"] == 2
+
+
+def test_sequential_branch_scaling_cleans_failed_candidate_parent_dirs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+    harness.config.staged_execution_enabled = True
+    harness.config.test_time_scaling_enabled = True
+    harness.config.test_time_scaling_policy = "sequential_branch"
+    harness.config.test_time_scaling_max_candidates = 2
+    harness.config.test_time_scaling_min_candidates = 2
+    harness.state.active_plan = ExecutionPlan(
+        plan_id="plan-1",
+        goal="scaled branch cleanup goal",
+        approved=True,
+        steps=[
+            PlanStep(
+                step_id="S1",
+                title="write valid python",
+                task="write answer.py",
+                difficulty="hard",
+                tool_allowlist=["file_write"],
+                outputs_expected=[StepOutputSpec(kind="file", ref="answer.py", required=True)],
+                verifiers=[StepVerifierSpec(kind="syntax_ok", args={"path": "answer.py"}, required=True)],
+            ),
+        ],
+    )
+
+    call_count = 0
+    stream_sequences = [
+        _tool_call_stream(
+            "file_write",
+            {"path": "scratch/candidate/answer.py", "content": "def wrong_location():\n    return 0\n"},
+            tool_call_id="tc-wrong-location",
+        ),
+        _tool_call_stream(
+            "file_write",
+            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            tool_call_id="tc-good-write",
+        ),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del messages, tools
+        nonlocal call_count
+        call_count += 1
+        if call_count > len(stream_sequences):
+            raise AssertionError(f"unexpected extra model call #{call_count}")
+        for event in stream_sequences[call_count - 1]:
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = StagedExecutionRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("execute staged plan"),
+            timeout=10,
+        )
+    )
+
+    assert result["status"] == "complete"
+    assert call_count == 2
+    assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "def answer():\n    return 42\n"
+    assert not (tmp_path / "scratch").exists()
     metrics = harness.state.scratchpad["_recovery_metrics"]["test_time_scaling_last"]
     assert metrics["selected_candidate"] == 2
 

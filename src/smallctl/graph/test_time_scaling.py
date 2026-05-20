@@ -54,6 +54,7 @@ LOCAL_FILE_MUTATION_TOOLS = {
 }
 
 SHELL_EXECUTION_TOOLS = {"shell_exec", "ssh_exec"}
+REMOTE_MUTATION_TOOLS = {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
 
 
 @dataclass(slots=True)
@@ -142,22 +143,27 @@ class CandidateStateGuard:
 class FileSnapshotGuard:
     cwd: Path
     snapshots: dict[Path, bytes | None]
+    directories_existed: set[Path] = field(default_factory=set)
 
     @classmethod
     def capture(cls, *, cwd: str | Path, paths: list[str | Path]) -> "FileSnapshotGuard":
         root = Path(cwd).resolve()
         snapshots: dict[Path, bytes | None] = {}
+        directories_existed: set[Path] = {root}
         for raw_path in paths:
             path = _resolve_snapshot_path(root, raw_path)
             if path is None:
                 continue
             if path in snapshots:
                 continue
+            for parent in _snapshot_parent_dirs(root, path):
+                if parent.exists() and parent.is_dir():
+                    directories_existed.add(parent)
             try:
                 snapshots[path] = path.read_bytes() if path.exists() and path.is_file() else None
             except OSError:
                 snapshots[path] = None
-        return cls(cwd=root, snapshots=snapshots)
+        return cls(cwd=root, snapshots=snapshots, directories_existed=directories_existed)
 
     def restore(self) -> None:
         for path, content in self.snapshots.items():
@@ -171,6 +177,25 @@ class FileSnapshotGuard:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
+            except OSError:
+                continue
+        self._remove_new_empty_directories()
+
+    def _remove_new_empty_directories(self) -> None:
+        candidates: set[Path] = set()
+        for path in self.snapshots:
+            candidates.update(_snapshot_parent_dirs(self.cwd, path))
+            if path.exists() and path.is_dir():
+                candidates.add(path)
+        for directory in sorted(candidates, key=lambda item: len(item.parts), reverse=True):
+            if directory == self.cwd or directory in self.directories_existed:
+                continue
+            try:
+                directory.relative_to(self.cwd)
+            except ValueError:
+                continue
+            try:
+                directory.rmdir()
             except OSError:
                 continue
 
@@ -859,6 +884,13 @@ def candidate_uses_only_read_only_tools(candidate: ProposalCandidate) -> bool:
 
 
 def unsafe_branch_execution_reason(candidate: ProposalCandidate) -> str:
+    remote_mutation_tools = [
+        str(getattr(call, "tool_name", "") or "").strip()
+        for call in candidate.pending_tool_calls
+        if str(getattr(call, "tool_name", "") or "").strip() in REMOTE_MUTATION_TOOLS
+    ]
+    if remote_mutation_tools:
+        return "unsafe_branch_tool:" + ",".join(sorted(set(remote_mutation_tools)))
     unsafe_shell_tools = [
         str(getattr(call, "tool_name", "") or "").strip()
         for call in candidate.pending_tool_calls
@@ -1010,6 +1042,21 @@ def _resolve_snapshot_path(root: Path, raw_path: str | Path) -> Path | None:
     except ValueError:
         return None
     return resolved
+
+
+def _snapshot_parent_dirs(root: Path, path: Path) -> list[Path]:
+    dirs: list[Path] = []
+    current = path.parent
+    while True:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            break
+        dirs.append(current)
+        if current == root:
+            break
+        current = current.parent
+    return dirs
 
 
 def _usage_total_tokens(usage: dict[str, Any]) -> int:

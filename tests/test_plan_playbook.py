@@ -3957,6 +3957,80 @@ def test_patch_existing_first_choice_failure_recovers_missing_write_session(tmp_
     assert any(event == "patch_existing_stage_read_autocontinue" for event, _message, _data in runlog_events)
 
 
+def test_missing_first_write_session_recovered_and_original_payload_replayed(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "new_script.py"
+    content = "def main():\n    return 42\n"
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(),
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-1",
+            tool_name="file_write",
+            args={
+                "path": str(target),
+                "content": content,
+                "write_session_id": "3dde23b4",
+            },
+            tool_call_id="tool-1",
+            result=ToolEnvelope(
+                success=False,
+                error="No active write session found for session ID `3dde23b4`.",
+                metadata={
+                    "path": str(target),
+                    "write_session_id": "3dde23b4",
+                    "error_kind": "missing_active_write_session",
+                    "staged_only": True,
+                },
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert isinstance(state.write_session, WriteSession)
+    assert state.write_session.write_session_id == "3dde23b4"
+    assert state.write_session.write_target_path == str(target)
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "file_write"
+    assert pending.args["content"] == content
+    assert pending.args["write_session_id"] == "3dde23b4"
+    assert pending.args["section_name"] == "imports"
+    assert any(
+        event == "missing_first_write_session_recovered"
+        for event, _message, _data in runlog_events
+    )
+
+    replay_result = asyncio.run(
+        fs.file_write(
+            cwd=str(tmp_path),
+            state=state,
+            **pending.args,
+        )
+    )
+
+    assert replay_result["success"] is True
+    assert state.write_session.write_staging_path
+    assert Path(state.write_session.write_staging_path).read_text(encoding="utf-8") == content
+    assert not target.exists()
+
+
 def test_patch_existing_first_choice_failure_rebinds_mismatched_write_session(tmp_path: Path) -> None:
     state = _make_state()
     state.cwd = str(tmp_path)

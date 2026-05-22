@@ -74,12 +74,16 @@ class SubtaskService:
         harness_factory: Callable[..., "Harness"] | None = None,
         artifact_start_index: int | None = None,
     ) -> "Harness":
+        parent = self.harness.config
         child_config = dataclasses.replace(
-            self.harness.config,
+            parent,
             phase=request.phase,
             checkpoint_on_exit=False,
             checkpoint_path=None,
             artifact_start_index=artifact_start_index,
+            tool_profiles=list(parent.tool_profiles) if parent.tool_profiles is not None else None,
+            test_time_scaling_runtimes=list(parent.test_time_scaling_runtimes),
+            strategy=dict(parent.strategy) if parent.strategy is not None else None,
         )
         if getattr(self.harness, "server_context_limit", None) is not None:
             child_config = dataclasses.replace(child_config, context_limit=self.harness.server_context_limit)

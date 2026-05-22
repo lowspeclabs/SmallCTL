@@ -341,6 +341,65 @@ def test_loop_runtime_promotes_raw_task_complete_json_after_tool_evidence(tmp_pa
     )
 
 
+def test_loop_runtime_promotes_readonly_answer_after_missing_complete_nudge(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pong.py").write_text("print('pong')\n", encoding="utf-8")
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled",
+        provider_profile="llamacpp",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    first_answer = (
+        "I read `pong.py` and found several improvements:\n\n"
+        "1. Extract the game loop into a helper so replay does not duplicate control flow.\n"
+        "2. Separate rendering from state updates so movement and scoring can be tested.\n"
+        "3. Add pause-state rendering so the user gets visible feedback."
+    )
+    second_answer = (
+        "Improvements for `pong.py`:\n\n"
+        "1. Extract the duplicated play loop into a `play_round()` helper.\n"
+        "2. Separate game-state updates from curses rendering for easier tests.\n"
+        "3. Add a visible paused overlay and clarify the right-paddle control text."
+    )
+    stream_sequences = [
+        _tool_call_stream(
+            tool_name="file_read",
+            args={"path": str(tmp_path / "pong.py")},
+            tool_call_id="tool-read-before-readonly-answer",
+        ),
+        _assistant_text_stream(first_answer),
+        _assistant_text_stream(second_answer),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del messages, tools
+        if not stream_sequences:
+            raise AssertionError("unexpected extra model call")
+        for event in stream_sequences.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+    runtime = LoopGraphRuntime.from_harness(harness)
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            runtime.run("read ./pong.py and list improvements you would make to that file"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["assistant"] == second_answer
+    assert stream_sequences == []
+    assert harness.state.scratchpad["_terminal_prose_task_complete_autopromoted"]["message_preview"] == second_answer
+
+
 def test_loop_runtime_does_not_promote_plain_nonterminal_summary(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 

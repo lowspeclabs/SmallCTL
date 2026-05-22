@@ -9,7 +9,7 @@ from smallctl.harness import Harness
 from smallctl.harness.context_limits import apply_server_context_limit
 from smallctl.harness.tool_message_compaction import trim_recent_messages_window
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import EvidenceRecord, LoopState
+from smallctl.state import ArtifactRecord, EvidenceRecord, LoopState
 
 
 def _make_harness(
@@ -281,6 +281,41 @@ def test_prompt_assembler_preserves_fresh_tool_outputs_from_scratchpad() -> None
     assert "Fresh tool outputs" in rendered
     assert "A0016" in rendered
     assert "body{font-family:Roboto;background:var(--bg)}" in rendered
+
+
+def test_prompt_assembler_compacts_complete_file_read_fresh_outputs() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Review app.py"
+    state.artifacts["A0001"] = ArtifactRecord(
+        artifact_id="A0001",
+        kind="file_read",
+        source="/tmp/app.py",
+        created_at="2026-05-21T00:00:00+00:00",
+        size_bytes=4096,
+        summary="app.py full file",
+        tool_name="file_read",
+        metadata={"complete_file": True, "total_lines": 403},
+    )
+    state.scratchpad["_fresh_tool_outputs"] = [
+        {
+            "tool_name": "file_read",
+            "artifact_id": "A0001",
+            "content": "import curses\n" + ("raw line\n" * 300),
+        }
+    ]
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=4096)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+        recent_message_limit=1,
+        include_structured_sections=True,
+    )
+
+    rendered = "\n\n".join(str(message.get("content") or "") for message in assembly.messages)
+
+    assert "Artifact A0001: app.py full file (403 lines). Full file captured" in rendered
+    assert "import curses" not in rendered
+    assert "raw line" not in rendered
 
 
 def test_prompt_assembler_prioritizes_latest_observations_under_budget_pressure() -> None:

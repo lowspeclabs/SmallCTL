@@ -76,6 +76,7 @@ class SmallctlConfig:
     graph_model_call_timeout_sec: int = 600
     graph_dispatch_tools_timeout_sec: int = 300
     graph_idle_watchdog_sec: int = 300
+    needs_human_timeout_sec: int = 600
     restore_graph_state: bool = False
     graph_thread_id: str | None = None
     fresh_run: bool = False
@@ -125,6 +126,24 @@ class SmallctlConfig:
     test_time_scaling_timeout_sec: int = 120
     test_time_scaling_mutating_parallel_enabled: bool = False
     test_time_scaling_all_fail_action: str = "fallback_normal_retry"
+    escalation_enabled: bool = False
+    escalation_expose_tool: bool = True
+    escalation_auto_trigger: bool = False
+    escalation_endpoint: str | None = None
+    escalation_model: str | None = None
+    escalation_provider_profile: str = "auto"
+    escalation_api_key: str | None = None
+    escalation_api_key_env: str | None = None
+    escalation_chat_endpoint: str = "/chat/completions"
+    escalation_max_prompt_chars: int = 48000
+    escalation_max_response_tokens: int = 1600
+    escalation_temperature: float = 0.2
+    escalation_timeout_sec: int = 120
+    escalation_max_per_task: int = 2
+    escalation_cooldown_turns: int = 2
+    escalation_repeated_failure_threshold: int = 2
+    escalation_require_tool_plan_evidence: bool = True
+    escalation_redact_secrets: bool = True
     log_file: str | None = None
     debug: bool = False
     cleanup: bool = False
@@ -292,6 +311,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "rewoo_refiner_frame_enabled",
         "test_time_scaling_enabled",
         "test_time_scaling_mutating_parallel_enabled",
+        "escalation_enabled",
+        "escalation_expose_tool",
+        "escalation_auto_trigger",
+        "escalation_require_tool_plan_evidence",
+        "escalation_redact_secrets",
     ):
         if key in cli_clean:
             cli_clean[key] = _to_bool(cli_clean[key])
@@ -360,6 +384,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "test_time_scaling_min_candidates",
         "test_time_scaling_parallel_max",
         "test_time_scaling_timeout_sec",
+        "escalation_max_prompt_chars",
+        "escalation_max_response_tokens",
+        "escalation_timeout_sec",
+        "escalation_max_per_task",
+        "escalation_cooldown_turns",
+        "escalation_repeated_failure_threshold",
     ):
         if key in cli_clean:
             parsed_limit = _to_int(cli_clean[key])
@@ -385,6 +415,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
             cli_clean.pop("test_time_scaling_score_threshold", None)
         else:
             cli_clean["test_time_scaling_score_threshold"] = parsed_ratio
+    if "escalation_temperature" in cli_clean:
+        parsed_ratio = _to_float(cli_clean["escalation_temperature"])
+        if parsed_ratio is None:
+            cli_clean.pop("escalation_temperature", None)
+        else:
+            cli_clean["escalation_temperature"] = parsed_ratio
     if "test_time_scaling_runtimes" in cli_clean and isinstance(cli_clean["test_time_scaling_runtimes"], str):
         cli_clean["test_time_scaling_runtimes"] = [
             item.strip()
@@ -442,6 +478,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "rewoo_refiner_frame_enabled",
         "test_time_scaling_enabled",
         "test_time_scaling_mutating_parallel_enabled",
+        "escalation_enabled",
+        "escalation_expose_tool",
+        "escalation_auto_trigger",
+        "escalation_require_tool_plan_evidence",
+        "escalation_redact_secrets",
     ):
         if key in merged:
             merged[key] = _to_bool(merged[key])
@@ -471,6 +512,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "test_time_scaling_min_candidates",
         "test_time_scaling_parallel_max",
         "test_time_scaling_timeout_sec",
+        "escalation_max_prompt_chars",
+        "escalation_max_response_tokens",
+        "escalation_timeout_sec",
+        "escalation_max_per_task",
+        "escalation_cooldown_turns",
+        "escalation_repeated_failure_threshold",
     ):
         if key in merged:
             parsed_limit = _to_int(merged[key])
@@ -484,6 +531,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
             merged.pop("test_time_scaling_score_threshold", None)
         else:
             merged["test_time_scaling_score_threshold"] = parsed_ratio
+    if "escalation_temperature" in merged:
+        parsed_ratio = _to_float(merged["escalation_temperature"])
+        if parsed_ratio is None:
+            merged.pop("escalation_temperature", None)
+        else:
+            merged["escalation_temperature"] = parsed_ratio
     if "test_time_scaling_runtimes" in merged and isinstance(merged["test_time_scaling_runtimes"], str):
         merged["test_time_scaling_runtimes"] = [
             item.strip()
@@ -506,6 +559,13 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         )
     if preset_name and not preset_defaults:
         compatibility_warnings.append(f"Unknown preset '{preset_name}' ignored.")
+    if _to_bool(merged.get("escalation_enabled")) and (
+        not str(merged.get("escalation_endpoint") or "").strip()
+        or not str(merged.get("escalation_model") or "").strip()
+    ):
+        compatibility_warnings.append(
+            "Escalation is enabled but escalation_endpoint or escalation_model is missing; escalation tool calls will fail until configured."
+        )
     merged["phase"] = normalize_phase(str(merged.get("phase", "explore")))
     merged["run_mode"] = _normalize_run_mode(merged.get("run_mode", "auto"))
     merged["graph_checkpointer"] = _normalize_graph_checkpointer(merged.get("graph_checkpointer", "memory"))
@@ -513,7 +573,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["graph_checkpointer"] = "file"
     if merged.get("fresh_run"):
         merged["restore_graph_state"] = False
-    _apply_provider_profile(merged, cli_clean, compatibility_warnings)
+    _apply_provider_profile(merged, explicit_merged, compatibility_warnings)
     profile = str(merged.get("provider_profile", "auto")).strip().lower()
     if profile == "lmstudio":
         if not str(merged.get("backend_unload_command") or "").strip() and not str(
@@ -544,7 +604,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
 
 def _apply_provider_profile(
     merged: dict[str, Any],
-    cli_clean: dict[str, Any],
+    explicit_merged: dict[str, Any],
     compatibility_warnings: list[str],
 ) -> None:
     profile, profile_warnings = resolve_provider_profile(
@@ -555,6 +615,10 @@ def _apply_provider_profile(
     if profile_warnings:
         compatibility_warnings.extend(profile_warnings)
     merged["provider_profile"] = profile
+    profile_defaults = PROVIDER_PROFILES.get(profile, {})
+    for key, value in profile_defaults.items():
+        if key not in explicit_merged:
+            merged[key] = value
 
 
 def _normalize_run_mode(value: Any) -> str:

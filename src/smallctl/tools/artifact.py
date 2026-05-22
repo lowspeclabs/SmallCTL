@@ -100,6 +100,7 @@ def artifact_grep(
     artifact = _resolve_artifact_record(state, artifact_id)
     if not artifact:
         return fail(f"Artifact not found: {artifact_id}")
+    stale_marker = _artifact_stale_marker(state, artifact)
 
     try:
         content = ""
@@ -157,20 +158,38 @@ def artifact_grep(
                     if len(matches) >= max_results:
                         break
 
+        stale_warning = _artifact_stale_warning(artifact, stale_marker=stale_marker)
+        prefix = f"{stale_warning}\n\n" if stale_warning else ""
+
         if not matches:
-            return ok(f"No matches found for '{query}' in artifact {canonical_artifact_id}")
+            return ok(
+                f"{prefix}No matches found for '{query}' in artifact {canonical_artifact_id}",
+                metadata=_artifact_stale_metadata(
+                    {
+                        "artifact_id": canonical_artifact_id,
+                        "query": query,
+                        "match_count": 0,
+                        "total_lines": len(lines),
+                    },
+                    stale_marker=stale_marker,
+                ),
+            )
 
         output_lines = [f"Found {len(matches)} matches in {canonical_artifact_id}:"]
         for m in matches:
             output_lines.append(f"L{m['line']}: {m['content']}")
 
-        metadata = {
-            "artifact_id": canonical_artifact_id,
-            "query": query,
-            "match_count": len(matches),
-            "total_lines": len(lines)
-        }
-        return ok("\n".join(output_lines), metadata=metadata)
+        metadata = _artifact_stale_metadata(
+            {
+                "artifact_id": canonical_artifact_id,
+                "query": query,
+                "match_count": len(matches),
+                "total_lines": len(lines),
+            },
+            stale_marker=stale_marker,
+        )
+        output = "\n".join(output_lines)
+        return ok(f"{prefix}{output}", metadata=metadata)
     except Exception as exc:
         log.exception("Failed to grep artifact %s", artifact_id)
         return fail(f"Error searching artifact {artifact_id}: {exc}")
@@ -235,6 +254,7 @@ def artifact_read(
                 start_line=requested_start_line,
                 end_line=requested_end_line,
                 max_chars=requested_max_chars,
+                stale_marker=_artifact_stale_marker(state, artifact),
             )
         return fail(f"Artifact {artifact_id} has no stored content.")
 
@@ -249,6 +269,7 @@ def artifact_read(
                     start_line=requested_start_line,
                     end_line=requested_end_line,
                     max_chars=requested_max_chars,
+                    stale_marker=_artifact_stale_marker(state, artifact),
                 )
             return fail(f"Artifact content file not found: {artifact.content_path}")
 
@@ -259,6 +280,7 @@ def artifact_read(
             start_line=requested_start_line,
             end_line=requested_end_line,
             max_chars=requested_max_chars,
+            stale_marker=_artifact_stale_marker(state, artifact),
         )
     except Exception as exc:
         log.exception("Failed to read artifact %s", artifact_id)
@@ -272,6 +294,7 @@ def _render_artifact_slice(
     start_line: int,
     end_line: int | None,
     max_chars: int | None,
+    stale_marker: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     lines = content.splitlines()
     total_lines = max(len(lines), 1)
@@ -298,7 +321,7 @@ def _render_artifact_slice(
             selected_lines = [content]
 
         text = "\n".join(selected_lines)
-    stale_warning = _artifact_stale_warning(artifact)
+    stale_warning = _artifact_stale_warning(artifact, stale_marker=stale_marker)
     if stale_warning:
         text = f"{stale_warning}\n\n{text}" if text else stale_warning
     truncated_by_lines = effective_end < total_lines
@@ -323,26 +346,68 @@ def _render_artifact_slice(
         metadata["eof_overread"] = True
         metadata["requested_start_line"] = effective_start
         metadata["artifact_total_lines"] = total_lines
-    artifact_metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
-    if artifact_metadata.get("stale"):
-        metadata["stale"] = True
-        metadata["artifact_stale_reason"] = str(artifact_metadata.get("artifact_stale_reason") or "")
-        metadata["authoritative_path"] = str(artifact_metadata.get("authoritative_path") or "")
+    metadata = _artifact_stale_metadata(metadata, stale_marker=stale_marker)
     # Keep the tool contract raw; human-facing framing is added by the UI display layer.
     return ok(text, metadata=metadata)
 
 
-def _artifact_stale_warning(artifact: Any) -> str:
+def _artifact_stale_marker(state: LoopState, artifact: Any) -> dict[str, Any]:
     metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
-    if not metadata.get("stale"):
+    marker: dict[str, Any] = {}
+    if metadata.get("stale"):
+        marker.update(metadata)
+        marker.setdefault("reason", str(metadata.get("artifact_stale_reason") or ""))
+    scratchpad = getattr(state, "scratchpad", {})
+    staleness_index = scratchpad.get("_artifact_staleness") if isinstance(scratchpad, dict) else None
+    artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
+    indexed = staleness_index.get(artifact_id) if isinstance(staleness_index, dict) and artifact_id else None
+    if isinstance(indexed, dict) and indexed.get("stale"):
+        marker.update(indexed)
+        marker.setdefault("artifact_stale_reason", str(indexed.get("reason") or ""))
+    return marker if marker.get("stale") or marker.get("artifact_stale_reason") or marker.get("reason") else {}
+
+
+def _artifact_stale_metadata(metadata: dict[str, Any], *, stale_marker: dict[str, Any] | None) -> dict[str, Any]:
+    if not stale_marker:
+        return metadata
+    updated = dict(metadata)
+    updated["stale"] = True
+    updated["artifact_stale_reason"] = str(
+        stale_marker.get("artifact_stale_reason") or stale_marker.get("reason") or ""
+    )
+    paths = stale_marker.get("paths")
+    authoritative_path = str(stale_marker.get("authoritative_path") or "").strip()
+    if not authoritative_path and isinstance(paths, list) and paths:
+        authoritative_path = str(paths[0] or "").strip()
+    if authoritative_path:
+        updated["authoritative_path"] = authoritative_path
+    return updated
+
+
+def _artifact_stale_warning(artifact: Any, *, stale_marker: dict[str, Any] | None = None) -> str:
+    metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
+    marker = dict(metadata)
+    if stale_marker:
+        marker.update(stale_marker)
+    if not (marker.get("stale") or marker.get("artifact_stale_reason") or marker.get("reason")):
         return ""
-    authoritative_path = str(metadata.get("authoritative_path") or metadata.get("target_path") or "").strip()
+    paths = marker.get("paths")
+    authoritative_path = str(marker.get("authoritative_path") or marker.get("target_path") or "").strip()
+    if not authoritative_path and isinstance(paths, list) and paths:
+        authoritative_path = str(paths[0] or "").strip()
+    reason = str(marker.get("artifact_stale_reason") or marker.get("reason") or "").strip()
+    if reason in {"file_changed", "file_mutated"} or reason.endswith("_applied"):
+        cause = "the underlying file has been modified"
+    elif reason == "write_session_promoted":
+        cause = "its write session was promoted"
+    else:
+        cause = "its write session was promoted" if not reason else reason.replace("_", " ")
     if authoritative_path:
         return (
-            "WARNING: This artifact is stale because its write session was promoted. "
+            f"WARNING: This artifact is stale because {cause}. "
             f"Use `file_read(path='{authoritative_path}')` for the current authoritative file."
         )
-    return "WARNING: This artifact is stale because its write session was promoted."
+    return f"WARNING: This artifact is stale because {cause}."
 
 
 def _coerce_positive_int(value: int | None) -> int | None:

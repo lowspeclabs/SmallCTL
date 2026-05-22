@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..models.conversation import ConversationMessage
@@ -279,6 +280,7 @@ class PromptAssembler:
 
         summary_items = list(frame.evidence_packet.summaries)
         artifact_items = list(frame.artifact_packet.snippets)
+        artifact_items = self._expand_recently_mutated_artifact_snippet(state, artifact_items)
         experience_items = list(frame.experience_packet.memories)
         winners_summaries = []
         winners_artifacts = []
@@ -657,6 +659,67 @@ class PromptAssembler:
         return " | ".join(parts)
 
     @staticmethod
+    def _expand_recently_mutated_artifact_snippet(
+        state: LoopState, snippets: list[ArtifactSnippet]
+    ) -> list[ArtifactSnippet]:
+        """Expand the snippet for the most-recently-mutated artifact to reduce re-reads."""
+        changed = [str(p).strip() for p in (state.files_changed_this_cycle or []) if str(p).strip()]
+        if not changed:
+            return snippets
+        most_recent_path = changed[-1]
+        artifacts = getattr(state, "artifacts", {}) or {}
+        if not isinstance(artifacts, dict):
+            return snippets
+        target_artifact_id = ""
+        for aid, art in artifacts.items():
+            source = str(getattr(art, "source", "") or "").strip()
+            metadata = getattr(art, "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                path = str(metadata.get("path") or "").strip()
+            else:
+                path = ""
+            if source == most_recent_path or path == most_recent_path:
+                target_artifact_id = aid
+                break
+        if not target_artifact_id:
+            return snippets
+        art = artifacts.get(target_artifact_id)
+        if art is None:
+            return snippets
+        text = ""
+        if getattr(art, "inline_content", None):
+            text = str(art.inline_content)
+        elif getattr(art, "content_path", None):
+            try:
+                text = Path(art.content_path).read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+        if not text:
+            text = str(getattr(art, "preview_text", None) or getattr(art, "summary", "") or "")
+        if not text:
+            return snippets
+        line_count = len(text.splitlines())
+        if line_count >= 300:
+            # Provide at least ~250 tokens (roughly 1000 chars) for large files
+            preview = text[:1100].rstrip()
+            if len(text) > 1100:
+                preview += "\n...[truncated]"
+            text = preview
+        expanded_text = text.rstrip("\n")
+        new_snippets: list[ArtifactSnippet] = []
+        found = False
+        for s in snippets:
+            if s.artifact_id == target_artifact_id:
+                new_snippets.append(ArtifactSnippet(artifact_id=s.artifact_id, text=expanded_text, score=s.score))
+                found = True
+            else:
+                new_snippets.append(s)
+        if found:
+            # Move the expanded snippet to the front so it is always included
+            new_snippets.sort(key=lambda x: 0 if x.artifact_id == target_artifact_id else 1)
+        return new_snippets
+
+    @staticmethod
     def _render_artifacts(artifacts: list[ArtifactSnippet]) -> str:
         sections = [
             "Artifact summaries (compressed evidence only; these snippets are not full artifact reads):"
@@ -730,11 +793,16 @@ class PromptAssembler:
         for record in records[-limit:]:
             tool_name = str(record.get("tool_name") or "tool").strip() or "tool"
             artifact_id = str(record.get("artifact_id") or "").strip()
-            content = str(record.get("content") or "").strip()
+            content = self._compact_fresh_tool_output_content(state, record)
             if not content:
                 continue
             if len(content) > 1200:
-                content = content[:1190].rstrip() + " [truncated]"
+                suffix = " [truncated]"
+                if artifact_id and self._artifact_is_complete_file_read(state, artifact_id):
+                    suffix = (
+                        f" [preview clipped for prompt budget; Artifact {artifact_id} is complete]"
+                    )
+                content = content[: max(0, 1200 - len(suffix))].rstrip() + suffix
             label = f"[{tool_name}"
             if artifact_id:
                 label += f" {artifact_id}"
@@ -749,6 +817,38 @@ class PromptAssembler:
         if not selected:
             return ""
         return "Fresh tool outputs (latest preserved evidence):\n" + "\n\n".join(selected)
+
+    @staticmethod
+    def _artifact_is_complete_file_read(state: LoopState, artifact_id: str) -> bool:
+        artifact = state.artifacts.get(artifact_id)
+        if artifact is None:
+            return False
+        kind = str(getattr(artifact, "kind", "") or getattr(artifact, "tool_name", "") or "").strip()
+        if kind not in {"file_read", "ssh_file_read"}:
+            return False
+        metadata = getattr(artifact, "metadata", {}) if artifact is not None else {}
+        return bool(isinstance(metadata, dict) and metadata.get("complete_file"))
+
+    @classmethod
+    def _compact_fresh_tool_output_content(cls, state: LoopState, record: dict[str, Any]) -> str:
+        artifact_id = str(record.get("artifact_id") or "").strip()
+        artifact = state.artifacts.get(artifact_id) if artifact_id else None
+        if artifact is not None:
+            kind = str(getattr(artifact, "kind", "") or getattr(artifact, "tool_name", "") or "").strip()
+            metadata = getattr(artifact, "metadata", {}) if artifact is not None else {}
+            if kind in {"file_read", "ssh_file_read"} and isinstance(metadata, dict) and metadata.get("complete_file"):
+                summary = str(
+                    getattr(artifact, "summary", "")
+                    or getattr(artifact, "source", "")
+                    or "file read"
+                ).strip()
+                total_lines = cls._coerce_int_or_none(metadata.get("total_lines"))
+                line_note = f" ({total_lines} lines)" if total_lines is not None else ""
+                return (
+                    f"Artifact {artifact_id}: {summary}{line_note}. "
+                    "Full file captured; use this existing evidence instead of rereading the file."
+                )
+        return str(record.get("content") or "").strip()
 
     @staticmethod
     def _fresh_tool_output_records(state: LoopState) -> list[dict[str, Any]]:

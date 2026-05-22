@@ -136,6 +136,10 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
         if record.tool_name == "artifact_read" and record.result.success:
             if _artifact_read_is_past_eof(harness, record):
                 return False
+            # If this read is continuing pagination on the same artifact,
+            # treat it as progress so the guard doesn't fire mid-read.
+            if _artifact_read_is_continuation_page(harness, record):
+                return True
             if _artifact_read_result_is_new_range(harness, record):
                 return True
         if record.tool_name == "ssh_file_read" and record.result.success:
@@ -810,6 +814,26 @@ def _artifact_read_is_past_eof(harness: Any, record: Any) -> bool:
     return False
 
 
+def _artifact_read_is_continuation_page(harness: Any, record: Any) -> bool:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    artifact_id = _requested_artifact_read_target(args)
+    if not artifact_id:
+        return False
+    start_line, end_line = _requested_file_read_range(args)
+    if start_line is None or start_line <= 1:
+        return False
+    coverage = _artifact_coverage_entry(harness, artifact_id)
+    if coverage is None:
+        return False
+    normalized = _normalize_line_ranges(coverage.get("ranges", []))
+    if not normalized or normalized[-1][1] < start_line - 1:
+        return False
+    # Only count as a continuation page if it extends beyond prior coverage
+    if end_line is not None and end_line <= normalized[-1][1]:
+        return False
+    return True
+
+
 def _ssh_file_read_is_past_eof(harness: Any, record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
     start_line, _end_line = _requested_file_read_range(args)
@@ -878,6 +902,63 @@ def _assistant_text_is_repeat(harness: Any, text: str) -> bool:
     return False
 
 
+def _maybe_inject_verifier_success_nudge(state: Any, graph_state: Any) -> None:
+    """Inject a completion nudge when a verifier succeeds on a recently mutated file."""
+    if not getattr(state, "files_changed_this_cycle", None):
+        return
+    changed_paths = [str(p).strip() for p in state.files_changed_this_cycle if str(p).strip()]
+    if not changed_paths:
+        return
+    for record in getattr(graph_state, "last_tool_results", []) or []:
+        if record.tool_name not in {"shell_exec", "ssh_exec"}:
+            continue
+        if not record.result.success:
+            continue
+        args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+        command = str(args.get("command") or "").strip()
+        if not command or not _command_looks_like_verifier(command):
+            continue
+        # Check exit code 0
+        output = getattr(getattr(record, "result", None), "output", None)
+        exit_code = None
+        if isinstance(output, dict):
+            exit_code = output.get("exit_code")
+        if exit_code is None:
+            metadata = getattr(getattr(record, "result", None), "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                exit_code = metadata.get("exit_code")
+        if exit_code != 0:
+            continue
+        # Check if verifier targets a recently mutated file
+        if not any(str(path).strip() in command for path in changed_paths):
+            continue
+        # Avoid duplicate nudges for the same command
+        scratchpad = getattr(state, "scratchpad", {})
+        if not isinstance(scratchpad, dict):
+            scratchpad = {}
+        nudge_key = f"_verifier_nudge_{hash(command) & 0xFFFFFFFF}"
+        if scratchpad.get(nudge_key):
+            continue
+        scratchpad[nudge_key] = True
+        state.scratchpad = scratchpad
+        state.append_message(
+            ConversationMessage(
+                role="user",
+                content=(
+                    "The verification command succeeded with exit code 0. "
+                    "If the task requirements are satisfied, call `task_complete(message=...)` now "
+                    "instead of performing additional reads."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "verifier_success_completion_prompt",
+                    "command": command,
+                },
+            )
+        )
+        break
+
+
 def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     """Evaluate this turn and update the no-actionable-progress counter."""
     state = getattr(harness, "state", None)
@@ -892,6 +973,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
         if record.tool_name in _MUTATION_TOOLS and record.result.success and (record.result.metadata or {}).get("changed") is True:
             _mark_verifier_stale_after_mutation(state, record)
         _record_failed_verifier(state, record)
+    _maybe_inject_verifier_success_nudge(state, graph_state)
     if is_progress:
         counters["no_actionable_progress"] = 0
         # Update prior-state snapshots for next comparison

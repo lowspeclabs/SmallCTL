@@ -199,6 +199,9 @@ def parse_tool_calls(
 ) -> ToolCallParseResult:
     """Extract, deduplicate, and validate tool calls from a completed model stream."""
     harness = deps.harness
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        scratchpad.pop("_assistant_text_from_reasoning_fallback", None)
     active_model_name = model_name or getattr(getattr(harness, "client", None), "model", None)
     allowed_raw_function_names: set[str] | None = None
     registry = getattr(harness, "registry", None)
@@ -352,11 +355,13 @@ def parse_tool_calls(
         if candidate and candidate != "The model returned reasoning text but no final answer.":
             final_assistant_text = apply_triple_answer_guard(candidate, pending_calls)
 
+    reasoning_fallback_used = False
     if not final_assistant_text.strip() and not pending_calls:
         if allow_reasoning_fallback:
             final_assistant_text = recovered_reasoning_text
             if not final_assistant_text.strip():
                 final_assistant_text = _clean_reasoning_fallback_text(final_thinking_text)
+            reasoning_fallback_used = bool(final_assistant_text.strip())
     elif not final_assistant_text.strip() and not native_calls:
         final_assistant_text = _recover_small_gemma_terminal_message_from_raw_function_syntax(
             assistant_text,
@@ -364,6 +369,9 @@ def parse_tool_calls(
             model_name=active_model_name,
             allowed_tool_names=allowed_raw_function_names,
         )
+
+    if reasoning_fallback_used and isinstance(scratchpad, dict):
+        scratchpad["_assistant_text_from_reasoning_fallback"] = True
 
     return ToolCallParseResult(
         pending_tool_calls=pending_calls,

@@ -127,3 +127,17 @@ def test_openrouter_endpoint_overrides_generic_profile_with_warning(monkeypatch,
     )
     assert cfg.provider_profile == "openrouter"
     assert any("OpenRouter endpoint detected; overriding provider_profile" in item for item in cfg.compatibility_warnings)
+
+
+def test_openrouter_provider_profile_applies_reasoning_default(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = resolve_config({"provider_profile": "openrouter"})
+    assert cfg.provider_profile == "openrouter"
+    assert cfg.reasoning_mode == "off"
+
+
+def test_explicit_reasoning_mode_wins_over_openrouter_default(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = resolve_config({"provider_profile": "openrouter", "reasoning_mode": "tags"})
+    assert cfg.provider_profile == "openrouter"
+    assert cfg.reasoning_mode == "tags"

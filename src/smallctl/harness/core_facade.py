@@ -28,7 +28,7 @@ from ..state import (
 )
 from ..normalization import dedupe_keep_tail
 from ..tools import build_registry
-from ..tools.profiles import NETWORK_PROFILE, NETWORK_READ_PROFILE, classify_tool_profiles
+from ..tools.profiles import MUTATE_PROFILE, NETWORK_PROFILE, NETWORK_READ_PROFILE, classify_tool_profiles
 from .task_intent import completion_next_action, extract_intent_state, next_action_for_task
 from .tool_message_compaction import trim_recent_messages_window
 
@@ -316,6 +316,20 @@ def _update_working_memory(self: Any) -> None:
 
 def _refresh_active_intent(self: Any) -> None:
     self.memory._refresh_active_intent()
+    if not self._configured_tool_profiles:
+        task = self.state.run_brief.original_task or self._current_user_task()
+        prior_profiles = list(self.state.active_tool_profiles or [])
+        self._activate_tool_profiles(task)
+        new_profiles = list(self.state.active_tool_profiles or [])
+        if new_profiles != prior_profiles:
+            self._runlog(
+                "tool_profiles_refresh",
+                "refreshed tool profiles after intent change",
+                task=task,
+                profiles=new_profiles,
+                prior_profiles=prior_profiles,
+                active_intent=self.state.active_intent,
+            )
 
 
 def _completion_next_action(self: Any) -> str:
@@ -477,6 +491,17 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
             or isinstance(resolved_remote, dict) and resolved_remote
         ):
             profiles.add(NETWORK_PROFILE)
+        if active_intent in {
+            "author_write",
+            "write_file",
+            "requested_write_file",
+            "requested_file_write",
+            "requested_file_append",
+            "requested_file_patch",
+            "requested_ast_patch",
+            "requested_file_delete",
+        }:
+            profiles.add(MUTATE_PROFILE)
         if isinstance(prior_profiles, list) and NETWORK_READ_PROFILE in prior_profiles:
             if (
                 self.state.scratchpad.get("_task_boundary_previous_task")

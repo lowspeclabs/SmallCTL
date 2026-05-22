@@ -31,6 +31,18 @@ def _compact_shell_without_artifact(result: ToolEnvelope, *, preview_chars: int)
     return str(result.error or result.output or "").strip() or ("ok" if result.success else "Tool failed.")
 
 
+def _read_file_output_text(result: ToolEnvelope) -> str:
+    output = result.output
+    if isinstance(output, dict) and isinstance(output.get("content"), str):
+        return output["content"]
+    if isinstance(output, str):
+        return output
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if isinstance(metadata.get("content"), str):
+        return metadata["content"]
+    return str(output or "")
+
+
 async def build_tool_result_message(
     service: Any,
     *,
@@ -60,6 +72,16 @@ async def build_tool_result_message(
             compact_content = str(result.error or result.output or "Tool failed.")
     elif tool_name == "artifact_read" and isinstance(result.output, str):
         compact_content = result.output
+    elif artifact and tool_name in {"file_read", "ssh_file_read"}:
+        compact_content = service.harness.artifact_store.compact_tool_message(
+            artifact,
+            result,
+            request_text=request_text,
+            inline_full_file=not compact_full_file,
+            full_file_preview_chars=preview_chars if compact_full_file else None,
+        )
+    elif tool_name in {"file_read", "ssh_file_read"}:
+        compact_content = _read_file_output_text(result)
     else:
         compact_content = (
             service.harness.artifact_store.compact_tool_message(

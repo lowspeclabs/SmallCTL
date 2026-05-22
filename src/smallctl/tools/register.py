@@ -17,6 +17,7 @@ from .profiles import (
 )
 from .registry import ToolRegistry
 from .register_control_planning import register_control_planning_tools
+from .register_escalation import register_escalation_tools
 from .register_filesystem import register_filesystem_tools
 from .register_operational import register_operational_tools
 from .register_content import register_content_tools
@@ -98,6 +99,14 @@ def build_registry(
         register=_register,
         make_registration=_make_registration,
         inject_state=_inject_state,
+        inject_state_and_harness=_inject_state_and_harness,
+        core_profile=CORE_PROFILE,
+    )
+
+    register_escalation_tools(
+        state_provider=state_provider,
+        register=_register,
+        make_registration=_make_registration,
         inject_state_and_harness=_inject_state_and_harness,
         core_profile=CORE_PROFILE,
     )

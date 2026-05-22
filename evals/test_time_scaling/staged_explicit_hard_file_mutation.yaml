@@ -1,0 +1,33 @@
+id: staged_explicit_hard_file_mutation
+eval_enabled: false
+task: >-
+  Use staged execution with exactly one plan step. First call plan_set. The
+  single step must have step_id S1, title "Write mutation probe", difficulty
+  "hard", task "Call file_write once for
+  .smallctl/artifacts/tts_file_mutation_probe.txt with the exact content
+  tts mutation probe ok, then call step_complete with a one-line summary that
+  mentions tts mutation probe ok.", tool_allowlist ["file_write",
+  "step_complete"], outputs_expected [{"kind":"file",
+  "ref":".smallctl/artifacts/tts_file_mutation_probe.txt","required":true}],
+  and verifiers [{"kind":"file_exists","args":{"path":".smallctl/artifacts/tts_file_mutation_probe.txt"},"required":true}].
+  After the plan is approved, execute only that step and finish.
+tags:
+  - test_time_scaling
+  - staged
+  - explicit_hard
+  - local_mutation
+test_time_scaling:
+  trigger: explicit
+  policy: sequential_branch
+  max_candidates: 2
+  min_candidates: 2
+  parallel_max: 1
+expectations:
+  grounding_required: false
+  success_statuses:
+    - complete
+    - completed
+  required_files:
+    - .smallctl/artifacts/tts_file_mutation_probe.txt
+  required_terms:
+    - tts mutation probe ok

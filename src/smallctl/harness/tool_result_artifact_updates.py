@@ -189,6 +189,50 @@ def _supersede_prior_read_artifacts(
             metadata["superseded_by"] = new_artifact_id
 
 
+def _mark_prior_read_artifacts_stale(
+    service: Any,
+    *,
+    path: str,
+    reason: str = "file_mutated",
+) -> None:
+    """Mark prior file_read artifacts for the same path as stale after a mutation.
+
+    Unlike superseding (which happens when a newer read artifact replaces an
+    older one), staleness is used when the live file has been modified by a
+    patch or write and the old snapshot no longer reflects reality.
+    """
+    if not path:
+        return
+    normalized_path = Path(path).as_posix().lower()
+    for artifact_id, artifact in list(service.harness.state.artifacts.items()):
+        art_tool = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+        if art_tool not in {"file_read", "ssh_file_read"}:
+            continue
+        metadata = getattr(artifact, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        art_path = str(metadata.get("path") or "").strip()
+        if not art_path:
+            args = metadata.get("arguments")
+            if isinstance(args, dict):
+                art_path = str(args.get("path") or "").strip()
+        if not art_path:
+            art_path = str(getattr(artifact, "source", "") or "").strip()
+        if Path(art_path).as_posix().lower() == normalized_path:
+            if metadata.get("superseded_by"):
+                continue
+            metadata["stale"] = True
+            metadata["artifact_stale_reason"] = reason
+            metadata["authoritative_path"] = art_path
+            staleness_index = service.harness.state.scratchpad.setdefault("_artifact_staleness", {})
+            if isinstance(staleness_index, dict) and artifact_id:
+                staleness_index[artifact_id] = {
+                    "stale": True,
+                    "reason": reason,
+                    "paths": [art_path],
+                }
+
+
 _SYMBOL_TOKEN_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{0,80}$")
 _SYMBOL_LINE_PATTERNS = (
     re.compile(r"^\s*(?:async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
@@ -1770,6 +1814,11 @@ def apply_artifact_success_outcome(
                 mutated_path = str(arguments.get("path") or "").strip()
             if mutated_path:
                 _invalidate_file_read_cache(service.harness, mutated_path)
+                _mark_prior_read_artifacts_stale(
+                    service,
+                    path=mutated_path,
+                    reason=f"{tool_name}_applied",
+                )
                 _emit_context_invalidation(
                     service,
                     reason="file_changed",

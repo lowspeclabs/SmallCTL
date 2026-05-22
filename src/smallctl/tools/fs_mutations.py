@@ -99,7 +99,7 @@ async def file_append(
     except Exception as exc:
         return fail(f"Unable to append file: {exc}")
     _record_file_change(state, target)
-    return ok("appended", metadata={"path": str(target)})
+    return ok("appended", metadata={"path": str(target), "changed": True})
 
 
 async def file_delete(

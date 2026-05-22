@@ -298,7 +298,8 @@ def _store_verifier_verdict(
         stderr=stderr,
     )
     status = str(result.status or metadata.get("status") or "").strip()
-    if status == "needs_human":
+    approval_denied = bool(metadata.get("approval_denied"))
+    if status == "needs_human" or approval_denied:
         verdict = "needs_human"
     elif semantic_failure:
         verdict = "fail"
@@ -330,7 +331,7 @@ def _store_verifier_verdict(
         verdict = "pass"
     else:
         verdict = "fail"
-    failure_class = _classify_execution_failure(result.error or stderr or stdout)
+    failure_class = "approval_denied" if approval_denied else _classify_execution_failure(result.error or stderr or stdout)
     if absence_probe["is_absence_probe"]:
         failure_class = "" if verdict == "pass" else "removal_residue"
     if _is_long_running_remote_command_timeout(
@@ -347,12 +348,21 @@ def _store_verifier_verdict(
         failure_class=failure_class,
         verdict=verdict,
     )
-    acceptance_delta = {
-        "status": "satisfied" if verdict == "pass" else "blocked",
-        "notes": ["execution succeeded"] if verdict == "pass" else [
-            str(semantic_failure or result.error or stderr or stdout or status or "execution failed")
-        ],
-    }
+    if verdict == "pass":
+        acceptance_delta = {
+            "status": "satisfied",
+            "notes": ["execution succeeded"],
+        }
+    elif verdict == "needs_human":
+        acceptance_delta = {
+            "status": "pending",
+            "notes": [str(result.error or status or "human approval required")],
+        }
+    else:
+        acceptance_delta = {
+            "status": "blocked",
+            "notes": [str(semantic_failure or result.error or stderr or stdout or status or "execution failed")],
+        }
     normalized = {
         "tool": tool_name,
         "target": target,
@@ -364,6 +374,8 @@ def _store_verifier_verdict(
         "failure_mode": failure_class,
         "acceptance_delta": acceptance_delta,
     }
+    if approval_denied:
+        normalized["approval_denied"] = True
     if absence_probe["is_absence_probe"]:
         normalized["verifier_kind"] = "removal_absence_probe"
         normalized["absence_probe_reason"] = absence_probe["reason"]

@@ -16,7 +16,9 @@ from ..provider_profiles import resolve_provider_profile
 from .provider_adapters import get_provider_adapter
 from .stream_collectors import StreamResult, TimelineEntry, collect_stream, collect_timeline
 from .usage import extract_context_limit, extract_runtime_context_limit
+from .client_transport import _DEFAULT_MAX_COMPLETION_TOKENS
 from .client_transport import fetch_model_context_limit, stream_chat
+from .request_budget import client_context_limit as _request_budget_client_context_limit
 
 
 class OpenAICompatClient:
@@ -34,6 +36,8 @@ class OpenAICompatClient:
     LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 135.0
     LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 90.0
     WRITE_HEAVY_TOOL_CALL_CONTINUATION_TIMEOUT_MULTIPLIER = 2.0
+    WRITE_HEAVY_MAX_COMPLETION_TOKENS_MULTIPLIER = 2.0
+    OPENROUTER_AUTO_MAX_COMPLETION_TOKENS = _DEFAULT_MAX_COMPLETION_TOKENS
     _WRITE_HEAVY_TOOL_NAMES: ClassVar[set[str]] = {
         "file_write",
         "file_append",
@@ -188,6 +192,89 @@ class OpenAICompatClient:
         if not write_heavy:
             return timeout
         return max(timeout, timeout * float(self.WRITE_HEAVY_TOOL_CALL_CONTINUATION_TIMEOUT_MULTIPLIER))
+
+    def _resolve_base_max_completion_tokens(self) -> int:
+        explicit = getattr(self, "max_completion_tokens", None)
+        try:
+            explicit_tokens = int(explicit)
+        except (TypeError, ValueError):
+            explicit_tokens = 0
+        if explicit_tokens > 0:
+            return explicit_tokens
+        if self.provider_profile == "openrouter":
+            return int(self.OPENROUTER_AUTO_MAX_COMPLETION_TOKENS)
+        limit = _request_budget_client_context_limit(self)
+        if limit:
+            return max(1, limit // 2)
+        return _DEFAULT_MAX_COMPLETION_TOKENS
+
+    def _request_supports_parameter(self, parameter_name: str) -> bool:
+        supported = getattr(self, "model_supported_parameters", None)
+        if not isinstance(supported, list):
+            return True
+        expected = self._normalize_request_parameter_name(parameter_name)
+        normalized = {
+            self._normalize_request_parameter_name(str(item or ""))
+            for item in supported
+            if str(item or "").strip()
+        }
+        return expected in normalized
+
+    @staticmethod
+    def _normalize_request_parameter_name(value: str) -> str:
+        text = str(value or "").strip().replace("-", "_")
+        normalized: list[str] = []
+        for index, char in enumerate(text):
+            if char.isupper() and index > 0 and normalized and normalized[-1] != "_":
+                normalized.append("_")
+            normalized.append(char.lower())
+        return "".join(normalized)
+
+    def _metadata_max_completion_tokens(self) -> int | None:
+        try:
+            value = int(getattr(self, "model_max_completion_tokens", None) or 0)
+        except (TypeError, ValueError):
+            return None
+        if value > 0:
+            return value
+        return None
+
+    def _request_max_completion_tokens(self, tools: list[dict[str, Any]]) -> int | None:
+        if not self._request_supports_parameter("max_tokens"):
+            return None
+        limit = _request_budget_client_context_limit(self)
+        metadata_limit = self._metadata_max_completion_tokens()
+        base = metadata_limit or self._resolve_base_max_completion_tokens()
+        if not tools:
+            return base
+
+        write_heavy = False
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            tool_name = str(function.get("name") or "").strip()
+            parameters = function.get("parameters")
+            properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+            property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
+            if tool_name in self._WRITE_HEAVY_TOOL_NAMES:
+                write_heavy = True
+                break
+            if property_names & self._WRITE_HEAVY_ARGUMENT_FIELDS:
+                write_heavy = True
+                break
+
+        if not write_heavy:
+            return base
+
+        candidate = int(base * float(self.WRITE_HEAVY_MAX_COMPLETION_TOKENS_MULTIPLIER))
+        if metadata_limit:
+            ceiling = metadata_limit
+        else:
+            ceiling = limit // 2 if limit else _DEFAULT_MAX_COMPLETION_TOKENS * 2
+        return min(max(base, candidate), ceiling)
 
     @classmethod
     async def aclose_shared_clients(cls) -> None:

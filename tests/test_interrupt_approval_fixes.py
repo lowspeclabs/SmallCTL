@@ -22,6 +22,7 @@ from smallctl.harness.runtime_facade import (
 )
 from smallctl.harness.run_mode import (
     ModeDecisionService,
+    _has_plan_execution_approval_context,
     has_active_remote_handoff,
     is_contextual_affirmative_execution_continuation,
 )
@@ -551,6 +552,7 @@ class TestInterruptApprovalFixes:
 
         assert has_pending_interrupt(mock_harness) is False
         assert get_pending_interrupt(mock_harness) is None
+        assert _has_plan_execution_approval_context(mock_harness) is False
 
     def test_approved_plan_ignores_stale_pending_interrupt(self):
         """A serialized pending approval should be stale once the same plan is approved."""
@@ -574,6 +576,7 @@ class TestInterruptApprovalFixes:
 
         assert has_pending_interrupt(mock_harness) is False
         assert get_pending_interrupt(mock_harness) is None
+        assert _has_plan_execution_approval_context(mock_harness) is False
 
     def test_unapproved_plan_still_exposes_planner_interrupt(self):
         """The stale guard should not hide a real unapproved plan approval prompt."""
@@ -597,6 +600,47 @@ class TestInterruptApprovalFixes:
 
         assert has_pending_interrupt(mock_harness) is True
         assert get_pending_interrupt(mock_harness)["plan_id"] == "plan-draft"
+        assert _has_plan_execution_approval_context(mock_harness) is True
+
+    @pytest.mark.asyncio
+    async def test_mode_decision_does_not_use_plan_approval_fallback_for_approved_plan(self):
+        """Session 4715ce37 regression: stale planner_interrupt is not approval context."""
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = None
+        mock_harness.state.active_plan = ExecutionPlan(
+            plan_id="plan-e892d6fa",
+            goal="convert pong",
+            status="approved",
+            approved=True,
+        )
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planner_interrupt = Mock(
+            kind="plan_execute_approval",
+            question="Plan ready. Execute it now?",
+            plan_id="plan-e892d6fa",
+            approved=False,
+            response_mode="yes/no/revise",
+        )
+        mock_harness.state.recent_messages = []
+        mock_harness.state.run_brief = Mock()
+        mock_harness.state.run_brief.original_task = "read the script ./temp/pong.py update the script"
+        mock_harness.state.scratchpad = {}
+        mock_harness.state.cwd = "/home/stephen/Scripts/Harness-Redo"
+        mock_harness.state.task_mode = ""
+        mock_harness.state.active_tool_profiles = ["core"]
+        mock_harness.client = Mock()
+        mock_harness.client.model = "test-model"
+        mock_harness._runlog = Mock()
+        mock_harness._emit = Mock()
+
+        mode = await ModeDecisionService(mock_harness).decide("approve")
+
+        assert _has_plan_execution_approval_context(mock_harness) is False
+        assert not any(
+            kwargs.get("raw") == "plan_approval_fallback"
+            for _args, kwargs in mock_harness._runlog.call_args_list
+        )
 
     def test_vague_planning_prose_does_not_synthesize_empty_plan(self):
         """Approval prompts require an extractable plan, not just text mentioning a plan."""

@@ -492,11 +492,8 @@ def looks_like_freeze_or_hang(harness: Any, assistant_text: str) -> bool:
     recent = recent_assistant_texts(harness, limit=3)
     if not recent:
         return False
-    if text in recent:
-        return True
-    if len(recent) >= 2 and recent[0] == recent[1]:
-        return True
-    if len(recent) >= 3 and recent[0] == recent[1] == recent[2]:
+    historical = recent[1:] if recent and recent[0] == text else recent
+    if text in historical:
         return True
     return False
 

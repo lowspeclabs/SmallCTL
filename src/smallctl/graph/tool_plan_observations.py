@@ -142,6 +142,18 @@ def _output_excerpt(record: ToolExecutionRecord, *, max_chars: int, hint_text: s
     output = result.output
     if output in (None, "", [], {}):
         return ""
+    # For artifact-backed file reads, don't show a truncated raw excerpt;
+    # the observation already includes the artifact reference.
+    if record.tool_name == "file_read":
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        artifact_id = metadata.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id.strip():
+            total_lines = metadata.get("total_lines")
+            line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "content"
+            return (
+                f"Full {line_label} stored in artifact {artifact_id}. "
+                f"Use artifact_read for line slices."
+            )
     if isinstance(output, dict) and str(output.get("status") or "").strip().lower() == "cached":
         summary = output.get("summary")
         if summary not in (None, "", [], {}):

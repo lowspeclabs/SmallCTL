@@ -77,6 +77,19 @@ def _should_persist_tool_artifact(
     tool_name: str,
     result: ToolEnvelope,
 ) -> bool:
+    if tool_name == "file_read":
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        output_len = len(str(result.output or ""))
+        # Artifactize file reads when content is large enough to be
+        # observation-truncated (~600 chars) or when the model explicitly
+        # requested a line slice (paging intent).
+        return (
+            output_len > 600
+            or metadata.get("requested_start_line") is not None
+            or metadata.get("requested_end_line") is not None
+        )
+    if tool_name == "ssh_file_read":
+        return False
     if tool_name != "ssh_exec":
         return True
     return _ssh_result_requires_artifact(service, result=result)
@@ -110,6 +123,10 @@ async def _persist_artifact_result(
                 session_id=str(getattr(service.harness.state, "thread_id", "") or ""),
                 tool_call_id=str(tool_call_id or ""),
             )
+            if artifact is not None:
+                if not isinstance(result.metadata, dict):
+                    result.metadata = {}
+                result.metadata["artifact_id"] = artifact.artifact_id
 
     if result.success and result.output and artifact:
         out_str = str(result.output)

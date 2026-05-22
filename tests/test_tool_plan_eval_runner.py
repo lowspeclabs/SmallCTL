@@ -523,6 +523,39 @@ def test_test_time_scaling_task_env_ignored_for_other_modes() -> None:
     assert env == {}
 
 
+def test_test_time_scaling_dry_run_warns_when_timeout_below_live_guidance(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    yaml_path = tmp_path / "task.yaml"
+    yaml_path.write_text(
+        "id: hard_timeout_guidance\n"
+        "task: Inspect the staged hard step\n"
+        "tags:\n"
+        "  - test_time_scaling\n",
+        encoding="utf-8",
+    )
+
+    exit_code = _tool_plan_eval.main(
+        [
+            "--comparison",
+            "test_time_scaling",
+            "--tasks",
+            str(yaml_path),
+            "--mode",
+            "both",
+            "--timeout-sec",
+            "180",
+            "--dry-run",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "prefer --timeout-sec 300 or higher" in captured.err
+    assert "with timeout=180s" in captured.err
+
+
 def test_text_output_decodes_timeout_bytes() -> None:
     assert _text_output(b"partial output") == "partial output"
     assert _text_output(None) == ""
@@ -638,6 +671,39 @@ def test_by_tag_abort_loop_rate_counts_tool_plan_timeout() -> None:
 
     assert report["comparisons"][0]["tool_plan_timed_out"] is True
     assert report["by_tag"]["robustness"]["abort_loop_rate"] == 1.0
+
+
+def test_abort_rate_ignores_timeout_after_success_payload() -> None:
+    results = [
+        {
+            "task_id": "slow-success",
+            "tags": ["robustness"],
+            "task": "finish just before timeout",
+            "mode": "loop",
+            "duration_sec": 2.0,
+            "timed_out": False,
+            "returncode": 0,
+            "final_success": True,
+            "final_json": {"status": "completed"},
+        },
+        {
+            "task_id": "slow-success",
+            "tags": ["robustness"],
+            "task": "finish just before timeout",
+            "mode": "tool_plan",
+            "duration_sec": 900.0,
+            "timed_out": True,
+            "returncode": 124,
+            "final_success": True,
+            "final_json": {"status": "completed"},
+        },
+    ]
+
+    report = _build_report(results)
+
+    assert report["comparisons"][0]["tool_plan_timed_out"] is True
+    assert report["by_tag"]["robustness"]["abort_loop_rate"] == 0.0
+    assert report["summary"]["tool_plan_abort_rate"] == 0.0
 
 
 def test_report_exit_code_zero_when_ok() -> None:
@@ -822,10 +888,16 @@ def test_test_time_scaling_fixture_directory_has_enabled_smoke_gates() -> None:
     assert {"staged_explicit_hard_loop_status", "staged_explicit_hard_file_read"} <= enabled_ids
     assert "staged_read_path_probe" not in enabled_ids
     assert "staged_scaling_runtime_probe" not in enabled_ids
+    assert "staged_explicit_hard_file_mutation" not in enabled_ids
     assert by_id["staged_explicit_hard_file_read"]["expectations"]["required_files"] == [
         "src/smallctl/graph/hard_step_detector.py"
     ]
     assert by_id["staged_explicit_hard_file_read"]["test_time_scaling"]["trigger"] == "explicit"
+    assert by_id["staged_explicit_hard_file_mutation"]["eval_enabled"] is False
+    assert by_id["staged_explicit_hard_file_mutation"]["test_time_scaling"]["policy"] == "sequential_branch"
+    assert by_id["staged_explicit_hard_file_mutation"]["expectations"]["required_files"] == [
+        ".smallctl/artifacts/tts_file_mutation_probe.txt"
+    ]
 
 
 def test_build_markdown_report_includes_decision_and_gates() -> None:
@@ -913,6 +985,103 @@ def test_build_test_time_scaling_report_compares_pass_at_1_to_pass_at_n() -> Non
     assert report["by_tag"]["coding"]["pass_at_n"] == 1.0
 
 
+def test_build_test_time_scaling_report_infers_branch_attempt_from_candidates() -> None:
+    results = [
+        {
+            "task_id": "branch-step",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["local_mutation"],
+            "task": "write a local probe",
+            "mode": "staged_baseline",
+            "duration_sec": 5.0,
+            "returncode": 0,
+            "timed_out": False,
+            "final_success": True,
+            "final_json": {"status": "completed", "token_usage": 100},
+        },
+        {
+            "task_id": "branch-step",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["local_mutation"],
+            "task": "write a local probe",
+            "mode": "staged_scaled",
+            "duration_sec": 20.0,
+            "returncode": 0,
+            "timed_out": False,
+            "final_success": True,
+            "final_json": {
+                "status": "completed",
+                "token_usage": 130,
+                "recovery_metrics": {
+                    "test_time_scaling_candidates": 2,
+                    "test_time_scaling_branch_successes": 1,
+                    "test_time_scaling_isolated_branch_attempts": 1,
+                    "test_time_scaling_last": {"policy": "sequential_branch", "selected_candidate": 1},
+                },
+            },
+        },
+    ]
+
+    report = _build_report(results)
+
+    assert report["summary"]["scaling_attempts"] == 1
+    assert report["summary"]["scaling_attempt_rate"] == 1.0
+    assert report["summary"]["isolated_branch_attempts"] == 1
+    assert report["comparisons"][0]["scaled_attempted"] is True
+    assert report["comparisons"][0]["isolated_branch_attempts"] == 1
+    assert report["by_tag"]["local_mutation"]["isolated_branch_attempts"] == 1
+
+
+def test_test_time_scaling_abort_rate_ignores_timeout_after_success_payload() -> None:
+    results = [
+        {
+            "task_id": "slow-tts",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["test_time_scaling"],
+            "task": "finish staged eval just before timeout",
+            "mode": "staged_baseline",
+            "duration_sec": 300.0,
+            "returncode": 124,
+            "timed_out": True,
+            "final_success": True,
+            "final_json": {"status": "completed", "token_usage": 100},
+        },
+        {
+            "task_id": "slow-tts",
+            "repeat_index": 1,
+            "repeat_total": 1,
+            "tags": ["test_time_scaling"],
+            "task": "finish staged eval just before timeout",
+            "mode": "staged_scaled",
+            "duration_sec": 300.0,
+            "returncode": 124,
+            "timed_out": True,
+            "final_success": True,
+            "final_json": {
+                "status": "completed",
+                "token_usage": 120,
+                "recovery_metrics": {"test_time_scaling_attempts": 1},
+            },
+        },
+    ]
+
+    report = _build_report(results)
+
+    assert report["summary"]["baseline_abort_rate"] == 0.0
+    assert report["summary"]["scaled_abort_rate"] == 0.0
+    assert report["summary"]["scaled_abort_not_worse"] is True
+    assert report["summary"]["baseline_timeout_after_success_count"] == 1
+    assert report["summary"]["scaled_timeout_after_success_count"] == 1
+    assert report["comparisons"][0]["baseline_timeout_after_success"] is True
+    assert report["comparisons"][0]["scaled_timeout_after_success"] is True
+    assert report["by_tag"]["test_time_scaling"]["timeout_after_success_count"] == 1
+    assert "scaled_timeout_after_success_count=1" in report["summary"]["decision_reason"]
+    assert "baseline_timeout_after_success_count=1" in report["summary"]["decision_reason"]
+
+
 def test_test_time_scaling_markdown_report_uses_scaling_terms() -> None:
     report = {
         "summary": {
@@ -923,8 +1092,17 @@ def test_test_time_scaling_markdown_report_uses_scaling_terms() -> None:
             "scaled_success_not_worse": True,
             "scaled_abort_not_worse": True,
             "scaled_latency_reasonable": True,
+            "isolated_branch_attempts": 1,
+            "scaled_timeout_after_success_count": 1,
         },
-        "by_tag": {"coding": {"total_comparisons": 1, "scaled_wins": 1}},
+        "by_tag": {
+            "coding": {
+                "total_comparisons": 1,
+                "scaled_wins": 1,
+                "isolated_branch_attempts": 1,
+                "timeout_after_success_count": 1,
+            }
+        },
         "comparisons": [
             {
                 "task_id": "hard-step",
@@ -944,3 +1122,6 @@ def test_test_time_scaling_markdown_report_uses_scaling_terms() -> None:
     assert "# Test-Time Scaling Eval Report" in markdown
     assert "Scaled Pass@N no worse than baseline Pass@1" in markdown
     assert "`coding`" in markdown
+    assert "`isolated_branch_attempts`: 1" in markdown
+    assert "`scaled_timeout_after_success_count`: 1" in markdown
+    assert "`timeout_after_success_count`: 1" in markdown

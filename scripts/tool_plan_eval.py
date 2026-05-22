@@ -94,6 +94,7 @@ TOKEN_SAVINGS_GATE_PCT = -20.0
 DEFAULT_PROGRESS_INTERVAL_SEC = 30.0
 DIAGNOSTIC_TAIL_CHARS = 4000
 CHILD_PROGRESS_LINE_LIMIT = 1200
+TEST_TIME_SCALING_RECOMMENDED_TIMEOUT_SEC = 300
 
 CHILD_PROGRESS_MARKERS = (
     "build_registry",
@@ -192,6 +193,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     modes = list(_comparison_modes(args.comparison) if args.mode == "both" else (args.mode,))
     repeat = max(1, int(args.repeat))
+    timeout_sec = max(1, int(args.timeout_sec))
+    if any(mode in TEST_TIME_SCALING_MODES for mode in modes) and timeout_sec < TEST_TIME_SCALING_RECOMMENDED_TIMEOUT_SEC:
+        _log_progress(
+            "warning: test_time_scaling live smoke runs can be latency-sensitive; "
+            f"prefer --timeout-sec {TEST_TIME_SCALING_RECOMMENDED_TIMEOUT_SEC} or higher "
+            f"for OpenRouter/provider-backed runs (current {timeout_sec}s)"
+        )
     commands = [
         _command_for(task["task"], mode=mode, rewoo_frames=args.rewoo_frames)
         for _repeat_index in range(repeat)
@@ -200,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     _log_progress(
         f"loaded {len(tasks)} task(s); running {len(commands)} child process(es) "
-        f"with timeout={max(1, int(args.timeout_sec))}s"
+        f"with timeout={timeout_sec}s"
     )
     if args.dry_run:
         for command in commands:
@@ -221,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = _run_task(
                     task,
                     mode=mode,
-                    timeout_sec=max(1, int(args.timeout_sec)),
+                    timeout_sec=timeout_sec,
                     rewoo_frames=args.rewoo_frames,
                     repeat_index=repeat_index,
                     repeat_total=repeat,
@@ -1226,7 +1234,7 @@ def _abort_indicator(comparison: dict[str, Any]) -> bool:
     return bool(
         comparison.get("abort_count")
         or comparison.get("loop_guard_count")
-        or comparison.get("tool_plan_timed_out")
+        or (comparison.get("tool_plan_timed_out") and not comparison.get("tool_plan_success"))
     )
 
 
@@ -1442,6 +1450,8 @@ def _series_stats(values: list[float], *, worst_mode: str = "max") -> dict[str, 
 
 
 def _runtime_abort_indicator(result: dict[str, Any]) -> bool:
+    if result.get("final_success") is True:
+        return False
     final_json = result.get("final_json") if isinstance(result.get("final_json"), dict) else {}
     status = str(final_json.get("status") or "").strip().lower()
     return bool(
@@ -1449,6 +1459,10 @@ def _runtime_abort_indicator(result: dict[str, Any]) -> bool:
         or int(result.get("returncode") or 0) not in {0, 127}
         or status in {"cancelled", "aborted", "stopped", "failed"}
     )
+
+
+def _timeout_after_success_indicator(result: dict[str, Any]) -> bool:
+    return bool(result.get("timed_out") and result.get("final_success") is True)
 
 
 def _build_report(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1724,6 +1738,12 @@ def _build_test_time_scaling_report(results: list[dict[str, Any]]) -> dict[str, 
             "pass_at_1": _truthy_rate(tagged, "baseline_success"),
             "pass_at_n": _truthy_rate(tagged, "scaled_success"),
             "scaling_attempt_rate": _truthy_rate(tagged, "scaled_attempted"),
+            "isolated_branch_attempts": sum(int(c.get("isolated_branch_attempts") or 0) for c in tagged),
+            "timeout_after_success_count": sum(
+                1
+                for c in tagged
+                if c.get("baseline_timeout_after_success") or c.get("scaled_timeout_after_success")
+            ),
             "token_delta_pct_mean": _mean([float(c["token_delta_pct"]) for c in tagged if c.get("token_delta_pct") is not None]),
             "duration_delta_pct_mean": _mean([float(c["duration_delta_pct"]) for c in tagged if c.get("duration_delta_pct") is not None]),
         }
@@ -1737,6 +1757,9 @@ def _build_test_time_scaling_report(results: list[dict[str, Any]]) -> dict[str, 
     scaled_win_count = sum(1 for c in comparisons if c["scaled_success"] and not c["baseline_success"])
     baseline_win_count = sum(1 for c in comparisons if c["baseline_success"] and not c["scaled_success"])
     scaling_attempts = sum(int(c.get("scaling_attempts") or 0) for c in comparisons)
+    isolated_branch_attempts = sum(int(c.get("isolated_branch_attempts") or 0) for c in comparisons)
+    baseline_timeout_after_success_count = sum(1 for c in comparisons if c.get("baseline_timeout_after_success"))
+    scaled_timeout_after_success_count = sum(1 for c in comparisons if c.get("scaled_timeout_after_success"))
     summary = {
         "comparison": "test_time_scaling",
         "total_comparisons": len(comparisons),
@@ -1751,6 +1774,9 @@ def _build_test_time_scaling_report(results: list[dict[str, Any]]) -> dict[str, 
         "scaling_attempts": scaling_attempts,
         "scaling_attempt_rate": _truthy_rate(comparisons, "scaled_attempted"),
         "candidate_count_total": sum(int(c.get("candidate_count") or 0) for c in comparisons),
+        "isolated_branch_attempts": isolated_branch_attempts,
+        "baseline_timeout_after_success_count": baseline_timeout_after_success_count,
+        "scaled_timeout_after_success_count": scaled_timeout_after_success_count,
         "token_delta_total": sum(token_delta_values) if token_delta_values else None,
         "token_delta_mean": token_delta_stats["mean"],
         "token_delta_median": token_delta_stats["median"],
@@ -1818,6 +1844,13 @@ def _build_test_time_scaling_comparison(
     tts_last = scaled_metrics.get("test_time_scaling_last")
     if not isinstance(tts_last, dict):
         tts_last = {}
+    scaling_attempts = _coerce_optional_int(scaled_metrics.get("test_time_scaling_attempts"))
+    if scaling_attempts is None and (
+        scaled_metrics.get("test_time_scaling_candidates")
+        or scaled_metrics.get("test_time_scaling_branch_successes")
+        or scaled_metrics.get("test_time_scaling_branch_failures")
+    ):
+        scaling_attempts = 1
     return {
         "task_id": task["id"],
         "run_id": run_id,
@@ -1834,6 +1867,8 @@ def _build_test_time_scaling_comparison(
         "scaled_returncode": scaled.get("returncode"),
         "baseline_timed_out": baseline.get("timed_out"),
         "scaled_timed_out": scaled.get("timed_out"),
+        "baseline_timeout_after_success": _timeout_after_success_indicator(baseline),
+        "scaled_timeout_after_success": _timeout_after_success_indicator(scaled),
         "baseline_approval_auto_resumed": baseline.get("approval_auto_resumed"),
         "scaled_approval_auto_resumed": scaled.get("approval_auto_resumed"),
         "baseline_approval_initial_duration_sec": baseline.get("approval_initial_duration_sec"),
@@ -1850,8 +1885,8 @@ def _build_test_time_scaling_comparison(
         "scaled_tokens": scaled_metrics.get("token_usage"),
         "token_delta": _delta(_coerce_optional_float(baseline_metrics.get("token_usage")), _coerce_optional_float(scaled_metrics.get("token_usage"))),
         "token_delta_pct": _pct_delta(_coerce_optional_float(baseline_metrics.get("token_usage")), _coerce_optional_float(scaled_metrics.get("token_usage"))),
-        "scaled_attempted": bool(scaled_metrics.get("test_time_scaling_attempts")),
-        "scaling_attempts": scaled_metrics.get("test_time_scaling_attempts"),
+        "scaled_attempted": bool(scaling_attempts),
+        "scaling_attempts": scaling_attempts,
         "candidate_count": scaled_metrics.get("test_time_scaling_candidates"),
         "selected_candidate": tts_last.get("selected_candidate"),
         "selected_score": tts_last.get("selected_score"),
@@ -1859,6 +1894,7 @@ def _build_test_time_scaling_comparison(
         "failed_criteria": tts_last.get("failed_criteria"),
         "branch_successes": scaled_metrics.get("test_time_scaling_branch_successes"),
         "branch_failures": scaled_metrics.get("test_time_scaling_branch_failures"),
+        "isolated_branch_attempts": scaled_metrics.get("test_time_scaling_isolated_branch_attempts"),
         "parallel_proposal_batches": scaled_metrics.get("test_time_scaling_parallel_proposal_batches"),
         "parallel_read_only_branch_batches": scaled_metrics.get("test_time_scaling_parallel_read_only_branch_batches"),
     }
@@ -1897,6 +1933,8 @@ def _test_time_scaling_decision_reason(summary: dict[str, Any]) -> str:
     parts.append(f"scaling_attempt_rate={summary.get('scaling_attempt_rate')}")
     parts.append(f"scaled_abort_rate={summary.get('scaled_abort_rate')}")
     parts.append(f"baseline_abort_rate={summary.get('baseline_abort_rate')}")
+    parts.append(f"scaled_timeout_after_success_count={summary.get('scaled_timeout_after_success_count')}")
+    parts.append(f"baseline_timeout_after_success_count={summary.get('baseline_timeout_after_success_count')}")
     parts.append(f"scaled_duration_sec_median={summary.get('scaled_duration_sec_median')}")
     parts.append(f"baseline_duration_sec_median={summary.get('baseline_duration_sec_median')}")
     return "; ".join(parts)
@@ -2062,6 +2100,9 @@ def _build_test_time_scaling_markdown_report(report: dict[str, Any]) -> str:
         "scaling_attempts",
         "scaling_attempt_rate",
         "candidate_count_total",
+        "isolated_branch_attempts",
+        "baseline_timeout_after_success_count",
+        "scaled_timeout_after_success_count",
         "token_delta_total",
         "token_delta_mean",
         "token_delta_median",
@@ -2100,6 +2141,8 @@ def _build_test_time_scaling_markdown_report(report: dict[str, Any]) -> str:
                 "pass_at_1",
                 "pass_at_n",
                 "scaling_attempt_rate",
+                "isolated_branch_attempts",
+                "timeout_after_success_count",
                 "token_delta_pct_mean",
                 "duration_delta_pct_mean",
             ):

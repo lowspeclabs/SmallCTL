@@ -140,6 +140,7 @@ def build_system_prompt(
             "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
             "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
             "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
+            "SHELL: When verifying a Python script that has `if __name__ == '__main__': main()`, do not run it bare without arguments if `main()` reads from stdin. Pipe sample input (e.g., `echo '{}' | python3 script.py`) or use `python3 -m unittest discover` / `python3 -m pytest` instead of bare execution. ",
             "MEMORY: Use `memory_update` to persist key facts. ",
             "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
             "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
@@ -157,7 +158,7 @@ def build_system_prompt(
             "CHUNKED AUTHORING: When writing large files or complex logic, the harness may initialize a Write Session. "
             "Break the file into logical sections (e.g., imports, constants, classes, main logic). "
             "Use `file_write` for new files, large sections, or chunked authoring. "
-            "Use `file_patch` for small exact edits when you know the exact target text. "
+            "Use `file_patch` for small exact edits when you know the exact target text. Use `dry_run=true` first when you need to preview the unified diff. "
             "Use `ast_patch` when the edit is easier to describe by function, class, import, call, argument, or dataclass-field structure. "
             "For localized edits to an existing file, prefer `file_patch` or `ast_patch` over rewriting the whole file with `file_write`. "
             "PATCH VERBATIM RULE: When using `file_patch` or `ssh_file_patch`, copy the `target_text` verbatim from the most recent `file_read` or `ssh_file_read` output or artifact. "
@@ -170,7 +171,7 @@ def build_system_prompt(
             "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
             "`replace_strategy`: REQUIRED enum: 'append' or 'overwrite'. Omit only when the harness explicitly tracks the mode from session metadata. "
             "When resuming an active session, prefer `file_write` for chunk continuation; the harness will track append/replace behavior from the session metadata. "
-            "If you need a narrow repair inside the staged copy, prefer `file_patch` for exact text or `ast_patch` for structural edits. "
+            "If you need a narrow repair inside the staged copy, prefer `file_patch` for exact text or `ast_patch` for structural edits. Use explicit regex mode only when exact matching is the wrong fit. "
             "The target path is the canonical destination; the staged copy is for read/verify context while the session is active. "
             "If prior chunks are no longer visible because tool previews were compacted or truncated, recover the current staged content first with `file_read(path=target)` before choosing `replace_strategy='overwrite'`. "
             "If you rely on `artifact_read` instead, keep paging until you have covered 100% of the current staged artifact before overwriting from memory. "

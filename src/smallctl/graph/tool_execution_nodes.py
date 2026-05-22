@@ -38,7 +38,10 @@ from .tool_call_parser import (
     _record_tool_attempt,
     _undo_tool_attempt_if_cached,
 )
-from .tool_execution_recovery import handle_repeated_tool_loop
+from .tool_execution_recovery import (
+    handle_repeated_tool_loop,
+    _maybe_auto_trigger_escalation_for_same_tool_failures,
+)
 from .tool_execution_persistence import persist_tool_results
 from .shell_outcomes import (
     _shell_human_retry_hint,
@@ -770,6 +773,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             break
 
     graph_state.pending_tool_calls = []
+    await _maybe_auto_trigger_escalation_for_same_tool_failures(
+        harness=harness,
+        graph_state=graph_state,
+    )
     dispatch_end = time.perf_counter()
     duration = dispatch_end - dispatch_start
     graph_state.latency_metrics["tool_execution_duration_sec"] = round(duration, 3)

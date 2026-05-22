@@ -214,6 +214,14 @@ def _serialize_recent_messages(state: Any) -> list[dict[str, Any]]:
             continue
         content_value = getattr(message, "content", None)
         content = "" if content_value is None else str(content_value)
+        metadata = getattr(message, "metadata", None)
+        if (
+            role == "tool"
+            and isinstance(metadata, dict)
+            and metadata.get("artifact_id")
+            and len(content) > 500
+        ):
+            content = f"[tool result stored in artifact {metadata['artifact_id']}]"
         tool_calls = getattr(message, "tool_calls", None)
         has_tool_calls = isinstance(tool_calls, list) and bool(tool_calls)
         if not content.strip() and not has_tool_calls:
@@ -227,7 +235,6 @@ def _serialize_recent_messages(state: Any) -> list[dict[str, Any]]:
             payload["tool_call_id"] = str(tool_call_id)
         if has_tool_calls:
             payload["tool_calls"] = tool_calls
-        metadata = getattr(message, "metadata", None)
         if isinstance(metadata, dict) and metadata:
             payload["metadata"] = metadata
         serialized.append(payload)

@@ -7,6 +7,7 @@ from typing import Any
 from ..experience_tags import PHASE_TAG_PREFIX
 from ..state import clip_string_list, clip_text_value
 from .task_classifier import (
+    _LOCAL_SHELL_OVERRIDE_RE,
     is_smalltalk,
     looks_like_author_write_request,
     looks_like_write_file_request,
@@ -50,6 +51,17 @@ _MEMORY_PREFIXES = (
 _REMOTE_TASK_HINT_RE = re.compile(r"\b(?:remote|ssh|server|host|username|password)\b", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _USER_AT_HOST_RE = re.compile(r"\b[A-Za-z0-9._-]+@[A-Za-z0-9._-]+\b")
+_TRACEBACK_HEADER_RE = re.compile(r"Traceback\s*\(most recent call last\):", re.IGNORECASE)
+_TERMINAL_PROMPT_RE = re.compile(r"\S+@[\w.-]+[:~]?[^\$]*\$?\s*")
+
+
+def _sanitize_task_for_intent_routing(task: str) -> str:
+    """Strip terminal prompts from tracebacks so they don't trigger ssh_exec intent."""
+    if not task:
+        return task
+    if _TRACEBACK_HEADER_RE.search(task):
+        return _TERMINAL_PROMPT_RE.sub("", task)
+    return task
 def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[str]]:
     text = (task or "").lower()
     secondary: list[str] = []
@@ -113,11 +125,16 @@ def infer_entity_tags(task: str) -> list[str]:
 
 
 def infer_requested_tool_name(harness: Any, task: str) -> str:
-    text = (task or "").lower()
+    text = _sanitize_task_for_intent_routing(task).lower()
+    # Explicit local-shell override bypasses remote heuristic
+    if _LOCAL_SHELL_OVERRIDE_RE.search(task):
+        if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
+            return "shell_exec"
+        return "shell_exec"
     remote_task = bool(
-        _REMOTE_TASK_HINT_RE.search(task or "")
-        or _IPV4_RE.search(task or "")
-        or _USER_AT_HOST_RE.search(task or "")
+        _REMOTE_TASK_HINT_RE.search(text)
+        or _IPV4_RE.search(text)
+        or _USER_AT_HOST_RE.search(text)
     )
     if remote_task:
         if any(marker in text for marker in ("style block", "<style>", "</style>", "between ", "bounded block", "inline style")):
@@ -155,10 +172,10 @@ def extract_memory_payload(task: str) -> str:
 
     lowered = text.lower()
     for prefix in _MEMORY_PREFIXES:
-        start = lowered.find(prefix)
-        if start == -1:
+        match = re.search(rf"(?<!\w){re.escape(prefix)}(?!\w)", lowered)
+        if match is None:
             continue
-        remainder = text[start + len(prefix) :].strip()
+        remainder = text[match.end() :].strip()
         remainder = remainder.lstrip(":-— ")
         if remainder:
             return remainder

@@ -70,6 +70,26 @@ test_time_scaling_timeout_sec: 120
 test_time_scaling_mutating_parallel_enabled: false
 # All sequential branches failed: fallback_normal_retry (default) or fail_step.
 test_time_scaling_all_fail_action: fallback_normal_retry
+# Larger-model escalation is advisor-only and disabled by default. It must use
+# its own endpoint/model/key and never inherits the main small-model config.
+escalation_enabled: false
+escalation_expose_tool: true
+escalation_auto_trigger: false
+escalation_endpoint: null
+escalation_model: null
+escalation_provider_profile: auto
+escalation_api_key: null
+escalation_api_key_env: null
+escalation_chat_endpoint: /chat/completions
+escalation_max_prompt_chars: 48000
+escalation_max_response_tokens: 1600
+escalation_temperature: 0.2
+escalation_timeout_sec: 120
+escalation_max_per_task: 2
+escalation_cooldown_turns: 2
+escalation_repeated_failure_threshold: 2
+escalation_require_tool_plan_evidence: true
+escalation_redact_secrets: true
 summarize_at_ratio: 0.8
 recent_message_limit: 6
 max_summary_items: 3

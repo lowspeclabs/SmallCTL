@@ -148,7 +148,60 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
         return True
     reads = set(_repair_cycle_reads(state))
     normalized = str(path.resolve()) if hasattr(path, "resolve") else str(path)
-    return normalized in reads
+    if normalized in reads:
+        return True
+    return _latest_path_evidence_allows_repair_patch(state, path)
+
+
+def _latest_path_evidence_allows_repair_patch(state: LoopState, path: Path) -> bool:
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict) or not records:
+        return False
+
+    for record in reversed(list(records.values())):
+        if not isinstance(record, dict):
+            continue
+        tool_name = str(record.get("tool_name") or "").strip()
+        if tool_name not in {"file_read", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
+            continue
+        if not _record_targets_path(record, path, getattr(state, "cwd", None)):
+            continue
+
+        result = record.get("result")
+        result_success = isinstance(result, dict) and bool(result.get("success"))
+        if tool_name == "file_read":
+            return result_success
+        if tool_name in {"file_patch", "ast_patch"} and not result_success:
+            return False
+        if tool_name in {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
+            return False
+    return False
+
+
+def _record_targets_path(record: dict[str, Any], path: Path, cwd: str | None) -> bool:
+    args = record.get("args")
+    metadata = {}
+    result = record.get("result")
+    if isinstance(result, dict) and isinstance(result.get("metadata"), dict):
+        metadata = result["metadata"]
+
+    candidates: list[str] = []
+    if isinstance(args, dict):
+        candidates.extend(
+            str(args.get(key) or "").strip()
+            for key in ("path", "target_path")
+            if str(args.get(key) or "").strip()
+        )
+    candidates.extend(
+        str(metadata.get(key) or "").strip()
+        for key in ("requested_path", "path", "target_path")
+        if str(metadata.get(key) or "").strip()
+    )
+
+    for candidate in candidates:
+        if _same_target_path(candidate, str(path), cwd):
+            return True
+    return False
 
 
 def _repair_cycle_read_required_metadata(

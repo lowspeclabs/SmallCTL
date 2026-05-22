@@ -47,11 +47,17 @@ _SENSITIVE_SUFFIXES = (
     "_pass",
 )
 
-_PASSWORD_TEXT_PATTERNS = (
+_SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(\bpassword\s+is\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(\bpassword\s*(?:is\s+|=|:)?\s*")([^"\r\n]+)(")', re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s*')([^'\r\n]+)(')", re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(("|\')password("|\')\s*:\s*("|\'))([^"\r\n]+)(("|\'))', re.IGNORECASE),
+    re.compile(
+        r"(\b(?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|authorization|secret)\s*(?:=|:)\s*[\"']?)([^\s,\"'\]}]+)([\"']?)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]+)", re.IGNORECASE),
 )
 
 
@@ -148,7 +154,7 @@ def redact_sensitive_text(text: str) -> str:
         return ""
 
     redacted = value
-    for pattern in _PASSWORD_TEXT_PATTERNS:
+    for pattern in _SENSITIVE_TEXT_PATTERNS:
         def _get_repl(pat_groups: int):
             def _repl(m: re.Match[str]) -> str:
                 if pat_groups >= 5:

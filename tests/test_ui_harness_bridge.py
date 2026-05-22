@@ -5,7 +5,7 @@ import threading
 from types import SimpleNamespace
 
 from smallctl.models.events import UIEvent, UIEventType
-from smallctl.ui.harness_bridge import HarnessBridge
+from smallctl.ui.harness_bridge import HarnessBridge, _serialize_recent_messages
 
 
 class _FakeHarness:
@@ -207,3 +207,38 @@ def test_harness_bridge_runs_work_and_control_calls_on_background_loop() -> None
     assert harness.shell_approval_session_default is True
     assert harness.sync_run_logger_calls == 1
     assert harness.teardown_thread_id == harness.run_thread_id
+
+
+def test_restore_serialization_excludes_tool_result_content() -> None:
+    state = SimpleNamespace(
+        transcript_messages=[
+            SimpleNamespace(role="user", content="review file"),
+            SimpleNamespace(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "type": "function",
+                        "id": "call-1",
+                        "function": {"name": "file_read", "arguments": "{\"path\":\"app.py\"}"},
+                    }
+                ],
+            ),
+            SimpleNamespace(
+                role="tool",
+                name="file_read",
+                tool_call_id="call-1",
+                content="RAW FILE CONTENT\n" * 50,
+                metadata={"artifact_id": "A0001"},
+            ),
+            SimpleNamespace(role="assistant", content="I found the bug."),
+        ],
+        recent_messages=[],
+    )
+
+    serialized = _serialize_recent_messages(state)
+
+    assert [message["role"] for message in serialized] == ["user", "assistant", "tool", "assistant"]
+    assert "RAW FILE CONTENT" not in "\n".join(str(message.get("content") or "") for message in serialized)
+    assert serialized[1]["tool_calls"][0]["function"]["name"] == "file_read"
+    assert serialized[2]["metadata"] == {"artifact_id": "A0001"}

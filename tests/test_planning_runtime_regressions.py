@@ -211,6 +211,69 @@ def test_auto_runtime_plan_approval_reply_uses_planner_interrupt_fallback(tmp_pa
     assert decisions == []
 
 
+def test_auto_runtime_ignores_stale_planner_interrupt_for_approved_plan(tmp_path, monkeypatch) -> None:
+    from smallctl.state import ExecutionPlan
+
+    state = LoopState(cwd=str(tmp_path))
+    state.pending_interrupt = None
+    state.active_plan = ExecutionPlan(
+        plan_id="plan-test",
+        goal="do the thing",
+        status="approved",
+        approved=True,
+    )
+    state.planner_interrupt = SimpleNamespace(
+        kind="plan_execute_approval",
+        question="Plan ready. Execute it now?",
+        plan_id="plan-test",
+        approved=False,
+        response_mode="yes/no/revise",
+    )
+    loop_runs: list[str] = []
+    planning_resumes: list[str] = []
+
+    class _StubPlanningRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            planning_resumes.append(human_input)
+            return {"status": "wrong", "message": "stale resume"}
+
+    class _StubLoopRuntime:
+        async def run(self, task: str) -> dict[str, object]:
+            loop_runs.append(task)
+            return {"status": "loop", "message": "continued"}
+
+    async def _decide_run_mode(task: str) -> str:
+        return "loop"
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_specialized.PlanningGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubPlanningRuntime()),
+    )
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubLoopRuntime()),
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        has_pending_interrupt=lambda: False,
+        get_pending_interrupt=lambda: None,
+        decide_run_mode=_decide_run_mode,
+        config=SimpleNamespace(
+            run_mode="auto",
+            tool_plan_runtime_enabled=False,
+            tool_plan_auto_select=False,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(AutoGraphRuntime.from_harness(harness).run("approve"))
+
+    assert result == {"status": "loop", "message": "continued"}
+    assert planning_resumes == []
+    assert loop_runs == ["approve"]
+
+
 def test_apply_planning_tool_outcomes_finalizes_successful_task_complete_without_plan_approval() -> None:
     emitted: list[object] = []
 

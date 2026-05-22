@@ -84,4 +84,5 @@ def build_interrupt_payload(
         "thread_id": graph_state.thread_id,
         "operation_id": record.operation_id,
         "recent_tool_outcomes": recent_tool_summary,
+        "created_at": time.time(),
     }

@@ -18,6 +18,7 @@ from .shell_outcomes import (
     _shell_workspace_relative_retry_hint,
 )
 from .tool_execution_recovery import handle_failed_file_write_outcome
+from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_patch_stall
 from ..harness.tool_visibility import schedule_retry_tool_exposure
 from ..models.conversation import ConversationMessage
 from .tool_execution_recovery_helpers import (
@@ -86,7 +87,12 @@ async def apply_tool_outcomes(
         _write_session_outcomes._maybe_record_write_session_first_chunk_metric(graph_state, harness, record)
         await _write_session_outcomes._handle_write_session_outcome(harness, record)
         _update_subtask_ledger_from_record(harness, record)
+        _maybe_auto_complete_plan_step_for_mutation(harness, record)
 
+    await _maybe_auto_trigger_escalation_for_patch_stall(
+        harness=harness,
+        graph_state=graph_state,
+    )
     _update_progress_tracking(harness, graph_state)
     task_boundary_service = getattr(harness, "_task_boundary_service", None)
     if task_boundary_service is not None:
@@ -114,6 +120,7 @@ async def apply_chat_tool_outcomes(
         _write_session_outcomes._maybe_record_write_session_first_chunk_metric(graph_state, harness, record)
         await _write_session_outcomes._handle_write_session_outcome(harness, record)
         _update_subtask_ledger_from_record(harness, record)
+        _maybe_auto_complete_plan_step_for_mutation(harness, record)
 
         if await maybe_apply_terminal_tool_outcome(graph_state, deps, record, chat_mode=True):
             return LoopRoute.FINALIZE
@@ -224,6 +231,43 @@ def _maybe_emit_missing_requested_output_file_nudge(
             retry_scheduled=retry_scheduled,
         )
     return True
+
+
+def _maybe_auto_complete_plan_step_for_mutation(harness: Any, record: ToolExecutionRecord) -> None:
+    if not record.result.success:
+        return
+    if record.tool_name not in {"file_patch", "ast_patch", "file_write", "file_append"}:
+        return
+    if not getattr(harness.state, "plan_execution_mode", False):
+        return
+    active_step_id = str(getattr(harness.state, "active_step_id", "") or "").strip()
+    if not active_step_id:
+        return
+    plan = getattr(harness.state, "active_plan", None) or getattr(harness.state, "draft_plan", None)
+    if plan is None:
+        return
+    step = plan.find_step(active_step_id)
+    if step is None:
+        return
+    target_path = str(
+        record.args.get("path")
+        or record.args.get("target_path")
+        or (record.result.metadata.get("path") if isinstance(record.result.metadata, dict) else "")
+        or ""
+    ).strip()
+    if not target_path:
+        return
+    step_text = f"{step.title} {step.description} {step.task}".lower()
+    normalized_path = target_path.replace("\\", "/").lower()
+    path_parts = normalized_path.split("/")
+    filename = path_parts[-1] if path_parts else normalized_path
+    if filename not in step_text and normalized_path not in step_text:
+        return
+    _auto_update_active_plan_step(
+        harness,
+        status="completed",
+        note=f"Step satisfied by successful {record.tool_name} on `{target_path}`.",
+    )
 
 
 def _update_subtask_ledger_from_record(harness: Any, record: ToolExecutionRecord) -> None:

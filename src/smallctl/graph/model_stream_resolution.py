@@ -156,6 +156,32 @@ async def resolve_model_stream_result(
     if graph_state.final_result is not None:
         return StreamProcessingResult(chunks=chunks)
 
+    if (
+        stream_ended_without_done
+        and stream_ended_without_done_details.get("reason") == "reasoning_only_stream_stall"
+    ):
+        failure_message = (
+            "Model stream halted after repeated reasoning-only output with no assistant content "
+            "or tool call"
+        )
+        harness._runlog(
+            "reasoning_only_stream_exhausted",
+            "model stream halted after repeated reasoning-only output",
+            details=stream_ended_without_done_details,
+            error_type="model_stream_stall",
+        )
+        await harness._emit(
+            deps.event_handler,
+            UIEvent(event_type=UIEventType.ERROR, content=f"Stream error: {failure_message}"),
+        )
+        graph_state.final_result = harness._failure(
+            failure_message,
+            error_type="model_stream_stall",
+            details=stream_ended_without_done_details,
+        )
+        graph_state.error = graph_state.final_result["error"]
+        return StreamProcessingResult(chunks=chunks)
+
     enter_fallback_block = (
         not stream_completed_cleanly
         and (

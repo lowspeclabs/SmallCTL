@@ -216,6 +216,12 @@ def _maybe_schedule_task_complete_verifier_loop_status(
     error_text = str(record.result.error or "").strip().lower()
     if "latest verifier verdict is still failing" not in error_text:
         return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    verifier = metadata.get("last_verifier_verdict")
+    if isinstance(verifier, dict) and (
+        bool(verifier.get("approval_denied")) or str(verifier.get("verdict") or "").strip() == "needs_human"
+    ):
+        return False
 
     signature = "|".join(
         [
@@ -334,6 +340,8 @@ def _maybe_emit_task_complete_verifier_nudge(harness: Any, record: ToolExecution
         current_verifier = getattr(harness.state, "current_verifier_verdict", None)
         verifier = current_verifier() if callable(current_verifier) else None
     if not isinstance(verifier, dict) or not verifier:
+        return False
+    if bool(verifier.get("approval_denied")) or str(verifier.get("verdict") or "").strip() == "needs_human":
         return False
 
     target_text, clipped = clip_text_value(

@@ -234,7 +234,7 @@ def test_file_read_records_evidence_and_preserves_raw_artifact(tmp_path: Path) -
     async def _run() -> None:
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
-        result = ToolEnvelope(success=True, output="alpha\nbeta\n", metadata={"path": "README.md"})
+        result = ToolEnvelope(success=True, output=("alpha\nbeta\n" * 400), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-1",
@@ -255,7 +255,7 @@ def test_file_read_records_evidence_and_preserves_raw_artifact(tmp_path: Path) -
         artifact_id = str(message.metadata.get("artifact_id") or "")
         assert artifact_id
         artifact = harness.state.artifacts[artifact_id]
-        assert Path(artifact.content_path).read_text(encoding="utf-8") == "alpha\nbeta\n"
+        assert Path(artifact.content_path).read_text(encoding="utf-8") == ("alpha\nbeta\n" * 400)
 
         evidence = harness.state.reasoning_graph.evidence_records[-1]
         assert evidence.tool_name == "file_read"
@@ -576,7 +576,7 @@ def test_artifact_read_cache_hit_marks_replayed_evidence(tmp_path: Path) -> None
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-3",
@@ -630,7 +630,7 @@ def test_fresh_artifact_read_with_reused_ids_clears_stale_markers(tmp_path: Path
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-seed",
@@ -690,7 +690,7 @@ def test_artifact_read_cache_hit_with_reused_ids_keeps_stale_markers(tmp_path: P
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-seed-cache",
@@ -753,7 +753,7 @@ def test_artifact_print_reuses_existing_artifact(tmp_path: Path) -> None:
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output="cached content", metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-5",

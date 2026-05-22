@@ -177,13 +177,13 @@ def _extract_code_from_fallback_response(
     target_path: str,
     path_confidence: str,
 ) -> str:
-    recovered = recover_content_from_assistant_text(
+    recovered_content, _, _ = recover_content_from_assistant_text(
         response_text,
         target_path=target_path,
         allow_raw_text_targets=True,
         path_confidence=path_confidence,
     )
-    return str(recovered or "").strip()
+    return str(recovered_content or "").strip()
 
 
 def _fallback_response_ready_for_early_exit(

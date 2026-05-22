@@ -110,7 +110,7 @@ def register_content_tools(
             ),
             make_registration(
                 name="artifact_grep",
-                description="Search for a substring or regex pattern within an artifact and return matching lines with line numbers. By default uses literal substring matching (not regex). Set regex=True to enable regex mode. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
+                description="Search for a substring or regex pattern within an artifact and return matching lines with line numbers. By default uses literal substring matching (NOT regex). Set regex=True to enable regex mode. Do NOT use pipe characters (|) or regex syntax in the query unless regex=True is set. Use this to find specific information within large artifacts WITHOUT reading the entire content.",
                 schema={
                     "type": "object",
                     "properties": {

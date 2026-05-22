@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+from smallctl.fama.runtime import observe_tool_result
 from smallctl.fama.signals import ActiveMitigation
-from smallctl.fama.state import activate_mitigations
+from smallctl.fama.state import activate_mitigations, active_mitigation_names
 from smallctl.fama.tool_policy import apply_fama_tool_exposure, enforce_fama_tool_call
+from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
 from smallctl.tools.base import ToolSpec
 from smallctl.tools.dispatcher import ToolDispatcher
@@ -203,3 +206,68 @@ def test_fama_disabled_config_allows_direct_tool_dispatcher() -> None:
 
     assert result.success is True
     assert result.output == "done"
+
+
+def test_ssh_auth_failure_releases_done_gate() -> None:
+    state = LoopState()
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            )
+        ],
+        max_active=2,
+    )
+    state.task_mode = "remote_execute"
+    state.active_intent = "requested_ssh_exec"
+    state.last_verifier_verdict = {"verdict": "fail", "command": "pytest"}
+
+    result = ToolEnvelope(
+        success=False,
+        error="Permission denied (publickey,password).",
+        metadata={
+            "tool_name": "ssh_exec",
+            "output": {
+                "stdout": "",
+                "stderr": "Permission denied (publickey,password).",
+                "exit_code": 255,
+            },
+        },
+    )
+
+    def _runlog(*args, **kwargs):
+        pass
+
+    harness = SimpleNamespace(
+        state=state,
+        config=_Config(),
+        _runlog=_runlog,
+    )
+
+    asyncio.run(
+        observe_tool_result(
+            SimpleNamespace(harness=harness),
+            tool_name="ssh_exec",
+            result=result,
+            operation_id="op-ssh-auth-fail",
+        )
+    )
+
+    assert "done_gate" not in active_mitigation_names(state)
+    assert state.task_mode == "local_execute"
+    assert state.active_intent == "general_task"
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail"), _schema("shell_exec")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "task_complete" in names
+    assert "task_fail" in names

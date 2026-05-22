@@ -208,6 +208,33 @@ async def resume_loop_run(
         )
         graph_state.error = graph_state.final_result["error"]
         return
+    created_at = pending.get("created_at")
+    if isinstance(created_at, (int, float)):
+        elapsed = time.time() - created_at
+        timeout = getattr(getattr(harness, "config", None), "needs_human_timeout_sec", 600)
+        if elapsed > timeout:
+            postmortem = f"Task timed out after {int(elapsed)}s in paused state awaiting user input."
+            graph_state.final_result = harness._failure(
+                postmortem,
+                error_type="guard",
+                details={
+                    "interrupt_kind": pending.get("kind", "ask_human"),
+                    "elapsed_sec": elapsed,
+                    "timeout_sec": timeout,
+                },
+            )
+            graph_state.error = graph_state.final_result["error"]
+            harness.state.pending_interrupt = None
+            graph_state.pending_interrupt = None
+            graph_state.interrupt_payload = None
+            harness._runlog(
+                "interrupt_resume_timeout",
+                "auto-failed task because interrupt exceeded needs_human_timeout",
+                elapsed_sec=elapsed,
+                timeout_sec=timeout,
+                interrupt_kind=pending.get("kind", "ask_human"),
+            )
+            return
     harness._runlog(
         "interrupt_resume",
         "resuming loop from interrupt",
@@ -295,10 +322,18 @@ async def resume_loop_run(
         transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
         tx_lines = recovery_context_lines(transaction)
         tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
+        suppressed_tool = str(scratchpad.get("_repeated_tool_loop_suppressed_tool") or "").strip()
+        suppression_note = ""
+        if suppressed_tool and suppressed_tool == interrupted_pending.tool_name:
+            suppression_note = (
+                f"IMPORTANT: `{suppressed_tool}` has been REMOVED from your available tools. "
+                "You physically cannot call it again. Use a different tool or make a state-changing action. "
+            )
         resume_hint = (
             f"RESUME CONTRACT: You are resuming after a loop guard pause. "
             f"YOUR TASK (do not abandon): {goal_recap or 'Continue the current task'}. "
             f"Do not call `{interrupted_pending.tool_name}` again with the same arguments. "
+            f"{suppression_note}"
             "Do not read files already in context. "
             "Do NOT switch tasks, projects, or goals. "
             f"{tx_note} "
@@ -529,7 +564,19 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
     if not graph_state.pending_tool_calls and getattr(harness.state, "write_session", None) is None:
         target_path = primary_task_target_path(harness)
         if target_path:
-            _ensure_chunk_write_session(harness, target_path)
+            # Fix 2 (RCA 8b79ca76): Don't pre-arm a write session if the target
+            # file already exists and is non-empty. The file was likely written
+            # by a prior completed session; creating a new orphan session traps
+            # the model in a task_complete deadlock.
+            from pathlib import Path
+            from ..tools.fs import _resolve
+            try:
+                resolved = _resolve(target_path, getattr(harness.state, "cwd", None))
+                file_already_exists = resolved.exists() and resolved.is_file() and resolved.stat().st_size > 0
+            except Exception:
+                file_already_exists = False
+            if not file_already_exists:
+                _ensure_chunk_write_session(harness, target_path)
 
     if graph_state.pending_tool_calls:
         suppressed_plan_reads: list[str] = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..state import clip_text_value
@@ -48,6 +49,7 @@ def render_shell_failure(
     strip_whitespace: bool = False,
 ) -> str:
     error_text = str(error or "").strip()
+    failure_summary = _failure_summary(error_text=error_text, output=output)
     transcript = ""
     if isinstance(output, dict):
         transcript = render_shell_output(
@@ -59,6 +61,8 @@ def render_shell_failure(
             transcript = ""
 
     parts: list[str] = []
+    if failure_summary:
+        parts.append(f"--- [FAILURE SUMMARY] ---\n{failure_summary}")
     if error_text:
         parts.append(error_text)
     if transcript:
@@ -74,3 +78,49 @@ def render_shell_failure(
     if clipped:
         return f"{preview}\n... output truncated"
     return preview
+
+
+_UNITTEST_ERROR_RE = re.compile(r"^ERROR:\s+.+", re.MULTILINE)
+_TEST_SUMMARY_RE = re.compile(
+    r"^(?:FAILED\s*\([^)]+\)|(?:=+\s*)?\d+\s+failed\b.*|NO TESTS RAN\b.*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_EXCEPTION_LINE_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*Error|AssertionError|Exception|SystemExit|KeyboardInterrupt):\s+.+",
+    re.MULTILINE,
+)
+
+
+def _failure_summary(*, error_text: str, output: dict[str, Any] | None) -> str:
+    lines: list[str] = []
+    if isinstance(output, dict):
+        exit_code = output.get("exit_code")
+        if exit_code not in (None, "", 0, "0"):
+            lines.append(f"Command failed with exit code {exit_code}.")
+        combined = "\n".join(
+            str(output.get(key) or "").strip()
+            for key in ("stdout", "stderr")
+            if str(output.get(key) or "").strip()
+        )
+    else:
+        combined = ""
+    if error_text:
+        combined = "\n".join(part for part in (combined, error_text) if part)
+
+    if not combined:
+        return "\n".join(lines)
+
+    matches: list[str] = []
+    for regex in (_TEST_SUMMARY_RE, _UNITTEST_ERROR_RE, _EXCEPTION_LINE_RE):
+        matches.extend(match.group(0).strip() for match in regex.finditer(combined))
+
+    seen = {line.lower() for line in lines}
+    for line in matches:
+        normalized = line.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(line[:240])
+        if len(lines) >= 7:
+            break
+    return "\n".join(lines)

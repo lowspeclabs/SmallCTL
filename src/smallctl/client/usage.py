@@ -49,6 +49,66 @@ def extract_context_limit(payload: Any) -> int | None:
     return max(found)
 
 
+def extract_max_completion_tokens(payload: Any) -> int | None:
+    """Extract a model/provider output-token cap from metadata payloads."""
+
+    keys = (
+        "max_completion_tokens",
+        "max_output_tokens",
+        "output_token_limit",
+        "completion_token_limit",
+        "max_tokens",
+    )
+    candidates: list[int] = []
+
+    if isinstance(payload, dict):
+        for container_key in ("top_provider", "provider", "limits", "per_request_limits"):
+            container = payload.get(container_key)
+            if not isinstance(container, dict):
+                continue
+            for key in keys:
+                parsed = _parse_positive_int(container.get(key))
+                if parsed is not None:
+                    candidates.append(parsed)
+
+        for key in keys:
+            parsed = _parse_positive_int(payload.get(key))
+            if parsed is not None:
+                candidates.append(parsed)
+
+    if not candidates:
+        return None
+    # Output limits are ceilings; use the smallest discovered ceiling.
+    return min(candidates)
+
+
+def extract_supported_parameters(payload: Any) -> list[str] | None:
+    """Extract supported request parameters from provider model metadata."""
+
+    candidates: list[Any] = []
+    if isinstance(payload, dict):
+        candidates.append(payload.get("supported_parameters"))
+        top_provider = payload.get("top_provider")
+        if isinstance(top_provider, dict):
+            candidates.append(top_provider.get("supported_parameters"))
+
+    supported: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, list):
+            continue
+        for item in candidate:
+            normalized = str(item or "").strip()
+            if not normalized:
+                continue
+            key = _normalize_parameter_name(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            supported.append(normalized)
+    return supported or None
+
+
 def extract_runtime_context_limit(payload: Any) -> int | None:
     """Extract context limit from runtime server payload (e.g., llama.cpp).
     
@@ -131,3 +191,13 @@ def _parse_positive_int(value: Any) -> int | None:
     if 0 < parsed < 10_000_000:
         return parsed
     return None
+
+
+def _normalize_parameter_name(value: str) -> str:
+    text = str(value or "").strip().replace("-", "_")
+    normalized: list[str] = []
+    for index, char in enumerate(text):
+        if char.isupper() and index > 0 and normalized and normalized[-1] != "_":
+            normalized.append("_")
+        normalized.append(char.lower())
+    return "".join(normalized)

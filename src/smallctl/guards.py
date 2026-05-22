@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class GuardConfig:
-    max_steps: int = 35
+    max_steps: int = 50
     max_tokens: int | None = None
     max_consecutive_errors: int = 5
     max_repeated_actions: int = 6

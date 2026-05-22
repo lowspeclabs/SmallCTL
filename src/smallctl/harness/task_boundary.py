@@ -74,6 +74,10 @@ _INLINE_USER_WRAP_MARKER_RE = re.compile(
 _FOLLOWUP_FILLERS = {"please", "pls", "now", "again", "just", "then", "more", "further"}
 _NUMBERED_OPTION_RE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 _INLINE_NUMBERED_OPTION_RE = re.compile(r"(?:^|\s)(\d+)[.)]\s+(.+?)(?=(?:\s+\d+[.)]\s+)|$)")
+_MARKDOWN_OPTION_RE = re.compile(
+    r"^\s*(?:\*\*)?(?:option|proposal)\s+(\d+)\s*(?:[-—–:]|\*\*)\s*(.*?)(?:\*\*)?\s*$",
+    re.IGNORECASE,
+)
 _ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
 _OPTION_ACTION_WORDS = re.compile(
     r"\b(stream|streaming|md5|hash|patch|edit|modify|fix|update|implement|add|replace|refactor|test|skip|handle|read|write|calculate)\b",
@@ -87,7 +91,9 @@ _TARGET_REPLACEMENT_RE = re.compile(
 _TARGET_LANGUAGE_RE = re.compile(r"\b(?:rust|go|typescript|javascript|python|bash|shell)\b", re.IGNORECASE)
 _ORDINAL_FOLLOWUP_RE = re.compile(
     r"\b(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:option\s+|proposal\s+|#)?(\d+)\b",
+    r"(?:option\s+|proposal\s+|#)?(\d+)\b"
+    r"|"
+    r"\b(?:option|proposal)\s+#?(\d+)\b",
     re.IGNORECASE,
 )
 _ORDINAL_PREFIX_RE = re.compile(
@@ -547,6 +553,8 @@ def _extract_action_options_from_text(text: str, inherited_paths: list[str]) -> 
 
     for line in str(text or "").splitlines():
         match = _NUMBERED_OPTION_RE.match(line)
+        if not match:
+            match = _MARKDOWN_OPTION_RE.match(line)
         if not match:
             continue
         _append_option(int(match.group(1)), str(match.group(2) or ""))
@@ -2239,6 +2247,10 @@ class TaskBoundaryService:
             return True
         if known_paths and _GENERIC_TARGET_RE.search(text) and _FOLLOWUP_ACTION_RE.search(text):
             return True
+        # If previous task had known paths and new task mentions same artifact type
+        # without specifying any new paths, treat as contextual follow-up
+        if not (explicit_paths or explicit_remote_paths) and known_paths and _GENERIC_TARGET_RE.search(text):
+            return True
         return False
 
     def _has_recent_guard_failure_context(self) -> bool:
@@ -2626,7 +2638,7 @@ class TaskBoundaryService:
         match = _ORDINAL_FOLLOWUP_RE.search(text)
         if match:
             try:
-                return int(match.group(1))
+                return int(match.group(1) or match.group(2))
             except (TypeError, ValueError):
                 return None
         for word, index in _ORDINAL_WORDS.items():

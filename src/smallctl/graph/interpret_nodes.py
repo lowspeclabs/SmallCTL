@@ -54,12 +54,88 @@ _COMPLETION_FACT_MARKERS = ("[COMPLETED]", "[DONE]", "[SUCCESS]", "task complete
 _TERMINAL_PROSE_STRONG_MARKERS = (
     "task complete",
     "task completed",
+    "task is essentially complete",
     "the task is complete",
     "final summary",
     "final answer",
     "completed successfully",
 )
 _FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+_REASONING_FALLBACK_FLAG = "_assistant_text_from_reasoning_fallback"
+_DECLARED_FILE_READ_MARKERS = (
+    "call file_read",
+    "use file_read",
+    "invoke file_read",
+    "run file_read",
+    "file_read to read",
+    "read the file",
+    "read this file",
+    "read that file",
+    "read it first",
+)
+_DECLARED_ACTION_PREFIXES = (
+    "let me",
+    "i need to",
+    "i'll",
+    "i will",
+    "i'm going to",
+    "i am going to",
+    "first i",
+    "next i",
+)
+
+
+def _maybe_synthesize_declared_file_read(
+    graph_state: GraphRunState,
+    harness: Any,
+    assistant_text: str,
+) -> bool:
+    if graph_state.pending_tool_calls:
+        return False
+    text = str(assistant_text or "").strip()
+    if not text:
+        return False
+
+    low_text = text.lower()
+    if "file_read" not in low_text and not any(marker in low_text for marker in _DECLARED_FILE_READ_MARKERS):
+        return False
+    if not any(prefix in low_text for prefix in _DECLARED_ACTION_PREFIXES) and "file_read" not in low_text:
+        return False
+
+    target_path = str(primary_task_target_path(harness) or "").strip()
+    if not target_path:
+        return False
+    if target_path.lower() not in low_text and "file_read" not in low_text:
+        return False
+
+    args = {"path": target_path}
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="file_read",
+            args=args,
+            raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+            source="system",
+            parser_metadata={"auto_repaired_from_text": "declared_file_read"},
+        )
+    ]
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        scratchpad["_declared_file_read_synthesized"] = {
+            "path": target_path,
+            "assistant_text_preview": text[:240],
+        }
+        scratchpad.pop("_action_stalls", None)
+        scratchpad.pop("_blank_message_nudges", None)
+        scratchpad.pop("_small_model_continue_nudges", None)
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "declared_file_read_synthesized",
+            "synthesized file_read from assistant text that declared a read action",
+            path=target_path,
+            assistant_text_preview=text[:240],
+        )
+    return True
 
 
 def _working_memory_signals_completion(harness: Any) -> bool:
@@ -121,6 +197,39 @@ def _latest_verifier_allows_terminal_recovery(harness: Any) -> bool:
     return str(verdict.get("verdict", "") or "").strip().lower() in {"", "pass"}
 
 
+def _readonly_answer_can_complete(
+    text: str,
+    *,
+    harness: Any,
+    nudge_count: int,
+) -> bool:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    action_stalls = int(scratchpad.get("_action_stalls", 0)) if isinstance(scratchpad, dict) else 0
+    if max(nudge_count, action_stalls) < 1:
+        return False
+    if isinstance(scratchpad, dict) and scratchpad.get("_unresolved_missing_input_file"):
+        return False
+
+    task = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").lower()
+    current_goal = str(getattr(getattr(state, "working_memory", None), "current_goal", "") or "").lower()
+    task_text = f"{task} {current_goal}"
+    if any(marker in task_text for marker in ("patch", "edit", "modify", "fix ", "implement", "write file", "create file")):
+        return False
+    if not any(marker in task_text for marker in ("read", "list", "summarize", "inspect", "review", "improvement", "recommend")):
+        return False
+
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if any(marker in lowered for marker in ("let me ", "i'll ", "i will ", "i need to ", "next i ", "can inspect")):
+        return False
+    if len(lowered) < 80:
+        return False
+    return bool(
+        re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+\S", text)
+        or any(marker in lowered for marker in ("recommend", "improvement", "would make", "found", "the file"))
+    )
+
+
 def _terminal_prose_completion_message(
     assistant_text: str,
     *,
@@ -134,10 +243,17 @@ def _terminal_prose_completion_message(
     raw_terminal_message = _raw_terminal_json_completion_message(text)
     lowered = re.sub(r"\s+", " ", text.lower()).strip()
     has_strong_marker = any(marker in lowered for marker in _TERMINAL_PROSE_STRONG_MARKERS)
-    looks_like_completion = bool(raw_terminal_message) or has_strong_marker or lowered.endswith("**task complete**") or lowered.endswith("task complete")
+    readonly_completion = _readonly_answer_can_complete(text, harness=harness, nudge_count=nudge_count)
+    looks_like_completion = (
+        bool(raw_terminal_message)
+        or has_strong_marker
+        or lowered.endswith("**task complete**")
+        or lowered.endswith("task complete")
+        or readonly_completion
+    )
     if not looks_like_completion:
         return ""
-    if not raw_terminal_message and not has_strong_marker and nudge_count < 1:
+    if not raw_terminal_message and not has_strong_marker and not readonly_completion and nudge_count < 1:
         return ""
 
     has_recent_tool_evidence = any(
@@ -145,7 +261,8 @@ def _terminal_prose_completion_message(
         for message in getattr(harness.state, "recent_messages", [])[-12:]
     )
     has_working_memory_evidence = bool(getattr(getattr(harness.state, "working_memory", None), "known_facts", None))
-    if not (has_recent_tool_evidence or has_working_memory_evidence):
+    has_artifact_evidence = bool(getattr(harness.state, "artifacts", None))
+    if not (has_recent_tool_evidence or has_working_memory_evidence or has_artifact_evidence):
         return ""
 
     if getattr(harness.state, "plan_execution_mode", False) and str(getattr(harness.state, "active_step_id", "") or ""):
@@ -226,6 +343,13 @@ def _maybe_promote_terminal_prose_task_complete(
         message_preview=message[:240],
     )
     return True
+
+
+def _consume_reasoning_fallback_flag(harness: Any) -> bool:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    return bool(scratchpad.pop(_REASONING_FALLBACK_FLAG, False))
 
 
 def _format_allowed_tool_summary(names: list[str], *, limit: int = 8) -> str:
@@ -374,6 +498,9 @@ async def interpret_model_output(
     deps: GraphRuntimeDeps,
 ) -> LoopRoute:
     harness = deps.harness
+    reasoning_fallback_active = _consume_reasoning_fallback_flag(harness)
+    assistant_text = str(graph_state.last_assistant_text or "")
+    assistant_text_for_guards = "" if reasoning_fallback_active else assistant_text
     strategy = harness.state.strategy
     if not isinstance(strategy, dict):
         strategy = harness.state.scratchpad.get("strategy", {})
@@ -986,7 +1113,14 @@ async def interpret_model_output(
     text_has_tool_tags = any(tag in low_text for tag in _HTML_TOOL_TAGS)
     text_has_func_calls = any(fn in low_text for fn in _FUNC_SYNTAX)
 
-    if not graph_state.pending_tool_calls and (thinking_looks_like_action or text_looks_like_action_list or text_has_tool_tags or text_has_func_calls):
+    if _maybe_synthesize_declared_file_read(graph_state, harness, assistant_text):
+        return LoopRoute.DISPATCH_TOOLS
+
+    if (
+        not reasoning_fallback_active
+        and not graph_state.pending_tool_calls
+        and (thinking_looks_like_action or text_looks_like_action_list or text_has_tool_tags or text_has_func_calls)
+    ):
         if graph_state.run_mode == "planning" or harness.state.planning_mode_enabled:
             synthesized_plan = _nodes._synthesize_plan_from_text(harness, assistant_text)
             if synthesized_plan is not None:
@@ -1051,7 +1185,7 @@ async def interpret_model_output(
 
     stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
 
-    if not assistant_text.strip() and not graph_state.pending_tool_calls and not stream_halted:
+    if not assistant_text_for_guards.strip() and not graph_state.pending_tool_calls and not stream_halted:
         blank_nudges = int(harness.state.scratchpad.get("_blank_message_nudges", 0))
         if blank_nudges < 2:
             harness.state.scratchpad["_blank_message_nudges"] = blank_nudges + 1
@@ -1074,7 +1208,7 @@ async def interpret_model_output(
             )
             return LoopRoute.NEXT_STEP
 
-    if assistant_text and not graph_state.pending_tool_calls and not stream_halted:
+    if assistant_text_for_guards and not graph_state.pending_tool_calls and not stream_halted:
         if _maybe_promote_terminal_prose_task_complete(
             graph_state,
             harness,
@@ -1082,7 +1216,7 @@ async def interpret_model_output(
         ):
             return LoopRoute.DISPATCH_TOOLS
 
-    if nudges < 4 and assistant_text and not stream_halted:
+    if nudges < 4 and assistant_text_for_guards and not stream_halted:
         harness.state.scratchpad["_no_tool_nudges"] = nudges + 1
         msg = (
             "You reached a conclusion but did not call `task_complete`. "
@@ -1182,6 +1316,7 @@ async def interpret_chat_output(
 ) -> LoopRoute:
     harness = deps.harness
     scratchpad = harness.state.scratchpad
+    reasoning_fallback_active = _consume_reasoning_fallback_flag(harness)
     signature = _nodes._chat_turn_signature(graph_state)
     prior_signature = str(scratchpad.get("_chat_last_turn_signature") or "")
     if signature:
@@ -1198,6 +1333,7 @@ async def interpret_chat_output(
         return LoopRoute.DISPATCH_TOOLS
 
     assistant_text = str(graph_state.last_assistant_text or "")
+    assistant_text_for_guards = "" if reasoning_fallback_active else assistant_text
     low_text = assistant_text.lower()
     action_keywords = ["call", "run", "execute", "use", "using", "invok", "command", "tool"]
     html_tool_tags = ["<tool_call>", "<function=", "<parameter="]
@@ -1207,7 +1343,34 @@ async def interpret_chat_output(
     text_has_tool_tags = any(tag in low_text for tag in html_tool_tags)
     text_has_func_calls = any(token in low_text for token in func_syntax)
 
-    if thinking_looks_like_action or text_looks_like_action or text_has_tool_tags or text_has_func_calls:
+    # Smalltalk bypass: pure chat tasks with no actionable work should
+    # finalize directly after a natural-language response, not nudge.
+    task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
+    if (
+        graph_state.run_mode == "chat"
+        and task_mode == "chat"
+        and assistant_text_for_guards
+        and not graph_state.pending_tool_calls
+    ):
+        has_active_write = (
+            getattr(harness.state, "write_session", None) is not None
+            and str(getattr(harness.state.write_session, "status", "") or "").strip().lower() != "complete"
+        )
+        has_active_plan = bool(
+            harness.state.planning_mode_enabled
+            or harness.state.active_plan is not None
+            or harness.state.draft_plan is not None
+        )
+        if not has_active_write and not has_active_plan:
+            graph_state.final_result = {
+                "status": "chat_completed",
+                "assistant": assistant_text,
+                "thinking": graph_state.last_thinking_text,
+                "usage": graph_state.last_usage,
+            }
+            return LoopRoute.FINALIZE
+
+    if not reasoning_fallback_active and (thinking_looks_like_action or text_looks_like_action or text_has_tool_tags or text_has_func_calls):
         stalls = int(scratchpad.get("_chat_action_stalls", 0))
         if stalls < 2:
             scratchpad["_chat_action_stalls"] = stalls + 1

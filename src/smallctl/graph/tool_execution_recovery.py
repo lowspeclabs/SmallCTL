@@ -30,6 +30,7 @@ from .tool_call_parser import (
     _fallback_repeated_artifact_read,
     _fallback_repeated_file_read,
 )
+from .tool_loop_guards import _tool_call_fingerprint
 from .state import ToolExecutionRecord
 from .tool_execution_recovery_helpers import (
     _maybe_emit_repair_recovery_nudge,
@@ -557,13 +558,30 @@ async def handle_repeated_tool_loop(
         )
         guidance = str(payload.get("guidance", "") or "").strip()
 
+        if await _maybe_auto_trigger_escalation_for_tool_loop(
+            harness=harness,
+            pending=pending,
+            repeat_error=repeat_error,
+        ):
+            graph_state.pending_tool_calls = []
+            graph_state.last_tool_results = []
+            return None
+
         nudge_key = f"generic_loop:{pending.tool_name}:{json.dumps(json_safe_value(pending.args), sort_keys=True)}"
         if not should_pause_repeated_tool_loop(harness, pending) and harness.state.scratchpad.get("_generic_loop_nudged") != nudge_key:
             harness.state.scratchpad["_generic_loop_nudged"] = nudge_key
+            nudge_content = repeat_error
+            config = getattr(harness, "config", None)
+            if bool(getattr(config, "escalation_enabled", False)) and bool(getattr(config, "escalation_expose_tool", True)):
+                nudge_content += (
+                    "\n\nIf you are stuck and have already gathered evidence, you may call "
+                    "`escalate_to_bigger_model(reason=..., question=..., requested_output='next_action')` "
+                    "for bounded recovery advice."
+                )
             harness.state.append_message(
                 ConversationMessage(
                     role="system",
-                    content=repeat_error,
+                    content=nudge_content,
                     metadata={
                         "is_recovery_nudge": True,
                         "recovery_kind": "generic_tool_loop",
@@ -585,6 +603,43 @@ async def handle_repeated_tool_loop(
             return None
 
         if should_pause_repeated_tool_loop(harness, pending):
+            fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+            pause_key = f"_repeated_tool_loop_pause_count:{fingerprint}"
+            pause_count = harness.state.scratchpad.get(pause_key, 0)
+            if pause_count >= 1:
+                postmortem = (
+                    f"Guard tripped: repeated {pending.tool_name} loop (same arguments repeated after prior pause). "
+                    "Task auto-failed after multiple loop guard trips."
+                )
+                harness.state.recent_errors.append(postmortem)
+                await harness._emit(
+                    deps.event_handler,
+                    UIEvent(event_type=UIEventType.ERROR, content=postmortem),
+                )
+                graph_state.pending_tool_calls = []
+                graph_state.final_result = harness._failure(
+                    postmortem,
+                    error_type="guard",
+                    details={
+                        "tool_name": pending.tool_name,
+                        "arguments": json_safe_value(pending.args),
+                        "guard": "repeated_tool_loop",
+                        "auto_fail": True,
+                    },
+                )
+                graph_state.error = graph_state.final_result["error"]
+                harness._runlog(
+                    "repeated_tool_loop_auto_fail",
+                    "auto-failed task after repeated tool loop guard re-tripped",
+                    step=harness.state.step_count,
+                    tool_name=pending.tool_name,
+                    arguments=json_safe_value(pending.args),
+                    error=postmortem,
+                )
+                return None
+            harness.state.scratchpad[pause_key] = pause_count + 1
+            harness.state.scratchpad["_repeated_tool_loop_suppressed_tool"] = pending.tool_name
+            harness.state.scratchpad["_repeated_tool_loop_suppressed_ttl"] = 2
             if guidance:
                 harness.state.append_message(
                     ConversationMessage(
@@ -644,6 +699,303 @@ async def handle_repeated_tool_loop(
         return None
 
     return pending
+
+
+async def _maybe_auto_trigger_escalation_for_tool_loop(
+    *,
+    harness: Any,
+    pending: PendingToolCall,
+    repeat_error: str,
+) -> bool:
+    config = getattr(harness, "config", None)
+    if not bool(getattr(config, "escalation_enabled", False)):
+        return False
+    if not bool(getattr(config, "escalation_auto_trigger", False)):
+        return False
+
+    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+    seen = harness.state.scratchpad.get("_escalation_auto_tool_loop_fingerprints")
+    if not isinstance(seen, list):
+        seen = []
+    if fingerprint in seen:
+        return False
+
+    harness.state.scratchpad["_tool_loop_suppression"] = {
+        "tool_name": pending.tool_name,
+        "arguments": json_safe_value(pending.args),
+        "error": repeat_error,
+    }
+    from ..harness.escalation_service import EscalationService
+
+    result = await EscalationService(harness).run(
+        reason=f"Repeated `{pending.tool_name}` call was blocked by the tool-loop guard.",
+        question="What is the smallest safe next evidence-gathering or repair step?",
+        requested_output="next_action",
+        risk_level="medium",
+        source="auto",
+    )
+    seen.append(fingerprint)
+    harness.state.scratchpad["_escalation_auto_tool_loop_fingerprints"] = seen[-20:]
+    if not bool(result.get("success")):
+        return False
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "Escalation advisor returned bounded recovery advice. Treat this as advice only; "
+                "choose any next action through normal tool policy.\n"
+                f"{json.dumps(json_safe_value(result), ensure_ascii=True, sort_keys=True)}"
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "escalation_advisory",
+                "source": "auto_tool_loop",
+                "tool_name": pending.tool_name,
+                "escalation_id": result.get("escalation_id"),
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "escalation_auto_tool_loop_advisory",
+            "injected escalation advisory after repeated tool loop",
+            tool_name=pending.tool_name,
+            escalation_id=result.get("escalation_id"),
+            verdict=result.get("verdict"),
+        )
+    return True
+
+
+async def _maybe_auto_trigger_escalation_for_same_tool_failures(
+    *,
+    harness: Any,
+    graph_state: GraphRunState,
+) -> bool:
+    """Auto-escalate when the same tool fails multiple times in one turn with different arguments."""
+    config = getattr(harness, "config", None)
+    if not bool(getattr(config, "escalation_enabled", False)):
+        return False
+    if not bool(getattr(config, "escalation_auto_trigger", False)):
+        return False
+
+    failure_counts: dict[str, int] = {}
+    for record in graph_state.last_tool_results:
+        if not record.result.success:
+            failure_counts[record.tool_name] = failure_counts.get(record.tool_name, 0) + 1
+
+    for tool_name, count in failure_counts.items():
+        if count < 3:
+            continue
+
+        seen_key = f"_escalation_auto_same_tool_fingerprints:{tool_name}"
+        seen = harness.state.scratchpad.get(seen_key)
+        if isinstance(seen, list) and harness.state.step_count in seen:
+            continue
+
+        harness.state.scratchpad["_tool_loop_suppression"] = {
+            "tool_name": tool_name,
+            "error": f"Same tool failed {count} times in one turn with different arguments.",
+        }
+        from ..harness.escalation_service import EscalationService
+
+        result = await EscalationService(harness).run(
+            reason=f"`{tool_name}` failed {count} times in one turn with different arguments.",
+            question="What is the smallest safe next evidence-gathering or repair step?",
+            requested_output="next_action",
+            risk_level="medium",
+            source="auto",
+        )
+        if not isinstance(seen, list):
+            seen = []
+        seen.append(harness.state.step_count)
+        harness.state.scratchpad[seen_key] = seen[-10:]
+
+        if not bool(result.get("success")):
+            continue
+
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    "Escalation advisor returned bounded recovery advice. Treat this as advice only; "
+                    "choose any next action through normal tool policy.\n"
+                    f"{json.dumps(json_safe_value(result), ensure_ascii=True, sort_keys=True)}"
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "escalation_advisory",
+                    "source": "auto_same_tool_failures",
+                    "tool_name": tool_name,
+                    "escalation_id": result.get("escalation_id"),
+                },
+            )
+        )
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "escalation_auto_same_tool_failures_advisory",
+                "injected escalation advisory after same-tool repeated failures",
+                tool_name=tool_name,
+                escalation_id=result.get("escalation_id"),
+                verdict=result.get("verdict"),
+            )
+        return True
+
+    return False
+
+
+async def _maybe_auto_trigger_escalation_for_patch_stall(
+    *,
+    harness: Any,
+    graph_state: GraphRunState,
+) -> bool:
+    """Auto-escalate after patch/write-session stalls once policy evidence exists."""
+    config = getattr(harness, "config", None)
+    if not bool(getattr(config, "escalation_enabled", False)):
+        return False
+    if not bool(getattr(config, "escalation_auto_trigger", False)):
+        return False
+
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+
+    threshold = max(2, _safe_int(getattr(config, "escalation_repeated_failure_threshold", 2), 2))
+    trigger = _patch_stall_trigger(state, graph_state, threshold=threshold)
+    if not trigger:
+        return False
+
+    fingerprint = "|".join(
+        [
+            trigger,
+            str(getattr(state, "step_count", 0) or 0),
+            _latest_patch_stall_path(state, graph_state),
+        ]
+    )
+    seen = scratchpad.get("_escalation_auto_patch_stall_fingerprints")
+    if not isinstance(seen, list):
+        seen = []
+    if fingerprint in seen:
+        return False
+
+    scratchpad["_tool_loop_suppression"] = {
+        "tool_name": "file_patch",
+        "error": f"Patch/write-session stall detected: {trigger}.",
+    }
+    from ..harness.escalation_service import EscalationService
+
+    result = await EscalationService(harness).run(
+        reason=f"Patch/write-session stall detected after file mutation: {trigger}.",
+        question="What is the smallest safe next evidence-gathering or repair step?",
+        requested_output="next_action",
+        risk_level="medium",
+        source="auto",
+    )
+    seen.append(fingerprint)
+    scratchpad["_escalation_auto_patch_stall_fingerprints"] = seen[-20:]
+    if not bool(result.get("success")):
+        return False
+
+    state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "Escalation advisor returned bounded recovery advice for a patch stall. "
+                "Treat this as advice only; choose any next action through normal tool policy.\n"
+                f"{json.dumps(json_safe_value(result), ensure_ascii=True, sort_keys=True)}"
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "escalation_advisory",
+                "source": "auto_patch_stall",
+                "trigger": trigger,
+                "escalation_id": result.get("escalation_id"),
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "escalation_auto_patch_stall_advisory",
+            "injected escalation advisory after patch/write-session stall",
+            trigger=trigger,
+            escalation_id=result.get("escalation_id"),
+            verdict=result.get("verdict"),
+        )
+    return True
+
+
+def _patch_stall_trigger(state: Any, graph_state: GraphRunState, *, threshold: int) -> str:
+    counters = getattr(state, "stagnation_counters", None)
+    counters = counters if isinstance(counters, dict) else {}
+    if _safe_int(counters.get("repeat_patch"), 0) >= threshold:
+        return "repeat_patch"
+    if _safe_int(counters.get("no_actionable_progress"), 0) >= threshold and _last_turn_touched_patch_path(graph_state):
+        return "no_actionable_progress_after_patch"
+
+    failure_events = getattr(state, "failure_events", None)
+    if isinstance(failure_events, list):
+        for event in reversed(failure_events[-8:]):
+            failure_class = str(getattr(event, "failure_class", "") or "").strip()
+            fama_kind = str(getattr(event, "fama_kind", "") or "").strip()
+            if failure_class == "write_session_stall" or fama_kind == "write_session_stall":
+                return "write_session_stall"
+
+    scratchpad = getattr(state, "scratchpad", None)
+    scratchpad = scratchpad if isinstance(scratchpad, dict) else {}
+    for signal in _fama_signal_classes_from_scratchpad(scratchpad):
+        if signal == "write_session_stall":
+            return "write_session_stall"
+    return ""
+
+
+def _latest_patch_stall_path(state: Any, graph_state: GraphRunState) -> str:
+    for record in reversed(getattr(graph_state, "last_tool_results", []) or []):
+        args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+        path = str(args.get("path") or "").strip()
+        if path:
+            return path
+    changed = getattr(state, "files_changed_this_cycle", None)
+    if isinstance(changed, list) and changed:
+        return str(changed[-1] or "").strip()
+    return ""
+
+
+def _last_turn_touched_patch_path(graph_state: GraphRunState) -> bool:
+    for record in getattr(graph_state, "last_tool_results", []) or []:
+        if record.tool_name in {"file_patch", "ast_patch", "file_write", "file_append"}:
+            return True
+    return False
+
+
+def _fama_signal_classes_from_scratchpad(scratchpad: dict[str, Any]) -> list[str]:
+    fama = scratchpad.get("_fama")
+    if not isinstance(fama, dict):
+        return []
+    signals = fama.get("signals")
+    if not isinstance(signals, list):
+        return []
+    classes: list[str] = []
+    for item in signals[-8:]:
+        if not isinstance(item, dict):
+            continue
+        for key in ("failure_class", "kind"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                classes.append(value)
+    return classes
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def handle_failed_file_write_outcome(

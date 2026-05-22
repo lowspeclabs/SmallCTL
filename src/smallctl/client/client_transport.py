@@ -27,7 +27,8 @@ from .request_budget import client_context_limit as _budget_client_context_limit
 from .request_budget import json_size_bytes as _budget_json_size_bytes
 from .streaming import SSEStreamer, summarize_stream_chunk
 from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
-from .usage import extract_context_limit, extract_runtime_context_limit
+from .usage import extract_context_limit, extract_max_completion_tokens, extract_runtime_context_limit
+from .usage import extract_supported_parameters
 
 _LLAMACPP_CONTEXT_OVERFLOW_RE = re.compile(
     r"request\s*\((?P<request_tokens>\d+)\s+tokens?\)\s+exceeds\s+the\s+available\s+context\s+size\s*\((?P<context_tokens>\d+)\s+tokens?\)",
@@ -364,6 +365,34 @@ def _remember_context_limit(client: Any, limit: int | None) -> int | None:
     except Exception:
         pass
     return normalized
+
+
+def _remember_model_metadata(client: Any, payload: Any, *, source: str) -> int | None:
+    if isinstance(payload, dict):
+        try:
+            client.model_metadata = dict(payload)
+        except Exception:
+            pass
+        try:
+            client.model_metadata_source = source
+        except Exception:
+            pass
+
+        max_completion_tokens = extract_max_completion_tokens(payload)
+        if max_completion_tokens is not None:
+            try:
+                client.model_max_completion_tokens = int(max_completion_tokens)
+            except Exception:
+                pass
+
+        supported_parameters = extract_supported_parameters(payload)
+        if supported_parameters is not None:
+            try:
+                client.model_supported_parameters = list(supported_parameters)
+            except Exception:
+                pass
+
+    return _remember_context_limit(client, extract_context_limit(payload))
 
 
 def _http_error_body(exc: Any, *, limit: int = 1000) -> str:
@@ -1235,11 +1264,12 @@ async def stream_chat(
         "model": client.model,
         "messages": messages,
         "stream": True,
-        "max_tokens": int(
-            getattr(client, "max_completion_tokens", _DEFAULT_MAX_COMPLETION_TOKENS)
-            or _DEFAULT_MAX_COMPLETION_TOKENS
-        ),
     }
+    request_max_tokens = client._request_max_completion_tokens(tools)
+    if request_max_tokens is not None:
+        payload["max_tokens"] = int(request_max_tokens)
+    if getattr(client, "temperature", None) is not None:
+        payload["temperature"] = float(getattr(client, "temperature"))
     if tools:
         payload["tools"] = tools
     if client.adapter.stream_policy.supports_stream_options:
@@ -2043,10 +2073,10 @@ async def fetch_model_context_limit(client: Any) -> int | None:
         response = await async_client.get(model_url, headers=headers, timeout=10.0)
         if response.status_code < 400:
             payload = response.json()
-            limit = extract_context_limit(payload)
+            limit = _remember_model_metadata(client, payload, source="model_metadata")
             if limit:
                 log_kv(client.log, logging.INFO, "context_probe_success", source="model_metadata", limit=limit)
-                return _remember_context_limit(client, limit)
+                return limit
     except Exception:
         pass
     try:
@@ -2059,7 +2089,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
-        return _remember_context_limit(client, extract_context_limit(payload))
+        return _remember_model_metadata(client, payload, source="model_list")
 
     selected: dict[str, Any] | None = None
     for item in data:
@@ -2072,5 +2102,5 @@ async def fetch_model_context_limit(client: Any) -> int | None:
                 selected = item
                 break
     if selected is not None:
-        return _remember_context_limit(client, extract_context_limit(selected))
-    return _remember_context_limit(client, extract_context_limit(payload))
+        return _remember_model_metadata(client, selected, source="model_list")
+    return _remember_model_metadata(client, payload, source="model_list")

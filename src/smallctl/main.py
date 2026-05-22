@@ -14,6 +14,29 @@ from .memory_cli import build_memory_parser, handle_memory_command, memory_cli
 from .presets import list_presets
 
 
+def _escalation_harness_kwargs(config: object) -> dict[str, object]:
+    return {
+        "escalation_enabled": getattr(config, "escalation_enabled", False),
+        "escalation_expose_tool": getattr(config, "escalation_expose_tool", True),
+        "escalation_auto_trigger": getattr(config, "escalation_auto_trigger", False),
+        "escalation_endpoint": getattr(config, "escalation_endpoint", None),
+        "escalation_model": getattr(config, "escalation_model", None),
+        "escalation_provider_profile": getattr(config, "escalation_provider_profile", "auto"),
+        "escalation_api_key": getattr(config, "escalation_api_key", None),
+        "escalation_api_key_env": getattr(config, "escalation_api_key_env", None),
+        "escalation_chat_endpoint": getattr(config, "escalation_chat_endpoint", "/chat/completions"),
+        "escalation_max_prompt_chars": getattr(config, "escalation_max_prompt_chars", 48000),
+        "escalation_max_response_tokens": getattr(config, "escalation_max_response_tokens", 1600),
+        "escalation_temperature": getattr(config, "escalation_temperature", 0.2),
+        "escalation_timeout_sec": getattr(config, "escalation_timeout_sec", 120),
+        "escalation_max_per_task": getattr(config, "escalation_max_per_task", 2),
+        "escalation_cooldown_turns": getattr(config, "escalation_cooldown_turns", 2),
+        "escalation_repeated_failure_threshold": getattr(config, "escalation_repeated_failure_threshold", 2),
+        "escalation_require_tool_plan_evidence": getattr(config, "escalation_require_tool_plan_evidence", True),
+        "escalation_redact_secrets": getattr(config, "escalation_redact_secrets", True),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="smallctl", description="smallctl CLI")
     parser.add_argument("--task", help="Task string to run")
@@ -371,6 +394,7 @@ def cli(argv: list[str] | None = None) -> int:
             "rewoo_solver_frame_enabled": getattr(config, "rewoo_solver_frame_enabled", False),
             "rewoo_refiner_frame_enabled": getattr(config, "rewoo_refiner_frame_enabled", False),
             "rewoo_frame_token_budget": getattr(config, "rewoo_frame_token_budget", 1200),
+            **_escalation_harness_kwargs(config),
             "run_logger": run_logger,
             "task": config.task,
             "fama_enabled": getattr(config, "fama_enabled", True),
@@ -498,6 +522,7 @@ def cli(argv: list[str] | None = None) -> int:
             test_time_scaling_timeout_sec=getattr(config, "test_time_scaling_timeout_sec", 120),
             test_time_scaling_mutating_parallel_enabled=getattr(config, "test_time_scaling_mutating_parallel_enabled", False),
             test_time_scaling_all_fail_action=getattr(config, "test_time_scaling_all_fail_action", "fallback_normal_retry"),
+            **_escalation_harness_kwargs(config),
             run_logger=run_logger,
             fama_enabled=getattr(config, "fama_enabled", True),
             fama_mode=getattr(config, "fama_mode", "lite"),

@@ -277,6 +277,175 @@ def test_stream_chat_openrouter_401_chat_error_returns_actionable_chunk_error(mo
     assert details["provider_error"] == "User not found."
 
 
+def test_stream_chat_openrouter_caps_auto_max_tokens_with_large_context_limit(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.6-35b-a3b",
+        provider_profile="openrouter",
+        api_key="test-key",
+    )
+    client.runtime_context_limit = 2_000_000
+    payloads: list[dict[str, object]] = []
+
+    class _AuthResponse:
+        status_code = 200
+        text = '{"data":{"total_credits":1}}'
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers):
+            del url, headers
+            return _AuthResponse()
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "read ./temp/pong.py"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_write",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                        },
+                    },
+                }
+            ],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    assert payloads[0]["max_tokens"] == 4096
+
+
+def test_openrouter_context_probe_remembers_model_capabilities(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.6-35b-a3b",
+        provider_profile="openrouter",
+        api_key="test-key",
+    )
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers, timeout=None):
+            del headers, timeout
+            if url.endswith("/props") or url.endswith("/slots"):
+                return _Response(404, {})
+            if url.endswith("/models/qwen%2Fqwen3.6-35b-a3b"):
+                return _Response(404, {})
+            if url.endswith("/models"):
+                return _Response(
+                    200,
+                    {
+                        "data": [
+                            {
+                                "id": "qwen/qwen3.6-35b-a3b",
+                                "context_length": 128000,
+                                "supported_parameters": ["temperature", "max_tokens"],
+                                "top_provider": {"max_completion_tokens": 8192},
+                            }
+                        ]
+                    },
+                )
+            raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+
+    limit = asyncio.run(client.fetch_model_context_limit())
+
+    assert limit == 128000
+    assert client.runtime_context_limit == 128000
+    assert client.model_max_completion_tokens == 8192
+    assert client.model_supported_parameters == ["temperature", "max_tokens"]
+    assert client._request_max_completion_tokens([]) == 8192
+
+
+def test_stream_chat_openrouter_omits_unsupported_max_tokens_from_metadata(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.6-35b-a3b",
+        provider_profile="openrouter",
+        api_key="test-key",
+    )
+    client.model_supported_parameters = ["temperature"]
+    client.model_max_completion_tokens = 8192
+    payloads: list[dict[str, object]] = []
+
+    class _AuthResponse:
+        status_code = 200
+        text = '{"data":{"total_credits":1}}'
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers):
+            del url, headers
+            return _AuthResponse()
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["done"]
+    assert "max_tokens" not in payloads[0]
+
+
 def test_stream_chat_llamacpp_500_jinja_system_message_retries_once(monkeypatch) -> None:
     client = OpenAICompatClient(
         base_url="http://127.0.0.1:8080/v1",

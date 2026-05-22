@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from smallctl.graph.deps import GraphRuntimeDeps
+from smallctl.graph.autocontinue import _DURABLE_AUTOCONTINUE_KEY
 from smallctl.graph.nodes import interpret_model_output
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_call_parser_support import _detect_patch_existing_stage_read_contract_violation
@@ -379,3 +380,133 @@ def test_replace_strategy_schema_excludes_auto() -> None:
     assert "enum" in replace_strategy
     assert set(replace_strategy["enum"]) == {"append", "overwrite"}
     assert "auto" not in replace_strategy["enum"]
+
+
+def test_stale_file_patch_after_recent_success_nudges_verify_not_retry() -> None:
+    from smallctl.graph.write_session_patch_recovery import _maybe_schedule_file_patch_read_recovery
+
+    state = _make_state()
+    state.tool_execution_records = {
+        "op-prior": {
+            "operation_id": "op-prior",
+            "tool_name": "file_patch",
+            "args": {
+                "path": "./temp/pong.py",
+                "target_text": "    curses.endwin()",
+                "replacement_text": "    # removed to avoid double end",
+            },
+            "result": {
+                "success": True,
+                "output": "Patched 1 occurrence.",
+                "metadata": {"path": "./temp/pong.py", "changed": True},
+            },
+        }
+    }
+    harness = _make_harness(state)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-stale-patch",
+        run_mode="loop",
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-retry",
+        tool_name="file_patch",
+        args={
+            "path": "./temp/pong.py",
+            "target_text": "    curses.endwin()",
+            "replacement_text": "    # removed to avoid double end",
+        },
+        tool_call_id="tc-retry",
+        result=ToolEnvelope(
+            success=False,
+            error="Target text not found.",
+            metadata={
+                "path": "./temp/pong.py",
+                "error_kind": "patch_target_not_found",
+            },
+        ),
+    )
+
+    scheduled = _maybe_schedule_file_patch_read_recovery(graph_state, harness, record)
+
+    assert scheduled is True
+    assert len(graph_state.pending_tool_calls) == 1
+    assert graph_state.pending_tool_calls[0].tool_name == "file_read"
+    assert state.recent_messages
+    recovery_message = state.recent_messages[-1]
+    assert recovery_message.metadata["recovery_kind"] == "file_patch_already_applied_verify"
+    assert "already applied" in recovery_message.content.lower()
+    assert "task_complete" in recovery_message.content
+    assert "before asking for another patch" not in recovery_message.content.lower()
+
+
+def test_already_applied_file_patch_autocontinues_with_traceback_focused_read(tmp_path: Path) -> None:
+    from smallctl.graph.write_session_patch_recovery import _maybe_schedule_file_patch_read_recovery
+
+    state = _make_state()
+    target = tmp_path / "pong.py"
+    state.cwd = str(tmp_path)
+    state.tool_execution_records = {
+        "op-prior": {
+            "operation_id": "op-prior",
+            "tool_name": "file_patch",
+            "args": {
+                "path": str(target),
+                "target_text": "self.stdscr.addch(curses.color_pair(1), y, 1, '|')",
+                "replacement_text": "self.stdscr.addch(COLOR_LEFT_PADDLE, y, 1, '|')",
+            },
+            "result": {
+                "success": True,
+                "output": "Patched 1 occurrence.",
+                "metadata": {"path": str(target), "changed": True},
+            },
+        }
+    }
+    harness = _make_harness(state)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-already-applied",
+        run_mode="loop",
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-retry",
+        tool_name="file_patch",
+        args={
+            "path": str(target),
+            "target_text": "self.stdscr.addch(curses.color_pair(1), y, 1, '|')",
+            "replacement_text": "self.stdscr.addch(COLOR_LEFT_PADDLE, y, 1, '|')",
+        },
+        tool_call_id="tc-retry",
+        result=ToolEnvelope(
+            success=False,
+            error="This exact patch already landed.",
+            metadata={
+                "path": str(target),
+                "requested_path": str(target),
+                "error_kind": "repeat_sensitive_patch_already_applied",
+                "next_required_tool": {
+                    "tool_name": "file_read",
+                    "required_arguments": {
+                        "path": str(target),
+                        "start_line": 305,
+                        "end_line": 320,
+                    },
+                },
+            },
+        ),
+    )
+
+    scheduled = _maybe_schedule_file_patch_read_recovery(graph_state, harness, record)
+
+    assert scheduled is True
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "file_read"
+    assert pending.args == {"path": str(target), "start_line": 305, "end_line": 320}
+    assert state.scratchpad["_repeat_guard_one_shot_fingerprints"]
+    durable_queue = state.scratchpad.get(_DURABLE_AUTOCONTINUE_KEY)
+    assert isinstance(durable_queue, list)
+    assert durable_queue[-1]["args"] == pending.args
+    recovery_message = state.recent_messages[-1]
+    assert recovery_message.metadata["recovery_kind"] == "file_patch_already_applied_verify"
+    assert "already applied" in recovery_message.content.lower()

@@ -783,7 +783,7 @@ def normalize_tool_request(
         )
         if remote_shell_guard is not None:
             return tool_name, arguments, remote_shell_guard, normalization_metadata
-        if _task_clearly_targets_remote_ssh_host(state) and not re.search(r"\b(?:ssh|scp|sftp)\b", command):
+        if not _recent_ssh_auth_failure(state) and _task_clearly_targets_remote_ssh_host(state) and not re.search(r"\b(?:ssh|scp|sftp)\b", command):
             metadata = {
                 "tool_name": tool_name,
                 "reason": "remote_task_requires_ssh_exec",
@@ -1091,6 +1091,39 @@ def _suggested_remote_file_tool(tool_name: str, *, state: Any | None = None) -> 
     return "ssh_exec"
 
 
+def _recent_ssh_auth_failure(state: Any | None) -> bool:
+    """Return True if the most recent ssh_exec attempt failed with auth denied."""
+    if state is None:
+        return False
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict) or not records:
+        return False
+    for record in reversed(list(records.values())):
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "").strip() != "ssh_exec":
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        if bool(result.get("success")):
+            return False
+        error = str(result.get("error") or "").lower()
+        stderr = ""
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            output = metadata.get("output")
+            if isinstance(output, dict):
+                stderr = str(output.get("stderr") or "").lower()
+            else:
+                stderr = str(metadata.get("stderr") or "").lower()
+        combined = f"{error}\n{stderr}"
+        if "permission denied" in combined and ("publickey" in combined or "password" in combined):
+            return True
+        return False
+    return False
+
+
 def _guard_remote_shell_tool_request(
     command: str,
     *,
@@ -1098,6 +1131,8 @@ def _guard_remote_shell_tool_request(
     ssh_available: bool = True,
 ) -> ToolEnvelope | None:
     if not command:
+        return None
+    if _recent_ssh_auth_failure(state):
         return None
     if not (_remote_scope_is_active(state) or _has_single_confirmed_ssh_target(state)):
         return None

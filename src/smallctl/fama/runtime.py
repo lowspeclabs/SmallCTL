@@ -69,6 +69,30 @@ async def observe_tool_result(
                     step=current_step(state),
                 )
 
+        # Fix 5 (RCA 8b79ca76): successful shell/ssh re-execution can also
+        # clear done_gate when it verifies a previously failing target.
+        if not latest_verifier_passed(state, result=result):
+            if _successful_execution_clears_done_gate(
+                state,
+                result=result,
+                tool_name=tool_name,
+                arguments=arguments,
+            ):
+                cleared = clear_mitigations(
+                    state,
+                    {"done_gate", "acceptance_checklist_capsule"},
+                    reason="re_verification_passed",
+                )
+                for mitigation in cleared:
+                    _runlog(
+                        harness,
+                        "fama_mitigation_expired",
+                        "FAMA mitigation cleared",
+                        mitigation=mitigation.name,
+                        reason="re_verification_passed",
+                        step=current_step(state),
+                    )
+
         early_stop = detect_early_stop_from_result(
             state,
             tool_name=tool_name,
@@ -94,6 +118,31 @@ async def observe_tool_result(
                 signal=verifier_failure,
                 dedupe=True,
             )
+            # Circuit-breaker: SSH auth impossibility should not trap the agent
+            if _is_ssh_auth_impossibility(result):
+                cleared = clear_mitigations(
+                    state,
+                    {"done_gate", "acceptance_checklist_capsule"},
+                    reason="ssh_auth_impossible",
+                )
+                for mitigation in cleared:
+                    _runlog(
+                        harness,
+                        "fama_mitigation_expired",
+                        "FAMA mitigation cleared",
+                        mitigation=mitigation.name,
+                        reason="ssh_auth_impossible",
+                        step=current_step(state),
+                    )
+                # Reset remote intent so local tools become available
+                state.task_mode = "local_execute"
+                state.active_intent = "general_task"
+                _runlog(
+                    harness,
+                    "fama_ssh_auth_circuit_breaker",
+                    "SSH auth failure triggered circuit breaker; released done_gate and reset to local_execute",
+                    step=current_step(state),
+                )
 
         record_bad_tool_arg_failure(state, tool_name=tool_name, result=result)
         bad_args = detect_bad_tool_args(
@@ -374,6 +423,75 @@ def _verifier_pass_matches_active_done_gate(state: Any, *, result: Any | None) -
     if not verifier_fingerprint:
         return True
     return verifier_fingerprint in fingerprints
+
+
+def _successful_execution_clears_done_gate(
+    state: Any,
+    *,
+    result: Any,
+    tool_name: str,
+    arguments: dict[str, Any] | None,
+) -> bool:
+    """Return True when a successful shell/ssh execution re-verifies a previously failing target."""
+    if str(tool_name or "").strip() not in {"shell_exec", "ssh_exec"}:
+        return False
+    if not bool(getattr(result, "success", False)):
+        return False
+    fingerprints = active_done_gate_fingerprints(state)
+    if not fingerprints:
+        return False
+    command = str((arguments or {}).get("command", "")).strip()
+    if not command:
+        return False
+    from .fingerprints import normalize_verifier_target
+
+    cmd_fp = normalize_verifier_target(command)
+    if cmd_fp in fingerprints:
+        return True
+    # Path-based matching: if the successful command references the same
+    # target path as any active done_gate fingerprint, consider it a
+    # successful re-verification.
+    for fp in fingerprints:
+        if not fp:
+            continue
+        for token in fp.split():
+            if "/" in token and token in cmd_fp:
+                return True
+            if any(
+                token.endswith(ext)
+                for ext in (
+                    ".py",
+                    ".js",
+                    ".ts",
+                    ".sh",
+                    ".go",
+                    ".rs",
+                    ".java",
+                )
+            ):
+                if token in cmd_fp:
+                    return True
+    return False
+
+
+def _is_ssh_auth_impossibility(result: Any) -> bool:
+    """Return True when an ssh_exec result failed with an authentication error."""
+    if bool(getattr(result, "success", True)):
+        return False
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    tool_name = str(metadata.get("tool_name") or "").strip()
+    if tool_name != "ssh_exec":
+        return False
+    error = str(getattr(result, "error", "") or "").lower()
+    stderr = ""
+    output = metadata.get("output")
+    if isinstance(output, dict):
+        stderr = str(output.get("stderr") or "").lower()
+    else:
+        stderr = str(metadata.get("stderr") or "").lower()
+    combined = f"{error}\n{stderr}"
+    return "permission denied" in combined and ("publickey" in combined or "password" in combined)
 
 
 def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:

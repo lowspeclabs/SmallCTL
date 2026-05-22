@@ -150,9 +150,11 @@ def _remote_installer_preflight_guard(
         "created_at_step": int(getattr(state, "step_count", 0) or 0),
         "status": "required",
     }
+    checks_text = " && ".join(checks)
     return fail(
         "Remote installer preflight required before running this high-risk installer mutation. "
-        "Run narrow repo/integrity checks first, then retry the installer after the preflight is clean.",
+        "Run narrow repo/integrity checks first, then retry the installer after the preflight is clean. "
+        f"Required checks: {checks_text}",
         metadata={
             "reason": "remote_installer_preflight_required",
             "host": host,
@@ -161,14 +163,14 @@ def _remote_installer_preflight_guard(
             "cwd": cwd,
             "script_path": script_path,
             "required_checks": checks,
-            "next_required_action": " && ".join(checks),
+            "next_required_action": checks_text,
         },
     )
 
 
 def _looks_like_remote_installer_mutation(command: str) -> bool:
     lowered = str(command or "").lower()
-    if "installfog.sh" in lowered:
+    if re.search(r"(?:^|[\s;&|])(?:bash\s+|sh\s+|\./|/)[^\s;&|]*installfog\.sh\b", lowered):
         return True
     if re.search(r"\bmake\s+install\b", lowered):
         return True

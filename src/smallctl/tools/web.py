@@ -95,6 +95,47 @@ def _load_result_index(state: Any) -> dict[str, dict[str, Any]]:
     return index
 
 
+def _load_fetch_artifact_index(state: Any) -> dict[str, str]:
+    """Map of result_id/fetch_id -> artifact_id for previously fetched results."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        state.scratchpad = scratchpad
+    index = scratchpad.get("_web_fetch_artifact_index")
+    if not isinstance(index, dict):
+        index = {}
+        scratchpad["_web_fetch_artifact_index"] = index
+    return index
+
+
+def _record_fetch_artifact_mapping(
+    state: Any, result_id: str, fetch_id: str | None, artifact_id: str
+) -> None:
+    index = _load_fetch_artifact_index(state)
+    if not artifact_id:
+        return
+    if result_id:
+        index[result_id] = artifact_id
+    if fetch_id and fetch_id != result_id:
+        index[fetch_id] = artifact_id
+
+
+def _find_existing_fetch_artifact(state: Any, token: str) -> str | None:
+    """Fallback scan of artifacts for a matching previously fetched result."""
+    artifacts = getattr(state, "artifacts", None)
+    if not isinstance(artifacts, dict):
+        return None
+    for artifact in artifacts.values():
+        metadata = getattr(artifact, "metadata", None)
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("result_id") or "") == token:
+            return str(getattr(artifact, "artifact_id", "") or "")
+        if str(metadata.get("fetch_id") or "") == token:
+            return str(getattr(artifact, "artifact_id", "") or "")
+    return None
+
+
 def _update_result_index(state: Any, results: list[dict[str, Any]]) -> None:
     index = _load_result_index(state)
     for result in results:
@@ -520,6 +561,21 @@ async def web_fetch(
         invented_url_error = _reject_invented_result_domain_url(state, url=requested_url, result_id=requested_result_token)
         if invented_url_error:
             return fail(invented_url_error, metadata={"reason": "web_fetch_url_not_from_results"})
+        if requested_result_token:
+            existing_artifact_id = _load_fetch_artifact_index(state).get(requested_result_token)
+            if not existing_artifact_id:
+                existing_artifact_id = _find_existing_fetch_artifact(state, requested_result_token)
+            if existing_artifact_id:
+                return fail(
+                    f"Result '{requested_result_token}' was already fetched in this session. "
+                    f"The full content is available in artifact {existing_artifact_id}. "
+                    f"Use artifact_read(artifact_id='{existing_artifact_id}') instead of repeating this fetch.",
+                    metadata={
+                        "reason": "web_fetch_duplicate_result_id",
+                        "requested_result_id": requested_result_token,
+                        "existing_artifact_id": existing_artifact_id,
+                    },
+                )
         _ensure_budget(state, config=config, action="fetch")
         runtime = get_search_runtime(harness, config=config)
         resolved_result_id = requested_result_token
@@ -630,6 +686,8 @@ async def web_fetch(
                     "excerpt_char_count": len(excerpt),
                     "render_mode": "body_with_preview",
                     "untrusted": True,
+                    "result_id": str(resolved_result_id or ""),
+                    "fetch_id": str(payload.get("fetch_id") or ""),
                 },
                 tool_name="web_fetch",
                 session_id=str(getattr(state, "thread_id", "") or ""),
@@ -640,6 +698,13 @@ async def web_fetch(
             payload["artifact_id"] = artifact_id
             payload["body_artifact_id"] = artifact_id
             payload["body_available_via_artifact"] = True
+            if requested_result_token:
+                _record_fetch_artifact_mapping(
+                    state,
+                    result_id=str(resolved_result_id or ""),
+                    fetch_id=str(payload.get("fetch_id") or ""),
+                    artifact_id=artifact_id,
+                )
         payload["budget_remaining"] = _budget_remaining(state, config)
         return ok(
             payload,

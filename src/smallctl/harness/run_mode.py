@@ -176,7 +176,7 @@ def _looks_like_execution_approval_reply(task: str) -> bool:
     if not tokens:
         return False
     approval_tokens = {"approve", "approved", "proceed", "continue", "execute", "run"}
-    action_tokens = {"fix", "repair", "apply", "implement", "update", "change", "install", "deploy"}
+    action_tokens = {"fix", "repair", "apply", "implement", "update", "change", "install", "deploy", "patch"}
     return bool(tokens & approval_tokens) and bool(tokens & action_tokens)
 
 
@@ -190,14 +190,33 @@ def _recent_assistant_proposed_concrete_implementation(messages: list[Conversati
     return False
 
 
+def _approved_plan_matches_plan_interrupt(state: Any, interrupt: Any) -> bool:
+    if state is None:
+        return False
+    if isinstance(interrupt, dict):
+        kind = str(interrupt.get("kind") or "").strip()
+        plan_id = str(interrupt.get("plan_id") or "").strip()
+    else:
+        kind = str(getattr(interrupt, "kind", "") or "").strip()
+        plan_id = str(getattr(interrupt, "plan_id", "") or "").strip()
+    if kind != "plan_execute_approval":
+        return False
+    for plan in (getattr(state, "active_plan", None), getattr(state, "draft_plan", None)):
+        if plan is None or getattr(plan, "approved", False) is not True:
+            continue
+        if not plan_id or str(getattr(plan, "plan_id", "") or "").strip() == plan_id:
+            return True
+    return False
+
+
 def _has_plan_execution_approval_context(harness: Any) -> bool:
     state = getattr(harness, "state", None)
     pending_interrupt = getattr(state, "pending_interrupt", None)
     if isinstance(pending_interrupt, dict) and pending_interrupt.get("kind") == "plan_execute_approval":
-        return True
+        return not _approved_plan_matches_plan_interrupt(state, pending_interrupt)
     planner_interrupt = getattr(state, "planner_interrupt", None)
     if str(getattr(planner_interrupt, "kind", "") or "").strip() == "plan_execute_approval":
-        return True
+        return not _approved_plan_matches_plan_interrupt(state, planner_interrupt)
     plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
     status = str(getattr(plan, "status", "") or "").strip().lower()
     return status == "awaiting_approval"
@@ -240,6 +259,12 @@ def is_contextual_affirmative_execution_continuation(
     if not isinstance(handoff, dict):
         if has_active_remote_handoff(harness):
             ensure_remote_tool_profile(harness)
+            return True
+        # Local task continuation: if the assistant recently proposed a
+        # concrete implementation or asked for confirmation, and the user
+        # is replying with an approval, keep the task in loop mode so the
+        # model retains filesystem tool access.
+        if has_recent_confirmation or _recent_assistant_proposed_concrete_implementation(recent_messages):
             return True
         return False
     handoff_is_remote = has_active_remote_handoff(harness)
@@ -347,8 +372,13 @@ class ModeDecisionService:
             return "planning"
 
         model_name = getattr(self.harness.client, "model", None)
+        # Fix 1 (RCA 8b79ca76): Only apply complex_write_sync_heuristic on the
+        # user's raw input, not on resolved/inherited effective_task which may
+        # carry forward prior write context (e.g. "Continue current task: ...
+        # User follow-up: ...") and falsely trigger chunk mode on follow-up
+        # turns that are actually execution or verification requests.
         sync_mode = decide_run_mode_sync(
-            mode_task,
+            raw_task,
             model_name=model_name,
             cwd=getattr(self.harness.state, "cwd", None),
         )

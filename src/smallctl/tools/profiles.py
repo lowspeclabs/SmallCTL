@@ -26,6 +26,10 @@ PUBLIC_PROFILES: tuple[ToolProfile, ...] = (
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _USER_AT_HOST_RE = re.compile(r"\b[A-Za-z0-9._-]+@[A-Za-z0-9._-]+\b")
+_CODE_FILE_EXT_RE = re.compile(
+    r"(?:^|[\s`'\"(])[\w/\\.-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|pl|lua)\b",
+    re.IGNORECASE,
+)
 
 
 def classify_tool_profiles(
@@ -172,6 +176,25 @@ def classify_tool_profiles(
             "cleanup files",
             "clean up files",
         ),
+    ):
+        profiles.add(MUTATE_PROFILE)
+
+    if _matches_any(
+        text,
+        (
+            "fix ",
+            "debug",
+            "bug",
+            "traceback",
+            "patch ",
+            "edit ",
+            "modify ",
+            "refactor",
+            "repair ",
+        ),
+    ) and (
+        _matches_any(text, ("file", "script", "code", "source", "module", "path"))
+        or bool(_CODE_FILE_EXT_RE.search(text))
     ):
         profiles.add(MUTATE_PROFILE)
 

@@ -371,12 +371,13 @@ class MemoryService:
             content = str(message.content or "").strip()
             if not content:
                 continue
-            clipped, _ = clip_text_value(content, limit=1200)
             metadata = message.metadata if isinstance(message.metadata, dict) else {}
+            artifact_id = str(metadata.get("artifact_id") or "").strip()
+            clipped = self._fresh_tool_output_content(message, artifact_id=artifact_id)
             preserved.append(
                 {
                     "tool_name": str(message.name or "").strip() or "tool",
-                    "artifact_id": str(metadata.get("artifact_id") or "").strip(),
+                    "artifact_id": artifact_id,
                     "content": clipped,
                 }
             )
@@ -396,6 +397,26 @@ class MemoryService:
 
         limit = int(getattr(self.harness.context_policy, "fresh_tool_output_items", 4) or 4)
         scratchpad["_fresh_tool_outputs"] = deduped[-max(1, limit) :]
+
+    def _fresh_tool_output_content(self, message: Any, *, artifact_id: str) -> str:
+        artifact = self.harness.state.artifacts.get(artifact_id) if artifact_id else None
+        if artifact is not None:
+            kind = str(getattr(artifact, "kind", "") or getattr(artifact, "tool_name", "") or "").strip()
+            metadata = getattr(artifact, "metadata", {}) if artifact is not None else {}
+            if kind in {"file_read", "ssh_file_read"} and isinstance(metadata, dict) and metadata.get("complete_file"):
+                summary = str(
+                    getattr(artifact, "summary", "")
+                    or getattr(artifact, "source", "")
+                    or "file read"
+                ).strip()
+                total_lines = metadata.get("total_lines")
+                line_note = f" ({total_lines} lines)" if isinstance(total_lines, int) else ""
+                return (
+                    f"Artifact {artifact_id}: {summary}{line_note}. "
+                    "Full file captured; use this existing evidence instead of rereading the file."
+                )
+        clipped, _ = clip_text_value(str(getattr(message, "content", "") or "").strip(), limit=1200)
+        return clipped
 
     def _refresh_active_intent(self) -> None:
         task = self.harness.state.run_brief.original_task or self.harness._current_user_task()

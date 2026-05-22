@@ -17,7 +17,7 @@ from smallctl.harness.task_classifier import (
     runtime_policy_for_intent,
 )
 from smallctl.harness.tool_dispatch import chat_mode_tools
-from smallctl.harness.task_intent import extract_intent_state
+from smallctl.harness.task_intent import derive_task_contract, extract_intent_state, memory_fact_hint
 from smallctl.memory_store import ExperienceStore
 from smallctl.state import ArtifactRecord, EpisodicSummary, ExperienceMemory, LoopState, WriteSession
 
@@ -79,12 +79,43 @@ def test_extract_intent_state_uses_author_write_for_plain_language_report_reques
     assert "phase_execute" in tags
 
 
+def test_looping_does_not_trigger_memory_contract_from_pin_substring() -> None:
+    task = "your looping esclate to bigger model for help"
+
+    assert memory_fact_hint(task) == ""
+    assert derive_task_contract(task) == "general"
+
+
 def test_runtime_intent_routes_plain_language_report_requests_to_loop() -> None:
     intent = classify_runtime_intent("create a detailed report of your findings", recent_messages=[])
 
     assert intent.label == "author_write"
     assert intent.task_mode == "local_execute"
     assert runtime_policy_for_intent(intent).route_mode == "loop"
+
+
+def test_file_improvement_listing_is_readonly_analysis_not_write_file() -> None:
+    task = "read ./temp/pony.py and list improvements you would make to that file"
+
+    assert classify_task_mode(task) == "analysis"
+
+    intent = classify_runtime_intent(task, recent_messages=[])
+    assert intent.label in {"content_lookup", "readonly_lookup"}
+    assert intent.task_mode == "analysis"
+
+    harness = SimpleNamespace(
+        provider_profile="lmstudio",
+        state=SimpleNamespace(
+            current_phase="execute",
+            cwd="/home/stephen/Scripts/Harness-Redo",
+            working_memory=SimpleNamespace(failures=[], next_actions=[]),
+        ),
+        _looks_like_shell_request=lambda task: False,
+    )
+    primary, secondary, tags = extract_intent_state(harness, task)
+    assert primary == "inspect_repo"
+    assert "read_artifacts" in secondary
+    assert "write_file" not in tags
 
 
 def test_over_twenty_b_model_name_helper_is_strictly_greater_than_twenty_b() -> None:
@@ -1051,3 +1082,45 @@ def test_retrieval_prefers_artifact_matching_touched_symbols_for_implicit_query(
 
     assert bundle.artifacts
     assert bundle.artifacts[0].artifact_id == "A-parse"
+
+
+def test_traceback_does_not_trigger_ssh_exec_intent() -> None:
+    harness = SimpleNamespace(
+        provider_profile="lmstudio",
+        state=SimpleNamespace(
+            current_phase="execute",
+            cwd="/home/stephen/Scripts/Harness-Redo",
+            working_memory=SimpleNamespace(failures=[], next_actions=[]),
+        ),
+        _looks_like_shell_request=lambda task: False,
+    )
+    traceback_text = (
+        "Traceback (most recent call last):\n"
+        '  File "/home/stephen/Scripts/Harness-Redo/src/smallctl/tools/dispatcher.py", line 392, in normalize_tool_request\n'
+        "    ...\n"
+        '  File "/home/stephen/Scripts/Harness-Redo/pong.py", line 1, in <module>\n'
+        "    import pygame\n"
+        "ModuleNotFoundError: No module named 'pygame'\n"
+        "stephen@Ubuntu-Devbox:~/Scripts/Harness-Redo$ "
+    )
+    primary, secondary, tags = extract_intent_state(harness, traceback_text)
+    assert primary != "requested_ssh_exec"
+    assert "ssh_exec" not in tags
+
+
+def test_explicit_local_shell_override() -> None:
+    task = "use shell exec no ssh exec"
+    assert classify_task_mode(task) == "local_execute"
+
+    harness = SimpleNamespace(
+        provider_profile="lmstudio",
+        state=SimpleNamespace(
+            current_phase="execute",
+            cwd="/home/stephen/Scripts/Harness-Redo",
+            working_memory=SimpleNamespace(failures=[], next_actions=[]),
+        ),
+        _looks_like_shell_request=lambda task: True,
+    )
+    primary, secondary, tags = extract_intent_state(harness, task)
+    assert primary == "requested_shell_exec"
+    assert "shell_exec" in tags

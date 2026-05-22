@@ -82,3 +82,57 @@ class TrajectoryRecorder:
         with out_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
         return out_path
+
+    def record_escalation(
+        self,
+        harness: Any,
+        advisory: dict[str, Any],
+    ) -> Path | None:
+        state = getattr(harness, "state", None)
+        if state is None:
+            return None
+        scratchpad = getattr(state, "scratchpad", None)
+        if not isinstance(scratchpad, dict):
+            return None
+
+        session_id = str(getattr(state, "thread_id", "") or getattr(harness, "conversation_id", "") or "unknown")
+        run_brief = getattr(state, "run_brief", None)
+        task = str(
+            getattr(run_brief, "original_task", "")
+            or getattr(run_brief, "effective_task", "")
+            or ""
+        ).strip()
+        last_escalation = scratchpad.get("_last_escalation")
+        last_escalation = last_escalation if isinstance(last_escalation, dict) else {}
+        metrics = scratchpad.get("_recovery_metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        config = getattr(harness, "config", None)
+
+        payload: dict[str, Any] = {
+            "type": "escalation",
+            "task": task,
+            "runtime": "escalation",
+            "session_id": session_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "escalation_id": advisory.get("escalation_id"),
+            "trigger": last_escalation.get("trigger"),
+            "small_model": scratchpad.get("_model_name") or getattr(config, "model", ""),
+            "big_model": getattr(config, "escalation_model", ""),
+            "provider_profile": getattr(config, "escalation_provider_profile", ""),
+            "packet_chars": metrics.get("escalation_prompt_chars", 0),
+            "verdict": advisory.get("verdict"),
+            "confidence": advisory.get("confidence"),
+            "recommended_next_action": advisory.get("recommended_next_action"),
+            "accepted_by_harness": bool(advisory.get("success")),
+            "validator_result": "pass" if advisory.get("success") else "fail",
+            "metrics": {
+                "escalation_prompt_chars": metrics.get("escalation_prompt_chars", 0),
+                "escalation_response_chars": metrics.get("escalation_response_chars", 0),
+                "escalation_wall_clock_sec": metrics.get("escalation_wall_clock_sec", 0.0),
+            },
+        }
+
+        out_path = self.base_dir / f"{session_id}.jsonl"
+        with out_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+        return out_path

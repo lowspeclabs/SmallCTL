@@ -402,6 +402,115 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "patched\n"
 
 
+def test_repair_cycle_accepts_existing_successful_file_read_for_same_path(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "example.txt"
+    target.write_text("original\n", encoding="utf-8")
+    state.tool_execution_records["op-read"] = {
+        "tool_name": "file_read",
+        "args": {"path": str(target)},
+        "result": {
+            "success": True,
+            "metadata": {"path": str(target), "complete_file": True},
+        },
+    }
+
+    allowed = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="original",
+            replacement_text="patched",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert allowed["success"] is True
+    assert target.read_text(encoding="utf-8") == "patched\n"
+
+
+def test_repair_cycle_requires_new_read_after_failed_file_patch_on_same_path(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "example.txt"
+    target.write_text("original\n", encoding="utf-8")
+    state.tool_execution_records["op-read"] = {
+        "tool_name": "file_read",
+        "args": {"path": str(target)},
+        "result": {
+            "success": True,
+            "metadata": {"path": str(target), "complete_file": True},
+        },
+    }
+    state.tool_execution_records["op-patch-failed"] = {
+        "tool_name": "file_patch",
+        "args": {
+            "path": str(target),
+            "target_text": "missing",
+            "replacement_text": "patched",
+        },
+        "result": {
+            "success": False,
+            "metadata": {"path": str(target), "error_kind": "patch_target_not_found"},
+        },
+    }
+
+    blocked = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="original",
+            replacement_text="patched",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
+
+
+def test_cached_file_read_satisfies_active_repair_cycle_read_gate(tmp_path: Path) -> None:
+    from smallctl.harness.artifact_tracking import file_read_cache_key
+    from smallctl.harness.tool_dispatch import _reuse_cached_file_read
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "example.txt"
+    target.write_text("original\n", encoding="utf-8")
+    artifact = ArtifactRecord(
+        artifact_id="art-read",
+        kind="file_read",
+        source=str(target),
+        created_at="2026-05-21T00:00:00+00:00",
+        size_bytes=9,
+        summary="file_read success",
+        tool_name="file_read",
+        metadata={"path": str(target), "complete_file": True},
+    )
+    state.artifacts[artifact.artifact_id] = artifact
+    cache_key = file_read_cache_key(state.cwd, {"path": str(target)})
+    assert cache_key
+    state.scratchpad["file_read_cache"] = {cache_key: artifact.artifact_id}
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    cached = _reuse_cached_file_read(harness, {"path": str(target)})
+
+    assert cached is not None
+    assert cached.success is True
+    assert str(target.resolve()) in state.scratchpad["_repair_cycle_reads"]
+
+
 def test_repair_cycle_missing_file_read_unblocks_create_write(tmp_path: Path) -> None:
     state = _make_state()
     state.repair_cycle_id = "repair-1"
@@ -455,7 +564,73 @@ def test_file_patch_exact_match_updates_target_file(tmp_path: Path) -> None:
     assert result["metadata"]["requested_path"] == str(target)
     assert result["metadata"]["occurrence_count"] == 1
     assert result["metadata"]["expected_occurrences"] == 1
+    assert result["metadata"]["dry_run"] is False
+    assert result["metadata"]["old_sha256"] != result["metadata"]["new_sha256"]
+    assert "old value" in result["metadata"]["diff"]
+    assert "new value" in result["metadata"]["diff"]
     assert target.read_text(encoding="utf-8") == "keep\nnew value\nkeep\n"
+
+
+def test_file_patch_dry_run_returns_diff_without_mutating_file(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("keep\nold value\nkeep\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="old value",
+            replacement_text="new value",
+            cwd=str(tmp_path),
+            state=state,
+            dry_run=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert "Dry run" in result["output"]
+    assert result["metadata"]["dry_run"] is True
+    assert result["metadata"]["occurrence_count"] == 1
+    assert result["metadata"]["replacement_count"] == 1
+    assert "old value" in result["metadata"]["diff"]
+    assert "new value" in result["metadata"]["diff_preview"]
+    diff_lines = result["metadata"]["diff"].splitlines()
+    assert diff_lines[0].startswith("--- ")
+    assert diff_lines[1].startswith("+++ ")
+    assert diff_lines[2].startswith("@@ ")
+    assert target.read_text(encoding="utf-8") == "keep\nold value\nkeep\n"
+
+
+def test_file_patch_dry_run_active_write_session_does_not_advance_stage_or_session(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "session.txt"
+    stage = tmp_path / ".smallctl" / "write_sessions" / "ws-dry-stage.txt"
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.write_text("alpha beta gamma\n", encoding="utf-8")
+    session = _make_open_write_session(target, session_id="ws-dry", intent="patch_existing")
+    session.write_staging_path = str(stage)
+    session.write_next_section = "patch"
+    state.write_session = session
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="beta",
+            replacement_text="delta",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id=session.write_session_id,
+            dry_run=True,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["staged_only"] is True
+    assert result["metadata"]["dry_run"] is True
+    assert stage.read_text(encoding="utf-8") == "alpha beta gamma\n"
+    assert session.write_sections_completed == []
+    assert session.write_next_section == "patch"
+    assert session.write_pending_finalize is False
 
 
 def test_file_patch_empty_target_text_suggests_anchor_or_ast_patch(tmp_path: Path) -> None:
@@ -661,6 +836,153 @@ def test_file_patch_can_replace_multiple_exact_matches_when_requested(tmp_path: 
     assert result["metadata"]["occurrence_count"] == 3
     assert result["metadata"]["expected_occurrences"] == 3
     assert target.read_text(encoding="utf-8") == "gamma gamma gamma\n"
+
+
+def test_file_patch_occurrence_index_replaces_only_selected_match(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("beta beta beta\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="beta",
+            replacement_text="gamma",
+            expected_occurrences=3,
+            occurrence_index=2,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["occurrence_count"] == 1
+    assert result["metadata"]["actual_occurrences"] == 3
+    assert result["metadata"]["selected_occurrence"] == 2
+    assert target.read_text(encoding="utf-8") == "beta gamma beta\n"
+
+
+def test_file_patch_occurrence_index_out_of_range_fails_without_mutating_file(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("beta beta\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="beta",
+            replacement_text="gamma",
+            expected_occurrences=2,
+            occurrence_index=3,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "invalid_occurrence_index"
+    assert result["metadata"]["occurrence_index"] == 3
+    assert target.read_text(encoding="utf-8") == "beta beta\n"
+
+
+def test_file_patch_regex_replacement_succeeds(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("version = 12\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text=r"version = (\d+)",
+            replacement_text=r"version = \g<1>0",
+            regex=True,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["patch_mode"] == "regex"
+    assert result["metadata"]["occurrence_count"] == 1
+    assert target.read_text(encoding="utf-8") == "version = 120\n"
+
+
+def test_file_patch_regex_flags_are_applied(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("HEADER\nvalue\nfooter\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text=r"header.*footer",
+            replacement_text="body",
+            regex=True,
+            case_insensitive=True,
+            dotall=True,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["patch_mode"] == "regex"
+    assert target.read_text(encoding="utf-8") == "body\n"
+
+
+def test_file_patch_invalid_regex_fails_with_error_kind(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="[",
+            replacement_text="beta",
+            regex=True,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "invalid_regex"
+    assert target.read_text(encoding="utf-8") == "alpha\n"
+
+
+def test_file_patch_regex_broad_match_fails_on_expected_occurrence_mismatch(tmp_path: Path) -> None:
+    state = _make_state()
+    target = tmp_path / "example.txt"
+    target.write_text("one two three\n", encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text=r"\w+",
+            replacement_text="word",
+            regex=True,
+            expected_occurrences=1,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "patch_occurrence_mismatch"
+    assert result["metadata"]["actual_occurrences"] == 3
+    assert target.read_text(encoding="utf-8") == "one two three\n"
+
+
+def test_write_text_file_atomic_replace_failure_preserves_original(tmp_path: Path) -> None:
+    target = tmp_path / "atomic.txt"
+    target.write_text("original\n", encoding="utf-8")
+
+    with patch("smallctl.tools.fs_write_sessions.Path.replace", side_effect=OSError("replace failed")):
+        with pytest.raises(OSError):
+            fs._write_text_file(target, "patched\n", encoding="utf-8")
+
+    assert target.read_text(encoding="utf-8") == "original\n"
 
 
 def test_file_patch_uses_active_write_session_staging_and_leaves_target_untouched(tmp_path: Path) -> None:
@@ -1239,6 +1561,42 @@ def test_interpret_model_output_marks_action_stall_nudge_as_recovery_message() -
     assert state.recent_messages
     assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
     assert state.recent_messages[-1].metadata["recovery_kind"] == "action_stall"
+
+
+def test_interpret_model_output_ignores_reasoning_fallback_text_for_action_stall() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "find the vikunja docker compose on the remote host"
+    state.scratchpad["_assistant_text_from_reasoning_fallback"] = True
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(min_exploration_steps=0),
+        summarizer=None,
+        _extract_planning_request=lambda task: None,
+        _record_experience=lambda *args, **kwargs: None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        _failure=lambda error, error_type="runtime", details=None: {
+            "error": error,
+            "error_type": error_type,
+            "details": details or {},
+        },
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-reasoning-fallback",
+        run_mode="loop",
+    )
+    graph_state.last_assistant_text = "I'll search the remote host for the docker compose file next."
+    graph_state.last_thinking_text = "I should use ssh_exec to find the compose file."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.recent_messages
+    assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "blank_message"
+    assert all(message.metadata.get("recovery_kind") != "action_stall" for message in state.recent_messages)
 
 
 def test_interpret_model_output_tags_phase_contract_block_nudges_as_recovery_messages() -> None:
@@ -2859,6 +3217,29 @@ def test_task_complete_still_blocks_non_diagnostic_failing_verifier() -> None:
     assert "latest verifier verdict is still failing" in blocked["error"]
 
 
+def test_task_complete_surfaces_approval_required_verifier_blocker() -> None:
+    state = _make_state()
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "cd /repo && timeout 3 python pong.py || true",
+        "command": "cd /repo && timeout 3 python pong.py || true",
+        "exit_code": None,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "needs_human",
+        "failure_mode": "approval_denied",
+        "approval_denied": True,
+        "acceptance_delta": {"status": "pending", "notes": ["Shell execution denied by user."]},
+    }
+
+    blocked = asyncio.run(control.task_complete("done", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert "approved or rerun with approval" in blocked["error"]
+    assert "Shell execution denied by user" in blocked["error"]
+    assert blocked["metadata"]["approval_required"] is True
+
+
 def test_repair_recovery_nudge_triggers_on_repeated_shell_failures() -> None:
     state = _make_state()
     state.current_phase = "execute"
@@ -3935,6 +4316,59 @@ def test_task_complete_verifier_failure_autocontinues_with_loop_status() -> None
         for message in state.recent_messages
     )
     assert any(event == "task_complete_verifier_loop_status_autocontinue" for event, _message, _data in runlog_events)
+
+
+def test_task_complete_verifier_needs_human_does_not_autocontinue_with_loop_status() -> None:
+    state = _make_state()
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "cd /repo && timeout 3 python pong.py || true",
+        "command": "cd /repo && timeout 3 python pong.py || true",
+        "exit_code": None,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "needs_human",
+        "failure_mode": "approval_denied",
+        "approval_denied": True,
+        "acceptance_delta": {"status": "pending", "notes": ["Shell execution denied by user."]},
+    }
+
+    runlog_events: list[tuple[str, str, dict[str, object]]] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=AsyncMock(),
+        _failure=lambda *args, **kwargs: {"error": "guard"},
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="execute",
+    )
+    graph_state.last_tool_results = [
+        ToolExecutionRecord(
+            operation_id="op-approval",
+            tool_name="task_complete",
+            args={"message": "done"},
+            tool_call_id="tool-approval",
+            result=ToolEnvelope(
+                success=False,
+                error="Cannot complete the task until the latest verifier check is approved or rerun with approval.",
+                metadata={"last_verifier_verdict": state.last_verifier_verdict, "approval_required": True},
+            ),
+        )
+    ]
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = asyncio.run(apply_tool_outcomes(graph_state, deps))
+
+    assert route == "next_step"
+    assert graph_state.pending_tool_calls == []
+    assert not any(
+        getattr(message, "metadata", {}).get("recovery_kind") == "task_complete_verifier_loop_status_autocontinue"
+        for message in state.recent_messages
+    )
+    assert not any(event == "task_complete_verifier_loop_status_autocontinue" for event, _message, _data in runlog_events)
 
 
 def test_task_complete_remote_mutation_block_autocontinues_with_ssh_file_read() -> None:

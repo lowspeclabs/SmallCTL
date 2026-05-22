@@ -2136,3 +2136,49 @@ def test_tool_dispatcher_validation_includes_dropped_keys_when_required_missing(
     error = ToolDispatcher._validate_args(schema, {"path": "a"})
     assert error is not None
     assert "target_text" in error
+
+
+def test_remote_scope_guard_allows_shell_exec_after_repeated_ssh_auth_failure() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    state.task_mode = "remote_execute"
+    state.active_intent = "requested_ssh_exec"
+    state.scratchpad["_last_task_handoff"] = {
+        "task_mode": "remote_execute",
+        "effective_task": "ssh into root@192.168.1.63 and fix the remote service",
+    }
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.63": {"host": "192.168.1.63", "user": "root", "confirmed": True}
+    }
+    state.tool_execution_records = {
+        "rec-1": {
+            "tool_name": "ssh_exec",
+            "result": {
+                "success": False,
+                "error": "Permission denied (publickey,password).",
+                "metadata": {
+                    "output": {
+                        "stdout": "",
+                        "stderr": "Permission denied (publickey,password).",
+                        "exit_code": 255,
+                    }
+                },
+            },
+        }
+    }
+
+    def _get(name: str):
+        if name == "ssh_exec":
+            return SimpleNamespace(phase_allowed=lambda phase: True)
+        return None
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=_get),
+        "shell_exec",
+        {"command": "ls /etc/nginx/sites-available"},
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "shell_exec"
+    assert args == {"command": "ls /etc/nginx/sites-available"}
+    assert intercepted is None

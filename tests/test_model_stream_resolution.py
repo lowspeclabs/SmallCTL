@@ -22,9 +22,10 @@ class _Harness:
         self.thinking_start_tag = "<think>"
         self.thinking_end_tag = "</think>"
         self.thinking_visibility = False
+        self.runlog_events = []
 
     def _runlog(self, *args, **kwargs) -> None:
-        del args, kwargs
+        self.runlog_events.append((args, kwargs))
 
     async def _emit(self, *args, **kwargs) -> None:
         del args, kwargs
@@ -93,6 +94,20 @@ class _ReasoningOnlyClient:
 
     async def stream_chat(self, messages, tools):
         self.calls.append({"messages": messages, "tools": tools})
+        if len(self.calls) > 1:
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "Done."
+                            }
+                        }
+                    ]
+                },
+            }
+            return
         for _ in range(3):
             yield {
                 "type": "chunk",
@@ -106,13 +121,65 @@ class _ReasoningOnlyClient:
                     ]
                 },
             }
+
+
+class _AlwaysReasoningOnlyClient:
+    model = "qwen3.5:9b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        for _ in range(3):
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "still thinking"
+                            }
+                        }
+                    ]
+                },
+            }
+
+
+class _ProgressingReasoningClient:
+    model = "qwen3.5:9b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        for text in [
+            "I read the file and found a concrete paddle collision bounds issue. ",
+            "The paddle rows are drawn with range(paddle_h), so the end row is exclusive. ",
+            "Using a less-than-or-equal comparison includes one extra row below each paddle. ",
+            "That means collisions can register when the ball is visually outside the paddle. ",
+            "I can now answer with the exact bug and the suggested patch. ",
+        ]:
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": text,
+                            }
+                        }
+                    ]
+                },
+            }
         yield {
             "type": "chunk",
             "data": {
                 "choices": [
                     {
                         "delta": {
-                            "content": "Done."
+                            "content": "The paddle collision check should use an exclusive lower bound."
                         }
                     }
                 ]
@@ -227,6 +294,58 @@ def _build_state_with_write_session() -> LoopState:
     return state
 
 
+def test_chunk_reasoning_text_falls_back_to_reasoning_when_content_field_is_not_text() -> None:
+    event = {
+        "type": "chunk",
+        "data": {
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": {"unexpected": "shape"},
+                        "reasoning": "fallback reasoning",
+                    }
+                }
+            ]
+        },
+    }
+
+    assert model_stream_loop_module._chunk_reasoning_text(event) == "fallback reasoning"
+
+
+def test_reasoning_progress_rejects_numbered_boilerplate() -> None:
+    fragments = [
+        (
+            "Still analyzing possible collision bounds parser fallback retry guard threshold "
+            f"without action attempt {index}"
+        )
+        for index in range(6)
+    ]
+
+    assessment = model_stream_loop_module._assess_reasoning_fragments_progress(fragments)
+
+    assert assessment.progress is False
+    assert assessment.fragment_count == 6
+    assert assessment.unique_ratio == 1.0
+    assert assessment.distinct_word_count >= 12
+    assert assessment.novel_word_count == 0
+
+
+def test_reasoning_progress_accepts_developing_analysis() -> None:
+    fragments = [
+        "I read the file and found a concrete paddle collision bounds issue. ",
+        "The paddle rows are drawn with range(paddle_h), so the end row is exclusive. ",
+        "Using a less-than-or-equal comparison includes one extra row below each paddle. ",
+        "That means collisions can register when the ball is visually outside the paddle. ",
+        "I can now answer with the exact bug and the suggested patch. ",
+    ]
+
+    assessment = model_stream_loop_module._assess_reasoning_fragments_progress(fragments)
+
+    assert assessment.progress is True
+    assert assessment.fragment_count == 5
+    assert assessment.novel_word_count >= 4
+
+
 def test_reasoning_only_stream_retries_with_action_nudge(monkeypatch) -> None:
     state = LoopState(cwd="/tmp")
     harness = _Harness(state)
@@ -257,6 +376,76 @@ def test_reasoning_only_stream_retries_with_action_nudge(monkeypatch) -> None:
     assert len(harness.client.calls) == 2
     assert "too long in reasoning" in harness.client.calls[1]["messages"][-1]["content"]
     assert result["stream_completed_cleanly"] is True
+
+
+def test_reasoning_only_stream_halts_after_escalation_nudge_exhausted(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _AlwaysReasoningOnlyClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [
+        {"type": "function", "function": {"name": "file_patch", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "escalate_to_bigger_model", "parameters": {"type": "object"}}},
+    ]
+
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "fix pong.py"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert len(harness.client.calls) == 2
+    assert "call escalate_to_bigger_model" in harness.client.calls[1]["messages"][-1]["content"]
+    assert result["stream_completed_cleanly"] is False
+    assert result["stream_ended_without_done"] is True
+    assert result["stream_ended_without_done_details"]["reason"] == "reasoning_only_stream_stall"
+    assert result["stream_ended_without_done_details"]["retrying"] is False
+
+
+def test_progressing_reasoning_only_stream_gets_hard_budget_before_retry(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _ProgressingReasoningClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "file_patch", "parameters": {"type": "object"}}}]
+
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_CHUNKS", 4)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_CHUNKS", 8)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "fix pong.py"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert len(harness.client.calls) == 1
+    assert result["stream_completed_cleanly"] is True
+    assert any(event[0][0] == "reasoning_only_stream_progress_defer" for event in harness.runlog_events)
 
 
 def test_stream_chunk_error_schedules_one_auto_resume_for_recoverable_write_session() -> None:
@@ -449,6 +638,45 @@ def test_resolve_model_stream_result_preserves_existing_final_result() -> None:
     assert graph_state.final_result == provider_failure
     assert graph_state.error is not None
     assert graph_state.error["type"] == "provider"
+
+
+def test_resolve_model_stream_result_reports_reasoning_only_stall() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    details = {
+        "reason": "reasoning_only_stream_stall",
+        "retrying": False,
+        "attempt": 2,
+        "reasoning_only_chunks": 604,
+    }
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=[],
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=True,
+            stream_ended_without_done_details=details,
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=False,
+            echo_to_stdout=False,
+            messages=[],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.chunks == []
+    assert graph_state.final_result is not None
+    assert graph_state.final_result["message"].startswith("Model stream halted after repeated reasoning-only")
+    assert graph_state.error is not None
+    assert graph_state.error["type"] == "model_stream_stall"
 
 
 def test_stalled_file_write_stream_uses_no_tools_fallback_without_session() -> None:

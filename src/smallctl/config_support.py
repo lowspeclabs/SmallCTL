@@ -154,6 +154,24 @@ def _env_config() -> dict[str, Any]:
         "test_time_scaling_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_TIMEOUT_SEC"),
         "test_time_scaling_mutating_parallel_enabled": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_MUTATING_PARALLEL_ENABLED"),
         "test_time_scaling_all_fail_action": env_or_dotenv(f"{ENV_PREFIX}TEST_TIME_SCALING_ALL_FAIL_ACTION"),
+        "escalation_enabled": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_ENABLED"),
+        "escalation_expose_tool": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_EXPOSE_TOOL"),
+        "escalation_auto_trigger": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_AUTO_TRIGGER"),
+        "escalation_endpoint": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_ENDPOINT"),
+        "escalation_model": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_MODEL"),
+        "escalation_provider_profile": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_PROVIDER_PROFILE"),
+        "escalation_api_key": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_API_KEY"),
+        "escalation_api_key_env": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_API_KEY_ENV"),
+        "escalation_chat_endpoint": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_CHAT_ENDPOINT"),
+        "escalation_max_prompt_chars": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_MAX_PROMPT_CHARS"),
+        "escalation_max_response_tokens": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_MAX_RESPONSE_TOKENS"),
+        "escalation_temperature": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_TEMPERATURE"),
+        "escalation_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_TIMEOUT_SEC"),
+        "escalation_max_per_task": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_MAX_PER_TASK"),
+        "escalation_cooldown_turns": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_COOLDOWN_TURNS"),
+        "escalation_repeated_failure_threshold": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_REPEATED_FAILURE_THRESHOLD"),
+        "escalation_require_tool_plan_evidence": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_REQUIRE_TOOL_PLAN_EVIDENCE"),
+        "escalation_redact_secrets": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_REDACT_SECRETS"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
@@ -290,6 +308,11 @@ def _env_config() -> dict[str, Any]:
         "rewoo_refiner_frame_enabled",
         "test_time_scaling_enabled",
         "test_time_scaling_mutating_parallel_enabled",
+        "escalation_enabled",
+        "escalation_expose_tool",
+        "escalation_auto_trigger",
+        "escalation_require_tool_plan_evidence",
+        "escalation_redact_secrets",
     ):
         if key in cfg:
             cfg[key] = _to_bool(cfg[key])
@@ -366,6 +389,12 @@ def _env_config() -> dict[str, Any]:
         "test_time_scaling_min_candidates",
         "test_time_scaling_parallel_max",
         "test_time_scaling_timeout_sec",
+        "escalation_max_prompt_chars",
+        "escalation_max_response_tokens",
+        "escalation_timeout_sec",
+        "escalation_max_per_task",
+        "escalation_cooldown_turns",
+        "escalation_repeated_failure_threshold",
     ):
         if key in cfg:
             parsed_limit = _to_int(cfg[key])
@@ -379,6 +408,12 @@ def _env_config() -> dict[str, Any]:
             cfg.pop("test_time_scaling_score_threshold", None)
         else:
             cfg["test_time_scaling_score_threshold"] = parsed_ratio
+    if "escalation_temperature" in cfg:
+        parsed_ratio = _to_float(cfg["escalation_temperature"])
+        if parsed_ratio is None:
+            cfg.pop("escalation_temperature", None)
+        else:
+            cfg["escalation_temperature"] = parsed_ratio
     if "summarize_at_ratio" in cfg:
         parsed_ratio = _to_float(cfg["summarize_at_ratio"])
         if parsed_ratio is None:

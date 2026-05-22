@@ -243,7 +243,7 @@ async def file_write(
                 pass  # staging sync is best-effort; the target write already succeeded
 
     _record_file_change(state, target)
-    return ok("written", metadata={"path": str(target), "bytes": len(content.encode(encoding))})
+    return ok("written", metadata={"path": str(target), "bytes": len(content.encode(encoding)), "changed": True})
 
 
 async def file_patch(
@@ -257,6 +257,12 @@ async def file_patch(
     write_session_id: str | None = None,
     expected_occurrences: int = 1,
     expected_followup_verifier: str | None = None,
+    dry_run: bool = False,
+    occurrence_index: int | None = None,
+    regex: bool = False,
+    case_insensitive: bool = False,
+    multiline: bool = False,
+    dotall: bool = False,
 ) -> dict[str, Any]:
     return await handle_file_patch(
         path=path,
@@ -269,6 +275,12 @@ async def file_patch(
         write_session_id=write_session_id,
         expected_occurrences=expected_occurrences,
         expected_followup_verifier=expected_followup_verifier,
+        dry_run=dry_run,
+        occurrence_index=occurrence_index,
+        regex=regex,
+        case_insensitive=case_insensitive,
+        multiline=multiline,
+        dotall=dotall,
     )
 
 

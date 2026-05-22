@@ -57,7 +57,10 @@ class ApprovalService:
         )
         try:
             await self.harness._emit(self.harness.event_handler, event)
-            return await future
+            return await asyncio.wait_for(future, timeout=float(timeout_sec))
+        except asyncio.TimeoutError:
+            self._reject_shell_approval(approval_id)
+            return False
         except Exception:
             self._reject_shell_approval(approval_id)
             raise

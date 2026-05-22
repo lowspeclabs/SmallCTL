@@ -179,3 +179,47 @@ def test_ssh_exec_compact_message_labels_remote_nonzero_as_reached_host() -> Non
 
     assert rendered.startswith("SSH reached the remote host; remote command exited non-zero.")
     assert "Remote SSH command exited with code 2" in rendered
+
+
+def test_shell_exec_failure_summary_precedes_long_unittest_transcript() -> None:
+    passing_lines = "\n".join(f"test_ok_{idx} (__main__.Suite.test_ok_{idx}) ... ok" for idx in range(40))
+    stderr = (
+        f"{passing_lines}\n"
+        "test_print_verdict_allowed (__main__.TestIPAllowlist.test_print_verdict_allowed) ... ERROR\n"
+        "\n"
+        "======================================================================\n"
+        "ERROR: test_print_verdict_allowed (__main__.TestIPAllowlist.test_print_verdict_allowed)\n"
+        "----------------------------------------------------------------------\n"
+        "Traceback (most recent call last):\n"
+        "  File \"/tmp/ip_allowlist.py\", line 65, in print_verdict\n"
+        "    print(f\"ALLOWED: {ip_str}\")\n"
+        "AttributeError: 'list' object has no attribute 'write'\n"
+        "\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 16 tests in 0.003s\n"
+        "\n"
+        "FAILED (errors=3)\n"
+    )
+    artifact = ArtifactRecord(
+        artifact_id="A0102",
+        kind="shell_exec",
+        source="python3 temp/ip_allowlist.py",
+        created_at="2026-05-21T00:00:00+00:00",
+        size_bytes=len(stderr.encode("utf-8")),
+        summary="unittest failure",
+        tool_name="shell_exec",
+    )
+    result = ToolEnvelope(
+        success=False,
+        error=stderr,
+        metadata={"output": {"stdout": "", "stderr": stderr, "exit_code": 120}},
+    )
+
+    rendered = format_compact_tool_message(artifact, result)
+
+    assert rendered.startswith("--- [FAILURE SUMMARY] ---")
+    assert "Command failed with exit code 120." in rendered
+    assert "FAILED (errors=3)" in rendered
+    assert "ERROR: test_print_verdict_allowed" in rendered
+    assert "AttributeError: 'list' object has no attribute 'write'" in rendered
+    assert rendered.index("FAILED (errors=3)") < rendered.index("test_ok_0")

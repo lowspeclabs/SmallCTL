@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -47,7 +49,33 @@ def _content_hash(text: str) -> str:
 
 def _write_text_file(path: Path, content: str, *, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding=encoding)
+    temp_name = ""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    fd_open = True
+    try:
+        if path.exists():
+            try:
+                os.chmod(temp_name, path.stat().st_mode)
+            except OSError:
+                pass
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            fd_open = False
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(temp_name).replace(path)
+    except Exception:
+        if fd_open:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def _ensure_write_session_files(

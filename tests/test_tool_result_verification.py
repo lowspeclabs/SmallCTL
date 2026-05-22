@@ -171,6 +171,31 @@ def test_nested_raw_ssh_failure_does_not_record_auth_recovery_state() -> None:
     assert "_ssh_auth_recovery_state" not in state.scratchpad
 
 
+def test_approval_denied_verifier_is_needs_human_and_does_not_start_repair() -> None:
+    state = LoopState()
+    result = ToolEnvelope(
+        success=False,
+        output={"exit_code": None, "stdout": "", "stderr": ""},
+        error="Shell execution denied by user.",
+        metadata={"approval_denied": True},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "cd /repo && timeout 3 python pong.py || true"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "needs_human"
+    assert verdict["failure_mode"] == "approval_denied"
+    assert verdict["approval_denied"] is True
+    assert verdict["acceptance_delta"]["status"] == "pending"
+    assert "denied by user" in verdict["acceptance_delta"]["notes"][0].lower()
+    assert state.repair_cycle_id == ""
+
+
 def test_latest_blocker_tracks_fogproject_account_over_interactive_prompt() -> None:
     state = LoopState()
     state.thread_id = "fog-run"

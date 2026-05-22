@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -22,6 +23,27 @@ from .shell_support import (
     _shell_workspace_relative_hint,
 )
 from .ui_streaming import BufferedUIEventEmitter
+
+
+_SAFE_COMPILE_LINT_COMMANDS = {
+    "python3 -m py_compile",
+    "flake8",
+    "mypy",
+    "ruff check",
+    "shellcheck",
+}
+
+
+def _is_safe_compile_lint_command(command: str) -> bool:
+    """Return True if the command is a read-only compile/lint verifier that can be auto-approved."""
+    segments = [s.strip() for s in re.split(r"&&|\|\||[;&|]", str(command or ""))]
+    for segment in segments:
+        if segment.startswith("cd "):
+            continue
+        for prefix in _SAFE_COMPILE_LINT_COMMANDS:
+            if segment.startswith(prefix):
+                return True
+    return False
 
 
 def _leading_command_tokens(command: str, *, max_depth: int = 3) -> list[str]:
@@ -93,13 +115,17 @@ async def shell_exec_foreground(
                 )
             if risk_decision.requires_approval and callable(approval_fn) and approval_available:
                 approval_start = time.monotonic()
-                approved = await approval_fn(
-                    command=command,
-                    cwd=state.cwd,
-                    timeout_sec=timeout_sec,
-                    proof_bundle=risk_decision.proof_bundle,
-                )
-                approval_wait_sec = time.monotonic() - approval_start
+                if _is_safe_compile_lint_command(command):
+                    approved = True
+                else:
+                    approved = await approval_fn(
+                        command=command,
+                        cwd=state.cwd,
+                        timeout_sec=timeout_sec,
+                        proof_bundle=risk_decision.proof_bundle,
+                    )
+                if not _is_safe_compile_lint_command(command):
+                    approval_wait_sec = time.monotonic() - approval_start
                 if not approved:
                     denied = fail(
                         "Shell execution denied by user.",

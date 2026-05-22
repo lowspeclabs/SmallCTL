@@ -65,6 +65,49 @@ def test_artifact_read_marks_past_eof_requests_in_metadata(tmp_path: Path) -> No
     assert "Stop reading and synthesize the results" in result["output"]
 
 
+def test_artifact_read_warns_for_durably_stale_file_snapshot(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="old line\n")
+    state.artifacts["A0001"].kind = "file_read"
+    state.artifacts["A0001"].tool_name = "file_read"
+    state.artifacts["A0001"].source = str(tmp_path / "example.py")
+    state.scratchpad["_artifact_staleness"] = {
+        "A0001": {
+            "stale": True,
+            "reason": "file_changed",
+            "paths": [str(tmp_path / "example.py")],
+        }
+    }
+
+    result = artifact_read(state, artifact_id="A0001")
+
+    assert result["success"] is True
+    assert result["metadata"]["stale"] is True
+    assert result["metadata"]["authoritative_path"] == str(tmp_path / "example.py")
+    assert "WARNING: This artifact is stale" in result["output"]
+    assert "Use `file_read(path='" in result["output"]
+
+
+def test_artifact_grep_warns_for_durably_stale_file_snapshot(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="old target\n")
+    state.artifacts["A0001"].kind = "file_read"
+    state.artifacts["A0001"].tool_name = "file_read"
+    state.artifacts["A0001"].source = str(tmp_path / "example.py")
+    state.scratchpad["_artifact_staleness"] = {
+        "A0001": {
+            "stale": True,
+            "reason": "file_changed",
+            "paths": [str(tmp_path / "example.py")],
+        }
+    }
+
+    result = artifact_grep(state, artifact_id="A0001", query="target")
+
+    assert result["success"] is True
+    assert result["metadata"]["stale"] is True
+    assert "WARNING: This artifact is stale" in result["output"]
+    assert "Found 1 matches in A0001" in result["output"]
+
+
 def test_shell_exec_failure_message_caps_long_error_text() -> None:
     long_error = "ERROR START\n" + ("x" * 5000) + "\nERROR END"
     artifact = ArtifactRecord(
@@ -186,3 +229,70 @@ def test_record_result_compacts_ssh_file_write_arguments_in_artifact_json(tmp_pa
     assert "content" not in arguments
     assert content not in serialized_arguments
     assert "secret-password" not in serialized_arguments
+
+
+def test_record_result_keeps_file_reads_inline_without_artifacts(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-test"
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path / "artifacts", "run-test", session_id=state.thread_id),
+        context_policy=ContextPolicy(artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        client=SimpleNamespace(model="qwen3.5:4b"),
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: "inspect a local file",
+    )
+    service = SimpleNamespace(harness=harness)
+
+    message = asyncio.run(
+        record_result(
+            service,
+            tool_name="file_read",
+            tool_call_id="call-1",
+            result=ToolEnvelope(success=True, output="alpha\nbeta\n", metadata={"path": "notes.txt"}),
+            arguments={"path": "notes.txt"},
+        )
+    )
+
+    assert state.artifacts == {}
+    assert state.retrieval_cache == []
+    assert message.content == "alpha\nbeta\n"
+    assert "artifact_id" not in message.metadata
+
+
+def test_record_result_keeps_ssh_file_reads_inline_without_artifacts(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-test"
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path / "artifacts", "run-test", session_id=state.thread_id),
+        context_policy=ContextPolicy(artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        client=SimpleNamespace(model="qwen3.5:4b"),
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: "inspect a remote file",
+    )
+    service = SimpleNamespace(harness=harness)
+
+    output = {"content": "alpha\nbeta\n", "path": "/etc/example.conf", "host": "example.test"}
+    message = asyncio.run(
+        record_result(
+            service,
+            tool_name="ssh_file_read",
+            tool_call_id="call-1",
+            result=ToolEnvelope(
+                success=True,
+                output=output,
+                metadata={"path": "/etc/example.conf", "host": "example.test"},
+            ),
+            arguments={"path": "/etc/example.conf", "host": "example.test"},
+        )
+    )
+
+    assert state.artifacts == {}
+    assert state.retrieval_cache == []
+    assert message.content == "alpha\nbeta\n"
+    assert "artifact_id" not in message.metadata

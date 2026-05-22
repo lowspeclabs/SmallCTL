@@ -73,6 +73,23 @@ def _verifier_failure_summary(verifier_verdict: dict[str, Any] | None) -> str:
     return " | ".join(bits)
 
 
+def _verifier_requires_human_approval(verifier_verdict: dict[str, Any] | None) -> bool:
+    if not isinstance(verifier_verdict, dict) or not verifier_verdict:
+        return False
+    if bool(verifier_verdict.get("approval_denied")):
+        return True
+    if str(verifier_verdict.get("verdict", "")).strip() == "needs_human":
+        return True
+    acceptance_delta = verifier_verdict.get("acceptance_delta")
+    if isinstance(acceptance_delta, dict):
+        status = str(acceptance_delta.get("status") or "").strip().lower()
+        if status == "pending":
+            notes = acceptance_delta.get("notes")
+            if isinstance(notes, list):
+                return any("denied by user" in str(note).strip().lower() for note in notes)
+    return False
+
+
 def _write_session_schema_failure(state: LoopState) -> dict[str, Any] | None:
     payload = state.scratchpad.get(_WRITE_SESSION_SCHEMA_FAILURE_KEY)
     if not isinstance(payload, dict) or not payload:
@@ -434,6 +451,43 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 session = state.write_session
 
         if str(session.status or "").strip().lower() != "complete":
+            # Fix 3 (RCA 8b79ca76): Track consecutive task_complete rejections
+            # for the same write session. Auto-abandon orphan sessions (no
+            # sections written, target file already exists) to prevent deadlock.
+            scratchpad = state.scratchpad
+            blocker_key = f"write_session:{session.write_session_id}"
+            last_blocker = scratchpad.get("_task_complete_last_blocker")
+            if last_blocker == blocker_key:
+                scratchpad["_task_complete_blocker_count"] = scratchpad.get("_task_complete_blocker_count", 0) + 1
+            else:
+                scratchpad["_task_complete_last_blocker"] = blocker_key
+                scratchpad["_task_complete_blocker_count"] = 1
+
+            if scratchpad.get("_task_complete_blocker_count", 0) >= 2:
+                has_no_sections = not session.write_sections_completed
+                from pathlib import Path
+                from ..tools.fs import _resolve
+                try:
+                    target = _resolve(session.write_target_path, getattr(state, "cwd", None))
+                    file_exists = target.exists() and target.is_file() and target.stat().st_size > 0
+                except Exception:
+                    file_exists = False
+
+                if has_no_sections and file_exists:
+                    record_write_session_event(
+                        state,
+                        event="session_abandoned",
+                        session=session,
+                        details={
+                            "reason": "auto_abandoned_orphan_session",
+                            "rejection_count": scratchpad["_task_complete_blocker_count"],
+                        },
+                    )
+                    state.write_session = None
+                    scratchpad.pop("_task_complete_last_blocker", None)
+                    scratchpad.pop("_task_complete_blocker_count", None)
+                    return await task_complete(message, state, harness)
+
             record_write_session_event(
                 state,
                 event="task_complete_blocked",
@@ -467,6 +521,23 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
     )
+    if (
+        verifier_verdict
+        and _verifier_requires_human_approval(verifier_verdict)
+        and not state.acceptance_waived
+    ):
+        error = "Cannot complete the task until the latest verifier check is approved or rerun with approval."
+        verifier_summary = _verifier_failure_summary(verifier_verdict)
+        if verifier_summary:
+            error = f"{error} Latest verifier: {verifier_summary}."
+        return fail(
+            error,
+            metadata={
+                "last_verifier_verdict": verifier_verdict,
+                "acceptance_checklist": state.acceptance_checklist(),
+                "approval_required": True,
+            },
+        )
     if (
         verifier_verdict
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}

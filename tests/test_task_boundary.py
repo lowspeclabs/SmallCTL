@@ -1101,3 +1101,83 @@ def test_unrelated_local_file_in_same_directory_still_hard_resets() -> None:
 
     assert state.run_brief.original_task == ""
     assert state.working_memory.known_facts == []
+
+
+def test_assistant_markdown_bold_options_are_persisted_in_last_task_handoff() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "rca vaultwarden ssl error and propose workarounds"
+    harness = _make_harness(state)
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    record_assistant_message(
+        harness,
+        assistant_text=(
+            "**Workaround options (pick one):**\n\n"
+            "**Option 1 — Fix DNS (recommended)**\n"
+            "Add a DNS A record.\n\n"
+            "**Option 2 — Edit /etc/hosts on your client machine (quick test)**\n"
+            "Edit your hosts file.\n\n"
+            "**Option 3 — Skip reverse proxy**\n"
+            "Use HTTP directly.\n\n"
+            "**Option 4 — Add Nginx reverse proxy with self-signed cert**\n"
+            "Install Nginx."
+        ),
+        tool_calls=[],
+    )
+
+    handoff = state.scratchpad["_last_task_handoff"]
+    assert len(handoff["action_options"]) == 4
+    assert handoff["action_options"][3] == {
+        "index": 4,
+        "title": "Add Nginx reverse proxy with self-signed cert",
+        "target_paths": [],
+    }
+
+
+def test_bare_option_number_resolves_when_action_options_exist() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "rca vaultwarden ssl error and propose workarounds"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "target_paths": [],
+        "action_options": [
+            {"index": 4, "title": "Add Nginx reverse proxy with self-signed cert", "target_paths": []}
+        ],
+    }
+    harness = _make_harness(state)
+
+    resolved = Harness._resolve_followup_task(harness, "option 4")
+
+    assert "Add Nginx reverse proxy with self-signed cert" in resolved
+    assert state.scratchpad["_resolved_followup"]["option_index"] == 4
+
+
+def test_bare_option_number_does_not_trigger_hard_task_switch() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "rca vaultwarden ssl error and propose workarounds"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "target_paths": [],
+        "action_options": [
+            {"index": 4, "title": "Add Nginx reverse proxy with self-signed cert", "target_paths": []}
+        ],
+    }
+    harness = _make_harness(state)
+
+    raw = "option 4"
+    resolved = Harness._resolve_followup_task(harness, raw)
+    Harness._maybe_reset_for_new_task(harness, resolved, raw_task=raw)
+
+    # Should be treated as an ITERATION (soft switch), not a NEW_TASK (hard switch)
+    tx = state.scratchpad.get("_task_transaction", {})
+    assert tx.get("turn_type") == "ITERATION"
+    # Memory should be preserved, not wiped
+    assert state.working_memory.current_goal == prior

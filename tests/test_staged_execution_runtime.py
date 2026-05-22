@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from smallctl.graph.runtime_staged import StagedExecutionRuntime
 from smallctl.graph.state import PendingToolCall
-from smallctl.graph.test_time_scaling import FileSnapshotGuard, ProposalCandidate, _candidate_history
+from smallctl.graph.test_time_scaling import FileSnapshotGuard, ProposalCandidate, _candidate_history, _copy_workspace_for_candidate
 from smallctl.harness import Harness
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.models.tool_result import ToolEnvelope
@@ -104,6 +104,24 @@ def test_file_snapshot_guard_keeps_existing_parent_directories(tmp_path: Path) -
 
     assert existing.exists()
     assert not target.exists()
+
+
+def test_copy_workspace_for_candidate_skips_generated_heavy_directories(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    sandbox = tmp_path / "sandbox"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "answer.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+    for name in (".smallctl", "logs", ".cache", "node_modules", "build", "dist", "target", "htmlcov"):
+        directory = root / name
+        directory.mkdir()
+        (directory / "heavy.txt").write_text("skip me\n", encoding="utf-8")
+
+    _copy_workspace_for_candidate(root, sandbox)
+
+    assert (sandbox / "src" / "answer.py").exists()
+    for name in (".smallctl", "logs", ".cache", "node_modules", "build", "dist", "target", "htmlcov"):
+        assert not (sandbox / name).exists()
 
 
 def test_test_time_scaling_candidate_history_includes_tools_scores_and_safety() -> None:
@@ -214,6 +232,7 @@ def test_sequential_branch_scaling_isolates_failed_local_file_mutation(tmp_path:
     assert call_count == 2
     assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "def answer():\n    return 42\n"
     metrics = harness.state.scratchpad["_recovery_metrics"]
+    assert metrics["test_time_scaling_attempts"] == 1
     assert metrics["test_time_scaling_isolated_branch_attempts"] == 2
     last = metrics["test_time_scaling_last"]
     assert last["selected_candidate"] == 2

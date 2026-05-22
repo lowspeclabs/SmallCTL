@@ -9,6 +9,8 @@ from .tool_result_artifact_updates import apply_artifact_success_outcome as _app
 
 logger = logging.getLogger("smallctl.harness.tool_results")
 
+_OUTCOME_ONLY_TOOLS = {"file_read", "ssh_file_read", "ssh_exec"}
+
 
 async def apply_persisted_artifact_outcome(
     service: Any,
@@ -19,7 +21,7 @@ async def apply_persisted_artifact_outcome(
     arguments: dict[str, Any] | None,
     operation_id: str | None,
 ) -> Any:
-    if artifact or tool_name == "ssh_exec":
+    if artifact or tool_name in _OUTCOME_ONLY_TOOLS:
         _apply_artifact_success_outcome(
             service,
             tool_name=tool_name,

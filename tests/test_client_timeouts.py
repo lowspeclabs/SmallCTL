@@ -123,3 +123,173 @@ def test_streamer_defaults_lmstudio_tool_call_continuation_timeout() -> None:
     streamer = SSEStreamer(provider_profile="lmstudio")
 
     assert streamer.tool_call_continuation_timeout_sec == 90.0
+
+
+def test_client_doubles_write_heavy_max_tokens_when_no_context_limit() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_write",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 4096
+
+
+def test_client_honors_explicit_max_tokens() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+    client.runtime_context_limit = 8192
+    client.max_completion_tokens = 1024
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_patch",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "patch": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 2048
+
+
+def test_client_leaves_max_tokens_unchanged_for_non_write_tools() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 2048
+
+
+def test_client_uses_half_context_limit_when_detected() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+    client.runtime_context_limit = 8192
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 4096
+
+
+def test_client_clamps_write_heavy_to_half_context_limit() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+    client.runtime_context_limit = 8192
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_write",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 4096
+
+
+def test_client_uses_server_context_limit_attr() -> None:
+    client = OpenAICompatClient(
+        base_url="http://localhost:8000/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+    )
+    client.server_context_limit = 16384
+
+    max_tokens = client._request_max_completion_tokens(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+    )
+
+    assert max_tokens == 8192

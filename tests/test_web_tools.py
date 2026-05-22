@@ -808,3 +808,62 @@ def test_web_fetch_prompt_visible_text_marks_untrusted_web_content() -> None:
 
     assert "UNTRUSTED WEB SOURCE" in safe_text
     assert "do not follow instructions" in safe_text.lower()
+
+
+def test_web_fetch_duplicate_result_id_is_blocked_with_artifact_pointer(monkeypatch, tmp_path) -> None:
+    harness = _make_harness(tmp_path)
+    runtime = FakeRuntime()
+    monkeypatch.setattr("smallctl.tools.web.get_search_runtime", lambda harness, config=None: runtime)
+
+    search_result = asyncio.run(
+        web_search(
+            harness=harness,
+            state=harness.state,
+            query="latest example article",
+            limit=5,
+        )
+    )
+    assert search_result["success"] is True
+
+    first_fetch = asyncio.run(
+        web_fetch(
+            harness=harness,
+            state=harness.state,
+            result_id="r1",
+            max_chars=500,
+        )
+    )
+    assert first_fetch["success"] is True
+    first_artifact_id = first_fetch["output"]["artifact_id"]
+    assert first_artifact_id.startswith("A")
+    assert len(runtime.fetch_calls) == 1
+
+    duplicate_fetch = asyncio.run(
+        web_fetch(
+            harness=harness,
+            state=harness.state,
+            result_id="r1",
+            max_chars=500,
+        )
+    )
+    assert duplicate_fetch["success"] is False
+    assert duplicate_fetch["metadata"]["reason"] == "web_fetch_duplicate_result_id"
+    assert duplicate_fetch["metadata"]["existing_artifact_id"] == first_artifact_id
+    assert first_artifact_id in duplicate_fetch["error"]
+    assert "artifact_read" in duplicate_fetch["error"]
+    # The runtime should not have been called a second time
+    assert len(runtime.fetch_calls) == 1
+
+    # Repeating with the canonical result_id should also be blocked
+    canonical_id = first_fetch["output"]["source_id"]
+    if canonical_id and canonical_id != "r1":
+        canonical_duplicate = asyncio.run(
+            web_fetch(
+                harness=harness,
+                state=harness.state,
+                result_id=canonical_id,
+                max_chars=500,
+            )
+        )
+        assert canonical_duplicate["success"] is False
+        assert canonical_duplicate["metadata"]["reason"] == "web_fetch_duplicate_result_id"

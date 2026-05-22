@@ -21,8 +21,8 @@ def register_filesystem_tools(
                 name="file_read",
                 description=(
                     "Read a LOCAL text file with optional line slicing. Paths resolve relative to the current cwd. "
-                    "For large files, read in chunks to avoid context overflow. If a file was recently written in 'chunked_build' mode, "
-                    "verify the final output after the last section is written. "
+                    "For large files, the full content is stored as an artifact; use artifact_read with the returned artifact_id for paging. "
+                    "If a file was recently written in 'chunked_build' mode, verify the final output after the last section is written. "
                     "This tool operates on the LOCAL orchestrator filesystem ONLY. Never use it to verify remote files."
                 ),
                 schema={
@@ -90,8 +90,9 @@ def register_filesystem_tools(
             make_registration(
                 name="file_patch",
                 description=(
-                    "Patch a file by replacing exact target text with replacement text. "
+                    "Patch a file by replacing exact target text, or an explicit regex, with replacement text. "
                     "Use this for small, precise edits to an existing file or active staged write session. "
+                    "Use `dry_run=true` to preview the diff without writing. "
                     "Never use `target_text=''` to create or replace a file; use `file_write` with `replace_strategy='overwrite'` for initial content or full replacement. "
                     "During an active write session, always patch the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
                 ),
@@ -102,6 +103,12 @@ def register_filesystem_tools(
                         "target_text": {"type": "string", "description": "Exact text to replace, including whitespace."},
                         "replacement_text": {"type": "string", "description": "Text to insert in place of the target text."},
                         "expected_occurrences": {"type": "integer", "description": "Expected number of exact matches. Defaults to 1."},
+                        "occurrence_index": {"type": "integer", "description": "Optional one-based occurrence to replace after validating expected_occurrences against all matches."},
+                        "regex": {"type": "boolean", "description": "Treat target_text as a Python regular expression instead of exact text."},
+                        "case_insensitive": {"type": "boolean", "description": "Regex mode only: use case-insensitive matching."},
+                        "multiline": {"type": "boolean", "description": "Regex mode only: make ^ and $ match line boundaries."},
+                        "dotall": {"type": "boolean", "description": "Regex mode only: make . match newlines."},
+                        "dry_run": {"type": "boolean", "description": "Preview the patch and unified diff without writing or mutating write-session state."},
                         "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
                         "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
                     },

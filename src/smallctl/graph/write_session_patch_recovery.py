@@ -341,6 +341,35 @@ def _clear_patch_existing_stage_read_autocontinue_count_after_success(
     return True
 
 
+def _recent_successful_mutation_on_same_path(harness: Any, target_path: str) -> bool:
+    records = getattr(harness.state, "tool_execution_records", None)
+    if not isinstance(records, dict):
+        return False
+    for record in reversed(list(records.values())):
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "") not in {"file_patch", "ast_patch", "file_write", "file_append"}:
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict) or not result.get("success"):
+            continue
+        args = record.get("args", {})
+        if not isinstance(args, dict):
+            continue
+        record_path = str(args.get("path") or "").strip()
+        if not record_path:
+            continue
+        try:
+            from ..tools.fs import _same_target_path
+
+            if _same_target_path(record_path, target_path, getattr(harness.state, "cwd", None)):
+                return True
+        except Exception:
+            if record_path == target_path:
+                return True
+    return False
+
+
 def _maybe_schedule_file_patch_read_recovery(
     graph_state: GraphRunState,
     harness: Any,
@@ -351,7 +380,11 @@ def _maybe_schedule_file_patch_read_recovery(
 
     metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
     error_kind = str(metadata.get("error_kind") or "").strip()
-    if error_kind not in {"patch_target_not_found", "patch_occurrence_mismatch"}:
+    if error_kind not in {
+        "patch_target_not_found",
+        "patch_occurrence_mismatch",
+        "repeat_sensitive_patch_already_applied",
+    }:
         return False
 
     target_path = str(
@@ -363,6 +396,7 @@ def _maybe_schedule_file_patch_read_recovery(
     if not target_path:
         return False
 
+    recent_success = _recent_successful_mutation_on_same_path(harness, target_path)
     recovery_key = _file_patch_recovery_key(record, target_path=target_path)
     raw_counts = harness.state.scratchpad.get("_file_patch_recovery_counts")
     counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
@@ -383,10 +417,19 @@ def _maybe_schedule_file_patch_read_recovery(
         return False
     harness.state.scratchpad["_file_patch_read_autocontinue"] = signature
 
+    next_required_tool = metadata.get("next_required_tool")
+    next_args = {"path": target_path}
+    if isinstance(next_required_tool, dict) and str(next_required_tool.get("tool_name") or "").strip() == "file_read":
+        required_arguments = next_required_tool.get("required_arguments")
+        if isinstance(required_arguments, dict):
+            candidate_args = dict(required_arguments)
+            if str(candidate_args.get("path") or "").strip():
+                next_args = candidate_args
+
     pending = PendingToolCall(
         tool_name="file_read",
-        args={"path": target_path},
-        raw_arguments=json.dumps({"path": target_path}, ensure_ascii=True, sort_keys=True),
+        args=next_args,
+        raw_arguments=json.dumps(next_args, ensure_ascii=True, sort_keys=True),
         source="system",
     )
     graph_state.pending_tool_calls = [pending]
@@ -402,27 +445,55 @@ def _maybe_schedule_file_patch_read_recovery(
             "recovery_count": recovery_count,
             "operation_id": record.operation_id,
             "tool_call_id": record.tool_call_id,
+            "next_required_tool": next_required_tool if isinstance(next_required_tool, dict) else {},
         },
     )
     from .tool_call_parser import allow_repeated_tool_call_once
 
-    allow_repeated_tool_call_once(harness, "file_read", {"path": target_path})
-    harness.state.append_message(
-        ConversationMessage(
-            role="system",
-            content=(
-                f"Auto-continuing patch recovery for `{target_path}`: "
-                f"reading the current file with `file_read(path='{target_path}')` before asking for another patch."
-            ),
-            metadata={
-                "is_recovery_nudge": True,
-                "recovery_kind": "file_patch_read_autocontinue",
-                "target_path": target_path,
-                "error_kind": error_kind,
-            },
+    allow_repeated_tool_call_once(harness, "file_read", next_args)
+    if recent_success:
+        plan_note = ""
+        active_step_id = str(getattr(harness.state, "active_step_id", "") or "").strip()
+        if getattr(harness.state, "plan_execution_mode", False) and active_step_id:
+            plan_note = (
+                " If this patch was part of an active plan step, the step may already be satisfied; "
+                "call `step_complete(message='...')` after verifying."
+            )
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"Auto-continuing patch recovery for `{target_path}`: "
+                    f"reading the current file with `file_read(path='{target_path}')` to verify whether the intended edit is already applied. "
+                    f"The file was recently mutated successfully. If the target text is missing because the edit was already applied, "
+                    f"verify the current content and call `task_complete` instead of retrying `file_patch`."
+                    f"{plan_note}"
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "file_patch_already_applied_verify",
+                    "target_path": target_path,
+                    "error_kind": error_kind,
+                },
+            )
         )
-    )
-    if recovery_count >= 2:
+    else:
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"Auto-continuing patch recovery for `{target_path}`: "
+                    f"reading the current file with `file_read(path='{target_path}')` before asking for another patch."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "file_patch_read_autocontinue",
+                    "target_path": target_path,
+                    "error_kind": error_kind,
+                },
+            )
+        )
+    if recovery_count >= 2 and not recent_success:
         _maybe_emit_ast_patch_recovery_nudge(
             harness,
             record,
@@ -438,6 +509,7 @@ def _maybe_schedule_file_patch_read_recovery(
         target_path=target_path,
         error_kind=error_kind,
         recovery_count=recovery_count,
+        recent_success=recent_success,
     )
     return True
 

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from smallctl.guards import GuardConfig, check_guards
 from smallctl.graph.recovery_context import build_goal_recap
 from smallctl.graph.chat_progress import should_pause_repeated_tool_loop, build_repeated_tool_loop_interrupt_payload
+from smallctl.graph.chat_progress import looks_like_freeze_or_hang as chat_progress_freeze_guard
+from smallctl.graph.node_support import looks_like_freeze_or_hang as node_support_freeze_guard
 from smallctl.graph.nodes import LoopRoute, interpret_model_output
 from smallctl.graph.state import PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop, _record_tool_attempt
@@ -128,6 +130,36 @@ def test_stream_halt_without_done_gets_goal_recap_nudge_for_any_model() -> None:
     assert "Goal recap:" in message.content
     assert "Run nmap on localhost and report open ports" in message.content
     assert "explore: wait for scan output" in message.content
+
+
+def test_declared_file_read_without_tool_call_is_synthesized() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.state.run_brief.original_task = "read ./temp/pong.py, what is the first bug you see in that script?"
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="chat",
+            pending_tool_calls=[],
+            last_assistant_text="I need to read the file ./temp/pong.py to identify the first bug. Let me call file_read to read this file.",
+            last_thinking_text="",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    harness, graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "file_read"
+    assert pending.args == {"path": "./temp/pong.py"}
+    assert pending.source == "system"
+    assert harness.state.scratchpad["_declared_file_read_synthesized"]["path"] == "./temp/pong.py"
 
 
 def test_goal_recap_omits_stale_task_boundary_goal() -> None:
@@ -473,6 +505,31 @@ def test_repeated_assistant_analysis_no_tools_is_no_progress() -> None:
     graph_state3 = _make_graph_state(assistant_text=text)
     _update_progress_tracking(harness, graph_state3)
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 2
+
+
+def test_freeze_guard_ignores_current_recorded_assistant_message() -> None:
+    harness = _FakeHarness()
+    text = "I need to inspect the current state before choosing the next tool."
+    harness.state.recent_messages = [
+        SimpleNamespace(role="user", content="continue"),
+        SimpleNamespace(role="assistant", content=text),
+    ]
+
+    assert chat_progress_freeze_guard(harness, text) is False
+    assert node_support_freeze_guard(harness, text) is False
+
+
+def test_freeze_guard_detects_repeated_assistant_message_in_history() -> None:
+    harness = _FakeHarness()
+    text = "I need to inspect the current state before choosing the next tool."
+    harness.state.recent_messages = [
+        SimpleNamespace(role="assistant", content=text),
+        SimpleNamespace(role="user", content="continue"),
+        SimpleNamespace(role="assistant", content=text),
+    ]
+
+    assert chat_progress_freeze_guard(harness, text) is True
+    assert node_support_freeze_guard(harness, text) is True
 
 
 def test_new_artifact_range_is_progress() -> None:

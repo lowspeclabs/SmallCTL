@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from dataclasses import dataclass
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Iterable
 
 from ..client import OpenAICompatClient, StreamResult
 from ..client.chunk_parser import chunk_contains_tool_call_delta
@@ -31,7 +33,34 @@ from .model_stream_loop_recovery import handle_model_stream_chunk_error
 
 _REASONING_ONLY_MAX_SECONDS = 60.0
 _REASONING_ONLY_MAX_CHUNKS = 4096
+_REASONING_ONLY_TOOL_MAX_SECONDS = 25.0
+_REASONING_ONLY_TOOL_MAX_CHUNKS = 1500
 _REASONING_ONLY_MAX_RETRIES = 1
+_REASONING_PROGRESS_MIN_FRAGMENTS = 4
+_REASONING_PROGRESS_MIN_UNIQUE_RATIO = 0.35
+_REASONING_PROGRESS_MIN_DISTINCT_WORDS = 12
+_REASONING_PROGRESS_MIN_NOVEL_WORDS = 4
+_REASONING_WORD_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{2,}")
+
+
+@dataclass(frozen=True)
+class _ReasoningProgressAssessment:
+    progress: bool
+    fragment_count: int
+    unique_ratio: float
+    distinct_word_count: int
+    novel_word_count: int
+    novel_word_ratio: float
+
+    def to_log_dict(self) -> dict[str, int | float | bool]:
+        return {
+            "progress": self.progress,
+            "fragment_count": self.fragment_count,
+            "unique_ratio": round(self.unique_ratio, 3),
+            "distinct_word_count": self.distinct_word_count,
+            "novel_word_count": self.novel_word_count,
+            "novel_word_ratio": round(self.novel_word_ratio, 3),
+        }
 
 
 def _chunk_delta(event: dict[str, Any]) -> dict[str, Any]:
@@ -52,9 +81,85 @@ def _chunk_has_assistant_content(event: dict[str, Any]) -> bool:
 
 
 def _chunk_has_reasoning(event: dict[str, Any]) -> bool:
+    return bool(_chunk_reasoning_text(event))
+
+
+def _chunk_reasoning_text(event: dict[str, Any]) -> str:
     delta = _chunk_delta(event)
-    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-    return isinstance(reasoning, str) and bool(reasoning)
+    for key in ("reasoning_content", "reasoning"):
+        reasoning = delta.get(key)
+        if isinstance(reasoning, str) and reasoning:
+            return reasoning
+    return ""
+
+
+def _assess_reasoning_fragments_progress(fragments: Iterable[str]) -> _ReasoningProgressAssessment:
+    normalized = [" ".join(fragment.lower().split()) for fragment in fragments if fragment.strip()]
+    fragment_count = len(normalized)
+    unique_ratio = len(set(normalized)) / max(1, fragment_count)
+    midpoint = max(1, fragment_count // 2)
+    early_words = set(_REASONING_WORD_RE.findall(" ".join(normalized[:midpoint])))
+    late_words = set(_REASONING_WORD_RE.findall(" ".join(normalized[midpoint:])))
+    words = early_words | late_words
+    novel_word_count = len(late_words - early_words)
+    novel_word_ratio = novel_word_count / max(1, len(late_words))
+    progress = (
+        fragment_count >= _REASONING_PROGRESS_MIN_FRAGMENTS
+        and unique_ratio >= _REASONING_PROGRESS_MIN_UNIQUE_RATIO
+        and len(words) >= _REASONING_PROGRESS_MIN_DISTINCT_WORDS
+        and novel_word_count >= _REASONING_PROGRESS_MIN_NOVEL_WORDS
+    )
+    return _ReasoningProgressAssessment(
+        progress=progress,
+        fragment_count=fragment_count,
+        unique_ratio=unique_ratio,
+        distinct_word_count=len(words),
+        novel_word_count=novel_word_count,
+        novel_word_ratio=novel_word_ratio,
+    )
+
+
+def _reasoning_fragments_show_progress(fragments: Iterable[str]) -> bool:
+    return _assess_reasoning_fragments_progress(fragments).progress
+
+
+def _tool_names(tools: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _reasoning_only_limits(tools: list[dict[str, Any]]) -> tuple[float, int]:
+    if not tools:
+        return _REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_MAX_CHUNKS
+    return (
+        min(_REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_TOOL_MAX_SECONDS),
+        min(_REASONING_ONLY_MAX_CHUNKS, _REASONING_ONLY_TOOL_MAX_CHUNKS),
+    )
+
+
+def _build_reasoning_only_nudge(tools: list[dict[str, Any]]) -> str:
+    names = _tool_names(tools)
+    if "escalate_to_bigger_model" in names:
+        return (
+            "The prior response stream spent too long in reasoning without producing assistant content "
+            "or a tool call. Continue now with a concrete action: call file/read tools if you can make "
+            "progress, or call escalate_to_bigger_model if you are stuck or need stronger reasoning. "
+            "Do not continue hidden reasoning only."
+        )
+    return (
+        "The prior response stream spent too long in reasoning without producing assistant content "
+        "or a tool call. Continue now by calling an appropriate available tool, or answer directly if "
+        "no tool is needed. Do not continue hidden reasoning only."
+    )
 
 
 async def run_model_stream_loop(
@@ -94,8 +199,14 @@ async def run_model_stream_loop(
             chunks = []
             stream_state = StreamTagState()
             _retry_immediately = False
+            _stop_after_reasoning_only_stall = False
             attempt_started_at = time.monotonic()
             reasoning_only_chunks = 0
+            reasoning_only_max_seconds, reasoning_only_max_chunks = _reasoning_only_limits(tools)
+            reasoning_only_base_seconds = reasoning_only_max_seconds
+            reasoning_only_base_chunks = reasoning_only_max_chunks
+            reasoning_only_progress_deferred = False
+            reasoning_only_fragments: deque[str] = deque(maxlen=512)
             saw_assistant_content = False
             saw_tool_call = False
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
@@ -251,56 +362,123 @@ async def run_model_stream_loop(
                 if event.get("type") == "chunk":
                     saw_tool_call = saw_tool_call or chunk_contains_tool_call_delta(event.get("data", {}))
                     saw_assistant_content = saw_assistant_content or _chunk_has_assistant_content(event)
-                    if _chunk_has_reasoning(event) and not saw_assistant_content and not saw_tool_call:
+                    reasoning_text = _chunk_reasoning_text(event)
+                    if reasoning_text and not saw_assistant_content and not saw_tool_call:
                         reasoning_only_chunks += 1
+                        reasoning_only_fragments.append(reasoning_text)
                     if (
                         tools
                         and not saw_assistant_content
                         and not saw_tool_call
-                        and reasoning_only_retries < _REASONING_ONLY_MAX_RETRIES
                         and (
-                            reasoning_only_chunks >= _REASONING_ONLY_MAX_CHUNKS
-                            or (time.monotonic() - attempt_started_at) >= _REASONING_ONLY_MAX_SECONDS
+                            reasoning_only_chunks >= reasoning_only_max_chunks
+                            or (time.monotonic() - attempt_started_at) >= reasoning_only_max_seconds
                         )
                     ):
-                        reasoning_only_retries += 1
-                        nudge = (
-                            "The prior response stream spent too long in reasoning without producing assistant "
-                            "content or a tool call. Continue now by calling an appropriate available tool, or "
-                            "answer directly if no tool is needed. Do not continue hidden reasoning only."
-                        )
-                        messages = list(messages) + [ConversationMessage(role="user", content=nudge).to_dict()]
-                        harness.state.scratchpad["_last_reasoning_only_retry"] = {
-                            "attempt": _model_attempt + 1,
-                            "reasoning_only_chunks": reasoning_only_chunks,
-                            "tools_available": [
-                                str((tool.get("function") or {}).get("name") or "").strip()
-                                for tool in tools
-                                if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-                            ],
-                        }
-                        harness._runlog(
-                            "reasoning_only_stream_retry",
-                            "retrying model call after reasoning-only stream stall",
-                            attempt=_model_attempt + 1,
-                            reasoning_only_chunks=reasoning_only_chunks,
-                            elapsed_seconds=round(time.monotonic() - attempt_started_at, 3),
-                            tool_count=len(tools),
-                        )
-                        await harness._emit(
-                            deps.event_handler,
-                            UIEvent(
-                                event_type=UIEventType.ALERT,
-                                content="Model stream stalled in reasoning; retrying with a tool/action nudge.",
-                                data={
+                        elapsed_seconds = round(time.monotonic() - attempt_started_at, 3)
+                        tool_names = _tool_names(tools)
+                        hard_max_seconds = max(reasoning_only_max_seconds, _REASONING_ONLY_MAX_SECONDS)
+                        hard_max_chunks = max(reasoning_only_max_chunks, _REASONING_ONLY_MAX_CHUNKS)
+                        progress_assessment = _assess_reasoning_fragments_progress(reasoning_only_fragments)
+                        progress_details = progress_assessment.to_log_dict()
+                        if (
+                            not reasoning_only_progress_deferred
+                            and (
+                                reasoning_only_max_seconds < hard_max_seconds
+                                or reasoning_only_max_chunks < hard_max_chunks
+                            )
+                            and progress_assessment.progress
+                        ):
+                            reasoning_only_progress_deferred = True
+                            reasoning_only_max_seconds = hard_max_seconds
+                            reasoning_only_max_chunks = hard_max_chunks
+                            harness._runlog(
+                                "reasoning_only_stream_progress_defer",
+                                "reasoning-only stream is still changing; extending to hard guard budget",
+                                attempt=_model_attempt + 1,
+                                reasoning_only_chunks=reasoning_only_chunks,
+                                elapsed_seconds=elapsed_seconds,
+                                base_max_seconds=reasoning_only_base_seconds,
+                                base_max_chunks=reasoning_only_base_chunks,
+                                hard_max_seconds=hard_max_seconds,
+                                hard_max_chunks=hard_max_chunks,
+                                tool_count=len(tools),
+                                tools_available=tool_names,
+                                **progress_details,
+                            )
+                        else:
+                            if reasoning_only_retries >= _REASONING_ONLY_MAX_RETRIES:
+                                stream_ended_without_done = True
+                                stream_ended_without_done_details = {
                                     "reason": "reasoning_only_stream_stall",
-                                    "retrying": True,
+                                    "retrying": False,
+                                    "attempt": _model_attempt + 1,
                                     "reasoning_only_chunks": reasoning_only_chunks,
-                                },
-                            ),
-                        )
-                        _retry_immediately = True
-                        break
+                                    "elapsed_seconds": elapsed_seconds,
+                                    "tools_available": tool_names,
+                                    "progress": progress_details,
+                                }
+                                harness.state.scratchpad["_last_reasoning_only_stall"] = dict(
+                                    stream_ended_without_done_details
+                                )
+                                harness._runlog(
+                                    "reasoning_only_stream_halt",
+                                    "halting model call after repeated reasoning-only stream stall",
+                                    attempt=_model_attempt + 1,
+                                    reasoning_only_chunks=reasoning_only_chunks,
+                                    elapsed_seconds=elapsed_seconds,
+                                    tool_count=len(tools),
+                                    tools_available=tool_names,
+                                    **progress_details,
+                                )
+                                await harness._emit(
+                                    deps.event_handler,
+                                    UIEvent(
+                                        event_type=UIEventType.ALERT,
+                                        content=(
+                                            "Model stream stayed in reasoning after recovery; handing off to "
+                                            "halt recovery/escalation logic."
+                                        ),
+                                        data=stream_ended_without_done_details,
+                                    ),
+                                )
+                                _stop_after_reasoning_only_stall = True
+                                break
+                            reasoning_only_retries += 1
+                            nudge = _build_reasoning_only_nudge(tools)
+                            messages = list(messages) + [ConversationMessage(role="user", content=nudge).to_dict()]
+                            harness.state.scratchpad["_last_reasoning_only_retry"] = {
+                                "attempt": _model_attempt + 1,
+                                "reasoning_only_chunks": reasoning_only_chunks,
+                                "elapsed_seconds": elapsed_seconds,
+                                "tools_available": tool_names,
+                                "progress": progress_details,
+                            }
+                            harness._runlog(
+                                "reasoning_only_stream_retry",
+                                "retrying model call after reasoning-only stream stall",
+                                attempt=_model_attempt + 1,
+                                reasoning_only_chunks=reasoning_only_chunks,
+                                elapsed_seconds=elapsed_seconds,
+                                tool_count=len(tools),
+                                tools_available=tool_names,
+                                **progress_details,
+                            )
+                            await harness._emit(
+                                deps.event_handler,
+                                UIEvent(
+                                    event_type=UIEventType.ALERT,
+                                    content="Model stream stalled in reasoning; retrying with a tool/action nudge.",
+                                    data={
+                                        "reason": "reasoning_only_stream_stall",
+                                        "retrying": True,
+                                        "reasoning_only_chunks": reasoning_only_chunks,
+                                        "elapsed_seconds": elapsed_seconds,
+                                    },
+                                ),
+                            )
+                            _retry_immediately = True
+                            break
                     stream_state, first_token_time = await handle_model_stream_chunk(
                         harness=harness,
                         deps=deps,
@@ -326,6 +504,8 @@ async def run_model_stream_loop(
                 break
 
             if _trigger_early_4b_fallback:
+                break
+            if _stop_after_reasoning_only_stall:
                 break
             if _retry_immediately:
                 continue

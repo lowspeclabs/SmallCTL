@@ -331,6 +331,16 @@ def filter_tools_for_runtime_state(
     has_plan = _has_plan(state)
     has_background_jobs = _has_background_jobs(state)
 
+    scratchpad = getattr(state, "scratchpad", {}) or {}
+    suppressed_tool = str(scratchpad.get("_repeated_tool_loop_suppressed_tool") or "").strip()
+    suppressed_ttl = int(scratchpad.get("_repeated_tool_loop_suppressed_ttl", 0) or 0)
+    if suppressed_tool and suppressed_ttl > 0:
+        scratchpad["_repeated_tool_loop_suppressed_ttl"] = suppressed_ttl - 1
+    else:
+        suppressed_tool = ""
+        scratchpad.pop("_repeated_tool_loop_suppressed_tool", None)
+        scratchpad.pop("_repeated_tool_loop_suppressed_ttl", None)
+
     filtered: list[dict[str, Any]] = []
     for entry in tools:
         tool_name = _tool_name(entry)
@@ -343,6 +353,8 @@ def filter_tools_for_runtime_state(
         if tool_name in _BACKGROUND_JOB_TOOL_NAMES and not has_background_jobs:
             continue
         if tool_name == "finalize_write_session" and not can_finalize_write_session:
+            continue
+        if suppressed_tool and tool_name == suppressed_tool:
             continue
         filtered.append(entry)
     return filtered
@@ -420,11 +432,26 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
             "names": _tool_names(schemas),
         }
 
+    profiles = set(harness.state.active_tool_profiles)
+    active_intent = str(getattr(harness.state, "active_intent", "") or "").strip().lower()
+    if active_intent in {
+        "author_write",
+        "write_file",
+        "requested_write_file",
+        "requested_file_write",
+        "requested_file_append",
+        "requested_file_patch",
+        "requested_ast_patch",
+        "requested_file_delete",
+    }:
+        profiles.add("mutate")
+    if profiles != set(harness.state.active_tool_profiles):
+        harness.state.active_tool_profiles = sorted(profiles)
     schemas = _export_registry_tools(
         harness,
         phase=harness.state.current_phase,
         mode=normalized_mode,
-        profiles=set(harness.state.active_tool_profiles),
+        profiles=profiles,
     )
     schemas = filter_tools_for_runtime_state(
         schemas,

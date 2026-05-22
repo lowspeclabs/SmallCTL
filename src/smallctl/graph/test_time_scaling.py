@@ -389,6 +389,7 @@ async def run_sequential_branch_scaling(
 ) -> ProposalCandidate | None:
     harness = deps.harness
     config = getattr(harness, "config", None)
+    increment_metric(harness.state, "test_time_scaling_attempts")
     candidates = await generate_proposal_candidates(
         graph_state,
         deps,
@@ -1032,8 +1033,18 @@ def _copy_workspace_for_candidate(root: Path, sandbox: Path) -> None:
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",
+        ".coverage",
+        "htmlcov",
+        ".tox",
+        ".nox",
+        ".cache",
+        "logs",
         ".smallctl",
         "node_modules",
+        "build",
+        "dist",
+        "target",
+        ".gradle",
     )
     shutil.copytree(root, sandbox, ignore=ignore)
 

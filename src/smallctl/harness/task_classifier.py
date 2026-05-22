@@ -57,6 +57,18 @@ _WRITE_FILE_CREATION_MARKERS = (
     "save",
     "produce",
 )
+_READONLY_SUGGESTION_MARKERS = (
+    "list improvement",
+    "list improvements",
+    "improvements you would make",
+    "improvements would you make",
+    "what improvements",
+    "recommend improvements",
+    "suggest improvements",
+    "suggest changes",
+    "would change",
+    "would improve",
+)
 _CODE_TARGET_RE = re.compile(
     r"\b(?:file|script|code|source|module|repo|repository)\b|(?:^|[\s`'\"(])[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json)\b",
     re.IGNORECASE,
@@ -170,6 +182,20 @@ _SSH_AUTH_MARKERS = (
     "ssh keys",
     "authorized_keys",
     "authorized keys",
+)
+_LOCAL_SHELL_OVERRIDE_RE = re.compile(
+    r"\b(?:use\s+)?shell_exec\b.*\bno\s+(?:ssh|ssh_exec)\b"
+    r"|"
+    r"\bno\s+(?:ssh|ssh_exec)\b.*\b(?:use\s+)?shell_exec\b"
+    r"|"
+    r"\buse\s+shell\s+exec\b.*\bno\s+ssh\b"
+    r"|"
+    r"\buse\s+local\s+shell_exec\b"
+    r"|"
+    r"\bshell_exec\b.*\blocal\b"
+    r"|"
+    r"\blocal\b.*\bshell_exec\b",
+    re.IGNORECASE,
 )
 _READONLY_FILE_TARGETS = (
     "file",
@@ -346,6 +372,8 @@ def classify_task_mode(task: str) -> str:
     text = task.strip()
     if not text:
         return "chat"
+    if _LOCAL_SHELL_OVERRIDE_RE.search(text):
+        return "local_execute"
     lowered = text.lower()
     if is_smalltalk(text):
         return "chat"
@@ -516,6 +544,8 @@ def looks_like_write_patch_request(task: str) -> bool:
 def looks_like_write_file_request(task: str) -> bool:
     text = str(task or "").strip().lower()
     if not text:
+        return False
+    if any(marker in text for marker in _READONLY_SUGGESTION_MARKERS):
         return False
     has_creation_marker = any(marker in text for marker in _WRITE_FILE_CREATION_MARKERS)
     has_code_target = "script" in text or bool(_CODE_TARGET_RE.search(text))

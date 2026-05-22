@@ -7,7 +7,8 @@ from typing import Any
 from ..state import LoopState
 from .common import fail, ok
 from .fs_patching import (
-    _apply_exact_patch,
+    _apply_exact_patch_plan,
+    _apply_regex_patch_plan,
     _build_patch_best_match,
     _build_patch_ambiguity_hint,
     _build_patch_failure_metadata,
@@ -210,6 +211,12 @@ async def handle_file_patch(
     write_session_id: str | None = None,
     expected_occurrences: int = 1,
     expected_followup_verifier: str | None = None,
+    dry_run: bool = False,
+    occurrence_index: int | None = None,
+    regex: bool = False,
+    case_insensitive: bool = False,
+    multiline: bool = False,
+    dotall: bool = False,
 ) -> dict[str, Any]:
     from .fs import _guard_suspicious_temp_root_path, _mark_repeat_patch, _resolve
 
@@ -277,6 +284,33 @@ async def handle_file_patch(
                 "expected_occurrences": normalized_expected_occurrences,
             },
         )
+
+    normalized_occurrence_index: int | None = None
+    if occurrence_index is not None:
+        try:
+            normalized_occurrence_index = int(occurrence_index)
+        except (TypeError, ValueError):
+            return fail(
+                "`occurrence_index` must be a one-based integer.",
+                metadata={
+                    "path": str(target),
+                    "requested_path": path,
+                    "error_kind": "invalid_occurrence_index",
+                    "occurrence_index": occurrence_index,
+                    "expected_occurrences": normalized_expected_occurrences,
+                },
+            )
+        if normalized_occurrence_index < 1:
+            return fail(
+                "`occurrence_index` must be at least 1.",
+                metadata={
+                    "path": str(target),
+                    "requested_path": path,
+                    "error_kind": "invalid_occurrence_index",
+                    "occurrence_index": normalized_occurrence_index,
+                    "expected_occurrences": normalized_expected_occurrences,
+                },
+            )
 
     staging_guard = _guard_write_session_staging_mutation(
         tool_name="file_patch",
@@ -434,7 +468,7 @@ async def handle_file_patch(
                 },
             )
 
-    actual_occurrences = _count_exact_occurrences(source_text, normalized_target_text)
+    actual_occurrences = _count_exact_occurrences(source_text, normalized_target_text) if not regex else None
     if actual_occurrences == 0:
         ambiguity_hint = _build_patch_ambiguity_hint(
             actual_occurrences=actual_occurrences,
@@ -448,6 +482,7 @@ async def handle_file_patch(
                 error_kind="patch_target_not_found",
                 actual_occurrences=actual_occurrences,
                 expected_occurrences=normalized_expected_occurrences,
+                regex=bool(regex),
             ),
             metadata=_build_patch_failure_metadata(
                 path=target,
@@ -466,7 +501,7 @@ async def handle_file_patch(
                 },
             ),
         )
-    if actual_occurrences != normalized_expected_occurrences:
+    if actual_occurrences is not None and actual_occurrences != normalized_expected_occurrences:
         ambiguity_hint = _build_patch_ambiguity_hint(
             actual_occurrences=actual_occurrences,
             expected_occurrences=normalized_expected_occurrences,
@@ -479,6 +514,7 @@ async def handle_file_patch(
                 error_kind="patch_occurrence_mismatch",
                 actual_occurrences=actual_occurrences,
                 expected_occurrences=normalized_expected_occurrences,
+                regex=bool(regex),
             ),
             metadata=_build_patch_failure_metadata(
                 path=target,
@@ -523,13 +559,91 @@ async def handle_file_patch(
         )
 
     try:
-        updated_text, occurrence_count = _apply_exact_patch(
-            source_text,
-            normalized_target_text,
-            normalized_replacement_text,
-            expected_occurrences=normalized_expected_occurrences,
+        if regex:
+            plan = _apply_regex_patch_plan(
+                source_text,
+                normalized_target_text,
+                normalized_replacement_text,
+                expected_occurrences=normalized_expected_occurrences,
+                occurrence_index=normalized_occurrence_index,
+                case_insensitive=bool(case_insensitive),
+                multiline=bool(multiline),
+                dotall=bool(dotall),
+                fromfile=str(source_path),
+                tofile=str(source_path),
+                encoding=encoding,
+            )
+        else:
+            plan = _apply_exact_patch_plan(
+                source_text,
+                normalized_target_text,
+                normalized_replacement_text,
+                expected_occurrences=normalized_expected_occurrences,
+                occurrence_index=normalized_occurrence_index,
+                fromfile=str(source_path),
+                tofile=str(source_path),
+                encoding=encoding,
+            )
+    except re.error as exc:
+        return fail(
+            f"Invalid regex for file_patch: {exc}",
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="invalid_regex",
+                extra={
+                    "expected_occurrences": normalized_expected_occurrences,
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                },
+            ),
         )
-    except ValueError:
+    except ValueError as exc:
+        reason = str(exc)
+        if reason == "empty_regex_match":
+            return fail(
+                "Regex patch produced an empty match; use a pattern that consumes at least one character.",
+                metadata=_build_patch_failure_metadata(
+                    path=target,
+                    requested_path=path,
+                    source_path=source_path,
+                    staged_only=staged_only,
+                    session=session,
+                    error_kind="invalid_regex",
+                    extra={
+                        "expected_occurrences": normalized_expected_occurrences,
+                        "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                        "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                    },
+                ),
+            )
+        if reason == "invalid_occurrence_index":
+            return fail(
+                f"`occurrence_index` {normalized_occurrence_index} did not select an observed occurrence.",
+                metadata=_build_patch_failure_metadata(
+                    path=target,
+                    requested_path=path,
+                    source_path=source_path,
+                    staged_only=staged_only,
+                    session=session,
+                    error_kind="invalid_occurrence_index",
+                    extra={
+                        "occurrence_index": normalized_occurrence_index,
+                        "actual_occurrences": actual_occurrences,
+                        "expected_occurrences": normalized_expected_occurrences,
+                        "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                        "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                    },
+                ),
+            )
+        if actual_occurrences is None:
+            try:
+                actual_occurrences = int(reason)
+            except (TypeError, ValueError):
+                actual_occurrences = 0
         return fail(
             _build_patch_failure_message(
                 requested_path=path,
@@ -538,6 +652,7 @@ async def handle_file_patch(
                 error_kind="patch_occurrence_mismatch",
                 actual_occurrences=actual_occurrences,
                 expected_occurrences=normalized_expected_occurrences,
+                regex=bool(regex),
             ),
             metadata=_build_patch_failure_metadata(
                 path=target,
@@ -559,12 +674,16 @@ async def handle_file_patch(
             ),
         )
 
-    try:
-        _write_text_file(source_path, updated_text, encoding=encoding)
-    except Exception as exc:
-        return fail(f"Unable to patch file: {exc}")
+    updated_text = plan.new_text
+    occurrence_count = plan.replacement_count
 
-    if normalized_target_text:
+    if not dry_run:
+        try:
+            _write_text_file(source_path, updated_text, encoding=encoding)
+        except Exception as exc:
+            return fail(f"Unable to patch file: {exc}")
+
+    if not dry_run and normalized_target_text:
         repeat_records[patch_signature] = {
             "path": str(target),
             "source_path": str(source_path),
@@ -577,7 +696,7 @@ async def handle_file_patch(
 
     section_added = False
     write_session_final_chunk = False
-    if session is not None:
+    if session is not None and not dry_run:
         if (
             staged_only
             and str(getattr(session, "write_session_intent", "") or "").strip().lower() == "patch_existing"
@@ -606,7 +725,8 @@ async def handle_file_patch(
     else:
         status_block = None
 
-    _record_file_change(state, target)
+    if not dry_run:
+        _record_file_change(state, target)
     metadata = _build_patch_metadata(
         path=target,
         requested_path=path,
@@ -620,6 +740,8 @@ async def handle_file_patch(
         session=session,
         staging_path=source_path if staged_only else None,
         status_block=status_block,
+        plan=plan,
+        dry_run=bool(dry_run),
     )
     if session is not None:
         metadata.update(
@@ -632,7 +754,10 @@ async def handle_file_patch(
             }
         )
     metadata["expected_followup_verifier"] = str(expected_followup_verifier or "")
-    message = f"Patched {occurrence_count} occurrence(s) in `{path}`."
+    if dry_run:
+        message = f"Dry run: patch would replace {occurrence_count} occurrence(s) in `{path}`."
+    else:
+        message = f"Patched {occurrence_count} occurrence(s) in `{path}`."
     if staged_only:
         message += f" Staged copy: `{source_path}`."
         if status_block:

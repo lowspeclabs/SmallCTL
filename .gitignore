@@ -1,46 +1,49 @@
-evals/
-!evals/
-!evals/tool_plan/
-!evals/tool_plan/*.yaml
-!evals/tool_plan/*.yml
-!evals/tool_plan/*.jsonl
-!evals/tool_plan/README.md
+# Dependencies & virtual environments
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# Environment
 .env
 .env.*
-venv/
+
+# Project specific
 .codex/
 .codex
 .smallctl/
 .smallctl.yaml
 .ssh/
+
+# Logs, temp, scratch
 logs/
 scratch/
 tmp/
 temp/
 /.tmp_test/
+*.log
+
+# Test & dev artifacts
 /checkpoints.json
-/old-logs-*.zip
-/step_*.txt
-/t*.log
 /test_checkpoints.json
 /test_setup.py
 /verify_fix.py
 /verify_tk.py
-/agent.md
-/double-read-fix.md
-/RELEASE_NOTES.md
-*.txt
-*.md
-*.log
-/logs
-/aho
-.ssh
-/temp
+/old-logs-*.zip
+/step_*.txt
+/t*.log
+
+# TOML files (config)
 *.toml
+
+# Evals - keep structure but ignore contents except specific dirs
+evals/
+!evals/tool_plan/
+!evals/tool_plan/*.yaml
+!evals/tool_plan/*.yml
+!evals/tool_plan/*.jsonl
+!evals/tool_plan/README.md
 !evals/test_time_scaling/
 !evals/test_time_scaling/*.yaml
 !evals/test_time_scaling/*.yml

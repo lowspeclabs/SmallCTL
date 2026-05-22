@@ -236,12 +236,12 @@ async def run_auto_with_events(
 
 def set_interactive_shell_approval(self: Any, enabled: bool) -> None:
     self.allow_interactive_shell_approval = bool(enabled)
-    self._harness_kwargs["allow_interactive_shell_approval"] = self.allow_interactive_shell_approval
+    self.config.allow_interactive_shell_approval = self.allow_interactive_shell_approval
 
 
 def set_shell_approval_session_default(self: Any, enabled: bool) -> None:
     self.shell_approval_session_default = bool(enabled)
-    self._harness_kwargs["shell_approval_session_default"] = self.shell_approval_session_default
+    self.config.shell_approval_session_default = self.shell_approval_session_default
 
 
 def set_planning_mode(self: Any, enabled: bool) -> dict[str, Any]:

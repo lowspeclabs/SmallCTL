@@ -14,7 +14,7 @@ from smallctl.client.model_listing import (
     parse_ollama_models,
     parse_openai_models,
 )
-from smallctl.harness import Harness
+from smallctl.harness import Harness, HarnessConfig
 from smallctl.ui.app import SmallctlApp
 from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
@@ -396,7 +396,7 @@ def test_smallctl_app_model_button_opens_selector_and_accepts_text(monkeypatch) 
             await pilot.press("b", "e", "t", "a")
             await pilot.click("#model-select-confirm")
             await pilot.pause(0.3)
-            return app.harness_kwargs.get("model")
+            return app.harness_config.model
 
     assert asyncio.run(_run()) == "beta-model"
 
@@ -455,7 +455,7 @@ def test_switching_model_updates_harness_kwargs() -> None:
     class _Flow(SmallctlAppFlowMixin):
         def __init__(self) -> None:
             self.harness = _Harness()
-            self.harness_kwargs = {"model": "old-model", "provider_profile": "lmstudio"}
+            self.harness_config = HarnessConfig(endpoint="http://test/v1", model="old-model", provider_profile="lmstudio")
             self.refreshed = False
             self._api_error_count = 0
             self._latest_status_snapshot = None
@@ -469,7 +469,7 @@ def test_switching_model_updates_harness_kwargs() -> None:
 
     asyncio.run(flow._switch_model("new-model"))
 
-    assert flow.harness_kwargs["model"] == "new-model"
+    assert flow.harness_config.model == "new-model"
     assert flow.harness.client.model == "new-model"
     assert flow.harness.config.model == "new-model"
     assert flow.harness.state is state
@@ -494,16 +494,16 @@ def test_harness_switch_model_preserves_conversation_state() -> None:
         provider_profile="generic",
         context_limit=8192,
     )
-    harness._harness_kwargs = {
-        "endpoint": "http://example.test/v1",
-        "model": "old-model",
-        "api_key": None,
-        "chat_endpoint": "/chat/completions",
-        "provider_profile": "generic",
-        "first_token_timeout_sec": None,
-        "runtime_context_probe": True,
-        "context_limit": 8192,
-    }
+    harness.config = HarnessConfig(
+        endpoint="http://example.test/v1",
+        model="old-model",
+        api_key=None,
+        chat_endpoint="/chat/completions",
+        provider_profile="generic",
+        first_token_timeout_sec=None,
+        runtime_context_probe=True,
+        context_limit=8192,
+    )
     harness.discovered_server_context_limit = 8192
     harness.server_context_limit = 8192
     harness._runtime_context_probe_attempted = True
@@ -520,7 +520,7 @@ def test_harness_switch_model_preserves_conversation_state() -> None:
     assert harness.state.scratchpad["_model_name"] == "new-model"
     assert harness.client.model == "new-model"
     assert harness.config.model == "new-model"
-    assert harness._harness_kwargs["model"] == "new-model"
+    assert harness.config.model == "new-model"
     assert harness.server_context_limit is None
     assert harness.discovered_server_context_limit is None
     assert harness._runtime_context_probe_attempted is False

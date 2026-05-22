@@ -13,6 +13,7 @@ from smallctl.state import LoopState
 from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_approvals import handle_approval_prompt, handle_sudo_password_prompt
 from smallctl.ui.approval import ShellApprovalDecision
+from smallctl.harness import HarnessConfig
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
 from smallctl.ui.display import compute_activity_for_event, format_test_time_scaling_event
 from smallctl.ui.model_selector import ModelSelectButton
@@ -313,7 +314,7 @@ def test_refresh_status_updates_model_button_and_status_details() -> None:
     class _Flow(SmallctlAppFlowMixin):
         def __init__(self) -> None:
             self.harness = None
-            self.harness_kwargs = {"model": "wrench-9b", "phase": "execute"}
+            self.harness_config = HarnessConfig(endpoint="http://test/v1", model="wrench-9b", phase="execute")
             self._status_activity = ""
             self._api_error_count = 0
             self.active_task = _Task()
@@ -365,7 +366,7 @@ def test_refresh_status_prefers_cached_snapshot_over_live_harness_reads() -> Non
     class _Flow(SmallctlAppFlowMixin):
         def __init__(self) -> None:
             self.harness = _ExplodingHarness()
-            self.harness_kwargs = {"model": "wrench-9b", "phase": "execute"}
+            self.harness_config = HarnessConfig(endpoint="http://test/v1", model="wrench-9b", phase="execute")
             self._status_activity = ""
             self._api_error_count = 0
             self._latest_status_snapshot = {
@@ -427,7 +428,7 @@ def test_refresh_status_without_cached_snapshot_uses_defaults_not_live_harness()
     class _Flow(SmallctlAppFlowMixin):
         def __init__(self) -> None:
             self.harness = _ExplodingHarness()
-            self.harness_kwargs = {"model": "fallback-3b", "phase": "execute", "contract_flow_ui": True}
+            self.harness_config = HarnessConfig(endpoint="http://test/v1", model="fallback-3b", phase="execute", contract_flow_ui=True)
             self._status_activity = ""
             self._api_error_count = 2
             self._latest_status_snapshot = None

@@ -38,7 +38,7 @@ from smallctl.state import ArtifactRecord, ExecutionPlan, LoopState, PlanStep, W
 from smallctl.graph.tool_outcomes import _maybe_emit_repair_recovery_nudge, apply_tool_outcomes
 from smallctl.graph.tool_outcomes import _shell_workspace_relative_retry_hint
 from smallctl.graph.state import ToolExecutionRecord
-from smallctl.harness import Harness
+from smallctl.harness import Harness, HarnessConfig
 from smallctl.harness.tool_visibility import hidden_tool_reason
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.config import resolve_config
@@ -3029,7 +3029,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
 
     status = StatusState.from_harness(
         harness,
-        {"model": "qwen3.5:4b", "phase": "execute", "contract_flow_ui": True},
+        HarnessConfig(endpoint="http://test/v1", model="qwen3.5:4b", phase="execute", contract_flow_ui=True),
     )
 
     assert status.contract_flow_ui is True

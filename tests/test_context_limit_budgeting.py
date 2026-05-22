@@ -31,7 +31,7 @@ def _make_harness(
         discovered_server_context_limit=None,
         provider_profile=provider_profile,
         state=SimpleNamespace(recent_message_limit=6),
-        _harness_kwargs={},
+        config=SimpleNamespace(),
         _runlog=lambda *args, **kwargs: None,
     )
 

@@ -97,7 +97,7 @@ def apply_server_context_limit(
         harness.context_policy.apply_model_profile(model_name)
         harness.context_policy.recalculate_quotas(partition_context)
         harness.state.recent_message_limit = harness.context_policy.recent_message_limit
-        harness._harness_kwargs["context_limit"] = harness.server_context_limit
+        harness.config.context_limit = harness.server_context_limit
 
     harness._runlog(
         "context_limit",

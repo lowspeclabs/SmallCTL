@@ -116,18 +116,16 @@ class SmallctlAppActionsMixin:
         harness = self.harness
         client = getattr(harness, "client", None)
         base_url = str(
-            getattr(client, "base_url", None) or self.harness_kwargs.get("endpoint") or ""
+            getattr(client, "base_url", None) or self.harness_config.endpoint or ""
         ).strip()
         current_model = str(
-            getattr(client, "model", None) or self.harness_kwargs.get("model") or ""
+            getattr(client, "model", None) or self.harness_config.model or ""
         ).strip()
-        api_key = getattr(client, "api_key", None)
-        if api_key is None:
-            api_key = self.harness_kwargs.get("api_key")
+        api_key = getattr(client, "api_key", None) or self.harness_config.api_key
         provider_profile = str(
             getattr(client, "provider_profile", None)
             or getattr(harness, "provider_profile", None)
-            or self.harness_kwargs.get("provider_profile")
+            or self.harness_config.provider_profile
             or "generic"
         ).strip()
 

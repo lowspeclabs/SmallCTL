@@ -145,13 +145,13 @@ class UIStatusSnapshot:
     def from_harness(
         cls,
         harness: Any,
-        harness_kwargs: dict[str, Any],
+        config: Any,
         *,
         activity: str = "",
         api_errors: int | None = None,
     ) -> "UIStatusSnapshot":
-        model = str(harness_kwargs.get("model", "n/a"))
-        phase = str(harness_kwargs.get("phase", "explore"))
+        model = str(getattr(config, "model", None) or "n/a")
+        phase = str(getattr(config, "phase", None) or "explore")
         step: int | str = 0
         mode = "execution"
         plan_label = ""
@@ -159,7 +159,7 @@ class UIStatusSnapshot:
         contract_phase = ""
         acceptance_progress = ""
         latest_verdict = ""
-        contract_flow_ui = bool(harness_kwargs.get("contract_flow_ui", False))
+        contract_flow_ui = bool(getattr(config, "contract_flow_ui", False))
         token_usage = 0
         token_total = 0
         token_limit = 0

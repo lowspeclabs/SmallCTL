@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from smallctl.config import resolve_config
 from smallctl.graph.runtime_auto import AutoGraphRuntime
-from smallctl.harness import Harness
+from smallctl.harness import Harness, HarnessConfig
 from smallctl.main import cli
 from smallctl.state import LoopState
 
@@ -93,8 +93,8 @@ def test_cli_passes_tool_dag_config_to_harness(monkeypatch, tmp_path, capsys) ->
     captured_kwargs: dict[str, object] = {}
 
     class _Harness:
-        def __init__(self, **kwargs: object) -> None:
-            captured_kwargs.update(kwargs)
+        def __init__(self, config: HarnessConfig) -> None:
+            captured_kwargs.update(config.__dict__)
             self.state = SimpleNamespace(thread_id="thread-1")
             self.conversation_id = "thread-1"
 
@@ -128,8 +128,8 @@ def test_cli_passes_test_time_scaling_config_to_harness(monkeypatch, tmp_path, c
     captured_kwargs: dict[str, object] = {}
 
     class _Harness:
-        def __init__(self, **kwargs: object) -> None:
-            captured_kwargs.update(kwargs)
+        def __init__(self, config: HarnessConfig) -> None:
+            captured_kwargs.update(config.__dict__)
             self.state = SimpleNamespace(thread_id="thread-1")
             self.conversation_id = "thread-1"
 

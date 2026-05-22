@@ -378,9 +378,9 @@ class SmallctlAppFlowMixin:
 
     def _default_status_snapshot(self) -> dict[str, Any]:
         return UIStatusSnapshot(
-            model=str(self.harness_kwargs.get("model", "n/a") or "n/a"),
-            phase=str(self.harness_kwargs.get("phase", "explore") or "explore"),
-            contract_flow_ui=bool(self.harness_kwargs.get("contract_flow_ui", False)),
+            model=str(self.harness_config.model or "n/a"),
+            phase=str(self.harness_config.phase or "explore"),
+            contract_flow_ui=bool(self.harness_config.contract_flow_ui),
             api_errors=max(0, int(self._api_error_count)),
         ).to_dict()
 
@@ -394,7 +394,7 @@ class SmallctlAppFlowMixin:
         else:
             snapshot = UIStatusSnapshot.from_harness(
                 self.harness,
-                self.harness_kwargs,
+                self.harness_config,
                 activity=activity,
                 api_errors=self._api_error_count,
             ).to_dict()
@@ -469,7 +469,7 @@ class SmallctlAppFlowMixin:
             return None
 
     def _create_harness(self) -> None:
-        self.harness = Harness(**self.harness_kwargs)
+        self.harness = Harness(self.harness_config)
         interactive_setter = getattr(self.harness, "set_interactive_shell_approval", None)
         if callable(interactive_setter):
             interactive_setter(True)
@@ -510,7 +510,7 @@ class SmallctlAppFlowMixin:
         model_name = str(model or "").strip()
         if not model_name:
             return
-        self.harness_kwargs["model"] = model_name
+        self.harness_config.model = model_name
         harness = self.harness
         if harness is not None:
             bridge = getattr(self, "_harness_bridge", None)
@@ -520,12 +520,13 @@ class SmallctlAppFlowMixin:
                     activity=self._status_activity,
                     api_errors=self._api_error_count,
                 )
-                self.harness_kwargs["provider_profile"] = str(
+                self.harness_config.provider_profile = str(
                     result.get("provider_profile")
                     or getattr(harness, "provider_profile", None)
-                    or self.harness_kwargs.get("provider_profile", "generic")
+                    or self.harness_config.provider_profile
+                    or "generic"
                 )
-                self.harness_kwargs["context_limit"] = None
+                self.harness_config.context_limit = None
                 snapshot = result.get("snapshot")
                 if isinstance(snapshot, dict):
                     self._refresh_status(snapshot=snapshot)
@@ -536,12 +537,10 @@ class SmallctlAppFlowMixin:
             switcher = getattr(harness, "switch_model", None)
             if callable(switcher):
                 switcher(model_name)
-                self.harness_kwargs["provider_profile"] = getattr(
-                    harness,
-                    "provider_profile",
-                    self.harness_kwargs.get("provider_profile", "generic"),
+                self.harness_config.provider_profile = getattr(
+                    harness, "provider_profile", self.harness_config.provider_profile or "generic"
                 )
-                self.harness_kwargs["context_limit"] = None
+                self.harness_config.context_limit = None
             else:
                 old_state = harness.state
                 self._create_harness()

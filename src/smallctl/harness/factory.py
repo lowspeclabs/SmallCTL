@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -73,32 +74,37 @@ class SubtaskService:
         harness_factory: Callable[..., "Harness"] | None = None,
         artifact_start_index: int | None = None,
     ) -> "Harness":
-        child_kwargs = dict(self.harness._harness_kwargs)
-        child_kwargs["phase"] = request.phase
-        child_kwargs["checkpoint_on_exit"] = False
-        child_kwargs["checkpoint_path"] = None
-        child_kwargs["artifact_start_index"] = artifact_start_index
+        child_config = dataclasses.replace(
+            self.harness.config,
+            phase=request.phase,
+            checkpoint_on_exit=False,
+            checkpoint_path=None,
+            artifact_start_index=artifact_start_index,
+        )
         if getattr(self.harness, "server_context_limit", None) is not None:
-            child_kwargs["context_limit"] = self.harness.server_context_limit
-        
+            child_config = dataclasses.replace(child_config, context_limit=self.harness.server_context_limit)
+
         if request.max_prompt_tokens is not None:
-            child_kwargs["max_prompt_tokens"] = request.max_prompt_tokens
-            child_kwargs["reserve_completion_tokens"] = min(
-                self.harness.context_policy.reserve_completion_tokens,
-                max(64, request.max_prompt_tokens // 5),
+            child_config = dataclasses.replace(
+                child_config,
+                max_prompt_tokens=request.max_prompt_tokens,
+                reserve_completion_tokens=min(
+                    self.harness.context_policy.reserve_completion_tokens,
+                    max(64, request.max_prompt_tokens // 5),
+                ),
+                reserve_tool_tokens=min(
+                    self.harness.context_policy.reserve_tool_tokens,
+                    max(64, request.max_prompt_tokens // 8),
+                ),
             )
-            child_kwargs["reserve_tool_tokens"] = min(
-                self.harness.context_policy.reserve_tool_tokens,
-                max(64, request.max_prompt_tokens // 8),
-            )
-            
+
         child_recent_limit = request.recent_message_limit
         if request.max_prompt_tokens is not None and request.max_prompt_tokens <= 1024:
             child_recent_limit = min(child_recent_limit, 2)
-        child_kwargs["recent_message_limit"] = child_recent_limit
-        
+        child_config = dataclasses.replace(child_config, recent_message_limit=child_recent_limit)
+
         factory = harness_factory or self.harness.__class__
-        child = factory(**child_kwargs)
+        child = factory(child_config)
         child.state.cwd = self.harness.state.cwd
         return child
 

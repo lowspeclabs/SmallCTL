@@ -8,7 +8,7 @@ import sys
 
 from .cleanup import run_cleanup
 from .config import resolve_config
-from .harness import Harness
+from .harness import Harness, HarnessConfig
 from .logging_utils import create_run_logger, log_kv, setup_logging
 from .memory_cli import build_memory_parser, handle_memory_command, memory_cli
 from .presets import list_presets
@@ -441,7 +441,7 @@ def cli(argv: list[str] | None = None) -> int:
         max_prompt_tokens_explicit = bool(
             getattr(config, "max_prompt_tokens_explicit", config.max_prompt_tokens is not None)
         )
-        harness = Harness(
+        harness = Harness(HarnessConfig(
             endpoint=config.endpoint,
             model=config.model,
             phase=config.phase,
@@ -533,7 +533,7 @@ def cli(argv: list[str] | None = None) -> int:
             fama_capsule_token_budget=getattr(config, "fama_capsule_token_budget", 180),
             fama_llm_judge_enabled=getattr(config, "fama_llm_judge_enabled", False),
             fama_llm_judge_min_severity=getattr(config, "fama_llm_judge_min_severity", 3),
-        )
+        ))
         if config.restore_graph_state and not config.fresh_run:
             restored = harness.restore_graph_state(thread_id=config.graph_thread_id)
             if not restored:

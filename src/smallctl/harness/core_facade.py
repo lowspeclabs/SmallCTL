@@ -91,7 +91,7 @@ def build_status_snapshot(
 ) -> dict[str, Any]:
     return UIStatusSnapshot.from_harness(
         self,
-        getattr(self, "_harness_kwargs", {}),
+        self.config,
         activity=activity,
         api_errors=api_errors,
     ).to_dict()
@@ -347,35 +347,27 @@ def switch_model(self: Any, model: str) -> None:
 
     from .bootstrap_support import build_client, resolve_provider_profile
 
-    kwargs = getattr(self, "_harness_kwargs", {})
-    endpoint = str(kwargs.get("endpoint") or getattr(self.client, "base_url", "")).rstrip("/")
-    api_key = kwargs.get("api_key")
-    if api_key is None:
-        api_key = getattr(self.client, "api_key", None)
-    provider_profile = str(
-        kwargs.get("provider_profile") or getattr(self, "provider_profile", "generic")
-    )
+    config = self.config
+    endpoint = str(config.endpoint or getattr(self.client, "base_url", "")).rstrip("/")
+    api_key = config.api_key or getattr(self.client, "api_key", None)
+    provider_profile = str(config.provider_profile or getattr(self, "provider_profile", "generic"))
     resolved_provider_profile = resolve_provider_profile(endpoint, model_name, provider_profile)
 
     self.client = build_client(
         endpoint=endpoint,
         model=model_name,
         api_key=api_key,
-        chat_endpoint=str(kwargs.get("chat_endpoint") or getattr(self.client, "chat_endpoint", "/chat/completions")),
+        chat_endpoint=str(config.chat_endpoint or getattr(self.client, "chat_endpoint", "/chat/completions")),
         provider_profile=resolved_provider_profile,
-        first_token_timeout_sec=kwargs.get("first_token_timeout_sec"),
-        runtime_context_probe=bool(kwargs.get("runtime_context_probe", True)),
+        first_token_timeout_sec=config.first_token_timeout_sec,
+        runtime_context_probe=bool(config.runtime_context_probe),
         run_logger=getattr(self, "run_logger", None),
         backend_recovery_handler=self.recover_backend_wedge,
     )
     self.provider_profile = self.client.provider_profile
-    self._harness_kwargs["model"] = model_name
-    self._harness_kwargs["provider_profile"] = self.provider_profile
-    self._harness_kwargs["context_limit"] = None
-    if hasattr(self, "config"):
-        self.config.model = model_name
-        self.config.provider_profile = self.provider_profile
-        self.config.context_limit = None
+    config.model = model_name
+    config.provider_profile = self.provider_profile
+    config.context_limit = None
     self.state.scratchpad["_model_name"] = model_name
     self.state.scratchpad["_model_is_small"] = self._is_small_model_name(model_name)
     self.discovered_server_context_limit = None

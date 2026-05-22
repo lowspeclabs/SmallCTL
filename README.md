@@ -1,241 +1,157 @@
 # SmallCTL
 
-An agentic harness for **small language models** that need help staying effective on real, multi-step tasks.
+SmallCTL is an experimental agent harness for small local or self-hosted language models. It wraps an OpenAI-compatible model with staged task flow, evidence tracking, context compression, tool safety, and recovery logic so the model can handle real technical work with fewer runaway loops and less guesswork.
 
-SmallCTL is designed for situations where a smaller model can be useful, but cannot be trusted to freely improvise across a long chain of tools, logs, files, and environment details. The harness adds **staging, evidence handling, memory compression, recovery, and risk controls** around the model so it can act more like a disciplined operator than an unbounded chatbot.
+It is aimed at coding-agent and diagnostic workflows where a small model is useful, but needs structure around planning, tool use, verification, and memory.
 
-## What SmallCTL is for
+## What It Helps With
 
-SmallCTL is built to make smaller local or self-hosted models more useful for:
+- Exploring repositories and logs before changing anything
+- Turning observations into bounded plans
+- Running tool-assisted coding or diagnosis loops
+- Keeping evidence, decisions, claims, and artifacts attached to the task
+- Compressing long sessions into task-relevant memory
+- Recovering from failed writes, bad tool calls, repeated actions, or verifier failures
 
-* **Coding-agent workflows**
+SmallCTL is not a claim that a 4B-9B model is a fully autonomous senior engineer. It is a runtime for making those models more inspectable and less fragile.
 
-  * repository exploration
-  * targeted refactors and patching
-  * verifier-driven edit loops
-  * bounded file authoring and repair
-* **Technical investigation and diagnosis**
+## Install
 
-  * log triage
-  * evidence gathering
-  * hypothesis building
-  * verification against observed state
-* **Structured tool use**
+Requires Python 3.10+.
 
-  * turning a raw model into a tool-using worker with state, persistence, and recovery
-* **Longer-horizon task execution**
+```bash
+git clone <repo-url>
+cd Harness-Redo
+./install.sh
+source .venv/bin/activate
+smallctl --help
+```
 
-  * tasks that are too large or too messy for a single prompt, but still benefit from local-model economics
+Optional local config:
 
-The harness is especially aimed at the failure modes common to smaller models:
+```bash
+cp .smallctl.yaml.example .smallctl.yaml
+```
 
-* weak long-chain reasoning across many moving parts
-* confusion when logs, tools, and environment details are mixed together
-* incomplete-context hallucinations
-* premature risky decisions
-* brittle file writing on large outputs
-* looping or repeating the same ineffective action
+Set the model endpoint with CLI flags, `.smallctl.yaml`, `.env`, or environment variables:
 
-## Core design goals
+```bash
+smallctl --endpoint http://localhost:8000/v1 --model qwen3.5:4b --task "Inspect this repo"
+```
 
-SmallCTL exists to do five things well:
+Common provider profiles include `generic`, `openai`, `ollama`, `vllm`, `lmstudio`, `openrouter`, and `llamacpp`.
 
-### 1\. Keep reasoning bounded and staged
+For development:
 
-Instead of letting the model freestyle from prompt to prompt, SmallCTL uses explicit phases to separate work such as:
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
-* **explore** — gather facts and open questions
-* **plan** — turn evidence into hypotheses and executable steps
-* **author** — prepare code/content changes
-* **execute** — run approved actions
-* **verify** — compare observed state with expected results
-* **repair** — recover from failed verification or execution
+## Quick Start
 
-The goal is to stop the model from mixing discovery, speculation, mutation, and verification in one noisy loop.
+Run a one-off task:
 
-### 2\. Make evidence first-class
+```bash
+smallctl --task "Find where tool dispatch is implemented"
+```
 
-SmallCTL is oriented around evidence-backed action instead of pure transcript reasoning. The state model supports structured evidence, decisions, claims, and context briefs so the harness can keep track of:
+Use a local coding preset:
 
-* what was observed
-* what was inferred
-* what remains unconfirmed
-* what decisions were taken
-* what evidence supported them
+```bash
+smallctl --preset coding-local --task "Investigate the failing tests"
+```
 
-This is meant to reduce false certainty and give the harness a basis for safer verification and recovery.
+Launch the Textual UI:
 
-### 3\. Compress state without losing task-critical context
+```bash
+smallctl --tui
+```
 
-Small models cannot carry an ever-growing raw transcript forever. SmallCTL uses layered context compaction and structured prompt assembly so older context can be demoted into:
+Enable the newer ToolPlan runtime for read-only evidence planning:
 
-* normalized observations
-* turn bundles
-* warm context briefs
-* episodic summaries
-* artifact snippets
-* reusable experience memory
+```bash
+smallctl --run-mode tool_plan --task "Find the risk policy flow"
+```
 
-The goal is to preserve task continuity without forcing the model to reread the full raw history every turn.
+## Core Features
 
-### 4\. Treat tool execution as a controlled runtime, not chat decoration
+### Staged Workflows
 
-Tool calls are not just text in the transcript. SmallCTL has an explicit execution and persistence path so tool work can be:
+SmallCTL separates a task into phases: `explore`, `plan`, `author`, `execute`, `verify`, and `repair`. Each phase has a contract that changes prompt focus and blocks inappropriate tools. For example, exploration and planning block mutation tools, while verification blocks file writes.
 
-* dispatched in a controlled way
-* recorded with metadata
-* turned into artifacts
-* reused by later steps
-* reintroduced into prompts in a structured form
+Research lineage: staged reasoning and plan-act-verify agent patterns; intended as a safer alternative to an unstructured ReAct loop for long tasks.
 
-This makes the harness more like an agent runtime than a chat wrapper.
+### Evidence-First State
 
-### 5\. Bound unsafe behavior
+The harness keeps structured records for evidence, decisions, claims, plans, context briefs, write sessions, artifacts, and verifier results. This lets later turns reason over what was observed, what was inferred, and what is still unproven.
 
-SmallCTL is designed for useful autonomy, not blind autonomy. The harness includes phase contracts, blocked-tool handling, risk policy surfaces, approval flows, and write-session recovery/loop control so smaller models are less likely to drift into unsafe or low-value behavior.
+Research lineage: evidence-grounded reasoning, retrieval-augmented context, and agent memory systems.
 
-## Current feature themes
+### Context Compression
 
-## Staged reasoning and execution
+SmallCTL does not rely only on the latest chat transcript. It compiles prompt state from recent messages, run briefs, working memory, observation packets, turn bundles, episodic summaries, artifact snippets, and warm experience memory.
 
-SmallCTL has explicit multi-phase task handling and staged reasoning support. The repo exposes phase contracts and a staged reasoning rollout path, making it possible to separate discovery, planning, authoring, execution, verification, and repair rather than forcing everything through a single ReAct-style loop.
+Research lineage: RAG-style retrieval, hierarchical memory, and long-context compaction.
 
-## Structured state and reasoning records
+### ToolPlan and ReWOO-Style Evidence Gathering
 
-The runtime keeps a rich `LoopState` and related records for things like:
+The ToolPlan runtime can ask the model to produce a bounded read-only evidence plan, execute those reads, then hand compressed observations to a solver. Optional ReWOO lane frames separate planner, solver, and refiner context into plan, evidence, decision, and experience lanes.
 
-* context briefs
-* evidence records
-* decision records
-* claim records
-* write sessions
-* experience memory
+Research lineage: ReWOO-style planner/worker/solver separation.
 
-This gives the harness a persistent working model of the task rather than relying only on raw recent messages.
+### Parallel Read-Only Tool DAGs
 
-## Prompt-state compilation and compaction
+Independent ToolPlan steps can be grouped into dependency batches and dispatched concurrently when they use approved read-only tools such as file reads, grep, directory listing, artifact reads, web fetches, git status/diff, and log reads.
 
-Prompt assembly is handled through a structured assembler that compiles a prompt frame from state, summaries, artifact snippets, and retrieved experience. The assembled prompt budgets space across lanes such as:
+Research lineage: LLMCompiler-style parallel tool execution for independent steps.
 
-* recent messages
-* run brief
-* working memory
-* FAMA capsules
-* recovery guidance
-* normalized observations
-* fresh tool outputs
-* turn bundles
-* warm briefs
-* episodic summaries
-* artifact snippets
-* warm memories
+### Reflexion-Style Repair
 
-This is one of the main mechanisms that makes SmallCTL suitable for smaller-context local models.
+Failure events can become compact reflections and recovery hints. The solver-refine path critiques draft answers against observations and can revise or block unsupported completions.
 
-## Evidence-oriented memory
+Research lineage: Reflexion-style verbal feedback and self-correction.
 
-SmallCTL supports context briefs that capture not just what happened, but also:
+### FAMA Mitigation Capsules
 
-* confirmed facts
-* unconfirmed facts
-* open questions
-* candidate causes
-* disproven causes
-* next observations needed
+The `fama` package detects failure modes such as early stopping, looping, tool-output misreads, remote/local confusion, write-session stalls, and context drift. It injects short mitigation capsules into the prompt when those failures are active.
 
-That pushes the harness toward evidence-led diagnosis instead of transcript-led guessing.
+Research lineage: failure-aware prompting, metacognitive control, and adaptive agent guardrails.
 
-## Write-session control and recovery
+### Risk and Approval Gates
 
-Large file writing is treated as a controlled session, not a single uncontrolled generation. The write-session machinery supports modes such as:
+Tools carry risk labels. Shell, SSH, network, and file mutation flows pass through policy checks, approval surfaces, phase gates, and write-session guards before execution.
 
-* `single\_write`
-* `chunked\_author`
-* `local\_repair`
-* `stub\_and\_fill`
+Research lineage: tool-use safety, sandboxing, and human-in-the-loop approval.
 
-The harness also includes a chunked-write loop guard and recovery behavior so repeated bad section writes can force recovery steps instead of endlessly repeating the same failure.
+## Configuration
 
-## Risk and approval surfaces
+SmallCTL reads configuration in this order:
 
-SmallCTL includes dedicated approval and risk-policy surfaces in the harness. The intended operating model is that the model can gather evidence, propose changes, and operate under policy, while the harness enforces when approval or stronger justification is required.
+1. user config path from `--config` or `SMALLCTL_CONFIG`
+2. local `.smallctl.yaml`
+3. `.env` and `SMALLCTL_*` environment variables
+4. CLI flags
 
-## Tool graph and execution plumbing
+Useful flags:
 
-The repo includes a graph-oriented execution layer with components for:
+- `--endpoint`, `--model`, `--provider-profile`
+- `--preset safe-small-model|coding-local|lmstudio-small-model`
+- `--run-mode auto|chat|loop|planning|indexer|tool_plan`
+- `--staged-reasoning`
+- `--staged-execution`
+- `--checkpoint-on-exit` and `--resume`
+- `--tool-profiles core,data,network,mutate,indexer`
 
-* checkpoints
-* interrupts
-* progress tracking
-* error hardening
-* tool DAG support
-* tool execution persistence
-* tool execution recovery
+## Project Status
 
-This is the systems backbone that makes it possible to evolve beyond simple one-step tool calling.
+SmallCTL is a practical research harness, not a polished product. The codebase includes tests and eval tasks for staged execution, ToolPlan behavior, risk policy, FAMA, Reflexion, compaction, write recovery, web tools, git tools, UI paths, and provider compatibility.
 
-## FAMA and reflexion-related support
+Best fit today:
 
-The codebase includes a dedicated `fama` package with capsules, detectors, a router, a runtime, a reflexion bridge, signals, and tool-policy support. That suggests the harness is already experimenting with more adaptive or meta-reasoning style control rather than only static prompting.
+- local-model coding experiments
+- repo and log investigation
+- guarded sysadmin diagnosis
+- research on small-model tool use, memory, staged reasoning, and recovery
 
-## Memory, diagnostics, and operator-facing tooling
-
-Beyond the main runtime, the repo includes memory CLI support, diagnostic-task helpers, cleanup/logging utilities, a search server package, and a Textual-based UI path. This points to SmallCTL being a practical operator harness, not just a library experiment.
-
-## What SmallCTL is **not**
-
-SmallCTL is not trying to pretend a 4B–9B class model is a fully reliable autonomous senior engineer.
-
-It is not built around the assumption that the model should:
-
-* freely make risky remediation decisions
-* mutate systems without evidence or guardrails
-* carry the whole task in raw chat memory
-* be trusted purely because it can emit plausible text
-
-Instead, SmallCTL is a harness for making smaller models **more usable, more inspectable, and less fragile**.
-
-## Best-fit use cases
-
-SmallCTL is a strong fit for:
-
-* codebase exploration and patching
-* verifier-driven coding loops
-* sysadmin and ops triage with guarded execution
-* repository and environment investigation
-* long-running local-model experiments
-* research into small-model tool use, memory, staged reasoning, and recovery
-
-It is especially valuable when you want:
-
-* lower-cost local inference
-* tighter control over runtime behavior
-* more explicit state and evidence than a normal chat interface provides
-* a platform for trying reasoning/runtime upgrades without retraining a model
-
-## Recommended operating philosophy
-
-Use SmallCTL as:
-
-* a **disciplined coding agent**
-* a **diagnostic worker with evidence requirements**
-* a **tool-using harness for weaker local models**
-* a **research platform for staged reasoning, compaction, verification, and recovery**
-
-Do **not** use it as a fully unbounded autonomous executor unless the surrounding risk policy, verifier surfaces, and approvals are strong enough for the environment.
-
-## Near-term direction
-
-Based on the current codebase and the design direction discussed in this project, the most valuable next upgrades are:
-
-* tool-integrated candidate generation plus verification for hard coding/diagnostic steps
-* compiler-lite parallelization of clearly independent read-only steps
-* stronger verifier-first task completion rules
-* even tighter state compression around evidence lanes and phase-specific retrieval
-* clearer README and operator docs that describe the harness as it exists now, not only as a bundle installer
-* a future web UI layered on top of the current harness/runtime seams
-
-## In one sentence
-
-**SmallCTL is a staged, evidence-aware, tool-driven harness that tries to make small language models useful on real multi-step technical work without pretending they are safe or reliable when left completely on their own.**
-
+Avoid using it as an unbounded autonomous executor unless your environment has strong approvals, verifiers, and rollback controls.

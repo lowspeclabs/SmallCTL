@@ -55,12 +55,12 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         super().__init__()
         self._app_logger = logging.getLogger("smallctl.ui")
         raw = dict(harness_kwargs)
-        self.fresh_run = bool(raw.pop("fresh_run", False))
         self.restore_graph_state_on_startup = bool(raw.pop("restore_graph_state_on_startup", False))
         self.restore_thread_id = raw.pop("restore_thread_id", None)
         self.initial_task = raw.pop("task", None)
         self.run_logger: RunLogger | None = raw.get("run_logger")
         self.harness_config = HarnessConfig(**raw)
+        self.fresh_run = self.harness_config.fresh_run
         self.harness: Harness | None = None
         self.active_task: asyncio.Task[None] | None = None
         self.task_history: list[str] = []

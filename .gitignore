@@ -13,6 +13,7 @@ __pycache__/
 .codex/
 .codex
 .smallctl/
+src/smallctl.egg-info/
 .smallctl.yaml
 .ssh/
 

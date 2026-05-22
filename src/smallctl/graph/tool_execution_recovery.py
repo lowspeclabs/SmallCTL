@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -39,6 +40,7 @@ from . import write_session_outcomes as _write_session_outcomes
 
 _CHUNK_WRITE_LOOP_GUARD_TOOLS = {"file_write", "file_append"}
 _TERMINAL_WRITE_SESSION_REPAIR_KEY = "_terminal_write_session_repair_signatures"
+_MISSING_FIRST_WRITE_SESSION_RECOVERY_KEY = "_missing_first_write_session_recovery_signatures"
 
 
 def _artifact_read_loop_exceeded_limit(
@@ -120,6 +122,139 @@ def _maybe_emit_terminal_write_session_reuse_nudge(harness: Any, record: ToolExe
             tool_name=record.tool_name,
             write_session_id=write_session_id,
             target_path=path,
+        )
+    return True
+
+
+def _maybe_recover_missing_first_write_session(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name not in {"file_write", "file_append"} or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "missing_active_write_session":
+        return False
+
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    active_session = getattr(state, "write_session", None)
+    active_status = str(getattr(active_session, "status", "") or "").strip().lower()
+    if active_session is not None and active_status not in {"complete", "finalized", "aborted"}:
+        return False
+
+    args = dict(record.args or {})
+    session_id = str(
+        metadata.get("write_session_id")
+        or args.get("write_session_id")
+        or args.get("session_id")
+        or ""
+    ).strip()
+    path = str(args.get("path") or metadata.get("path") or "").strip()
+    content = args.get("content")
+    if not session_id or not path or content is None:
+        return False
+
+    content_text = str(content)
+    content_hash = hashlib.sha256(content_text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    signature = "|".join([record.tool_name, session_id, path, content_hash])
+    seen = state.scratchpad.get(_MISSING_FIRST_WRITE_SESSION_RECOVERY_KEY)
+    if not isinstance(seen, list):
+        seen = []
+    if signature in seen:
+        return False
+    seen.append(signature)
+    state.scratchpad[_MISSING_FIRST_WRITE_SESSION_RECOVERY_KEY] = seen[-20:]
+
+    from ..tools.fs import infer_write_session_intent
+    from ..write_session_fsm import new_write_session
+    from .tool_write_session_policy import _suggested_chunk_sections
+
+    suggestions = _suggested_chunk_sections(path)
+    section_name = str(
+        args.get("section_name")
+        or args.get("section_id")
+        or metadata.get("section_name")
+        or ""
+    ).strip()
+    next_section = section_name or (suggestions[0] if suggestions else "initial_content")
+    intent = infer_write_session_intent(path, getattr(state, "cwd", None))
+    session = new_write_session(
+        session_id=session_id,
+        target_path=path,
+        intent=intent,
+        mode="chunked_author",
+        suggested_sections=suggestions,
+        next_section=next_section,
+    )
+    state.write_session = session
+    metadata["missing_active_write_session_recovered"] = True
+    record.result.metadata = metadata
+
+    replay_args = dict(args)
+    replay_args.pop("session_id", None)
+    replay_args["path"] = path
+    replay_args["write_session_id"] = session.write_session_id
+    if record.tool_name in {"file_write", "file_append"} and not str(
+        replay_args.get("section_name") or replay_args.get("section_id") or ""
+    ).strip():
+        replay_args["section_name"] = next_section
+
+    pending = PendingToolCall(
+        tool_name=record.tool_name,
+        args=replay_args,
+        tool_call_id=record.tool_call_id,
+        raw_arguments=json.dumps(replay_args, ensure_ascii=True, sort_keys=True),
+        source="system",
+        parser_metadata={
+            "auto_repaired_from_error": "missing_active_write_session",
+            "auto_repair_reason": "first_write_session_rehydrated",
+            "replayed_failed_payload": True,
+        },
+    )
+    graph_state.pending_tool_calls = [pending]
+
+    record_write_session_event(
+        state,
+        event="missing_first_write_session_recovered",
+        session=session,
+        details={
+            "path": path,
+            "tool_name": record.tool_name,
+            "tool_call_id": str(record.tool_call_id or ""),
+            "content_hash": content_hash,
+        },
+    )
+    state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Recovered Write Session `{session.write_session_id}` for `{path}` from the failed first write. "
+                "The previous tool payload has been queued for replay into the staged copy; do not resend the full file. "
+                f"Continue from the active write session after the replay result."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "missing_first_write_session_recovered",
+                "write_session_id": session.write_session_id,
+                "target_path": path,
+                "tool_name": record.tool_name,
+                "content_hash": content_hash,
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "missing_first_write_session_recovered",
+            "recovered missing active write session and queued failed payload for replay",
+            tool_name=record.tool_name,
+            session_id=session.write_session_id,
+            target_path=path,
+            content_hash=content_hash,
         )
     return True
 
@@ -1009,6 +1144,18 @@ async def handle_failed_file_write_outcome(
         return
 
     if await _maybe_finalize_chunked_write_loop_guard_abort(graph_state, harness, deps, record):
+        return
+
+    recovered_missing_session = _maybe_recover_missing_first_write_session(graph_state, harness, record)
+    if recovered_missing_session:
+        await harness._emit(
+            deps.event_handler,
+            UIEvent(
+                event_type=UIEventType.ALERT,
+                content="Recovered the missing write session and queued the failed first write for replay.",
+                data={"status_activity": "replaying recovered first write"},
+            ),
+        )
         return
 
     _maybe_emit_terminal_write_session_reuse_nudge(harness, record)

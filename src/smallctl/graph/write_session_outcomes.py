@@ -537,6 +537,9 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
                 )
             return
 
+        if bool(record.result.metadata.get("missing_active_write_session_recovered")):
+            return
+
         _maybe_emit_patch_existing_first_choice_nudge(harness, session, record)
         session.write_failed_local_patches += 1
         _record_write_session_recovery_failure(

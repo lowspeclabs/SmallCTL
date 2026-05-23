@@ -231,6 +231,21 @@ async def handle_file_patch(
     normalized_target_text = str(target_text or "")
     normalized_replacement_text = str(replacement_text or "")
 
+    if normalized_target_text and normalized_target_text == normalized_replacement_text:
+        return fail(
+            "Patch target text and replacement text are identical; no file content would change.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "error_kind": "patch_noop_identical_text",
+                "changed": False,
+                "expected_occurrences": expected_occurrences,
+                "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                "suggested_tools": ["file_read", "ast_patch"],
+            },
+        )
+
     if normalized_target_text == "":
         file_write_metadata = _empty_target_patch_file_write_metadata(
             path=path,
@@ -676,6 +691,26 @@ async def handle_file_patch(
 
     updated_text = plan.new_text
     occurrence_count = plan.replacement_count
+    if updated_text == source_text:
+        return fail(
+            "Patch would not change file content.",
+            metadata=_build_patch_failure_metadata(
+                path=target,
+                requested_path=path,
+                source_path=source_path,
+                staged_only=staged_only,
+                session=session,
+                error_kind="patch_noop",
+                extra={
+                    "changed": False,
+                    "actual_occurrences": actual_occurrences,
+                    "expected_occurrences": normalized_expected_occurrences,
+                    "target_text_preview": _build_patch_text_preview(normalized_target_text),
+                    "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                    "suggested_tools": ["file_read", "ast_patch"],
+                },
+            ),
+        )
 
     if not dry_run:
         try:

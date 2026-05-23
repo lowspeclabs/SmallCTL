@@ -83,7 +83,8 @@ def _maybe_schedule_task_complete_remote_mutation_verifier(
                 "Auto-continuing remote mutation verification with `ssh_file_read` "
                 "or `ssh_exec` because `task_complete` was blocked. For deletion "
                 "tasks, a `not found` / `no such file` read or an empty directory "
-                "listing is valid proof and clears the verifier requirement. "
+                "listing is valid proof. For binary or key files, a read-only "
+                "presence/hash check is valid proof. "
                 "Verification already completed means the model may call `task_complete` "
                 "immediately without additional chatter."
             ),

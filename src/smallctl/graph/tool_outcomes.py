@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from time import time
 from typing import Any
 
@@ -52,12 +54,20 @@ _maybe_schedule_task_complete_repair_loop_status = _task_completion_outcomes._ma
 _maybe_emit_task_complete_verifier_nudge = _task_completion_outcomes._maybe_emit_task_complete_verifier_nudge
 
 
+_REMOTE_TASK_HOST_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_REMOTE_TASK_USER_HOST_RE = re.compile(
+    r"\b[A-Za-z0-9._-]+@(?:[A-Za-z0-9.-]+|\d{1,3}(?:\.\d{1,3}){3})\b",
+    re.IGNORECASE,
+)
+
+
 async def apply_tool_outcomes(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
+        _maybe_clear_missing_input_after_remote_readback(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
         if record.tool_name == "shell_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
@@ -107,6 +117,7 @@ async def apply_chat_tool_outcomes(
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
+        _maybe_clear_missing_input_after_remote_readback(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
         await handle_failed_file_write_outcome(
             graph_state=graph_state,
@@ -160,6 +171,49 @@ def _maybe_emit_missing_requested_output_file_nudge(
     if not isinstance(scratchpad, dict):
         scratchpad = {}
         harness.state.scratchpad = scratchpad
+
+    if _is_remote_execution_state(harness.state) and "requested output file" in message:
+        nudge_key = f"missing-remote-output-readback:{raw_path}"
+        if scratchpad.get("_missing_remote_output_readback_nudged") == nudge_key:
+            return False
+        scratchpad["_missing_remote_output_readback_nudged"] = nudge_key
+        retry_scheduled = schedule_retry_tool_exposure(
+            harness.state,
+            mode=graph_state.run_mode,
+            tool_name="ssh_file_read",
+            arguments={"path": raw_path},
+        )
+        remote_message = (
+            f"`file_read(path='{raw_path}')` checks the local workspace, but this is a remote SSH task. "
+            f"If `{raw_path}` was written on the remote host, verify it with "
+            f"`ssh_file_read(path='{raw_path}')` or read the remote command output you already captured. "
+            "Do not call `task_complete` until the remote readback or equivalent remote evidence succeeds."
+        )
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=remote_message,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "missing_remote_requested_output_file",
+                    "recovery_mode": "read_remote_requested_output",
+                    "path": raw_path,
+                    "tool_name": "file_read",
+                    "retry_tool_name": "ssh_file_read",
+                    "retry_scheduled": retry_scheduled,
+                },
+            )
+        )
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "missing_remote_requested_output_file_nudge",
+                "nudged model to verify requested remote output with ssh_file_read after local file_read missed",
+                path=raw_path,
+                run_mode=graph_state.run_mode,
+                retry_scheduled=retry_scheduled,
+            )
+        return True
 
     if "requested output file" not in message:
         if "required input file" not in message:
@@ -231,6 +285,102 @@ def _maybe_emit_missing_requested_output_file_nudge(
             retry_scheduled=retry_scheduled,
         )
     return True
+
+
+def _maybe_clear_missing_input_after_remote_readback(
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "ssh_file_read" or not record.result.success:
+        return False
+    state = getattr(harness, "state", None)
+    if state is None or not _is_remote_task_state(state):
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    blocker = scratchpad.get("_unresolved_missing_input_file")
+    if not isinstance(blocker, dict):
+        return False
+    blocked_path = str(blocker.get("path") or "").strip()
+    if not blocked_path:
+        return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    read_path = str(metadata.get("path") or record.args.get("path") or "").strip()
+    if not read_path:
+        return False
+    if not _paths_likely_same_output(blocked_path, read_path):
+        return False
+    scratchpad.pop("_unresolved_missing_input_file", None)
+    scratchpad.pop("_missing_input_file_nudged", None)
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "missing_required_input_file_blocker_cleared_by_ssh_file_read",
+            "cleared stale local missing-input blocker after successful remote readback",
+            blocked_path=blocked_path,
+            read_path=read_path,
+        )
+    return True
+
+
+def _is_remote_task_state(state: Any) -> bool:
+    if _is_remote_execution_state(state):
+        return True
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    text = " ".join(
+        part
+        for part in (
+            str(getattr(run_brief, "original_task", "") or ""),
+            str(getattr(run_brief, "effective_task", "") or ""),
+            str(getattr(working_memory, "current_goal", "") or ""),
+        )
+        if part
+    ).lower()
+    if not text:
+        return False
+    if "ssh" in text or "remote host" in text or "remote server" in text:
+        return True
+    if _REMOTE_TASK_USER_HOST_RE.search(text) is not None:
+        return True
+    return _REMOTE_TASK_HOST_RE.search(text) is not None and any(
+        marker in text for marker in ("host", "server", "remote")
+    )
+
+
+def _is_remote_execution_state(state: Any) -> bool:
+    mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if mode == "remote_execute":
+        return True
+    intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if intent == "requested_ssh_exec":
+        return True
+    return False
+
+
+def _paths_likely_same_output(left: str, right: str) -> bool:
+    left_norm = _normalized_path_for_match(left)
+    right_norm = _normalized_path_for_match(right)
+    if not left_norm or not right_norm:
+        return False
+    if left_norm == right_norm:
+        return True
+    if left_norm.endswith(f"/{right_norm}") or right_norm.endswith(f"/{left_norm}"):
+        return True
+    return Path(left_norm).name == Path(right_norm).name
+
+
+def _normalized_path_for_match(path: str) -> str:
+    raw = str(path or "").strip().strip("'\"")
+    if not raw:
+        return ""
+    if raw.startswith("home/"):
+        raw = f"/{raw}"
+    raw = raw.replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return re.sub(r"/+", "/", raw).rstrip("/").lower()
 
 
 def _maybe_auto_complete_plan_step_for_mutation(harness: Any, record: ToolExecutionRecord) -> None:

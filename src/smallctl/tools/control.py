@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import shlex
 from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_completion_allowed
@@ -11,6 +13,78 @@ from .fs_loop_guard import build_loop_guard_status
 
 _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
 _REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
+_MULTI_OBJECTIVE_LEDGER_KEY = "_multi_objective_ledger"
+_ISSUE_LIST_CONTEXT_RE = re.compile(
+    r"\b(?:fix|address|resolve|handle|correct).{0,80}\b(?:issues|bugs|findings|items|problems)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_ISSUE_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)(?P<body>.+?)\s*$")
+_SEVERITY_PREFIX_RE = re.compile(r"^(?:critical|high|medium|low|p[0-3])\s*:\s+", re.IGNORECASE)
+_OBJECTIVE_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*(?:\(\))?")
+_OBJECTIVE_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "already",
+    "also",
+    "before",
+    "both",
+    "cannot",
+    "complete",
+    "could",
+    "does",
+    "done",
+    "fail",
+    "fails",
+    "fix",
+    "fixed",
+    "following",
+    "from",
+    "handle",
+    "high",
+    "ignore",
+    "ignores",
+    "into",
+    "issue",
+    "issues",
+    "large",
+    "look",
+    "medium",
+    "method",
+    "missing",
+    "only",
+    "patch",
+    "patches",
+    "probably",
+    "prompt",
+    "report",
+    "safe",
+    "should",
+    "state",
+    "still",
+    "test",
+    "that",
+    "there",
+    "this",
+    "with",
+    "works",
+}
+_REMOTE_BINARYISH_SUFFIXES = (
+    ".asc",
+    ".bin",
+    ".crt",
+    ".deb",
+    ".der",
+    ".gpg",
+    ".gz",
+    ".key",
+    ".pem",
+    ".pfx",
+    ".tar",
+    ".tgz",
+    ".xz",
+    ".zip",
+)
 
 
 def _normalized_verifier_verdict(state: LoopState) -> dict[str, Any] | None:
@@ -131,6 +205,16 @@ def _remote_mutation_has_pending_verifier(requirement: dict[str, Any]) -> bool:
     )
 
 
+def _remote_path_needs_presence_probe(path: str) -> bool:
+    lowered = str(path or "").strip().lower()
+    return bool(lowered) and lowered.endswith(_REMOTE_BINARYISH_SUFFIXES)
+
+
+def _remote_presence_probe_command(path: str) -> str:
+    quoted = shlex.quote(str(path or "").strip())
+    return f"test -s {quoted} && sha256sum {quoted}"
+
+
 def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any]:
     guessed_paths = requirement.get("guessed_paths")
     if not isinstance(guessed_paths, list):
@@ -161,8 +245,12 @@ def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any
     user = str(requirement.get("user") or "").strip()
     mutation_type = str(requirement.get("mutation_type") or "").strip().lower()
     required_arguments: dict[str, Any] = {}
+    first_path_needs_presence_probe = mutation_type != "deletion" and _remote_path_needs_presence_probe(first_path)
     if first_path:
-        required_arguments["path"] = first_path
+        if first_path_needs_presence_probe:
+            required_arguments["command"] = _remote_presence_probe_command(first_path)
+        else:
+            required_arguments["path"] = first_path
     elif first_directory_check:
         directory_path = str(first_directory_check.get("path") or "").strip()
         if directory_path:
@@ -209,20 +297,35 @@ def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any
                 ],
             }
     else:
-        error = (
-            "Cannot complete the task while a raw `ssh_exec` remote file mutation still needs meaningful verification. "
-            "Read back the changed file with `ssh_file_read`, or redo the edit with `ssh_file_patch` / "
-            "`ssh_file_replace_between` so the harness can verify the readback hash."
-        )
-        next_required_action = {
-            "tool_names": ["ssh_file_read", "ssh_file_patch", "ssh_file_replace_between"],
-            "required_fields": sorted(required_arguments),
-            "required_arguments": required_arguments,
-            "notes": [
-                "A grep-only positive match is not enough for replacement tasks.",
-                "Verify that the replacement exists and the old target is gone.",
-            ],
-        }
+        if first_path_needs_presence_probe:
+            error = (
+                "Cannot complete the task while a raw `ssh_exec` remote file mutation still needs meaningful verification. "
+                "Verify the changed binary or key file exists and has content with a read-only `ssh_exec` presence/hash check."
+            )
+            next_required_action = {
+                "tool_names": ["ssh_exec"],
+                "required_fields": sorted(required_arguments),
+                "required_arguments": required_arguments,
+                "notes": [
+                    "Binary/key files should be verified with metadata or hashes, not decoded as text.",
+                    "A successful `test -s ... && sha256sum ...` check is valid proof for this file.",
+                ],
+            }
+        else:
+            error = (
+                "Cannot complete the task while a raw `ssh_exec` remote file mutation still needs meaningful verification. "
+                "Read back the changed file with `ssh_file_read`, or redo the edit with `ssh_file_patch` / "
+                "`ssh_file_replace_between` so the harness can verify the readback hash."
+            )
+            next_required_action = {
+                "tool_names": ["ssh_file_read", "ssh_file_patch", "ssh_file_replace_between"],
+                "required_fields": sorted(required_arguments),
+                "required_arguments": required_arguments,
+                "notes": [
+                    "A grep-only positive match is not enough for replacement tasks.",
+                    "Verify that the replacement exists and the old target is gone.",
+                ],
+            }
     if path_hint:
         error += f" Suspected path(s): {path_hint}."
     if first_directory_check:
@@ -391,6 +494,292 @@ def _unresolved_missing_input_file(state: LoopState) -> dict | None:
     return None
 
 
+def _candidate_multi_objective_texts(state: LoopState) -> list[str]:
+    texts: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in texts:
+            texts.append(text)
+
+    add(getattr(state.run_brief, "original_task", ""))
+    add(getattr(state.run_brief, "current_phase_objective", ""))
+    add(getattr(state.working_memory, "current_goal", ""))
+    scratchpad = getattr(state, "scratchpad", {})
+    if isinstance(scratchpad, dict):
+        for key in ("_task_transaction", "_last_task_handoff"):
+            payload = scratchpad.get(key)
+            if not isinstance(payload, dict):
+                continue
+            for field in ("raw_task", "effective_task", "current_goal", "user_goal"):
+                add(payload.get(field))
+    return texts
+
+
+def _clean_objective_title(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip()).strip(" \"'")
+    return text[:260]
+
+
+def _extract_multi_objectives(text: str) -> list[str]:
+    raw_text = str(text or "")
+    if not raw_text.strip():
+        return []
+    raw_text = re.sub(
+        r"\s+([-*]\s+(?:critical|high|medium|low|p[0-3])\s*:)",
+        r"\n\1",
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+    has_issue_context = _ISSUE_LIST_CONTEXT_RE.search(raw_text) is not None
+    objectives: list[str] = []
+    current: list[str] = []
+    severity_count = 0
+    in_code_block = False
+
+    def flush() -> None:
+        if not current:
+            return
+        title = _clean_objective_title(" ".join(current))
+        current.clear()
+        if title and title not in objectives:
+            objectives.append(title)
+
+    for raw_line in raw_text.splitlines():
+        line = raw_line.rstrip()
+        if line.strip().startswith("```"):
+            flush()
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        match = _ISSUE_BULLET_RE.match(line)
+        if match:
+            body = str(match.group("body") or "").strip()
+            is_severity_item = _SEVERITY_PREFIX_RE.match(body) is not None
+            if not has_issue_context and not is_severity_item:
+                flush()
+                continue
+            flush()
+            if is_severity_item:
+                severity_count += 1
+            current.append(body)
+            continue
+        if current and line.startswith((" ", "\t")) and line.strip():
+            current.append(line.strip())
+        elif current and not line.strip():
+            flush()
+    flush()
+    if len(objectives) < 2:
+        return []
+    if not has_issue_context and severity_count < 2:
+        return []
+    return objectives
+
+
+def _ensure_multi_objective_ledger(state: LoopState) -> dict[str, Any] | None:
+    scratchpad = getattr(state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        return None
+    existing = scratchpad.get(_MULTI_OBJECTIVE_LEDGER_KEY)
+    if isinstance(existing, dict) and isinstance(existing.get("objectives"), list):
+        return existing
+
+    best_text = ""
+    best_objectives: list[str] = []
+    for text in _candidate_multi_objective_texts(state):
+        objectives = _extract_multi_objectives(text)
+        if len(objectives) > len(best_objectives):
+            best_text = text
+            best_objectives = objectives
+    if len(best_objectives) < 2:
+        return None
+
+    ledger = {
+        "status": "active",
+        "parent_goal": _clean_objective_title(best_text)[:500],
+        "objectives": [
+            {
+                "objective_id": f"O{index}",
+                "title": title,
+                "status": "pending",
+                "evidence": [],
+            }
+            for index, title in enumerate(best_objectives, start=1)
+        ],
+    }
+    scratchpad[_MULTI_OBJECTIVE_LEDGER_KEY] = ledger
+    return ledger
+
+
+def _objective_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in _OBJECTIVE_TOKEN_RE.findall(str(text or "").lower()):
+        token = raw.strip("()")
+        if len(token) < 4 or token in _OBJECTIVE_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _objective_matches_text(objective: dict[str, Any], text: str) -> bool:
+    title = str(objective.get("title") or "").strip().lower()
+    haystack = str(text or "").strip().lower()
+    if not title or not haystack:
+        return False
+    if title in haystack:
+        return True
+    title_tokens = _objective_tokens(title)
+    if not title_tokens:
+        return False
+    matched = title_tokens.intersection(_objective_tokens(haystack))
+    required = max(2, min(4, len(title_tokens) // 3 or 1))
+    return len(matched) >= required
+
+
+def _resolved_followup_objective_id(state: LoopState) -> str:
+    scratchpad = getattr(state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        return ""
+    resolved = scratchpad.get("_resolved_followup")
+    if not isinstance(resolved, dict):
+        return ""
+    try:
+        index = int(resolved.get("option_index") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"O{index}" if index > 0 else ""
+
+
+def _mark_objective_done(objective: dict[str, Any], message: str) -> bool:
+    if str(objective.get("status") or "").strip().lower() == "done":
+        return False
+    objective["status"] = "done"
+    evidence = str(message or "").strip()
+    if evidence:
+        current = objective.get("evidence")
+        if not isinstance(current, list):
+            current = []
+        current.append(evidence[:240])
+        objective["evidence"] = current[-4:]
+    return True
+
+
+def _multi_objective_completion_block(
+    state: LoopState,
+    *,
+    message: str,
+    verifier_verdict: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    ledger = _ensure_multi_objective_ledger(state)
+    if not ledger:
+        return None
+    objectives = [item for item in ledger.get("objectives", []) if isinstance(item, dict)]
+    if not objectives:
+        return None
+
+    resolved_objective_id = _resolved_followup_objective_id(state)
+    completed_now: list[str] = []
+    for objective in objectives:
+        if (
+            resolved_objective_id
+            and str(objective.get("objective_id") or "") == resolved_objective_id
+        ) or _objective_matches_text(objective, message):
+            if _mark_objective_done(objective, message):
+                completed_now.append(str(objective.get("objective_id") or ""))
+
+    remaining = [
+        {
+            "objective_id": str(item.get("objective_id") or ""),
+            "title": str(item.get("title") or ""),
+        }
+        for item in objectives
+        if str(item.get("status") or "").strip().lower() != "done"
+    ]
+    if not remaining:
+        ledger["status"] = "done"
+        return None
+
+    return {
+        "completed_now": completed_now,
+        "remaining_objectives": remaining,
+        "ledger": ledger,
+        "last_verifier_verdict": verifier_verdict,
+    }
+
+
+def _open_plan_subtasks(state: LoopState) -> list[dict[str, Any]]:
+    plan = state.active_plan or state.draft_plan
+    ledger = getattr(state, "subtask_ledger", None)
+    if plan is None or ledger is None:
+        return []
+    step_ids = {
+        str(getattr(step, "step_id", "") or "").strip()
+        for step in plan.iter_steps()
+        if str(getattr(step, "step_id", "") or "").strip()
+    }
+    if not step_ids:
+        return []
+    open_items: list[dict[str, Any]] = []
+    for task in getattr(ledger, "subtasks", []) or []:
+        subtask_id = str(getattr(task, "subtask_id", "") or "").strip()
+        if subtask_id not in step_ids:
+            continue
+        status = str(getattr(task, "status", "") or "").strip().lower()
+        if status in {"done", "abandoned"}:
+            continue
+        open_items.append(
+            {
+                "subtask_id": subtask_id,
+                "title": str(getattr(task, "title", "") or ""),
+                "goal": str(getattr(task, "goal", "") or ""),
+                "status": status or "pending",
+                "acceptance": list(getattr(task, "acceptance", []) or []),
+                "evidence": list(getattr(task, "evidence", []) or [])[-3:],
+                "blockers": list(getattr(task, "blockers", []) or [])[-3:],
+                "next_action": getattr(task, "next_action", None),
+                "attempts": int(getattr(task, "attempts", 0) or 0),
+            }
+        )
+    return open_items
+
+
+def _plan_subtask_completion_block(
+    state: LoopState,
+    *,
+    verifier_verdict: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    open_items = _open_plan_subtasks(state)
+    if not open_items:
+        return None
+    first = open_items[0]
+    status = str(first.get("status") or "").lower()
+    blocked = status in {"blocked", "failed"}
+    if blocked:
+        next_required_action = {
+            "tool_names": ["escalate_to_bigger_model", "ask_human", "task_fail"],
+            "notes": [
+                "Escalate to a bigger model if stronger debugging or planning is needed.",
+                "Ask the human if progress requires missing information, approval, credentials, or an ambiguous choice.",
+                "Fail the task only if the blocker is terminal.",
+            ],
+        }
+    else:
+        next_required_action = {
+            "tool_names": ["loop_status"],
+            "notes": [
+                "Continue the active plan subtask with concrete tool evidence.",
+                "Do not call task_complete until all plan subtasks are done or explicitly abandoned/failed.",
+            ],
+        }
+    return {
+        "open_plan_subtasks": open_items,
+        "next_required_subtask": first,
+        "next_required_action": next_required_action,
+        "last_verifier_verdict": verifier_verdict,
+    }
+
+
 async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
     if state.plan_execution_mode and state.active_step_id:
         return fail(
@@ -402,6 +791,12 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
             },
         )
     verifier_verdict = _normalized_verifier_verdict(state)
+    ledger_service = getattr(harness, "subtask_ledger", None)
+    if ledger_service is not None:
+        try:
+            ledger_service.import_plan_if_needed(replace_synthetic_root=True)
+        except Exception:
+            pass
     remote_requirement = _remote_mutation_verification_requirement(state)
     if remote_requirement is not None:
         block_payload = _remote_mutation_block_payload(remote_requirement)
@@ -465,7 +860,6 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
 
             if scratchpad.get("_task_complete_blocker_count", 0) >= 2:
                 has_no_sections = not session.write_sections_completed
-                from pathlib import Path
                 from ..tools.fs import _resolve
                 try:
                     target = _resolve(session.write_target_path, getattr(state, "cwd", None))
@@ -555,6 +949,17 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    plan_subtask_block = _plan_subtask_completion_block(state, verifier_verdict=verifier_verdict)
+    if plan_subtask_block is not None:
+        next_subtask = plan_subtask_block["next_required_subtask"]
+        return fail(
+            "Cannot complete the task while plan subtasks are still open. "
+            f"Next required subtask: {next_subtask.get('subtask_id')} - {next_subtask.get('title')}.",
+            metadata={
+                "reason": "plan_subtasks_incomplete",
+                **plan_subtask_block,
+            },
+        )
     if not state.acceptance_ready() and not verifier_failure_satisfies_diagnostic:
         checklist = state.acceptance_checklist()
         pending = [item["criterion"] for item in checklist if not item["satisfied"]]
@@ -581,6 +986,35 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                         "If fetches still fail, answer explicitly that the exact weather could not be verified from the available evidence.",
                     ],
                 },
+            },
+        )
+    objective_block = _multi_objective_completion_block(
+        state,
+        message=message,
+        verifier_verdict=verifier_verdict,
+    )
+    if objective_block is not None:
+        remaining = objective_block["remaining_objectives"]
+        first_remaining = str(remaining[0].get("title") or "the next open objective")
+        completed_now = objective_block["completed_now"]
+        if completed_now:
+            error = (
+                "Marked the current subobjective complete, but the parent task still has open objectives. "
+                f"Next open objective: {first_remaining}"
+            )
+        else:
+            error = (
+                "Cannot complete the parent task because it still has open objectives and the completion message "
+                f"did not match a specific open objective. Next open objective: {first_remaining}"
+            )
+        return fail(
+            error,
+            metadata={
+                "reason": "multi_objective_incomplete",
+                "completed_objectives": completed_now,
+                "remaining_objectives": remaining,
+                "multi_objective_ledger": objective_block["ledger"],
+                "last_verifier_verdict": objective_block["last_verifier_verdict"],
             },
         )
     state.scratchpad["_task_complete"] = True
@@ -700,6 +1134,40 @@ async def ask_human(question: str, state: LoopState) -> dict:
     return ok({"status": "human_input_required", "question": question})
 
 
+def _subtask_ledger_status(state: LoopState) -> dict[str, Any] | None:
+    ledger = getattr(state, "subtask_ledger", None)
+    if ledger is None:
+        return None
+    subtasks = []
+    for task in getattr(ledger, "subtasks", []) or []:
+        subtasks.append(
+            {
+                "subtask_id": str(getattr(task, "subtask_id", "") or ""),
+                "title": str(getattr(task, "title", "") or ""),
+                "goal": str(getattr(task, "goal", "") or ""),
+                "status": str(getattr(task, "status", "") or ""),
+                "acceptance": list(getattr(task, "acceptance", []) or []),
+                "evidence": list(getattr(task, "evidence", []) or [])[-3:],
+                "blockers": list(getattr(task, "blockers", []) or [])[-3:],
+                "next_action": getattr(task, "next_action", None),
+                "attempts": int(getattr(task, "attempts", 0) or 0),
+            }
+        )
+    return {
+        "task_id": getattr(ledger, "task_id", None),
+        "active_subtask_id": getattr(ledger, "active_subtask_id", None),
+        "active_subtask": next(
+            (item for item in subtasks if item["subtask_id"] == getattr(ledger, "active_subtask_id", None)),
+            None,
+        ),
+        "subtasks": subtasks[-12:],
+        "done_subtask_ids": [item["subtask_id"] for item in subtasks if item["status"] == "done"],
+        "pending_subtask_ids": [
+            item["subtask_id"] for item in subtasks if item["status"] in {"pending", "active", "blocked"}
+        ],
+    }
+
+
 async def loop_status(state: LoopState) -> dict:
     max_steps = state.scratchpad.get("_max_steps")
     try:
@@ -764,6 +1232,7 @@ async def loop_status(state: LoopState) -> dict:
             "acceptance_waived": state.acceptance_waived,
             "acceptance_checklist": acceptance_checklist,
             "pending_acceptance_criteria": [item["criterion"] for item in acceptance_checklist if not item["satisfied"]],
+            "subtask_ledger": _subtask_ledger_status(state),
             "last_verifier_verdict": verifier_verdict,
             "last_failure_class": state.last_failure_class,
             "files_changed_this_cycle": state.files_changed_this_cycle,

@@ -47,6 +47,15 @@ def test_alert_with_ui_kind_sudo_password_visible_when_system_hidden() -> None:
     assert should_render_event(event, show_system_messages=False, show_tool_calls=True) is True
 
 
+def test_subtask_checklist_alert_visible_when_system_hidden() -> None:
+    event = UIEvent(
+        event_type=UIEventType.ALERT,
+        content="[ ] task: SSH to remote server - needed",
+        data={"ui_kind": "subtask_checklist"},
+    )
+    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
 def test_system_event_suppressed_when_system_messages_hidden() -> None:
     event = UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled.")
     assert should_render_event(event, show_system_messages=False, show_tool_calls=True) is False

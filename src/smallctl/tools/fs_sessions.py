@@ -37,10 +37,124 @@ def _section_name_allows_full_file_finalization(section_name: str) -> bool:
     }
 
 
+def _normalize_chunk_section_label(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    for token in ("-", " ", "/", "\\"):
+        normalized = normalized.replace(token, "_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("_")
+
+
+def _chunk_section_labels_match(left: str, right: str) -> bool:
+    left_normalized = _normalize_chunk_section_label(left)
+    right_normalized = _normalize_chunk_section_label(right)
+    if not left_normalized or not right_normalized:
+        return False
+    if left_normalized == right_normalized:
+        return True
+    left_tokens = {token for token in left_normalized.split("_") if token}
+    right_tokens = {token for token in right_normalized.split("_") if token}
+    if not left_tokens or not right_tokens:
+        return False
+    return left_tokens.issubset(right_tokens) or right_tokens.issubset(left_tokens)
+
+
+def _chunk_section_completed(completed: set[str], label: str) -> bool:
+    return any(_chunk_section_labels_match(item, label) for item in completed)
+
+
+def _infer_next_suggested_section(session: Any, current_section: str) -> str:
+    suggestions = [
+        str(item or "").strip()
+        for item in (getattr(session, "suggested_sections", []) or [])
+        if str(item or "").strip()
+    ]
+    if not suggestions:
+        return ""
+
+    normalized_current = _normalize_chunk_section_label(current_section)
+    normalized_suggestions = [
+        _normalize_chunk_section_label(item)
+        for item in suggestions
+    ]
+    completed = {
+        _normalize_chunk_section_label(item)
+        for item in (getattr(session, "write_sections_completed", []) or [])
+        if str(item or "").strip()
+    }
+    if normalized_current:
+        completed.add(normalized_current)
+
+    current_index = next(
+        (
+            index
+            for index, normalized in enumerate(normalized_suggestions)
+            if _chunk_section_labels_match(normalized_current, normalized)
+        ),
+        -1,
+    )
+    if current_index >= 0:
+        index = current_index
+        for next_index in range(index + 1, len(suggestions)):
+            if not _chunk_section_completed(completed, normalized_suggestions[next_index]):
+                return suggestions[next_index]
+        return ""
+
+    for suggestion, normalized in zip(suggestions, normalized_suggestions):
+        if not _chunk_section_completed(completed, normalized):
+            return suggestion
+    return ""
+
+
+def _write_session_should_finalize(
+    session: Any,
+    *,
+    section_name: str,
+    next_section_name: str,
+    replace_strategy: str,
+    content: str,
+) -> bool:
+    if next_section_name:
+        return False
+    if not _write_session_can_finalize(session):
+        return False
+    if _section_name_allows_full_file_finalization(section_name):
+        return True
+    if replace_strategy == "overwrite" and _looks_like_full_script_content(content, section_name):
+        return True
+
+    suggestions = [
+        str(item or "").strip()
+        for item in (getattr(session, "suggested_sections", []) or [])
+        if str(item or "").strip()
+    ]
+    if not suggestions:
+        return True
+
+    normalized_section = _normalize_chunk_section_label(section_name)
+    normalized_suggestions = [
+        _normalize_chunk_section_label(item)
+        for item in suggestions
+    ]
+    if normalized_section and _chunk_section_labels_match(normalized_section, normalized_suggestions[-1]):
+        return True
+
+    completed = {
+        _normalize_chunk_section_label(item)
+        for item in (getattr(session, "write_sections_completed", []) or [])
+        if str(item or "").strip()
+    }
+    if normalized_section:
+        completed.add(normalized_section)
+    return all(_chunk_section_completed(completed, normalized) for normalized in normalized_suggestions)
+
+
 def _looks_like_full_script_content(content: str, section_name: str) -> bool:
     normalized_section = str(section_name or "").strip().lower().replace("-", "_").replace(" ", "_")
     likely_scaffold_sections = {
         "imports",
+        "imports_and_types",
         "imports_and_class",
         "imports_and_classes",
         "imports_and_core",
@@ -54,6 +168,8 @@ def _looks_like_full_script_content(content: str, section_name: str) -> bool:
         "implementation",
         "core",
         "body",
+        "main",
+        "main_file",
     }
     if normalized_section not in likely_scaffold_sections:
         return False

@@ -42,6 +42,7 @@ from smallctl.harness import Harness
 from smallctl.harness.tool_visibility import hidden_tool_reason
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.config import resolve_config
+from smallctl.recovery_schema import Subtask, SubtaskLedger
 from smallctl.ui.display import StatusState
 from smallctl.ui.statusbar import StatusBar
 from smallctl.tools import fs
@@ -148,6 +149,40 @@ def test_plan_set_creates_a_playbook_artifact(tmp_path: Path) -> None:
     assert result["output"]["artifact_id"] == state.plan_artifact_id
 
 
+def test_plan_set_accepts_task_only_step_payloads(tmp_path: Path) -> None:
+    state = _make_state()
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path, "run-1"),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+    )
+
+    result = asyncio.run(
+        planning.plan_set(
+            goal="Create a script and verify it",
+            inputs=["User request"],
+            outputs=["temp/example.py"],
+            constraints=["Use stdlib only"],
+            acceptance_criteria=["Script runs successfully"],
+            implementation_plan=["Write", "Run"],
+            steps=[
+                {"task": "Write script skeleton", "tool_allowlist": ["file_write"]},
+                {"task": "Run verifier", "tool_allowlist": ["shell_exec"]},
+            ],
+            state=state,
+            harness=harness,
+        )
+    )
+
+    assert result["success"] is True
+    assert state.draft_plan is not None
+    assert [step.title for step in state.draft_plan.steps] == [
+        "Write script skeleton",
+        "Run verifier",
+    ]
+    assert [step.step_id for step in state.draft_plan.steps] == ["P1", "P2"]
+
+
 def test_plan_set_rejects_incomplete_plan_before_approval(tmp_path: Path) -> None:
     state = _make_state()
     harness = SimpleNamespace(
@@ -212,6 +247,42 @@ def test_system_prompt_web_research_prefers_result_id_and_real_answer() -> None:
 
     assert "prefer the exact `web_fetch(result_id='...')` form shown in the result list" in prompt
     assert "do not finish with only 'found N results'" in prompt
+
+
+def test_loop_status_surfaces_subtask_ledger() -> None:
+    state = _make_state()
+    state.subtask_ledger = SubtaskLedger(
+        task_id="task-1",
+        active_subtask_id="S2",
+        subtasks=[
+            Subtask(
+                subtask_id="S1",
+                title="Read file",
+                goal="Understand the current implementation",
+                status="done",
+                evidence=["file_read succeeded for temp/example.py"],
+            ),
+            Subtask(
+                subtask_id="S2",
+                title="Run verifier",
+                goal="Verify the script",
+                status="active",
+                acceptance=["Verifier passes"],
+                blockers=["No verifier has run yet"],
+                next_action="Run python3 temp/example.py",
+                attempts=1,
+            ),
+        ],
+    )
+
+    result = asyncio.run(control.loop_status(state))
+
+    assert result["success"] is True
+    ledger = result["output"]["subtask_ledger"]
+    assert ledger["active_subtask_id"] == "S2"
+    assert ledger["active_subtask"]["title"] == "Run verifier"
+    assert ledger["done_subtask_ids"] == ["S1"]
+    assert ledger["pending_subtask_ids"] == ["S2"]
 
 
 def test_system_prompt_guards_header_only_tables_and_inline_tool_xml() -> None:
@@ -1766,6 +1837,46 @@ def test_file_read_does_not_shadow_existing_target_with_fresh_empty_write_sessio
     assert state.write_session.write_staging_path == ""
 
 
+def test_file_read_does_not_shadow_empty_target_with_fresh_empty_stage(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "patch_dependency_sim.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("", encoding="utf-8")
+
+    session = _make_open_write_session(target, intent="replace_file")
+    stage_path = fs._session_stage_path(session.write_session_id, target, str(tmp_path))
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_path.write_text("", encoding="utf-8")
+    session.write_staging_path = str(stage_path)
+    state.write_session = session
+
+    result = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+
+    assert result["success"] is True
+    assert result["output"] == ""
+    assert result["metadata"]["read_from_staging"] is False
+    assert result["metadata"]["source_path"] == str(target)
+
+
+def test_file_read_missing_target_with_fresh_empty_stage_reports_missing(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "patch_dependency_sim.py"
+
+    session = _make_open_write_session(target, intent="replace_file")
+    stage_path = fs._session_stage_path(session.write_session_id, target, str(tmp_path))
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_path.write_text("", encoding="utf-8")
+    session.write_staging_path = str(stage_path)
+    state.write_session = session
+
+    result = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+
+    assert result["success"] is False
+    assert result["metadata"]["read_result"] == "missing"
+
+
 def test_file_read_allows_empty_stage_after_write_session_progress(tmp_path: Path) -> None:
     state = _make_state()
     state.cwd = str(tmp_path)
@@ -2500,7 +2611,7 @@ def test_dir_list_repeat_loop_limits_are_50_percent_tighter_than_default_strict_
     file_read_limits = _repeat_loop_limits(harness, PendingToolCall(tool_name="file_read", args={"path": "src/app.py"}))
 
     assert dir_list_limits == (2, 4, 2)
-    assert file_read_limits == (3, 6, 3)
+    assert file_read_limits == (7, 7, 3)
 
 
 def test_repeated_artifact_read_for_table_task_gets_summary_exit_nudge() -> None:
@@ -2937,6 +3048,10 @@ def test_one_shot_repeat_guard_allows_scheduled_recovery_file_read_once() -> Non
         {"tool_name": "file_read", "fingerprint": fingerprint},
         {"tool_name": "file_read", "fingerprint": fingerprint},
         {"tool_name": "file_read", "fingerprint": fingerprint},
+        {"tool_name": "file_read", "fingerprint": fingerprint},
+        {"tool_name": "file_read", "fingerprint": fingerprint},
+        {"tool_name": "file_read", "fingerprint": fingerprint},
+        {"tool_name": "file_read", "fingerprint": fingerprint},
     ]
     pending = PendingToolCall(tool_name="file_read", args={"path": "src/app.py"})
 
@@ -2944,9 +3059,9 @@ def test_one_shot_repeat_guard_allows_scheduled_recovery_file_read_once() -> Non
 
     assert _detect_repeated_tool_loop(harness, pending) is None
     assert "_repeat_guard_one_shot_fingerprints" not in state.scratchpad
-    assert "Guard tripped: repeated tool call loop (file_read repeated with identical arguments)" in (
-        _detect_repeated_tool_loop(harness, pending) or ""
-    )
+    tripped_msg = _detect_repeated_tool_loop(harness, pending) or ""
+    assert "Guard tripped" in tripped_msg
+    assert "file_read" in tripped_msg
 
 
 def test_authoring_budget_trims_multi_call_turn_for_small_model() -> None:

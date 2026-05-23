@@ -49,12 +49,27 @@ def handle_reused_artifact_result(
         _auto_mirror_session_anchor(service.harness, tool_name=tool_name, result=result, arguments=arguments)
         if artifact is not None:
             artifact.metadata.setdefault("evidence_statement", evidence.statement)
+        message_metadata = {"artifact_id": artifact_id, "cache_hit": True}
+        if artifact is not None and str(artifact.kind or artifact.tool_name or "").strip() in {"file_read", "ssh_file_read"}:
+            artifact_metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+            for key in (
+                "path",
+                "source_path",
+                "complete_file",
+                "truncated",
+                "line_start",
+                "line_end",
+                "total_lines",
+            ):
+                if key in artifact_metadata:
+                    out_key = "file_content_truncated" if key == "truncated" else key
+                    message_metadata[out_key] = artifact_metadata.get(key)
         return ConversationMessage(
             role="tool",
             name=tool_name,
             tool_call_id=tool_call_id,
             content=compact_content,
-            metadata={"artifact_id": artifact_id, "cache_hit": True},
+            metadata=message_metadata,
         )
 
     if tool_name == "artifact_print" and result.success:

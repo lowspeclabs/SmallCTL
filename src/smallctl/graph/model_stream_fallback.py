@@ -25,6 +25,7 @@ from .model_stream_fallback_support import (
     _fallback_response_ready_for_early_exit,
     _fallback_task_text,
     _format_partial_tool_calls,
+    _recovered_write_content_is_plausible,
     _parse_context_window_overflow,
     _seed_text_write_fallback_session,
     _should_attempt_empty_payload_text_fallback,
@@ -322,7 +323,7 @@ async def _attempt_text_write_fallback(
     await harness._emit(
         deps.event_handler,
         UIEvent(
-            event_type=UIEventType.ASSISTANT,
+            event_type=UIEventType.ALERT,
             content="Fallback progress: switching to a code-only rescue pass for the stalled write.",
             data={"status_activity": "fallback rescue in progress"},
         ),
@@ -470,13 +471,24 @@ async def _attempt_text_write_fallback(
             source=fallback_intent.source,
             reason=reason,
         )
+        if not _recovered_write_content_is_plausible(fallback_intent.content, target_path=fallback_intent.path):
+            harness._runlog(
+                "stream_text_write_fallback_rejected",
+                "recovered write content was too small or implausible; refusing synthetic file_write",
+                write_session_id=fallback_intent.write_session_id,
+                target_path=fallback_intent.path,
+                content_chars=len(str(fallback_intent.content or "")),
+                current_section=fallback_intent.section_name or current_section,
+                reason=reason,
+            )
+            fallback_intent = None
     if fallback_intent is not None and can_safely_synthesize(fallback_intent, harness=harness):
         _maybe_prepend_existing_content(fallback_intent, harness=harness)
         synthetic_call = build_synthetic_file_write_call(fallback_intent)
         await harness._emit(
             deps.event_handler,
             UIEvent(
-                event_type=UIEventType.ASSISTANT,
+                event_type=UIEventType.ALERT,
                 content="Fallback progress: recovered a usable code block and is finalizing the write.",
                 data={"status_activity": "fallback rescue finalizing"},
             ),

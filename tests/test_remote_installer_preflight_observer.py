@@ -38,7 +38,7 @@ def _make_preflight_entry(
     step: int = 0,
 ) -> tuple[str, dict]:
     """Build a preflight scratchpad entry matching what the guard creates."""
-    key = "|".join([host, user, cwd, script_path])
+    key = "|".join([host, user, cwd])
     checks = [
         "pwd",
         f"cd '{cwd}' && git rev-parse --show-toplevel",

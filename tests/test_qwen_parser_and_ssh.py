@@ -1535,6 +1535,33 @@ def test_normalize_tool_request_backfills_active_write_session_path() -> None:
     assert metadata["repaired_write_session_path"] is True
 
 
+def test_normalize_tool_request_drops_write_session_none_sentinels() -> None:
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "file_write",
+        {
+            "path": "./temp/leader_election_sim.py",
+            "content": "print('debug')\n",
+            "write_session_id": "None",
+            "next_section_name": "None",
+            "replace_strategy": "overwrite",
+            "section_name": "full_file",
+        },
+        phase="execute",
+        state=LoopState(cwd="."),
+    )
+
+    assert intercepted is None
+    assert tool_name == "file_write"
+    assert args["path"] == "./temp/leader_election_sim.py"
+    assert args["content"] == "print('debug')\n"
+    assert args["replace_strategy"] == "overwrite"
+    assert args["section_name"] == "full_file"
+    assert "write_session_id" not in args
+    assert "next_section_name" not in args
+    assert metadata["optional_none_sentinel_removed"] == ["next_section_name", "write_session_id"]
+
+
 def test_normalize_tool_request_does_not_backfill_mismatched_write_session_path() -> None:
     state = LoopState(cwd=".")
     state.write_session = WriteSession(

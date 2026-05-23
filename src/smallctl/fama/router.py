@@ -23,6 +23,12 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
     names = list(MITIGATION_RULES.get(signal.kind, []))
     if signal.failure_class == "zero_tests_discovered" and "zero_test_recovery_capsule" not in names:
         names.append("zero_test_recovery_capsule")
+    # Timeout / infinite-loop signatures should not trap the agent behind done_gate.
+    # A hanging script needs a rewrite, not an acceptance checklist.
+    if signal.failure_class in {"verifier_timeout", "infinite_loop_suspected"}:
+        names = [n for n in names if n not in {"done_gate", "acceptance_checklist_capsule"}]
+        if "rewrite_suggestion_capsule" not in names:
+            names.append("rewrite_suggestion_capsule")
     if not names:
         return []
     step = current_step(state)

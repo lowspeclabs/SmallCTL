@@ -19,7 +19,13 @@ async def grep(
     if not root.exists():
         return fail(f"Path does not exist: {root}")
     flags = 0 if case_sensitive else re.IGNORECASE
-    matcher = re.compile(pattern, flags) if regex else None
+    try:
+        matcher = re.compile(pattern, flags) if regex else None
+    except re.error as exc:
+        return fail(
+            f"Invalid regex: {exc}",
+            metadata={"pattern": pattern, "regex": True, "error_kind": "invalid_regex"},
+        )
     results: list[dict[str, Any]] = []
 
     for file_path in root.rglob("*"):
@@ -49,7 +55,13 @@ async def find_files(
     if not root.exists():
         return fail(f"Path does not exist: {root}")
     results: list[str] = []
-    rx = re.compile(pattern) if regex else None
+    try:
+        rx = re.compile(pattern) if regex else None
+    except re.error as exc:
+        return fail(
+            f"Invalid regex: {exc}",
+            metadata={"pattern": pattern, "regex": True, "error_kind": "invalid_regex"},
+        )
     use_glob = not regex and any(char in pattern for char in "*?[]")
     for file_path in root.rglob("*"):
         if not file_path.is_file():

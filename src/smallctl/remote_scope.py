@@ -218,6 +218,29 @@ def handoff_supports_remote_continuation(state: Any | None) -> bool:
     return confirmed_ssh_target_count(state) > 0
 
 
+def _current_task_texts(state: Any) -> list[str]:
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    if run_brief is not None:
+        texts.append(str(getattr(run_brief, "original_task", "") or ""))
+        texts.append(str(getattr(run_brief, "effective_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    if working_memory is not None:
+        texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = _scratchpad(state)
+    handoff = scratchpad.get("_last_task_handoff")
+    if isinstance(handoff, dict):
+        texts.append(str(handoff.get("effective_task") or ""))
+        texts.append(str(handoff.get("current_goal") or ""))
+    return texts
+
+
+def _has_explicit_local_targets(state: Any) -> bool:
+    combined = " ".join(_current_task_texts(state)).lower()
+    local_markers = ("./", "../", "/home/", "/tmp/", "/var/", "/opt/", "/usr/")
+    return any(marker in combined for marker in local_markers)
+
+
 def remote_scope_is_active(state: Any | None) -> bool:
     if state is None:
         return False
@@ -225,6 +248,10 @@ def remote_scope_is_active(state: Any | None) -> bool:
         return True
     if _normalized_mode(getattr(state, "active_intent", "")) == "requested_ssh_exec":
         return True
+    # If the current task explicitly references local paths, do not treat remote
+    # scope as active regardless of stale handoff or resolved-remote state.
+    if _has_explicit_local_targets(state):
+        return False
     scratchpad = _scratchpad(state)
     resolved_remote = scratchpad.get("_resolved_remote_followup")
     if isinstance(resolved_remote, dict) and resolved_remote:

@@ -12,6 +12,7 @@ class EscalationPolicyDecision:
     trigger: str
     reason: str
     evidence_count: int = 0
+    missing_signals: list[str] | None = None
 
 
 class EscalationPolicy:
@@ -28,7 +29,7 @@ class EscalationPolicy:
         scratchpad = scratchpad if isinstance(scratchpad, dict) else {}
         history = scratchpad.get("_escalation_history")
         history = history if isinstance(history, list) else []
-        max_per_task = _safe_int(getattr(config, "escalation_max_per_task", 2), 2)
+        max_per_task = _safe_int(getattr(config, "escalation_max_per_task", 3), 3)
         if max_per_task >= 0 and len(history) >= max_per_task:
             return self._block("max_per_task", "Escalation limit reached for this task.", evidence_count=len(history))
 
@@ -48,17 +49,32 @@ class EscalationPolicy:
             signals.append("explicit_escalation_prior_evidence")
             signals = _dedupe(signals)
         evidence_count = len(signals)
-        if bool(getattr(config, "escalation_require_tool_plan_evidence", True)):
+        # In repair phase with no actionable progress, lower the evidence bar
+        # so small models can escalate before they spiral into read-only loops.
+        state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        stagnation = getattr(state, "stagnation_counters", None)
+        no_progress = int(stagnation.get("no_actionable_progress") or 0) if isinstance(stagnation, dict) else 0
+        repair_auto_evidence = state_phase == "repair" and no_progress >= 2
+
+        if bool(getattr(config, "escalation_require_tool_plan_evidence", True)) and not repair_auto_evidence:
             has_evidence = _has_meaningful_evidence(signals)
             if not has_evidence:
+                missing = sorted(_EVIDENCE_SIGNALS - set(signals))
                 return self._block(
                     "insufficient_evidence",
                     "Escalation requires verifier, tool-plan, recovery, or tool execution evidence first.",
                     evidence_count=evidence_count,
+                    missing_signals=missing,
                 )
 
-        if not signals:
-            return self._block("not_stuck", "No repeated stuck signal is present yet.", evidence_count=0)
+        if not signals and not repair_auto_evidence:
+            missing = sorted(_EVIDENCE_SIGNALS)
+            return self._block(
+                "not_stuck",
+                "No repeated stuck signal is present yet.",
+                evidence_count=0,
+                missing_signals=missing,
+            )
 
         trigger = signals[0]
         return EscalationPolicyDecision(
@@ -68,9 +84,18 @@ class EscalationPolicy:
             evidence_count=evidence_count,
         )
 
-    def _block(self, trigger: str, reason: str, *, evidence_count: int) -> EscalationPolicyDecision:
+    def _block(
+        self,
+        trigger: str,
+        reason: str,
+        *,
+        evidence_count: int,
+        missing_signals: list[str] | None = None,
+    ) -> EscalationPolicyDecision:
         increment_metric(self.harness.state, "escalation_policy_blocks")
-        return EscalationPolicyDecision(False, trigger, reason, evidence_count=evidence_count)
+        return EscalationPolicyDecision(
+            False, trigger, reason, evidence_count=evidence_count, missing_signals=missing_signals
+        )
 
     def _stuck_signals(self, state: Any, scratchpad: dict[str, Any]) -> list[str]:
         signals: list[str] = []
@@ -196,28 +221,30 @@ def jsonish_text(value: Any) -> str:
     return str(value or "")
 
 
+_EVIDENCE_SIGNALS = {
+    "tool_plan_observations",
+    "verifier_failure",
+    "tool_records",
+    "tool_loop_suppression",
+    "schema_validation_repair",
+    "write_session_schema_failure",
+    "wrong_path",
+    "remote_local_confusion",
+    "remote_verification_pending",
+    "tool_schema_invalid",
+    "backend_stream_recovery",
+    "tool_plan_repeated_read",
+    "evidence_before_patch",
+    "test_time_scaling_disagreement",
+    "repeat_patch",
+    "no_actionable_progress",
+    "write_session_stall",
+    "explicit_escalation_prior_evidence",
+}
+
+
 def _has_meaningful_evidence(signals: list[str]) -> bool:
-    evidence_signals = {
-        "tool_plan_observations",
-        "verifier_failure",
-        "tool_records",
-        "tool_loop_suppression",
-        "schema_validation_repair",
-        "write_session_schema_failure",
-        "wrong_path",
-        "remote_local_confusion",
-        "remote_verification_pending",
-        "tool_schema_invalid",
-        "backend_stream_recovery",
-        "tool_plan_repeated_read",
-        "evidence_before_patch",
-        "test_time_scaling_disagreement",
-        "repeat_patch",
-        "no_actionable_progress",
-        "write_session_stall",
-        "explicit_escalation_prior_evidence",
-    }
-    return any(signal in evidence_signals for signal in signals)
+    return any(signal in _EVIDENCE_SIGNALS for signal in signals)
 
 
 _NON_EVIDENCE_TOOLS = {

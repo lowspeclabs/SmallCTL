@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from .repeat_loop_policy import repeated_action_limit
 from .state import LoopState
 from typing import TYPE_CHECKING
 import difflib
@@ -139,8 +140,8 @@ def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
         from collections import Counter
         counts = Counter(state.tool_history)
         for fingerprint, count in counts.items():
-            if count >= cfg.max_repeated_actions:
-                tool_name = fingerprint.split("|")[0]
+            tool_name = fingerprint.split("|")[0]
+            if count >= repeated_action_limit(tool_name, cfg.max_repeated_actions):
                 message = (
                     "Guard tripped: repeated tool call loop "
                     f"({tool_name} repeated {count} times with identical args and outcome)"

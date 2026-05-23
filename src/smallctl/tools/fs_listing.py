@@ -47,7 +47,7 @@ def _active_session_staging_path(
         or first_chunk_at > 0.0
     )
     if staging_path and staging.exists():
-        if target_exists and staging.stat().st_size == 0 and not has_staged_progress:
+        if staging.stat().st_size == 0 and not has_staged_progress:
             return None
         return staging
     session_id = str(getattr(session, "write_session_id", "") or "").strip()
@@ -60,7 +60,7 @@ def _active_session_staging_path(
     except Exception:
         expected_staging = None
     if expected_staging is not None and expected_staging.exists():
-        if target_exists and expected_staging.stat().st_size == 0 and not has_staged_progress:
+        if expected_staging.stat().st_size == 0 and not has_staged_progress:
             return None
         try:
             session.write_staging_path = str(expected_staging)
@@ -76,6 +76,8 @@ def _active_session_staging_path(
     except Exception:
         return None
     if restored.exists():
+        if restored.stat().st_size == 0 and not has_staged_progress:
+            return None
         if not target_exists or restored.stat().st_size > 0:
             return restored
         try:
@@ -141,6 +143,17 @@ def _missing_path_error(*, requested_path: str, resolved_path: Path, cwd: str | 
             f"{message}. The requested path {requested_path!r} was treated as absolute. "
             f"If you meant a workspace-relative path, retry with {suggestion!r}."
         )
+    # If the parent directory is also missing, suggest creating the file via file_write
+    try:
+        parent = resolved_path.parent
+        if parent and not parent.exists():
+            message += (
+                f" The directory `{parent}` does not exist either. "
+                f"If you need to create this file, use `file_write(path='{requested_path}', content='...')` "
+                f"which will auto-create missing parent directories."
+            )
+    except Exception:
+        pass
     return message
 
 
@@ -212,6 +225,7 @@ async def file_read(
     t0 = time.perf_counter()
     target = _resolve(path, cwd)
     source = _active_session_staging_path(state, path, cwd) or target
+    session = getattr(state, "write_session", None) if state is not None else None
     if not source.exists():
         _record_repair_cycle_read(state, target)
         return fail(
@@ -280,6 +294,13 @@ async def file_read(
             "complete_file": complete_file,
             "truncated": truncated,
             "read_from_staging": source != target,
+            "staged_only": source != target,
+            "write_session_id": (
+                str(getattr(session, "write_session_id", "") or "") if source != target else ""
+            ),
+            "write_session_status": (
+                str(getattr(session, "status", "") or "") if source != target else ""
+            ),
             "system_repair_cycle_id": str(getattr(state, "repair_cycle_id", "") or ""),
         },
     )

@@ -6,6 +6,25 @@ from typing import Any
 from ..redaction import redact_sensitive_data, redact_sensitive_text
 from ..state_support import json_safe_value
 
+_ALLOWED_VERDICTS = [
+    "continue",
+    "need_more_evidence",
+    "reject_current_plan",
+    "propose_patch",
+    "final_answer_ok",
+    "ask_human",
+    "abort",
+    "next_action",
+]
+
+_RESPONSE_EXAMPLE = (
+    '{"verdict":"continue","confidence":0.85,"failure_diagnosis":"The tool call failed because '
+    'the path was absolute instead of relative.","recommended_next_action":'
+    '{"type":"tool_call","tool":"file_read","reason":"Re-read with relative path."},'
+    '"repair_plan":"Use ./temp/ instead of /tmp/ for local writes.",'
+    '"risk_notes":["Low risk: read-only operation."],"requires_human_approval":false}'
+)
+
 
 def build_escalation_packet(
     harness: Any,
@@ -61,6 +80,9 @@ def build_escalation_packet(
             "Do not suggest bypassing verification, approvals, or credential prompts.",
             "Prefer the smallest safe next evidence-gathering or repair step.",
             "Return JSON only.",
+            f"Allowed verdicts: {', '.join(_ALLOWED_VERDICTS)}.",
+            f"When requested_output is '{requested_output}', prefer a verdict that matches the intent (e.g. 'next_action' for next_action, 'continue' for repair_plan, 'propose_patch' for patch_review).",
+            f"Response example: {_RESPONSE_EXAMPLE}",
         ],
     }
 

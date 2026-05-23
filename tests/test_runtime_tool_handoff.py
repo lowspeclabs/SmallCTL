@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from smallctl.graph.runtime_auto import AutoGraphRuntime
 from smallctl.graph.runtime import ChatGraphRuntime, LoopGraphRuntime
 from smallctl.harness import Harness
+from smallctl.state import ExecutionPlan
 
 
 def _tool_call_stream(*, tool_name: str, args: dict[str, object], tool_call_id: str) -> list[dict[str, object]]:
@@ -189,6 +191,146 @@ def test_run_task_with_events_defers_task_boundary_reset_to_graph_lifecycle(monk
     assert result["status"] == "completed"
     assert runtime_calls == ["start with 1"]
     assert reset_calls == []
+
+
+def test_run_task_with_events_uses_staged_runtime_for_approved_plan(monkeypatch) -> None:
+    loop_calls: list[str] = []
+    staged_calls: list[str] = []
+
+    class _LoopRuntime:
+        async def run(self, task: str) -> dict[str, object]:
+            loop_calls.append(task)
+            return {"status": "loop"}
+
+    class _StagedRuntime:
+        async def run(self, task: str) -> dict[str, object]:
+            staged_calls.append(task)
+            return {"status": "staged"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        lambda harness, event_handler=None: _LoopRuntime(),
+    )
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_staged.StagedExecutionRuntime.from_harness",
+        lambda harness, event_handler=None: _StagedRuntime(),
+    )
+
+    plan = ExecutionPlan(plan_id="plan-1", goal="patch the thing")
+    plan.approved = True
+    harness = type("HarnessStub", (), {})()
+    harness.event_handler = None
+    harness.config = SimpleNamespace(staged_execution_enabled=True)
+    harness.state = SimpleNamespace(
+        active_plan=plan,
+        draft_plan=None,
+        planning_mode_enabled=False,
+        pending_interrupt=None,
+    )
+
+    result = asyncio.run(Harness.run_task_with_events(harness, "continue"))
+
+    assert result["status"] == "staged"
+    assert staged_calls == ["continue"]
+    assert loop_calls == []
+
+
+def test_resume_task_with_events_uses_staged_runtime_for_blocked_step(monkeypatch) -> None:
+    loop_resumes: list[str] = []
+    staged_resumes: list[str] = []
+
+    class _LoopRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            loop_resumes.append(human_input)
+            return {"status": "loop"}
+
+    class _StagedRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            staged_resumes.append(human_input)
+            return {"status": "staged"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        lambda harness, event_handler=None: _LoopRuntime(),
+    )
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_staged.StagedExecutionRuntime.from_harness",
+        lambda harness, event_handler=None: _StagedRuntime(),
+    )
+
+    plan = ExecutionPlan(plan_id="plan-1", goal="patch the thing")
+    plan.approved = True
+    interrupt = {
+        "kind": "staged_step_blocked",
+        "question": "Step S1 is blocked",
+        "response_mode": "revise/skip/retry",
+    }
+    harness = type("HarnessStub", (), {})()
+    harness.event_handler = None
+    harness.config = SimpleNamespace(staged_execution_enabled=True)
+    harness.state = SimpleNamespace(
+        active_plan=plan,
+        draft_plan=None,
+        plan_execution_mode=True,
+        pending_interrupt=interrupt,
+    )
+    harness.get_pending_interrupt = lambda: interrupt
+
+    result = asyncio.run(Harness.resume_task_with_events(harness, "retry"))
+
+    assert result["status"] == "staged"
+    assert staged_resumes == ["retry"]
+    assert loop_resumes == []
+
+
+def test_auto_runtime_resumes_staged_interrupt_with_staged_runtime(monkeypatch) -> None:
+    loop_resumes: list[str] = []
+    staged_resumes: list[str] = []
+
+    class _LoopRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            loop_resumes.append(human_input)
+            return {"status": "loop"}
+
+    class _StagedRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            staged_resumes.append(human_input)
+            return {"status": "staged"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        lambda harness, event_handler=None: _LoopRuntime(),
+    )
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_staged.StagedExecutionRuntime.from_harness",
+        lambda harness, event_handler=None: _StagedRuntime(),
+    )
+
+    plan = ExecutionPlan(plan_id="plan-1", goal="patch the thing")
+    plan.approved = True
+    interrupt = {
+        "kind": "staged_step_blocked",
+        "question": "Step S1 is blocked",
+        "response_mode": "revise/skip/retry",
+    }
+    harness = SimpleNamespace(
+        config=SimpleNamespace(staged_execution_enabled=True, run_mode="auto"),
+        state=SimpleNamespace(
+            active_plan=plan,
+            draft_plan=None,
+            plan_execution_mode=True,
+            pending_interrupt=interrupt,
+        ),
+        has_pending_interrupt=lambda: True,
+        get_pending_interrupt=lambda: interrupt,
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(AutoGraphRuntime.from_harness(harness).run("retry"))
+
+    assert result["status"] == "staged"
+    assert staged_resumes == ["retry"]
+    assert loop_resumes == []
 
 
 def test_loop_runtime_uses_task_complete_message_as_assistant_fallback(tmp_path: Path, monkeypatch) -> None:
@@ -599,3 +741,55 @@ def test_auto_chat_smalltalk_sends_no_tools_to_qwen35(
     ] == ["task_complete", "task_fail"]
     assert harness.state.scratchpad["_chat_runtime_intent"] == "smalltalk"
     assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_terminal_only"
+
+
+def test_chat_runtime_promotes_fenced_task_complete_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="qwen3.5:4b",
+        provider_profile="lmstudio",
+        phase="explore",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    async def fake_stream_chat(*, messages, tools):
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                "```json\n"
+                                '{"task_complete": {"message": "Task marked complete from chat JSON."}}\n'
+                                "```"
+                            )
+                        }
+                    }
+                ]
+            },
+        }
+        yield {"type": "done"}
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            ChatGraphRuntime.from_harness(harness).run("good job"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "chat_completed"
+    assert result["message"] == "Task marked complete from chat JSON."
+    assert (
+        harness.state.scratchpad["_terminal_json_task_complete_autopromoted"]["recovery_kind"]
+        == "terminal_json_task_complete"
+    )

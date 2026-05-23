@@ -17,6 +17,7 @@ ALLOWED_VERDICTS = {
     "final_answer_ok",
     "ask_human",
     "abort",
+    "next_action",
 }
 ALLOWED_ACTION_TYPES = {"tool_call", "repair_plan", "patch", "answer_review", "ask_human", "none"}
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)

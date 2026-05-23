@@ -7,6 +7,7 @@ from typing import Any
 
 from ..docker_retry_normalization import docker_retry_family
 from ..guards import is_four_b_or_under_model_name
+from ..repeat_loop_policy import strict_identical_limit, strict_window_limit
 from ..state import json_safe_value
 from .state import PendingToolCall
 from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
@@ -217,6 +218,12 @@ def _repeat_loop_limits(harness: Any, pending: PendingToolCall) -> tuple[int, in
             _DIR_LIST_REPEATED_TOOL_WINDOW,
             _DIR_LIST_REPEATED_TOOL_UNIQUE_LIMIT,
         )
+    if pending.tool_name == "file_read":
+        return (
+            strict_identical_limit(pending.tool_name, _STRICT_LOOP_GUARD_IDENTICAL_LIMIT),
+            strict_window_limit(pending.tool_name, _STRICT_LOOP_GUARD_WINDOW_LIMIT),
+            _STRICT_LOOP_GUARD_UNIQUE_LIMIT,
+        )
     if pending.tool_name in _STRICT_LOOP_GUARD_TOOLS:
         return (
             _STRICT_LOOP_GUARD_IDENTICAL_LIMIT,
@@ -420,17 +427,40 @@ def _placeholder_value_looks_generic(value: Any) -> bool:
     return False
 
 
-def _tool_call_fingerprint(tool_name: str, args: dict[str, Any]) -> str:
-    normalized_args = _normalize_tool_args(tool_name, args)
+def _tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> str:
+    normalized_args = _normalize_tool_args(tool_name, args, cwd=cwd)
     return json.dumps({"tool_name": tool_name, "args": normalized_args}, sort_keys=True, ensure_ascii=True)
 
 
-def _normalize_tool_args(tool_name: str, args: dict[str, Any]) -> Any:
+def _semantic_tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> str:
+    return _tool_call_fingerprint(tool_name, args, cwd=cwd)
+
+
+def _cwd_for_fingerprint(harness: Any) -> str | None:
+    cwd = getattr(getattr(harness, "state", None), "cwd", None)
+    return str(cwd) if isinstance(cwd, str) and cwd else None
+
+
+def _normalize_tool_args(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> Any:
     if not isinstance(args, dict):
         return args
     normalized = {str(key): _normalize_json_like(value) for key, value in args.items()}
     if tool_name in {"shell_exec", "bash_exec", "ssh_exec"} and "command" in normalized:
         normalized["command"] = _normalize_shell_command(str(normalized["command"]))
+    if tool_name in {
+        "file_read",
+        "dir_list",
+        "dir_tree",
+        "file_write",
+        "file_append",
+        "file_patch",
+        "ast_patch",
+        "file_delete",
+    }:
+        for key in ("path", "target_path"):
+            value = normalized.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = _normalize_local_path_for_fingerprint(value, cwd=cwd)
     return normalized
 
 
@@ -444,6 +474,17 @@ def _normalize_shell_command(command: str) -> str:
 
 def _normalize_path_token(value: str) -> str:
     return str(value or "").strip()
+
+
+def _normalize_local_path_for_fingerprint(value: str, *, cwd: str | None = None) -> str:
+    candidate = Path(str(value or "").strip() or ".")
+    if not candidate.is_absolute():
+        base = Path(cwd) if cwd else Path.cwd()
+        candidate = base / candidate
+    try:
+        return str(candidate.resolve())
+    except Exception:
+        return str(candidate)
 
 
 def _normalize_json_like(value: Any) -> Any:
@@ -553,10 +594,13 @@ def _record_tool_attempt(harness: Any, pending: PendingToolCall) -> None:
     history = scratchpad.setdefault("_tool_attempt_history", [])
     if not isinstance(history, list):
         return
+    cwd = _cwd_for_fingerprint(harness)
+    semantic_fingerprint = _semantic_tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd)
     history.append(
         {
             "tool_name": pending.tool_name,
-            "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
+            "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd),
+            "semantic_fingerprint": semantic_fingerprint,
         }
     )
     if len(history) > _REPEATED_TOOL_HISTORY_LIMIT:
@@ -617,15 +661,55 @@ def _repair_phase_mutation_tool_repeat_is_loop(harness: Any, pending: PendingToo
     history = _tool_attempt_history(harness)
     if len(history) < 1:
         return False
+    cwd = _cwd_for_fingerprint(harness)
     candidate = {
         "tool_name": pending.tool_name,
-        "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
+        "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd),
+        "semantic_fingerprint": _semantic_tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd),
     }
     last = history[-1]
     return (
         str(last.get("tool_name", "")) == candidate["tool_name"]
-        and str(last.get("fingerprint", "")) == candidate["fingerprint"]
+        and _history_fingerprint(last) == candidate["semantic_fingerprint"]
     )
+
+
+def _history_fingerprint(item: dict[str, Any]) -> str:
+    return str(item.get("semantic_fingerprint") or item.get("fingerprint") or "")
+
+
+def _file_read_immediate_full_repeat_is_loop(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "file_read":
+        return False
+    if _requested_file_read_range(pending.args) != (None, None):
+        return False
+    history = _tool_attempt_history(harness)
+    if not history:
+        return False
+
+    cwd = _cwd_for_fingerprint(harness)
+    candidate_fingerprint = _semantic_tool_call_fingerprint("file_read", pending.args, cwd=cwd)
+    progress_tools = {
+        "file_write",
+        "file_append",
+        "file_patch",
+        "ast_patch",
+        "file_delete",
+        "shell_exec",
+        "bash_exec",
+        "ssh_exec",
+    }
+    for item in reversed(history[-6:]):
+        tool_name = str(item.get("tool_name", ""))
+        if tool_name in progress_tools:
+            return False
+        if tool_name != "file_read":
+            continue
+        args = _extract_args_from_fingerprint(_history_fingerprint(item))
+        if isinstance(args, dict) and _requested_file_read_range(args) != (None, None):
+            continue
+        return _history_fingerprint(item) == candidate_fingerprint
+    return False
 
 
 def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | None:
@@ -686,6 +770,15 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return None
     if _file_read_line_progress_is_progress(harness, pending):
         return None
+    if _file_read_immediate_full_repeat_is_loop(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            (
+                "Guard tripped: repeated full file_read loop "
+                "(same canonical path already read and no mutation or verifier ran since)"
+            ),
+        )
     if _artifact_read_targets_mutation_result_loop(harness, pending):
         return _format_repeated_tool_loop_message(
             harness,
@@ -705,17 +798,19 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return None
     if _ssh_file_read_after_remote_mutation_is_progress(harness, pending):
         return None
+    cwd = _cwd_for_fingerprint(harness)
     history = _tool_attempt_history(harness)
     candidate = {
         "tool_name": pending.tool_name,
-        "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args),
+        "fingerprint": _tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd),
+        "semantic_fingerprint": _semantic_tool_call_fingerprint(pending.tool_name, pending.args, cwd=cwd),
     }
     identical_limit, window_limit, unique_limit = _repeat_loop_limits(harness, pending)
     recent_window = history[-(window_limit - 1) :] + [candidate]
     exact_streak = history[-(identical_limit - 1) :] + [candidate]
     if (
         len(exact_streak) >= identical_limit
-        and len({str(item.get("fingerprint", "")) for item in exact_streak}) == 1
+        and len({_history_fingerprint(item) for item in exact_streak}) == 1
     ):
         return _format_repeated_tool_loop_message(
             harness,
@@ -729,7 +824,7 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         identical_occurrences = sum(
             1
             for item in recent_window
-            if str(item.get("fingerprint", "")) == str(candidate.get("fingerprint", ""))
+            if _history_fingerprint(item) == str(candidate.get("semantic_fingerprint", ""))
         )
         if identical_occurrences >= identical_limit:
             return _format_repeated_tool_loop_message(
@@ -744,7 +839,7 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return None
 
     tool_names = {str(item.get("tool_name", "")) for item in recent_window}
-    fingerprints = [str(item.get("fingerprint", "")) for item in recent_window]
+    fingerprints = [_history_fingerprint(item) for item in recent_window]
 
     if len(set(fingerprints)) <= unique_limit:
         if len(tool_names) == 1:
@@ -799,7 +894,7 @@ def allow_repeated_tool_call_once(harness: Any, tool_name: str, args: dict[str, 
     scratchpad = getattr(state, "scratchpad", {})
     if not isinstance(scratchpad, dict):
         return
-    fingerprint = _tool_call_fingerprint(tool_name, args)
+    fingerprint = _tool_call_fingerprint(tool_name, args, cwd=_cwd_for_fingerprint(harness))
     allowances = scratchpad.setdefault("_repeat_guard_one_shot_fingerprints", [])
     if isinstance(allowances, list) and fingerprint not in allowances:
         allowances.append(fingerprint)
@@ -815,7 +910,7 @@ def _consume_repeat_guard_one_shot_allowance(harness: Any, pending: PendingToolC
     allowances = scratchpad.get("_repeat_guard_one_shot_fingerprints", [])
     if not isinstance(allowances, list):
         return False
-    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args, cwd=_cwd_for_fingerprint(harness))
     if fingerprint not in allowances:
         return False
     allowances.remove(fingerprint)

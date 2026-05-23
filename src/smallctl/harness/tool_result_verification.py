@@ -83,6 +83,14 @@ _REMOTE_MUTATING_COMMAND_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _REMOTE_READBACK_COMMANDS = {"cat", "head", "tail"}
+_REMOTE_FILE_PRESENCE_PROBE_RE = re.compile(
+    r"(?:^|[;&|]\s*)test\s+-s\s+/\S+"
+    r"|"
+    r"(?:^|[;&|]\s*)sha256sum\s+/\S+"
+    r"|"
+    r"(?:^|[;&|]\s*)stat\s+(?:-[^\s]+\s+)*?/\S+",
+    re.IGNORECASE,
+)
 _NGINX_VERIFIER_COMMAND_RE = re.compile(r"\bnginx\s+-t\b", re.IGNORECASE)
 _NGINX_VERIFIER_FAILURE_RE = re.compile(
     r"nginx:\s*configuration\s*file\b.*\btest\s*failed\b"
@@ -99,6 +107,34 @@ _CURL_VERIFIER_FAILURE_RE = re.compile(
     r"|"
     r"\bconnection refused\b",
     re.IGNORECASE | re.DOTALL,
+)
+_ZERO_TESTS_RAN_RE = re.compile(
+    r"\bNO TESTS RAN\b"
+    r"|"
+    r"\bRan\s+0\s+tests?\b",
+    re.IGNORECASE,
+)
+_TEST_FAILURE_OUTPUT_RE = re.compile(
+    r"\bFAILED\s*\((?:failures|errors|failed|passed|skipped|xfailed|xpassed)[^)]*\)"
+    r"|"
+    r"\b(?:FAIL|ERROR):\s+\S+"
+    r"|"
+    r"\b=+\s*(?:FAILURES|ERRORS|short test summary info)\s*=+"
+    r"|"
+    r"\b\d+\s+failed\b",
+    re.IGNORECASE,
+)
+_TEST_FAILURE_SUMMARY_RE = re.compile(
+    r"\bFAILED\s*\([^)]*\)"
+    r"|"
+    r"\b\d+\s+failed\b",
+    re.IGNORECASE,
+)
+_TEST_FAILURE_COUNT_RE = re.compile(
+    r"FAILED\s*\((?:[^)]*?failures\s*=\s*(\d+)[^)]*?)\)"
+    r"|"
+    r"(\d+)\s+failed",
+    re.IGNORECASE,
 )
 _LONG_RUNNING_REMOTE_INSTALLER_COMMAND_RE = re.compile(
     r"\binstallfog\.sh\b"
@@ -289,7 +325,7 @@ def _store_verifier_verdict(
     raw_stderr = str(output.get("stderr") if isinstance(output, dict) else "")
     stdout = _snip_text(raw_stdout, limit=400)
     stderr = _snip_text(raw_stderr, limit=400)
-    semantic_failure = _semantic_verifier_failure(command=command, stdout=stdout, stderr=stderr)
+    semantic_failure = _semantic_verifier_failure(command=command, stdout=raw_stdout, stderr=raw_stderr)
     absence_probe = _classify_removal_absence_probe(
         state,
         command=command,
@@ -299,6 +335,7 @@ def _store_verifier_verdict(
     )
     status = str(result.status or metadata.get("status") or "").strip()
     approval_denied = bool(metadata.get("approval_denied"))
+    current_verifier_kind = _verifier_kind_for_command(command)
     if status == "needs_human" or approval_denied:
         verdict = "needs_human"
     elif semantic_failure:
@@ -331,7 +368,23 @@ def _store_verifier_verdict(
         verdict = "pass"
     else:
         verdict = "fail"
+    insufficient_verifier = False
+    if verdict == "pass":
+        insufficient_verifier = _passing_verifier_is_weaker_than_prior_failure(
+            state,
+            current_command=command,
+            current_kind=current_verifier_kind,
+        )
+        if insufficient_verifier:
+            verdict = "fail"
+            semantic_failure = _insufficient_verifier_message(state, command=command)
+
     failure_class = "approval_denied" if approval_denied else _classify_execution_failure(result.error or stderr or stdout)
+    if insufficient_verifier:
+        failure_class = "insufficient_verifier"
+    if not approval_denied and failure_class == "environment":
+        if _looks_like_infinite_loop(command, str(result.error or ""), stdout, stderr):
+            failure_class = "infinite_loop_suspected"
     if absence_probe["is_absence_probe"]:
         failure_class = "" if verdict == "pass" else "removal_residue"
     if _is_long_running_remote_command_timeout(
@@ -374,6 +427,9 @@ def _store_verifier_verdict(
         "failure_mode": failure_class,
         "acceptance_delta": acceptance_delta,
     }
+    if insufficient_verifier:
+        normalized["insufficient_verifier"] = True
+        normalized["verifier_kind"] = current_verifier_kind
     if approval_denied:
         normalized["approval_denied"] = True
     if absence_probe["is_absence_probe"]:
@@ -505,7 +561,128 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
         match = _CURL_VERIFIER_FAILURE_RE.search(combined)
         if match:
             return _snip_text(match.group(0), limit=240)
+    match = _ZERO_TESTS_RAN_RE.search(combined)
+    if match:
+        return _snip_text(match.group(0), limit=240)
+    if _verifier_kind_for_command(command) in {"test_suite", "run_target"}:
+        match = _TEST_FAILURE_SUMMARY_RE.search(combined)
+        if match:
+            summary = _snip_text(match.group(0), limit=240)
+            count_match = _TEST_FAILURE_COUNT_RE.search(combined)
+            if count_match:
+                failures = next(g for g in count_match.groups() if g is not None)
+                summary = f"{summary} ({failures} test failure(s) detected)"
+            return summary
+        match = _TEST_FAILURE_OUTPUT_RE.search(combined)
+        if match:
+            return _snip_text(match.group(0), limit=240)
     return ""
+
+
+_VERIFIER_KIND_STRENGTH = {
+    "syntax_only": 1,
+    "lint_typecheck": 2,
+    "diagnostic": 2,
+    "run_target": 3,
+    "test_suite": 4,
+}
+
+
+def _verifier_kind_for_command(command: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    if not normalized:
+        return ""
+    padded = f" {normalized}"
+    if "py_compile" in padded:
+        return "syntax_only"
+    if any(marker in padded for marker in (" pytest", " unittest", " npm test", "npm run test", "pnpm test", "yarn test", "go test", "cargo test", "vitest", "jest")):
+        return "test_suite"
+    if any(marker in padded for marker in (" ruff", " mypy", " eslint", "cargo clippy")):
+        return "lint_typecheck"
+    if re.search(r"\bpython(?:3(?:\.\d+)?)?\b.*\.py\b", normalized):
+        return "run_target"
+    return "diagnostic"
+
+
+def _verifier_strength(kind: str) -> int:
+    return _VERIFIER_KIND_STRENGTH.get(str(kind or "").strip(), 0)
+
+
+def _task_or_history_requires_runtime_verifier(state: Any) -> bool:
+    prior_command = _prior_failed_verifier_command(state)
+    if _verifier_strength(_verifier_kind_for_command(prior_command)) > _verifier_strength("syntax_only"):
+        return True
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    texts.append(str(getattr(run_brief, "original_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            texts.append(str(handoff.get("effective_task") or ""))
+            texts.append(str(handoff.get("current_goal") or ""))
+    combined = " ".join(texts).lower()
+    return any(
+        marker in combined
+        for marker in (
+            "run script",
+            "run the script",
+            "run it",
+            "test",
+            "tests",
+            "unittest",
+            "pytest",
+            "verify functionality",
+            "fix until complete",
+        )
+    )
+
+
+def _prior_failed_verifier_command(state: Any) -> str:
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        failed = scratchpad.get("_last_failed_verifier")
+        if isinstance(failed, dict):
+            command = str(failed.get("command") or "").strip()
+            if command:
+                return command
+    prior = getattr(state, "last_verifier_verdict", None)
+    if isinstance(prior, dict) and str(prior.get("verdict") or "").strip().lower() == "fail":
+        return str(prior.get("command") or "").strip()
+    return ""
+
+
+def _passing_verifier_is_weaker_than_prior_failure(
+    state: Any,
+    *,
+    current_command: str,
+    current_kind: str,
+) -> bool:
+    if _verifier_strength(current_kind) > _verifier_strength("syntax_only"):
+        return False
+    if not _task_or_history_requires_runtime_verifier(state):
+        return False
+    prior_command = _prior_failed_verifier_command(state)
+    if not prior_command:
+        return False
+    prior_kind = _verifier_kind_for_command(prior_command)
+    if _verifier_strength(prior_kind) <= _verifier_strength(current_kind):
+        return False
+    normalized_current = re.sub(r"\s+", " ", str(current_command or "").strip().lower())
+    normalized_prior = re.sub(r"\s+", " ", prior_command.strip().lower())
+    return normalized_current != normalized_prior
+
+
+def _insufficient_verifier_message(state: Any, *, command: str) -> str:
+    prior_command = _prior_failed_verifier_command(state)
+    if prior_command:
+        return (
+            f"Verifier `{command}` only checks syntax and is weaker than the prior failed verifier "
+            f"`{prior_command}`; rerun the script/tests that failed."
+        )
+    return f"Verifier `{command}` only checks syntax; rerun the script/tests required by the task."
 
 
 def assess_remote_mutation_verification(
@@ -607,11 +784,29 @@ def assess_remote_mutation_verification(
                 }
             )
             return assessment
+        if path_match and _REMOTE_FILE_PRESENCE_PROBE_RE.search(command):
+            if result.success and exit_code in (0, None):
+                assessment.update(
+                    {
+                        "verification_strength": "strong",
+                        "clears_requirement": True,
+                        "reason": "file_presence_probe_passed",
+                    }
+                )
+                return assessment
+            assessment.update(
+                {
+                    "verification_strength": "strong",
+                    "clears_requirement": False,
+                    "reason": "file_presence_probe_failed",
+                    "message": _snip_text(stderr or stdout or "Presence/hash verifier did not confirm the file.", limit=240),
+                }
+            )
+            return assessment
 
     if profile == "html_stylesheet_swap":
         command_lower = command.lower()
         stdout_lower = stdout.lower()
-        stderr_lower = stderr.lower()
         has_positive_check = "theme" in command_lower or "stylesheet" in command_lower or any(
             str(pattern).lower() in command_lower for pattern in new_patterns
         )
@@ -787,15 +982,30 @@ def _classify_execution_failure(text: str) -> str:
         return "syntax"
     if "importerror" in lowered or "modulenotfounderror" in lowered:
         return "import"
-    if "no such file" in lowered or "not found" in lowered:
-        return "path"
     if "timed out" in lowered or "timeout" in lowered or "connection timed out" in lowered:
         return "environment"
     if "permission denied" in lowered or "password" in lowered or "sudo" in lowered:
         return "environment"
     if "assert" in lowered or "failed" in lowered or "traceback" in lowered:
         return "test"
+    if "no such file" in lowered or "not found" in lowered:
+        return "path"
     return "logic"
+
+
+def _looks_like_infinite_loop(command: str, error: str, stdout: str, stderr: str) -> bool:
+    """Heuristic: command timed out with no output for a Python script = likely infinite loop."""
+    cmd = str(command or "").strip().lower()
+    if not cmd:
+        return False
+    if "python" not in cmd and "py_compile" not in cmd:
+        return False
+    err = str(error or "").lower()
+    if "timed out" not in err and "timeout" not in err:
+        return False
+    out = str(stdout or "").strip()
+    err_out = str(stderr or "").strip()
+    return not out and not err_out
 
 
 def _is_long_running_remote_command_timeout(
@@ -930,6 +1140,8 @@ def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
     cmd = str(command or "").strip()
     if not _REMOVAL_ABSENCE_PROBE_RE.search(cmd):
         return False
+    if _command_has_write_or_heredoc_shape(cmd):
+        return False
     lowered = cmd.lower()
     has_absence_tool_shape = (
         re.search(r"(?:^|[;&|]\s*)find\s+", lowered) is not None
@@ -942,6 +1154,19 @@ def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
     if not has_absence_tool_shape:
         return False
     return _command_mentions_removal_subject(cmd, state)
+
+
+def _command_has_write_or_heredoc_shape(command: str) -> bool:
+    lowered = str(command or "").strip().lower()
+    if not lowered:
+        return False
+    if "<<" in lowered:
+        return True
+    if re.search(r"(?:^|[;&|]\s*)(?:cat|printf|echo)\b[^\n;&|]*(?:>>|>)", lowered):
+        return True
+    if re.search(r"(?:^|[;&|]\s*)tee(?:\s+-a)?\s+", lowered):
+        return True
+    return False
 
 
 def _command_mentions_removal_subject(command: str, state: Any) -> bool:

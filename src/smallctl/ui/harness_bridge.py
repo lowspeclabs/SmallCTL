@@ -25,6 +25,7 @@ class HarnessBridge:
         self._ready = threading.Event()
         self._closed = False
         self._close_lock = threading.Lock()
+        self._inflight_future: ConcurrentFuture[Any] | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -162,7 +163,11 @@ class HarnessBridge:
     async def _submit_coroutine(self, coro: Any) -> Any:
         loop = self._require_loop()
         future: ConcurrentFuture[Any] = asyncio.run_coroutine_threadsafe(coro, loop)
-        return await asyncio.wrap_future(future)
+        self._inflight_future = future
+        try:
+            return await asyncio.wrap_future(future)
+        finally:
+            self._inflight_future = None
 
     async def _submit_callable(self, callback: Callable[..., Any], *args: Any) -> Any:
         async def _invoke() -> Any:
@@ -194,6 +199,11 @@ class HarnessBridge:
             cancel(source)
         else:
             cancel()
+
+    def abort(self) -> None:
+        future = self._inflight_future
+        if future is not None and not future.done():
+            future.cancel()
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         self.start()

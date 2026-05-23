@@ -1,0 +1,11 @@
+gitpython
+numpy
+openai
+pydantic
+pyyaml
+rich
+
+[dev]
+pytest
+pytest-asyncio
+ruff

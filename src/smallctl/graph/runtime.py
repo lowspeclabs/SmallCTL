@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langgraph.graph import END
 from langgraph.types import Command, interrupt
 
+from ..logging_utils import log_kv
+from ..models.conversation import ConversationMessage
 from .deps import GraphRuntimeDeps
 from .nodes import (
     apply_planning_tool_outcomes,
@@ -171,7 +174,30 @@ class LoopGraphRuntime(CompiledGraphRuntimeBase):
     async def _interrupt_for_human_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
         payload_value = graph_state.interrupt_payload or graph_state.loop_state.pending_interrupt or {}
-        human_input = interrupt(payload_value)
+        try:
+            human_input = interrupt(payload_value)
+        except Exception as exc:
+            if "Interrupt" in exc.__class__.__name__ or "Bubble" in exc.__class__.__name__:
+                raise
+            log_kv(
+                self.deps.harness.log,
+                logging.ERROR,
+                "interrupt_for_human_fallback",
+                error=str(exc),
+                detail="langgraph interrupt raised an exception; falling back to ask_human injection",
+            )
+            # Fallback: inject a system message that forces the model to call ask_human
+            self.deps.harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        "The system attempted to pause for human input but the interrupt channel failed. "
+                        "Before proceeding, you MUST call `ask_human(question=...)`."
+                    ),
+                )
+            )
+            graph_state.interrupt_payload = None
+            return serialize_runtime_state(graph_state)
         await resume_loop_run(graph_state, self.deps, human_input=str(human_input))
         graph_state.interrupt_payload = None
         return serialize_runtime_state(graph_state)

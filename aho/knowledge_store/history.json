@@ -1,0 +1,47 @@
+[
+  {
+    "hypothesis": {
+      "id": "f044cd90",
+      "target_file": "src/smallctl/config.py",
+      "target_lever": "summarize_at_ratio",
+      "proposed_value": 0.65,
+      "rationale": "Lowering the summarization threshold triggers memory compression earlier...",
+      "expected_impact": {
+        "success_rate": "+10%"
+      },
+      "confidence_score": 0.85,
+      "created_at": "2026-03-21T23:36:20Z"
+    },
+    "actual_outcome": {
+      "delta_success": -0.33,
+      "delta_steps_pct": 0.3,
+      "delta_cost_pct": 0.0,
+      "is_significant": false,
+      "decision": "REJECT"
+    },
+    "timestamp": "2026-03-22T03:38:43.814410+00:00"
+  },
+  {
+    "hypothesis": {
+      "id": "0380d40e",
+      "target_file": "src/smallctl/config.py",
+      "target_lever": "recent_message_limit",
+      "proposed_value": 12,
+      "rationale": "Increasing the global recent message window from 6 to 12 provides more task continuity without triggering the premature summarization that correlated with the recent trial's failure to lower the threshold.",
+      "expected_impact": {
+        "success_rate": "+5%",
+        "mean_steps": "-5%",
+        "token_spend": "+10%"
+      },
+      "confidence_score": 0.78,
+      "created_at": "2026-03-22T04:12:47.865204+00:00"
+    },
+    "actual_outcome": {
+      "delta_success": -0.5,
+      "delta_steps_pct": -0.08333333333333333,
+      "delta_cost_pct": 0.0,
+      "is_significant": false
+    },
+    "timestamp": "2026-03-22T04:12:51.489706+00:00"
+  }
+]

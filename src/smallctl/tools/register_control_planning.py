@@ -91,7 +91,7 @@ def register_control_planning_tools(
                 handler=inject_state_and_harness(control.finalize_write_session),
                 category="control",
                 risk="medium",
-                allowed_phases={"explore", "plan", "execute", "verify"},
+                allowed_phases={"explore", "plan", "execute", "verify", "repair"},
                 allowed_modes={"loop", "planning", "chat"},
                 profiles={core_profile},
             ),
@@ -141,7 +141,7 @@ def register_control_planning_tools(
                         "implementation_plan": {"type": "array", "description": "Short implementation stages or ordered authoring plan items."},
                         "steps": {
                             "type": "array",
-                            "description": "Ordered plan steps. Prefer concise step objects with titles over prose paragraphs. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
+                            "description": "Ordered plan steps. Each step must have a short `title` (≤8 words, imperative mood, e.g. 'Write backoff script'). Put the full implementation spec in `description` or `task`, not in `title`. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
                             "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                         },
                         "output_path": {"type": "string", "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py."},

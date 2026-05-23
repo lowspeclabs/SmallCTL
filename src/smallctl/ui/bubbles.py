@@ -197,6 +197,31 @@ class ArtifactBubbleWidget(Collapsible):
         self._refresh_content()
 
 
+class TaskChecklistWidget(Collapsible):
+    def __init__(
+        self,
+        *,
+        title: str,
+        text: str = "",
+        id: str | None = None,
+    ) -> None:
+        self._content_widget = TextBlockWidget(text)
+        scroll = VerticalScroll(self._content_widget, classes="task-checklist-scroll")
+        super().__init__(
+            scroll,
+            title=title,
+            collapsed=True,
+            id=id,
+            classes="assistant-detail assistant-detail-checklist",
+        )
+
+    def set_text(self, value: str) -> None:
+        self._content_widget.set_text(value)
+
+    def set_title(self, value: str) -> None:
+        self.title = value
+
+
 class ToolCallDetailWidget(AssistantDetailWidget):
     def __init__(
         self,
@@ -316,6 +341,7 @@ class AssistantTurnWidget(Vertical):
         self._last_shell_stream: ArtifactBubbleWidget | None = None
         self._tool_call_details: list[ToolCallDetailWidget] = []
         self._current_tool_calls_container: ToolCallsContainerWidget | None = None
+        self._task_checklist_widget: TaskChecklistWidget | None = None
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -335,6 +361,30 @@ class AssistantTurnWidget(Vertical):
             return bool(list(self._meta_body().children))
         except Exception:
             return False
+
+    async def add_meta_widget(self, widget: Widget) -> None:
+        await self._meta_widget.mount(widget)
+
+    async def set_task_checklist(self, text: str, *, title: str = "📋 Task Checklist") -> None:
+        if self._task_checklist_widget is None:
+            self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
+            await self._meta_widget.mount(self._task_checklist_widget)
+        else:
+            self._task_checklist_widget.set_text(text)
+            self._task_checklist_widget.set_title(title)
+            await self._ensure_checklist_at_bottom()
+
+    async def _ensure_checklist_at_bottom(self) -> None:
+        if self._task_checklist_widget is None:
+            return
+        if self._meta_widget.children and self._meta_widget.children[-1] is self._task_checklist_widget:
+            return
+        # Recreate widget at the bottom to avoid Textual move/remove quirks
+        text = self._task_checklist_widget._content_widget.text
+        title = self._task_checklist_widget.title
+        await self._meta_widget.remove_children(".assistant-detail-checklist")
+        self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
+        await self._meta_widget.mount(self._task_checklist_widget)
 
     def compose(self) -> ComposeResult:
         yield self._label_widget
@@ -397,6 +447,7 @@ class AssistantTurnWidget(Vertical):
         if self._last_thinking_detail is None:
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
+            await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.append_text(text)
         self._current_tool_calls_container = None
         self._last_assistant_block = None
@@ -408,6 +459,7 @@ class AssistantTurnWidget(Vertical):
                 return
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
+            await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.set_text(text)
         self._current_tool_calls_container = None
         self._last_assistant_block = None
@@ -416,14 +468,14 @@ class AssistantTurnWidget(Vertical):
     async def append_shell_stream(self, text: str) -> None:
         if not text:
             return
-            
+
         # Find the active shell_exec call to nest the stream under
         shell_call = None
         for detail in reversed(self._tool_call_details):
             if detail.tool_name in {"shell_exec", "ssh_exec"}:
                 shell_call = detail
                 break
-        
+
         if shell_call:
             bubble = await shell_call.get_or_create_artifact_bubble("Live Output")
             bubble.append_text(text)
@@ -436,8 +488,9 @@ class AssistantTurnWidget(Vertical):
                 )
                 self._last_shell_stream.add_class("assistant-detail-nested")
                 await self._meta_body().mount(self._last_shell_stream)
+                await self._ensure_checklist_at_bottom()
             self._last_shell_stream.append_text(text)
-            
+
         self._last_assistant_block = None
         self._last_thinking_detail = None
 
@@ -454,6 +507,7 @@ class AssistantTurnWidget(Vertical):
             container = ToolCallsContainerWidget()
             self._current_tool_calls_container = container
             await self._meta_body().mount(container)
+            await self._ensure_checklist_at_bottom()
         await container.add_tool_call(detail)
         self._tool_call_details.append(detail)
         self._last_assistant_block = None

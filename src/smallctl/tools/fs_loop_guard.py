@@ -1022,6 +1022,9 @@ def clear_loop_guard_outline_requirement(
         if not normalized_path and not normalized_session_id and not bool(payload.get("outline_required")):
             continue
         payload["outline_required"] = False
+        # Outline confirmation from the user satisfies the read-before-write gate;
+        # clear it so the model can legally append the next section.
+        payload["pending_read_before_write"] = False
         cleared = True
     if cleared:
         _clear_loop_guard_read_schedule(state)
@@ -1031,7 +1034,7 @@ def clear_loop_guard_outline_requirement(
 def build_loop_guard_status(state: LoopState | None) -> dict[str, Any]:
     root = _loop_guard_root(state)
     if root is None:
-        return {"active_paths": [], "recent_events": []}
+        return {"active_paths": [], "recent_events": [], "recent_complete_reads": []}
     active_paths: list[dict[str, Any]] = []
     paths = root.get("paths", {})
     if isinstance(paths, dict):
@@ -1058,7 +1061,35 @@ def build_loop_guard_status(state: LoopState | None) -> dict[str, Any]:
                 }
             )
     recent_events = list(root.get("events", []) or [])[-10:]
+    recent_complete_reads: list[dict[str, Any]] = []
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    history = scratchpad.get("_progress_read_history", []) if isinstance(scratchpad, dict) else []
+    if isinstance(history, list):
+        seen: set[str] = set()
+        for item in reversed(history):
+            if not isinstance(item, dict) or not bool(item.get("complete_file")):
+                continue
+            if bool(item.get("file_content_truncated")):
+                continue
+            key = str(item.get("path") or item.get("artifact_id") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            recent_complete_reads.append(
+                {
+                    "tool_name": str(item.get("tool_name") or ""),
+                    "path": str(item.get("path") or ""),
+                    "artifact_id": str(item.get("artifact_id") or ""),
+                    "total_lines": item.get("total_lines"),
+                    "line_start": item.get("line_start"),
+                    "line_end": item.get("line_end"),
+                    "note": "Full content is already covered; do not reread only because chat preview was truncated.",
+                }
+            )
+            if len(recent_complete_reads) >= 5:
+                break
     return {
         "active_paths": active_paths,
         "recent_events": recent_events,
+        "recent_complete_reads": recent_complete_reads,
     }

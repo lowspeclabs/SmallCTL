@@ -17,6 +17,7 @@ from smallctl.graph.progress_guard import (
     _next_unread_artifact_line,
     _turn_has_actionable_progress,
 )
+from smallctl.harness.tool_visibility import filter_tools_for_runtime_state
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord
 
@@ -234,30 +235,67 @@ def test_check_guards_sub4b_repeated_action_adds_directive_hint() -> None:
     state.stagnation_counters = {}
     state.tool_history = ["file_read|{}|success"] * 6
 
+    assert check_guards(state, GuardConfig()) is None
+
+    state.tool_history.append("file_read|{}|success")
+
     guard_error = check_guards(state, GuardConfig())
 
     assert guard_error is not None
     assert "Guard tripped: repeated tool call loop" in guard_error
+    assert "file_read repeated 7 times" in guard_error
     assert "Directive Hint:" in guard_error
     assert "`file_patch`, `ast_patch`, `shell_exec`, or `task_complete`" in guard_error
 
 
-def test_sub4b_repeated_file_read_loop_includes_directive_hint() -> None:
+def test_sub4b_repeated_file_read_loop_trips_at_seven_with_directive_hint() -> None:
     harness = _FakeHarness()
     harness.client.model = "qwen3.5:4b"
     harness.state.scratchpad["_model_name"] = "qwen3.5:4b"
     pending = PendingToolCall(tool_name="file_read", args={"path": "temp/logwatch.py"})
 
     _record_tool_attempt(harness, pending)
-    _record_tool_attempt(harness, pending)
 
     repeat_error = _detect_repeated_tool_loop(harness, pending)
 
     assert repeat_error is not None
-    assert "Guard tripped: repeated tool call loop" in repeat_error
+    assert "Guard tripped: repeated full file_read loop" in repeat_error
+    assert "repeated full file_read loop" in repeat_error
     assert "Directive Hint:" in repeat_error
     assert "`file_patch` or `ast_patch`" in repeat_error
     assert "`shell_exec`" in repeat_error
+
+
+def test_file_read_repeat_guard_canonicalizes_relative_and_absolute_paths(tmp_path: Path) -> None:
+    harness = _FakeHarness()
+    harness.state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "logwatch.py"
+    target.parent.mkdir()
+    target.write_text("print('ok')\n", encoding="utf-8")
+    relative = PendingToolCall(tool_name="file_read", args={"path": "./temp/logwatch.py"})
+    absolute = PendingToolCall(tool_name="file_read", args={"path": str(target)})
+
+    _record_tool_attempt(harness, relative)
+
+    repeat_error = _detect_repeated_tool_loop(harness, absolute)
+
+    assert repeat_error is not None
+    assert "repeated full file_read loop" in repeat_error
+
+
+def test_file_read_repeat_guard_allows_same_path_after_verifier(tmp_path: Path) -> None:
+    harness = _FakeHarness()
+    harness.state.cwd = str(tmp_path)
+    target = tmp_path / "temp" / "logwatch.py"
+    target.parent.mkdir()
+    target.write_text("print('ok')\n", encoding="utf-8")
+    read = PendingToolCall(tool_name="file_read", args={"path": "./temp/logwatch.py"})
+    verifier = PendingToolCall(tool_name="shell_exec", args={"command": f"python3 {target}"})
+
+    _record_tool_attempt(harness, read)
+    _record_tool_attempt(harness, verifier)
+
+    assert _detect_repeated_tool_loop(harness, read) is None
 
 
 def test_ssh_file_read_not_found_blocks_same_missing_path_retry() -> None:
@@ -452,6 +490,46 @@ def test_repeated_same_artifact_range_is_no_progress() -> None:
     graph_state3 = _make_graph_state(tool_results=[_make_record("artifact_read", {"artifact_id": "A0001", "start_line": 1, "end_line": 50})])
     _update_progress_tracking(harness, graph_state3)
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 2
+
+
+def test_file_line_read_after_complete_read_and_failed_verifier_is_no_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.scratchpad["_last_failed_verifier"] = {
+        "tool_name": "shell_exec",
+        "command": "cd /repo && python3 ./temp/text_chunker.py",
+        "summary": ["FAILED (failures=4)"],
+        "raw_output": "FAILED (failures=4)",
+    }
+    harness.state.scratchpad["_progress_read_history"] = [
+        {
+            "tool_name": "file_read",
+            "path": "./temp/text_chunker.py",
+            "complete_file": True,
+            "file_content_truncated": False,
+        }
+    ]
+
+    graph_state = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "file_read",
+                {"path": "./temp/text_chunker.py", "start_line": 100, "end_line": 145},
+                metadata={
+                    "path": "./temp/text_chunker.py",
+                    "complete_file": False,
+                    "truncated": False,
+                    "line_start": 100,
+                    "line_end": 145,
+                    "total_lines": 289,
+                },
+            )
+        ]
+    )
+
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
 
 
 def test_repeated_eof_overread_is_no_progress() -> None:
@@ -742,23 +820,23 @@ FAILED (failures=2, errors=2)
     assert "Do not reread unchanged evidence" in message.content
 
 
-def test_five_no_progress_cycles_trip_guard() -> None:
+def test_seven_no_progress_cycles_trip_guard() -> None:
     harness = _FakeHarness()
     harness.state.current_phase = "author"  # default thresholds
-    harness.state.stagnation_counters = {"no_actionable_progress": 5}
+    harness.state.stagnation_counters = {"no_actionable_progress": 7}
     graph_state = _make_graph_state()
 
     guard = _check_progress_stagnation(harness, graph_state)
 
     assert guard is not None
     assert "Progress stagnation guard tripped" in guard
-    assert "no actionable progress made in 5 steps" in guard
+    assert "no actionable progress made in 7 steps" in guard
 
 
 def test_explore_phase_uses_higher_stagnation_thresholds() -> None:
     harness = _FakeHarness()
     harness.state.current_phase = "explore"
-    harness.state.stagnation_counters = {"no_actionable_progress": 4}
+    harness.state.stagnation_counters = {"no_actionable_progress": 2}
     graph_state = _make_graph_state()
 
     guard = _check_progress_stagnation(harness, graph_state)
@@ -766,7 +844,7 @@ def test_explore_phase_uses_higher_stagnation_thresholds() -> None:
     assert guard is None
     assert not harness.state.recent_messages
 
-    harness.state.stagnation_counters = {"no_actionable_progress": 5}
+    harness.state.stagnation_counters = {"no_actionable_progress": 3}
     guard = _check_progress_stagnation(harness, graph_state)
 
     assert guard is None
@@ -775,12 +853,12 @@ def test_explore_phase_uses_higher_stagnation_thresholds() -> None:
     assert last_msg.metadata.get("recovery_kind") == "no_actionable_progress"
 
     harness.state.recent_messages.clear()
-    harness.state.stagnation_counters = {"no_actionable_progress": 7}
+    harness.state.stagnation_counters = {"no_actionable_progress": 6}
     guard = _check_progress_stagnation(harness, graph_state)
 
     assert guard is not None
     assert "Progress stagnation guard tripped" in guard
-    assert "no actionable progress made in 7 steps" in guard
+    assert "no actionable progress made in 6 steps" in guard
 
 
 def test_remote_scope_uses_remote_aware_stagnation_thresholds() -> None:
@@ -834,6 +912,111 @@ def test_mutation_without_changed_does_not_count_as_progress() -> None:
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
 
 
+def test_novel_failed_patch_target_mismatch_counts_as_bounded_repair_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/patch_dependency_sim.py"
+    harness.state.stagnation_counters = {"no_actionable_progress": 2}
+
+    graph_state = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "file_patch",
+                {
+                    "path": "./temp/patch_dependency_sim.py",
+                    "target_text": "old failing assertion",
+                    "replacement_text": "new passing assertion",
+                },
+                success=False,
+                metadata={"path": "./temp/patch_dependency_sim.py", "error_kind": "patch_target_not_found"},
+                error="Patch target text was not found.",
+            )
+        ],
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+
+
+def test_repeated_failed_patch_target_mismatch_is_no_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/patch_dependency_sim.py"
+    record = _make_record(
+        "file_patch",
+        {
+            "path": "./temp/patch_dependency_sim.py",
+            "target_text": "old failing assertion",
+            "replacement_text": "new passing assertion",
+        },
+        success=False,
+        metadata={"path": "./temp/patch_dependency_sim.py", "error_kind": "patch_target_not_found"},
+        error="Patch target text was not found.",
+    )
+
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_second_patch_target_not_found_suppresses_file_patch() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/patch_dependency_sim.py"
+    record = _make_record(
+        "file_patch",
+        {
+            "path": "./temp/patch_dependency_sim.py",
+            "target_text": "old failing assertion",
+            "replacement_text": "new passing assertion",
+        },
+        success=False,
+        metadata={"path": "./temp/patch_dependency_sim.py", "error_kind": "patch_target_not_found"},
+        error="Patch target text was not found.",
+    )
+
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+    assert harness.state.scratchpad.get("_repeated_tool_loop_suppressed_tool") is None
+
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+
+    assert harness.state.scratchpad["_repeated_tool_loop_suppressed_tool"] == "file_patch"
+    assert harness.state.scratchpad["_last_file_patch_suppression"]["count"] == 2
+    tools = [
+        {"type": "function", "function": {"name": "file_patch"}},
+        {"type": "function", "function": {"name": "file_read"}},
+    ]
+    visible_names = {
+        tool["function"]["name"]
+        for tool in filter_tools_for_runtime_state(tools, state=harness.state, mode="loop")
+    }
+    assert "file_patch" not in visible_names
+    assert "file_read" in visible_names
+
+
+def test_failed_patch_repair_progress_is_budgeted_per_target() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/patch_dependency_sim.py"
+
+    for index in range(4):
+        record = _make_record(
+            "file_patch",
+            {
+                "path": "./temp/patch_dependency_sim.py",
+                "target_text": f"old block {index}",
+                "replacement_text": f"new block {index}",
+            },
+            success=False,
+            metadata={"path": "./temp/patch_dependency_sim.py", "error_kind": "patch_target_not_found"},
+            error="Patch target text was not found.",
+        )
+        _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
 def test_patch_task_memory_update_does_not_count_as_actionable_progress() -> None:
     harness = _FakeHarness()
     harness.state.active_intent = "requested_file_patch"
@@ -875,6 +1058,50 @@ def test_patch_task_stagnation_nudge_names_remote_patch_tools() -> None:
     assert "memory notes, artifact searches, and repeated reads are not progress" in message
     assert "`ssh_file_patch`" in message
     assert "`ssh_file_replace_between`" in message
+
+
+def test_stagnation_nudge_clarifies_complete_file_read_preview_truncation() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/restart_backoff.py"
+    harness.state.scratchpad["_progress_read_history"] = [
+        {
+            "tool_name": "file_read",
+            "path": "./temp/restart_backoff.py",
+            "complete_file": True,
+            "file_content_truncated": False,
+            "total_lines": 202,
+        }
+    ]
+
+    message = _build_progress_stagnation_nudge(harness)
+
+    assert "fully read `./temp/restart_backoff.py`" in message
+    assert "chat display compaction" in message
+    assert "not evidence that the file content is missing" in message
+
+
+def test_stagnation_nudge_clarifies_staged_file_read_is_not_empty_target() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    harness.state.working_memory.current_goal = "patch ./temp/patch_dependency_sim.py"
+    harness.state.scratchpad["_progress_read_history"] = [
+        {
+            "tool_name": "file_read",
+            "path": "./temp/patch_dependency_sim.py",
+            "source_path": "/repo/.smallctl/write_sessions/ws_abc123__patch_dependency_sim__stage.py",
+            "read_from_staging": True,
+            "complete_file": True,
+            "file_content_truncated": False,
+            "total_lines": 0,
+        }
+    ]
+
+    message = _build_progress_stagnation_nudge(harness)
+
+    assert "active write-session staged copy" in message
+    assert "not proof that the authoritative target file is empty" in message
+    assert "chat display compaction" not in message
 
 
 def test_new_verifier_verdict_counts_as_progress() -> None:

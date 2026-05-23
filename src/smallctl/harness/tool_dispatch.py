@@ -106,7 +106,6 @@ def _filter_chat_tools_for_task_mode(
             "ssh_file_write",
             "ssh_file_patch",
             "ssh_file_replace_between",
-            "finalize_write_session",
         }
     else:
         blocked_names = set(_READONLY_CHAT_TOOL_BLOCKLIST)
@@ -582,7 +581,7 @@ def _full_rewrite_explicitly_requested(harness: Any, args: dict[str, Any]) -> bo
         except Exception:
             task = ""
     text = f"{task} {args.get('instruction') or ''} {args.get('reason') or ''}".lower()
-    return any(
+    if any(
         phrase in text
         for phrase in (
             "rewrite the whole file",
@@ -594,6 +593,38 @@ def _full_rewrite_explicitly_requested(harness: Any, args: dict[str, Any]) -> bo
             "complete rewrite",
             "overwrite",
         )
+    ):
+        return True
+    return _task_requests_full_artifact_authoring(task, args)
+
+
+def _task_requests_full_artifact_authoring(task: str, args: dict[str, Any]) -> bool:
+    path = str(args.get("path") or args.get("target_path") or "").strip()
+    if not path:
+        return False
+    normalized_path = _normalize_path(path)
+    text = " ".join(str(task or "").lower().split())
+    if not text or normalized_path not in text.replace("\\", "/"):
+        return False
+
+    authoring_markers = (
+        "build ",
+        "create ",
+        "generate ",
+        "produce ",
+        "write ",
+        "implement ",
+    )
+    artifact_markers = (
+        "self-contained",
+        "complete script",
+        "complete file",
+        "standalone script",
+        "standalone file",
+        "from scratch",
+    )
+    return any(marker in text for marker in authoring_markers) and any(
+        marker in text for marker in artifact_markers
     )
 
 

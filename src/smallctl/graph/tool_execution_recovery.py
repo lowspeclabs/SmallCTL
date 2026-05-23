@@ -259,6 +259,88 @@ def _maybe_recover_missing_first_write_session(
     return True
 
 
+def _shell_exec_success_record_for_pending(graph_state: GraphRunState, pending: PendingToolCall) -> ToolExecutionRecord | None:
+    if pending.tool_name != "shell_exec":
+        return None
+    pending_fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+    for record in reversed(list(getattr(graph_state, "last_tool_results", []) or [])):
+        if not isinstance(record, ToolExecutionRecord):
+            continue
+        if record.tool_name != "shell_exec" or not record.result.success:
+            continue
+        if _tool_call_fingerprint(record.tool_name, record.args) == pending_fingerprint:
+            return record
+    return None
+
+
+def _current_verifier_already_passed(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "shell_exec":
+        return False
+    command = str(pending.args.get("command") or "").strip()
+    if not command:
+        return False
+    state = getattr(harness, "state", None)
+    verifier_fn = getattr(state, "current_verifier_verdict", None)
+    verifier = verifier_fn() if callable(verifier_fn) else getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verifier, dict):
+        return False
+    verdict = str(verifier.get("verdict") or verifier.get("status") or "").strip().lower()
+    verifier_command = str(verifier.get("command") or verifier.get("target") or "").strip()
+    return verdict == "pass" and verifier_command == command
+
+
+def _suppress_repeated_successful_shell_exec(
+    *,
+    harness: Any,
+    graph_state: GraphRunState,
+    pending: PendingToolCall,
+    repeat_error: str,
+) -> bool:
+    if pending.tool_name != "shell_exec":
+        return False
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    if isinstance(scratchpad, dict) and isinstance(scratchpad.get("_last_verifier_stale_after_mutation"), dict):
+        return False
+    if _shell_exec_success_record_for_pending(graph_state, pending) is None and not _current_verifier_already_passed(harness, pending):
+        return False
+
+    command = str(pending.args.get("command") or "").strip()
+    signature = _tool_call_fingerprint(pending.tool_name, pending.args)
+    if isinstance(scratchpad, dict) and scratchpad.get("_shell_exec_success_reuse_nudged") != signature:
+        scratchpad["_shell_exec_success_reuse_nudged"] = signature
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    "The exact `shell_exec` command already succeeded and no later mutation invalidated it. "
+                    f"Do not rerun `{command}`. Use that verifier evidence and call `task_complete(message=...)` now; "
+                    "if the task is not actually satisfied, explain the remaining blocker instead."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "shell_exec_already_succeeded",
+                    "guard": "repeated_tool_loop",
+                    "tool_name": pending.tool_name,
+                    "command": command,
+                },
+            )
+        )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "shell_exec_repeated_success_suppressed",
+            "suppressed repeated successful shell_exec and nudged terminal completion",
+            step=harness.state.step_count,
+            tool_name=pending.tool_name,
+            arguments=json_safe_value(pending.args),
+            guard_error=repeat_error,
+        )
+    graph_state.pending_tool_calls = []
+    graph_state.last_tool_results = []
+    return True
+
+
 def _maybe_schedule_chunked_write_loop_guard_read(
     graph_state: GraphRunState,
     harness: Any,
@@ -491,6 +573,14 @@ async def handle_repeated_tool_loop(
         graph_state.last_tool_results = []
         return None
 
+    if _suppress_repeated_successful_shell_exec(
+        harness=harness,
+        graph_state=graph_state,
+        pending=pending,
+        repeat_error=repeat_error,
+    ):
+        return None
+
     if pending.tool_name == "file_read":
         recovered = _fallback_repeated_file_read(harness, pending)
         if recovered is not None:
@@ -525,6 +615,37 @@ async def handle_repeated_tool_loop(
                 harness._runlog(
                     "file_read_recovery_nudge",
                     "nudged model away from rereading the same file",
+                    step=harness.state.step_count,
+                    tool_name=pending.tool_name,
+                    arguments=json_safe_value(pending.args),
+                    guard_error=repeat_error,
+                )
+                graph_state.pending_tool_calls = []
+                graph_state.last_tool_results = []
+                return None
+            else:
+                # HARD BLOCK: model was already nudged but is still calling file_read on the same path.
+                raw_path = str(pending.args.get("path", "") or "").strip()
+                hard_block = (
+                    f"STOP. You were already warned not to call `file_read` on `{raw_path}` again. "
+                    f"The file does not exist. Create it with `file_write(path='{raw_path}', content='...')` "
+                    f"or verify the path with `dir_list`. Do NOT call `file_read` on this path again."
+                )
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=hard_block,
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "file_read_hard_block",
+                            "path": raw_path,
+                        },
+                    )
+                )
+                harness.state.recent_errors.append(repeat_error)
+                harness._runlog(
+                    "file_read_hard_block",
+                    "blocked repeated file_read after recovery nudge was ignored",
                     step=harness.state.step_count,
                     tool_name=pending.tool_name,
                     arguments=json_safe_value(pending.args),
@@ -775,6 +896,9 @@ async def handle_repeated_tool_loop(
             harness.state.scratchpad[pause_key] = pause_count + 1
             harness.state.scratchpad["_repeated_tool_loop_suppressed_tool"] = pending.tool_name
             harness.state.scratchpad["_repeated_tool_loop_suppressed_ttl"] = 2
+            # Ensure guard trips are counted in session summary even when we pause for human interrupt
+            if repeat_error and repeat_error not in (harness.state.recent_errors or []):
+                harness.state.recent_errors.append(repeat_error)
             if guidance:
                 harness.state.append_message(
                     ConversationMessage(

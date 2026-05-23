@@ -20,6 +20,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "evidence_gathering_needed_hard_route": "",
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
+    "repair_debug_scaffold": "REPAIR MODE: You have already read the failing file. The bugs are in code you wrote. Do NOT read the file again. Emit ONE mutation (file_patch/file_write/ast_patch) this turn, then run the verifier.",
 }
 
 
@@ -37,6 +38,7 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
     seen: set[str] = set()
     used_tokens = 0
     mitigations = sorted(active_mitigations(state), key=lambda item: (item.priority, item.activated_step, item.name))
+    mitigation_names = {m.name for m in mitigations}
     for mitigation in mitigations:
         line = CAPSULE_TEXT.get(mitigation.name)
         if not line or line in seen:
@@ -49,6 +51,16 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
         used_tokens += line_tokens
         if len(lines) >= 5:
             break
+    # Inject repair-phase debug scaffold when in repair with stuck signals
+    state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+    if state_phase == "repair" and mitigation_names & {"done_gate", "micro_plan_capsule", "tool_exposure_narrowing"}:
+        scaffold = CAPSULE_TEXT.get("repair_debug_scaffold")
+        if scaffold and scaffold not in seen:
+            scaffold_tokens = estimate_text_tokens(scaffold)
+            if used_tokens + scaffold_tokens <= budget and len(lines) < 5:
+                lines.append(scaffold)
+                seen.add(scaffold)
+                used_tokens += scaffold_tokens
     return lines
 
 

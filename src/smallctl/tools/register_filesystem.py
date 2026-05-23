@@ -84,7 +84,7 @@ def register_filesystem_tools(
                 handler=inject_state_and_cwd(fs.file_write),
                 category="filesystem",
                 risk="high",
-                allowed_modes={"chat", "loop"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(

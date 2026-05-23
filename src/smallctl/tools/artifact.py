@@ -101,6 +101,9 @@ def artifact_grep(
     if not artifact:
         return fail(f"Artifact not found: {artifact_id}")
     stale_marker = _artifact_stale_marker(state, artifact)
+    kind_mismatch = _artifact_grep_kind_mismatch(artifact, query=query)
+    if kind_mismatch:
+        return fail(kind_mismatch["message"], metadata=kind_mismatch["metadata"])
 
     try:
         content = ""
@@ -193,6 +196,65 @@ def artifact_grep(
     except Exception as exc:
         log.exception("Failed to grep artifact %s", artifact_id)
         return fail(f"Error searching artifact {artifact_id}: {exc}")
+
+
+def _artifact_grep_kind_mismatch(artifact: Any, *, query: str) -> dict[str, Any] | None:
+    metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
+    tool_name = str(
+        metadata.get("_original_tool_name")
+        or metadata.get("tool_name")
+        or getattr(artifact, "tool_name", "")
+        or getattr(artifact, "kind", "")
+        or ""
+    ).strip()
+    if tool_name != "dir_list":
+        return None
+    if not _query_looks_like_file_content_search(query):
+        return None
+    artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
+    source = str(getattr(artifact, "source", "") or metadata.get("path") or "").strip()
+    return {
+        "message": (
+            f"Artifact {artifact_id} is from `dir_list`, so it contains a directory listing, not file contents. "
+            f"The query {query!r} looks like a file-content search. Use `file_read(path='...')` for the target file "
+            "or grep the target path directly instead of searching this directory-list artifact."
+        ),
+        "metadata": {
+            "artifact_id": artifact_id,
+            "artifact_tool_name": tool_name,
+            "artifact_source": source,
+            "query": query,
+            "error_kind": "artifact_kind_mismatch",
+            "next_recommended_tool": "file_read",
+        },
+    }
+
+
+def _query_looks_like_file_content_search(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    code_markers = (
+        "def ",
+        "class ",
+        "import ",
+        "from ",
+        "function ",
+        "const ",
+        "let ",
+        "var ",
+        "</",
+        "<script",
+        "{",
+        "}",
+        "=>",
+        "==",
+        "assert",
+    )
+    lowered = text.lower()
+    if any(marker in lowered for marker in code_markers):
+        return True
+    return bool(re.search(r"\b[a-zA-Z_][\w.]*\s*\(", text))
 
 
 def artifact_read(

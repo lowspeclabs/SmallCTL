@@ -81,6 +81,10 @@ LATENCY_KEYS = (
     "overhead_preparation_duration_sec",
 )
 
+SANDBOX_STARTUP_FAILURE_NEEDLES = (
+    "bwrap: loopback: failed rtm_newaddr: operation not permitted",
+)
+
 PROMPT_SHAPE_KEYS = (
     "planner_has_rewoo_plan_state",
     "planner_excludes_tool_observations",
@@ -440,6 +444,21 @@ def _run_task(
         env.setdefault("SMALLCTL_TEST_TIME_SCALING_TRIGGER", "retry_or_explicit")
         env.setdefault("SMALLCTL_TEST_TIME_SCALING_POLICY", "proposal_then_execute")
         env.update(_test_time_scaling_env_for_task(task, mode=mode))
+    preflight = _run_harness_preflight(
+        env=env,
+        task_id=str(task.get("id") or ""),
+        mode=mode,
+    )
+    if _is_harness_environment_failure(preflight, final_json=None):
+        return _build_harness_environment_failure_result(
+            task=task,
+            mode=mode,
+            repeat_index=repeat_index,
+            repeat_total=repeat_total,
+            child=preflight,
+            command=preflight.command or [sys.executable, "-c", "preflight"],
+            scenario_executed=False,
+        )
     initial = _run_child_process(
         command,
         env=env,
@@ -484,6 +503,7 @@ def _run_task(
     metrics = _extract_metrics(final_json)
     prompt_shape = _prompt_shape_assertions(stdout)
     success = _is_success(final_json, task.get("tags", []))
+    failure_classification = _classify_child_failure(child, final_json=final_json, command=command)
     result = {
         "task_id": task.get("id"),
         "tags": task.get("tags", []),
@@ -502,6 +522,8 @@ def _run_task(
         "stdout": stdout[-12000:],
         "stderr": stderr[-12000:],
     }
+    if failure_classification:
+        result.update(failure_classification)
     if mode in TEST_TIME_SCALING_MODES:
         result["approval_auto_resumed"] = approval_auto_resumed
         result["approval_initial_duration_sec"] = approval_initial_duration_sec
@@ -519,12 +541,153 @@ class _ChildRunResult:
         timed_out: bool,
         stdout: str,
         stderr: str,
+        command: list[str] | None = None,
     ) -> None:
         self.duration_sec = duration_sec
         self.returncode = returncode
         self.timed_out = timed_out
         self.stdout = stdout
         self.stderr = stderr
+        self.command = list(command or [])
+
+
+def _run_harness_preflight(
+    *,
+    env: dict[str, str],
+    task_id: str,
+    mode: str,
+) -> _ChildRunResult:
+    command = [
+        sys.executable,
+        "-c",
+        "import os; print('harness_preflight_ok', os.getcwd())",
+    ]
+    started = time.perf_counter()
+    _log_progress(f"preflight task={task_id} mode={mode}: {_shell_join(command)}")
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=PIPE,
+            stderr=PIPE,
+            text=True,
+            env=env,
+            timeout=10,
+            check=False,
+        )
+        return _ChildRunResult(
+            duration_sec=round(time.perf_counter() - started, 3),
+            returncode=int(completed.returncode),
+            timed_out=False,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            command=command,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return _ChildRunResult(
+            duration_sec=round(time.perf_counter() - started, 3),
+            returncode=124,
+            timed_out=True,
+            stdout=stdout,
+            stderr=stderr,
+            command=command,
+        )
+    except OSError as exc:
+        return _ChildRunResult(
+            duration_sec=round(time.perf_counter() - started, 3),
+            returncode=127,
+            timed_out=False,
+            stdout="",
+            stderr=str(exc),
+            command=command,
+        )
+
+
+def _is_harness_environment_failure(child: _ChildRunResult, *, final_json: dict[str, Any] | None) -> bool:
+    if isinstance(final_json, dict):
+        return False
+    if child.timed_out:
+        return False
+    if int(child.returncode or 0) == 0:
+        return False
+    combined = f"{child.stderr}\n{child.stdout}".lower()
+    return any(needle in combined for needle in SANDBOX_STARTUP_FAILURE_NEEDLES)
+
+
+def _first_failure_evidence(
+    child: _ChildRunResult,
+    *,
+    command: list[str],
+    scenario_executed: bool,
+) -> dict[str, Any]:
+    return {
+        "command": command,
+        "exit_code": child.returncode,
+        "stderr": child.stderr[-4000:],
+        "stdout": child.stdout[-4000:],
+        "duration_sec": child.duration_sec,
+        "timed_out": child.timed_out,
+        "scenario_executed": scenario_executed,
+    }
+
+
+def _classify_child_failure(
+    child: _ChildRunResult,
+    *,
+    final_json: dict[str, Any] | None,
+    command: list[str],
+) -> dict[str, Any] | None:
+    if not _is_harness_environment_failure(child, final_json=final_json):
+        return None
+    return {
+        "failure_class": "harness_environment",
+        "failure_reason": "sandbox_startup_failed",
+        "scenario_executed": False,
+        "first_failure_evidence": _first_failure_evidence(
+            child,
+            command=command,
+            scenario_executed=False,
+        ),
+    }
+
+
+def _build_harness_environment_failure_result(
+    *,
+    task: dict[str, Any],
+    mode: str,
+    repeat_index: int,
+    repeat_total: int,
+    child: _ChildRunResult,
+    command: list[str],
+    scenario_executed: bool,
+) -> dict[str, Any]:
+    return {
+        "task_id": task.get("id"),
+        "tags": task.get("tags", []),
+        "mode": mode,
+        "repeat_index": repeat_index,
+        "repeat_total": repeat_total,
+        "task": task["task"],
+        "duration_sec": child.duration_sec,
+        "returncode": child.returncode,
+        "timed_out": child.timed_out,
+        "final_json": None,
+        "final_success": False,
+        "expectations": task.get("expectations") if isinstance(task.get("expectations"), dict) else None,
+        **_extract_metrics(None),
+        "prompt_shape": None,
+        "stdout": child.stdout[-12000:],
+        "stderr": child.stderr[-12000:],
+        "failure_class": "harness_environment",
+        "failure_reason": "sandbox_startup_failed",
+        "scenario_executed": scenario_executed,
+        "first_failure_evidence": _first_failure_evidence(
+            child,
+            command=command,
+            scenario_executed=scenario_executed,
+        ),
+    }
 
 
 def _run_child_process(
@@ -638,6 +801,7 @@ def _run_child_process(
         timed_out=timed_out,
         stdout=stdout,
         stderr=stderr,
+        command=command,
     )
 
 
@@ -922,10 +1086,17 @@ def _shell_quote(value: str) -> str:
 
 
 def _emit_result_progress(result: dict[str, Any]) -> None:
+    failure_suffix = ""
+    if result.get("failure_class"):
+        failure_suffix = (
+            f" failure_class={result.get('failure_class')}"
+            f" failure_reason={result.get('failure_reason')}"
+        )
     _log_progress(
         f"finished task={result.get('task_id')} mode={result.get('mode')} "
         f"returncode={result.get('returncode')} timed_out={result.get('timed_out')} "
         f"duration={result.get('duration_sec')}s final_success={result.get('final_success')}"
+        f"{failure_suffix}"
     )
 
 
@@ -1185,6 +1356,9 @@ def _summary(result: dict[str, Any]) -> dict[str, Any]:
         "duration_sec": result.get("duration_sec"),
         "timed_out": result.get("timed_out"),
         "final_success": result.get("final_success"),
+        "failure_class": result.get("failure_class"),
+        "failure_reason": result.get("failure_reason"),
+        "scenario_executed": result.get("scenario_executed"),
         "token_usage": measurements.get("token_usage"),
         "latency_metrics": latency,
     }

@@ -30,6 +30,8 @@ _text_output = _tool_plan_eval._text_output
 _prompt_shape_assertions = _tool_plan_eval._prompt_shape_assertions
 _last_json_object = _tool_plan_eval._last_json_object
 _test_time_scaling_env_for_task = _tool_plan_eval._test_time_scaling_env_for_task
+_classify_child_failure = _tool_plan_eval._classify_child_failure
+_is_harness_environment_failure = _tool_plan_eval._is_harness_environment_failure
 
 
 def test_extract_metrics_reads_recovery_metrics() -> None:
@@ -120,6 +122,78 @@ def test_summary_includes_metrics() -> None:
     assert summary["token_usage"] == 120
     assert summary["tool_plan_steps_executed"] == 2
     assert summary["latency_metrics"]["tool_execution_duration_sec"] == 4.2
+
+
+def test_summary_includes_harness_environment_failure_fields() -> None:
+    result = {
+        "task_id": "t-env",
+        "mode": "loop",
+        "final_json": None,
+        "returncode": 1,
+        "duration_sec": 0.01,
+        "timed_out": False,
+        "final_success": False,
+        "failure_class": "harness_environment",
+        "failure_reason": "sandbox_startup_failed",
+        "scenario_executed": False,
+    }
+    summary = _summary(result)
+    assert summary["failure_class"] == "harness_environment"
+    assert summary["failure_reason"] == "sandbox_startup_failed"
+    assert summary["scenario_executed"] is False
+
+
+def test_classifies_bwrap_loopback_failure_as_harness_environment() -> None:
+    child = _ChildRunResult(
+        duration_sec=0.01,
+        returncode=1,
+        timed_out=False,
+        stdout="",
+        stderr="bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+    )
+    assert _is_harness_environment_failure(child, final_json=None) is True
+    classification = _classify_child_failure(child, final_json=None, command=["smallctl"])
+    assert classification is not None
+    assert classification["failure_class"] == "harness_environment"
+    assert classification["failure_reason"] == "sandbox_startup_failed"
+    assert classification["scenario_executed"] is False
+    assert classification["first_failure_evidence"]["exit_code"] == 1
+    assert "Failed RTM_NEWADDR" in classification["first_failure_evidence"]["stderr"]
+
+
+def test_does_not_reclassify_child_failure_when_smallctl_returned_final_json() -> None:
+    child = _ChildRunResult(
+        duration_sec=0.01,
+        returncode=1,
+        timed_out=False,
+        stdout='{"status":"failed"}\n',
+        stderr="bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+    )
+    assert _is_harness_environment_failure(child, final_json={"status": "failed"}) is False
+    assert _classify_child_failure(child, final_json={"status": "failed"}, command=["smallctl"]) is None
+
+
+def test_run_task_stops_before_scenario_when_preflight_hits_sandbox_startup_failure(monkeypatch) -> None:
+    preflight = _ChildRunResult(
+        duration_sec=0.02,
+        returncode=1,
+        timed_out=False,
+        stdout="",
+        stderr="bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+        command=["python", "-c", "preflight"],
+    )
+    monkeypatch.setattr(_tool_plan_eval, "_run_harness_preflight", lambda **_kwargs: preflight)
+
+    def fail_if_scenario_runs(*_args, **_kwargs):
+        raise AssertionError("scenario should not run after harness preflight failure")
+
+    monkeypatch.setattr(_tool_plan_eval, "_run_child_process", fail_if_scenario_runs)
+    result = _run_task({"id": "fog", "task": "install fog"}, mode="loop", timeout_sec=30)
+    assert result["failure_class"] == "harness_environment"
+    assert result["failure_reason"] == "sandbox_startup_failed"
+    assert result["scenario_executed"] is False
+    assert result["final_success"] is False
+    assert result["first_failure_evidence"]["command"] == ["python", "-c", "preflight"]
 
 
 def test_build_report_computes_comparisons() -> None:

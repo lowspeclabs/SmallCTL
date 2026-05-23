@@ -338,6 +338,39 @@ def test_ordinal_followup_resolves_structured_action_option_with_path() -> None:
     assert state.scratchpad["_resolved_followup"]["option_index"] == 1
 
 
+def test_incidental_first_one_does_not_select_action_option() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "read temp/patch_dependency_sim.py and propose fixes"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "target_paths": ["temp/patch_dependency_sim.py"],
+        "action_options": [
+            {
+                "index": 1,
+                "title": "High: apply_patch() ignores conflicts - Add conflict check before applying",
+                "target_paths": ["temp/patch_dependency_sim.py"],
+            }
+        ],
+    }
+    harness = _make_harness(state)
+
+    resolved = Harness._resolve_followup_task(
+        harness,
+        (
+            "- Duplicate test method remains. test_conflict_exclusion_in_order() is defined twice, "
+            "so the first one is overwritten and never runs. Delete one."
+        ),
+    )
+
+    assert "proposal #1" not in resolved
+    assert "apply_patch() ignores conflicts" not in resolved
+    assert "_resolved_followup" not in state.scratchpad
+
+
 def test_ordinal_followup_effective_task_is_used_before_task_reset() -> None:
     state = LoopState(cwd="/tmp")
     prior = "read temp/file_deduper.py and propose upgrades"

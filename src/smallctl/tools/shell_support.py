@@ -113,7 +113,7 @@ def _remote_installer_preflight_guard(
     if state is None or not raw or not _looks_like_remote_installer_mutation(raw):
         return None
     cwd, script_path = _remote_installer_cwd_and_script(raw)
-    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd, script_path])
+    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd])
     scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
     preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
     if not isinstance(preflights, dict):
@@ -169,32 +169,77 @@ def _remote_installer_preflight_guard(
 
 
 def _looks_like_remote_installer_mutation(command: str) -> bool:
-    lowered = str(command or "").lower()
-    if re.search(r"(?:^|[\s;&|])(?:bash\s+|sh\s+|\./|/)[^\s;&|]*installfog\.sh\b", lowered):
-        return True
-    if re.search(r"\bmake\s+install\b", lowered):
-        return True
-    if re.search(r"\b(?:bash|sh|\./)[^\s;&|]*(?:install|bootstrap)[^\s;&|]*\.sh\b", lowered):
-        return True
+    for segment in _simple_shell_command_segments(command):
+        try:
+            words = _split_shell_words(segment)
+        except ValueError:
+            words = []
+        if not words:
+            continue
+        executable = Path(words[0]).name.lower()
+        if executable == "make" and len(words) > 1 and words[1].lower() == "install":
+            return True
+        if executable in {"bash", "sh", "dash", "zsh", "ksh"} and len(words) > 1:
+            script_name = Path(words[1]).name.lower()
+            if script_name == "installfog.sh" or (
+                script_name.endswith(".sh")
+                and ("install" in script_name or "bootstrap" in script_name)
+            ):
+                return True
+            continue
+        if executable == "installfog.sh":
+            return True
+        if executable.endswith(".sh") and ("install" in executable or "bootstrap" in executable):
+            return True
     return False
+
+
+def _simple_shell_command_segments(command: str) -> list[str]:
+    raw = str(command or "")
+    if not raw.strip():
+        return []
+    # Good enough for safety classification: split on common shell command
+    # separators while preserving ordinary arguments like installer paths.
+    parts = re.split(r"\s*(?:&&|\|\||[;|])\s*", raw)
+    return [part.strip() for part in parts if part.strip()]
 
 
 def _remote_installer_cwd_and_script(command: str) -> tuple[str, str]:
     raw = str(command or "").strip()
     cwd = ""
-    cd_match = re.search(r"(?:^|[;&]\s*)cd\s+([^;&|]+?)\s*&&", raw)
+    cd_match = re.search(r"(?:^|[;&]\s*)cd\s+([^;&|]+?)\s*(?:&&|\|\||;|\||$)", raw)
     if cd_match:
         cwd = str(cd_match.group(1) or "").strip().strip("'\"")
+
     script = ""
-    script_match = re.search(r"(?:^|\s)(?:bash|sh)?\s*(\.?/[\w./-]*installfog\.sh|[\w./-]*installfog\.sh)\b", raw)
-    if script_match:
-        script = str(script_match.group(1) or "").strip()
-    elif "make install" in raw:
-        script = "make install"
-    if script.startswith("./") and cwd:
-        script = cwd.rstrip("/") + "/" + script[2:]
-    elif script and not script.startswith("/") and cwd and script != "make install":
-        script = cwd.rstrip("/") + "/" + script
+    for segment in _simple_shell_command_segments(raw):
+        try:
+            words = _split_shell_words(segment)
+        except ValueError:
+            words = []
+        if not words:
+            continue
+        executable = Path(words[0]).name.lower()
+        if executable in {"bash", "sh", "dash", "zsh", "ksh"} and len(words) > 1:
+            candidate = words[1]
+            candidate_name = Path(candidate).name.lower()
+            if candidate_name.endswith(".sh") and ("install" in candidate_name or "bootstrap" in candidate_name):
+                script = candidate
+                break
+        elif executable.endswith(".sh") and ("install" in executable or "bootstrap" in executable):
+            script = words[0]
+            break
+        elif executable == "make" and len(words) > 1 and words[1].lower() == "install":
+            script = "make install"
+            break
+
+    if script and script != "make install":
+        if script.startswith("./") and cwd:
+            script = cwd.rstrip("/") + "/" + script[2:]
+        elif script.startswith("../") and cwd:
+            script = cwd.rstrip("/") + "/" + script
+        elif not script.startswith("/") and cwd:
+            script = cwd.rstrip("/") + "/" + script
     return cwd, script
 
 
@@ -204,12 +249,44 @@ def _remote_installer_preflight_checks(*, cwd: str, script_path: str) -> list[st
     if cwd:
         checks.append(f"cd {shlex.quote(cwd)} && git rev-parse --show-toplevel")
         checks.append(f"cd {shlex.quote(cwd)} && git status --short")
-    script = script_path or "./bin/installfog.sh"
-    if script != "make install":
-        checks.append(f"test -x {shlex.quote(script)}")
+    if script_path and script_path != "make install":
+        checks.append(f"test -x {shlex.quote(script_path)}")
     elif cwd:
         checks.append(prefix + "test -f Makefile")
     return checks
+
+
+def _mark_remote_installer_preflight_clean(
+    state: LoopState | None,
+    *,
+    host: str,
+    user: str | None,
+    cwd: str,
+) -> None:
+    if state is None:
+        return
+    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd])
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
+    if not isinstance(preflights, dict):
+        preflights = {}
+        scratchpad[_REMOTE_INSTALLER_PREFLIGHT_KEY] = preflights
+    entry = preflights.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        preflights[key] = entry
+    entry["status"] = "clean"
+    entry["host"] = host
+    entry["user"] = user or ""
+    entry["cwd"] = cwd
+    entry["created_at_step"] = int(getattr(state, "step_count", 0) or 0)
+
+
+def _expose_interactive_session_tools(state: LoopState | None) -> None:
+    if state is None:
+        return
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    scratchpad["_expose_interactive_session_tools"] = True
 
 
 def _looks_like_interactive_installer_target(target_lower: str) -> bool:
@@ -502,12 +579,9 @@ def _shell_write_session_target_path_guard(state: LoopState, command: str) -> di
     if not _command_targets_path(command, target_path=target_path, cwd=state.cwd):
         return None
 
-    next_section = str(getattr(session, "write_next_section", "") or "").strip()
-    if (
-        _write_session_can_finalize(session)
-        and not next_section
-        and bool(getattr(session, "write_sections_completed", []))
-    ):
+    from ..harness.tool_visibility import _has_finalizable_write_session
+    can_finalize = _has_finalizable_write_session(state)
+    if can_finalize:
         next_required_tool = {
             "tool_name": "finalize_write_session",
             "required_fields": [],
@@ -517,15 +591,17 @@ def _shell_write_session_target_path_guard(state: LoopState, command: str) -> di
                 "Promote the staged file to the target path before running shell verification on the target.",
             ],
         }
+        finalize_hint = "or finalize it with `finalize_write_session` "
     else:
         next_required_tool = _write_session_resume_metadata(session, path=target_path)
+        finalize_hint = ""
 
     session_id = str(getattr(session, "write_session_id", "") or "").strip()
     staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
     return fail(
         f"Write Session `{session_id}` for `{target_path}` is still {status or 'open'} and staged-only. "
         f"The command targets the unpromoted target path. Resume the write session with `file_write` "
-        f"or finalize it with `finalize_write_session` before running shell checks on `{target_path}`.",
+        f"{finalize_hint}before running shell checks on `{target_path}`.",
         metadata={
             "command": command,
             "reason": "write_session_unpromoted_target_path",
@@ -534,7 +610,7 @@ def _shell_write_session_target_path_guard(state: LoopState, command: str) -> di
             "write_session_mode": str(getattr(session, "write_session_mode", "") or "").strip(),
             "target_path": target_path,
             "staging_path": staging_path,
-            "next_section_name": next_section,
+            "next_section_name": str(getattr(session, "write_next_section", "") or "").strip(),
             "next_required_tool": next_required_tool,
         },
     )

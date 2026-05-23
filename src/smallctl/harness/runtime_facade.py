@@ -465,12 +465,19 @@ async def run_task_with_events(
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     from ..graph.runtime import LoopGraphRuntime
+    from ..graph.runtime_staged import StagedExecutionRuntime
 
     redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
     if redirected is not None:
         return redirected
 
     self.event_handler = event_handler
+    if _should_use_staged_execution_runtime(self):
+        runtime = StagedExecutionRuntime.from_harness(
+            self,
+            event_handler=event_handler,
+        )
+        return await runtime.run(task)
     runtime = LoopGraphRuntime.from_harness(
         self,
         event_handler=event_handler,
@@ -484,11 +491,18 @@ async def resume_task_with_events(
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     from ..graph.runtime import LoopGraphRuntime, PlanningGraphRuntime
+    from ..graph.runtime_staged import StagedExecutionRuntime
 
     self.event_handler = event_handler
     interrupt = self.get_pending_interrupt() or {}
     if str(interrupt.get("kind") or "") == "plan_execute_approval":
         runtime = PlanningGraphRuntime.from_harness(
+            self,
+            event_handler=event_handler,
+        )
+        return await runtime.resume(human_input)
+    if _should_resume_staged_runtime(self, interrupt):
+        runtime = StagedExecutionRuntime.from_harness(
             self,
             event_handler=event_handler,
         )
@@ -531,6 +545,34 @@ async def _maybe_resume_pending_interrupt(
     if not is_interrupt_response(interrupt, task):
         return None
     return await self.resume_task_with_events(task, event_handler=event_handler)
+
+
+def _staged_execution_enabled(self: Any) -> bool:
+    return bool(getattr(getattr(self, "config", None), "staged_execution_enabled", False))
+
+
+def _approved_plan_available(self: Any) -> bool:
+    plan = getattr(self.state, "active_plan", None) or getattr(self.state, "draft_plan", None)
+    return bool(plan is not None and getattr(plan, "approved", False))
+
+
+def _should_use_staged_execution_runtime(self: Any) -> bool:
+    return bool(
+        _staged_execution_enabled(self)
+        and _approved_plan_available(self)
+        and not getattr(self.state, "planning_mode_enabled", False)
+    )
+
+
+def _should_resume_staged_runtime(self: Any, interrupt: dict[str, Any]) -> bool:
+    interrupt_kind = str(interrupt.get("kind") or "").strip()
+    if interrupt_kind == "staged_step_blocked":
+        return True
+    return bool(
+        _staged_execution_enabled(self)
+        and getattr(self.state, "plan_execution_mode", False)
+        and _approved_plan_available(self)
+    )
 
 
 def bind_runtime_facade(cls: type[Any]) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from textual import events
 from textual.message import Message
 from textual.widgets import TextArea
@@ -63,6 +65,28 @@ class InputPane(TextArea):
     def action_scroll_page_down(self) -> None:
         if hasattr(self.app, "action_scroll_page_down"):
             self.app.action_scroll_page_down()
+
+    def action_copy(self) -> None:
+        app = self.app
+        if (
+            hasattr(app, "active_task")
+            and getattr(app, "active_task", None) is not None
+            and not app.active_task.done()
+        ):
+            asyncio.create_task(app.action_interrupt_or_quit())
+        else:
+            super().action_copy()
+
+    def action_delete_to_end_of_line_or_delete_line(self) -> None:
+        app = self.app
+        if (
+            hasattr(app, "active_task")
+            and getattr(app, "active_task", None) is not None
+            and not app.active_task.done()
+        ):
+            asyncio.create_task(app.action_cancel_task())
+        else:
+            super().action_delete_to_end_of_line_or_delete_line()
 
     def _end_location(self) -> tuple[int, int]:
         lines = self.text.split("\n")

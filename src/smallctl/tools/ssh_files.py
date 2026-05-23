@@ -500,7 +500,18 @@ def read_file(payload):
     try:
         content = visible.decode(encoding)
     except UnicodeDecodeError as exc:
-        return {"ok": False, "error_kind": "decode_failure", "path": str(path), "encoding": encoding, "message": str(exc)}
+        return {
+            "ok": True,
+            "path": str(path),
+            "bytes": len(data),
+            "sha256": sha256_bytes(data),
+            "content": "",
+            "truncated": truncated,
+            "encoding": encoding,
+            "binary": True,
+            "decode_error": str(exc),
+            "message": "Remote file is not valid text for the requested encoding; returning metadata only.",
+        }
     return {
         "ok": True,
         "path": str(path),

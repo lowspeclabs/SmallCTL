@@ -429,3 +429,40 @@
   overflow-y: auto;
   overflow-x: hidden;
 }
+
+.assistant-detail-checklist {
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  border-left: thick #22c55e;
+}
+
+.task-checklist-scroll {
+  height: auto;
+  max-height: 16;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+#quit-confirm-dialog {
+  width: 40;
+  max-width: 90%;
+  padding: 1 2;
+  border: round #ef4444;
+  background: #111827;
+  color: #f9fafb;
+}
+
+#quit-confirm-title {
+  width: 100%;
+  text-style: bold;
+  color: #ef4444;
+  content-align: center middle;
+}
+
+#quit-confirm-buttons {
+  width: 100%;
+  height: auto;
+  padding-top: 1;
+  align: center middle;
+}

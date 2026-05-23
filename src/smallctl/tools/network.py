@@ -6,9 +6,10 @@ import re
 import shlex
 import shutil
 import time
+import uuid
 from typing import Any, TYPE_CHECKING
 
-from ..models.events import UIEvent, UIEventType
+from ..models.events import UIEventType
 from .common import fail, ok
 from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
@@ -16,9 +17,12 @@ from .shell import create_process
 from .process_streams import read_stream_chunks
 from .shell_support import (
     InvalidInputLoopDetector,
+    _expose_interactive_session_tools,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
     _installer_command_suggested_timeout,
+    _mark_remote_installer_preflight_clean,
+    _remote_installer_cwd_and_script,
     _remote_installer_preflight_guard,
 )
 from .ui_streaming import BufferedUIEventEmitter
@@ -86,6 +90,14 @@ _SSH_TRANSPORT_FAILURE_MARKERS = (
     "operation timed out",
     "network is unreachable",
 )
+_INTERACTIVE_PROMPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("yes_no", re.compile(r"(?P<question>[^\n\r]{0,240}?\((?:y/n|y/N|Y/n|Y/N|yes/no|yes/NO)\))\s*$", re.IGNORECASE)),
+    ("choice", re.compile(r"(?P<question>[^\n\r]{0,240}?(?:choice|selection|option)\s*:)\s*$", re.IGNORECASE)),
+    ("enter", re.compile(r"(?P<question>[^\n\r]{0,240}?(?:press|hit)\s+(?:enter|return)[^\n\r]*)\s*$", re.IGNORECASE)),
+    ("password", re.compile(r"(?P<question>[^\n\r]{0,240}password\s*:)\s*$", re.IGNORECASE)),
+    ("free_text", re.compile(r"(?P<question>[^\n\r]{0,240}:\s*)$", re.IGNORECASE)),
+)
+_SSH_INTERACTIVE_SESSIONS: dict[str, dict[str, Any]] = {}
 _ROOT_SUDO_PREFIX_RE = re.compile(
     r"^\s*sudo(?:\s+-(?:n|E|H|S))*\s+(?:(?:-i|-s)\s+)?(?:--\s+)?(?P<command>.+?)\s*$",
     re.DOTALL,
@@ -377,6 +389,7 @@ def _build_ssh_command(
     identity_file: str | None,
     password: str | None,
     strict_host_key_checking: str = "accept-new",
+    force_tty: bool = False,
 ) -> tuple[str, dict[str, str] | None]:
     host, user = normalize_ssh_target(host=host, user=user)
     ssh_args = [
@@ -406,10 +419,63 @@ def _build_ssh_command(
 
     if identity_file:
         ssh_args.extend(["-i", identity_file])
+    if force_tty:
+        ssh_args.append("-tt")
 
     target = f"{user}@{host}" if user else host
     ssh_args.extend([target, command])
     return _shell_join([*command_args, *ssh_args]), env_overrides
+
+
+def _detect_interactive_prompt(text: str) -> dict[str, Any] | None:
+    tail = str(text or "")[-4096:]
+    if not tail.strip():
+        return None
+    normalized_tail = tail.rstrip()
+    for prompt_type, pattern in _INTERACTIVE_PROMPT_PATTERNS:
+        match = pattern.search(normalized_tail)
+        if not match:
+            continue
+        question = " ".join(str(match.group("question") or "").split())
+        detected: dict[str, Any] = {
+            "type": prompt_type,
+            "question": question,
+        }
+        if prompt_type == "yes_no":
+            marker = question[-5:].lower()
+            if "/n" in marker:
+                detected["default"] = "N"
+            elif "/y" in marker:
+                detected["default"] = "Y"
+        return detected
+    return None
+
+
+def _interactive_session_snapshot(session_id: str, session: dict[str, Any], *, max_chars: int = 6000) -> dict[str, Any]:
+    proc = session.get("proc")
+    stdout = "".join(session.get("stdout", []))
+    stderr = "".join(session.get("stderr", []))
+    combined = stdout + stderr
+    detected_prompt = _detect_interactive_prompt(combined)
+    returncode = getattr(proc, "returncode", None)
+    if returncode is not None:
+        status = "exited"
+    elif detected_prompt is not None:
+        status = "waiting_for_input"
+    else:
+        status = "running"
+    return {
+        "session_id": session_id,
+        "status": status,
+        "detected_prompt": detected_prompt,
+        "stdout_tail": stdout[-max_chars:],
+        "stderr_tail": stderr[-max_chars:],
+        "output_tail": combined[-max_chars:],
+        "exit_code": returncode,
+        "host": session.get("host"),
+        "user": session.get("user"),
+        "command": session.get("command"),
+    }
 
 
 def _ssh_accept_new_is_incompatible(stderr: str) -> bool:
@@ -574,6 +640,309 @@ async def ssh_exec(
     return result
 
 
+async def ssh_session_start(
+    *,
+    host: str = "",
+    target: str | None = None,
+    command: str = "",
+    user: str | None = None,
+    username: str | None = None,
+    port: int = 22,
+    identity_file: str | None = None,
+    password: str | None = None,
+    timeout_sec: int = 900,
+    state: LoopState | None = None,
+    harness: Any = None,
+) -> dict[str, Any]:
+    """Start an interactive SSH command and keep stdin/stdout open."""
+    if password and str(password).startswith("[REDACTED"):
+        return fail(
+            "The SSH password provided was literally redacted. Ask the human user to provide the actual password.",
+            metadata={"host": host, "command": command, "reason": "redacted_password_provided"},
+        )
+    try:
+        normalized = normalize_ssh_arguments(
+            {
+                "host": host,
+                "target": target,
+                "user": user,
+                "username": username,
+            }
+        )
+        host = str(normalized.get("host") or "")
+        user = str(normalized.get("user") or "") or None
+        host, user = normalize_ssh_target(host=host, user=user)
+    except ValueError as exc:
+        return fail(str(exc), metadata={"host": host, "user": user, "command": command})
+    command, stripped_root_sudo = _strip_redundant_root_sudo(command, user)
+    # ssh_session_start is the designated tool for interactive installers;
+    # do not block it with the remote-installer preflight guard.
+
+    try:
+        full_cmd, env_overrides = _build_ssh_command(
+            host=host,
+            command=command,
+            user=user,
+            port=port,
+            identity_file=identity_file,
+            password=password,
+            force_tty=True,
+        )
+    except FileNotFoundError as exc:
+        if str(exc) == "sshpass":
+            return fail(
+                "sshpass is required for password-based SSH but was not found.",
+                metadata={"host": host, "user": user, "command": command, "reason": "sshpass_missing"},
+            )
+        raise
+
+    proc = await create_process(
+        command=full_cmd,
+        cwd=".",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.PIPE,
+        env_overrides=env_overrides,
+        harness=harness,
+    )
+    session_id = f"sshint-{uuid.uuid4().hex[:12]}"
+    session: dict[str, Any] = {
+        "proc": proc,
+        "stdout": [],
+        "stderr": [],
+        "host": host,
+        "user": user,
+        "command": command,
+        "started_at": time.time(),
+        "timeout_sec": max(1, int(timeout_sec or 900)),
+    }
+    _SSH_INTERACTIVE_SESSIONS[session_id] = session
+
+    async def collect(stream: Any, key: str) -> None:
+        await read_stream_chunks(stream, session[key], chunk_size=4096, idle_timeout_sec=None)
+
+    session["tasks"] = [
+        asyncio.create_task(collect(proc.stdout, "stdout")),
+        asyncio.create_task(collect(proc.stderr, "stderr")),
+    ]
+    await asyncio.sleep(0.2)
+    _expose_interactive_session_tools(state)
+    return ok(
+        _interactive_session_snapshot(session_id, session),
+        metadata={
+            "interactive_session": True,
+            "pty_requested": True,
+            "next_tools": ["ssh_session_read", "ssh_session_send", "ssh_session_close"],
+            **_ssh_execution_debug_metadata(
+                password=password,
+                identity_file=identity_file,
+                strict_host_key_checking="accept-new",
+            ),
+        },
+    )
+
+
+async def ssh_session_read(
+    *,
+    session_id: str,
+    wait_sec: float = 1.0,
+    max_chars: int = 6000,
+) -> dict[str, Any]:
+    session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
+    if not isinstance(session, dict):
+        return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
+    await asyncio.sleep(max(0.0, min(float(wait_sec or 0), 30.0)))
+    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+
+
+async def ssh_session_send(
+    *,
+    session_id: str,
+    input: str,
+    wait_sec: float = 0.5,
+    max_chars: int = 6000,
+) -> dict[str, Any]:
+    session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
+    if not isinstance(session, dict):
+        return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
+    proc = session.get("proc")
+    if getattr(proc, "returncode", None) is not None:
+        return fail(
+            "SSH interactive session has already exited.",
+            metadata=_interactive_session_snapshot(session_id, session, max_chars=max_chars),
+        )
+    stdin = getattr(proc, "stdin", None)
+    if stdin is None:
+        return fail("SSH interactive session stdin is unavailable.", metadata={"session_id": session_id})
+    stdin.write(str(input or "").encode("utf-8"))
+    await stdin.drain()
+    await asyncio.sleep(max(0.0, min(float(wait_sec or 0), 30.0)))
+    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+
+
+async def ssh_session_close(
+    *,
+    session_id: str,
+    terminate: bool = True,
+    max_chars: int = 6000,
+) -> dict[str, Any]:
+    session = _SSH_INTERACTIVE_SESSIONS.pop(str(session_id or "").strip(), None)
+    if not isinstance(session, dict):
+        return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
+    proc = session.get("proc")
+    if terminate and getattr(proc, "returncode", None) is None:
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+    for task in session.get("tasks", []):
+        if hasattr(task, "cancel"):
+            task.cancel()
+    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+
+
+async def _run_remote_installer_preflight_probes(
+    *,
+    host: str,
+    command: str,
+    user: str | None = None,
+    port: int = 22,
+    identity_file: str | None = None,
+    password: str | None = None,
+    state: LoopState | None = None,
+    harness: Any = None,
+) -> dict[str, Any]:
+    """Run automated SSH probes to discover installer environment state."""
+    cwd, script_path = _remote_installer_cwd_and_script(command)
+    probes: dict[str, Any] = {
+        "host": host,
+        "user": user,
+        "cwd": cwd,
+        "script_path": script_path,
+        "script_exists": False,
+        "script_executable": False,
+        "repo_clean": False,
+        "noninteractive_flags": [],
+        "preseed_files": [],
+        "help_output": "",
+        "is_interactive": True,
+        "recommended_approach": "",
+    }
+
+    if not script_path or script_path == "make install":
+        probes["recommended_approach"] = (
+            "Unable to identify a specific install script for probing. "
+            "Verify the correct installer path and retry."
+        )
+        return probes
+
+    probe_script_parts = [
+        'echo "__PREFLIGHT_PWD__"',
+        "pwd",
+        'echo "__PREFLIGHT_GIT_TOPLEVEL__"',
+        f"cd {shlex.quote(cwd or '.')} && git rev-parse --show-toplevel 2>/dev/null || echo 'NO_GIT'",
+        'echo "__PREFLIGHT_GIT_STATUS__"',
+        f"cd {shlex.quote(cwd or '.')} && git status --short 2>/dev/null || echo 'NO_GIT'",
+        'echo "__PREFLIGHT_SCRIPT__"',
+        f"test -x {shlex.quote(script_path)} && echo 'EXECUTABLE' || (test -f {shlex.quote(script_path)} && echo 'EXISTS') || echo 'MISSING'",
+        'echo "__PREFLIGHT_HELP__"',
+        f"{shlex.quote(script_path)} --help 2>&1 || echo 'NO_HELP'",
+    ]
+
+    if cwd:
+        probe_script_parts.append('echo "__PREFLIGHT_PRESEED__"')
+        probe_script_parts.append(
+            f"test -f {shlex.quote(cwd.rstrip('/') + '/.fogsettings')} && echo 'FOG_PRESEED' || true"
+        )
+
+    probe_script_parts.append('echo "__PREFLIGHT_DONE__"')
+    probe_command = "bash -c " + shlex.quote("; ".join(probe_script_parts))
+
+    try:
+        full_cmd, env_overrides = _build_ssh_command(
+            host=host,
+            command=probe_command,
+            user=user,
+            port=port,
+            identity_file=identity_file,
+            password=password,
+        )
+        proc = await create_process(
+            command=full_cmd,
+            cwd=state.cwd if state else ".",
+            env_overrides=env_overrides,
+            harness=harness,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_data: list[str] = []
+        stderr_data: list[str] = []
+        await asyncio.wait_for(
+            asyncio.gather(
+                read_stream_chunks(proc.stdout, stdout_data, chunk_size=4096),
+                read_stream_chunks(proc.stderr, stderr_data, chunk_size=4096),
+                proc.wait(),
+            ),
+            timeout=30,
+        )
+        combined = "".join(stdout_data) + "".join(stderr_data)
+
+        if "__PREFLIGHT_SCRIPT__" in combined:
+            script_section = combined.split("__PREFLIGHT_SCRIPT__")[1].split("__PREFLIGHT_")[0]
+            if "EXECUTABLE" in script_section:
+                probes["script_exists"] = True
+                probes["script_executable"] = True
+            elif "EXISTS" in script_section:
+                probes["script_exists"] = True
+
+        if "__PREFLIGHT_GIT_STATUS__" in combined:
+            git_section = combined.split("__PREFLIGHT_GIT_STATUS__")[1].split("__PREFLIGHT_")[0]
+            probes["repo_clean"] = (
+                "NO_GIT" in git_section
+                or not git_section.strip()
+                or "nothing to commit" in git_section
+            )
+
+        if "__PREFLIGHT_HELP__" in combined:
+            help_section = combined.split("__PREFLIGHT_HELP__")[1].split("__PREFLIGHT_")[0]
+            probes["help_output"] = help_section[:2000]
+            help_lower = help_section.lower()
+            known_flags = [
+                "--autoaccept", "-y", "--yes", "--quiet",
+                "--non-interactive", "--unattended", "--batch", "-n",
+            ]
+            probes["noninteractive_flags"] = [f for f in known_flags if f in help_lower]
+
+        if "__PREFLIGHT_PRESEED__" in combined:
+            preseed_section = combined.split("__PREFLIGHT_PRESEED__")[1].split("__PREFLIGHT_")[0]
+            if "FOG_PRESEED" in preseed_section:
+                probes["preseed_files"].append(".fogsettings")
+
+        probes["is_interactive"] = len(probes["noninteractive_flags"]) == 0
+
+        if probes["noninteractive_flags"]:
+            probes["recommended_approach"] = (
+                f"This installer supports non-interactive mode. "
+                f"Retry with `ssh_exec` and the flag `{probes['noninteractive_flags'][0]}`."
+            )
+        else:
+            probes["recommended_approach"] = (
+                "This appears to be an interactive installer. "
+                "Use `ssh_session_start` to run it with a pseudo-terminal, "
+                "then answer prompts with `ssh_session_send`."
+            )
+    except asyncio.TimeoutError:
+        probes["probe_error"] = "Preflight probes timed out after 30s"
+    except Exception as exc:
+        probes["probe_error"] = str(exc)
+
+    return probes
+
+
 async def run_ssh_command(
     *,
     host: str,
@@ -661,12 +1030,46 @@ async def run_ssh_command(
         )
     if preflight_guard is not None:
         metadata = dict(preflight_guard.get("metadata") or {})
+        # If the guard already detected a hard failure (missing/corrupt files),
+        # preserve that actionable error instead of running probes.
+        if metadata.get("reason") == "remote_installer_preflight_failed":
+            if stripped_root_sudo:
+                metadata["stripped_redundant_root_sudo"] = True
+            metadata.update(
+                {
+                    "host": host,
+                    "user": user,
+                    **_ssh_execution_debug_metadata(
+                        password=password,
+                        identity_file=identity_file,
+                        strict_host_key_checking=strict_host_key_mode,
+                    ),
+                }
+            )
+            preflight_guard["metadata"] = metadata
+            return preflight_guard
+
+        # Run automatic environment probes before returning the block
+        probes = await _run_remote_installer_preflight_probes(
+            host=host,
+            command=command,
+            user=user,
+            port=port,
+            identity_file=identity_file,
+            password=password,
+            state=state,
+            harness=harness,
+        )
         if stripped_root_sudo:
             metadata["stripped_redundant_root_sudo"] = True
         metadata.update(
             {
                 "host": host,
                 "user": user,
+                "preflight_probes": probes,
+                "suggested_tool_after_preflight": (
+                    "ssh_session_start" if probes.get("is_interactive") else "ssh_exec"
+                ),
                 **_ssh_execution_debug_metadata(
                     password=password,
                     identity_file=identity_file,
@@ -674,6 +1077,56 @@ async def run_ssh_command(
                 ),
             }
         )
+
+        # Auto-clear preflight if basic checks pass so the model can retry immediately
+        if probes.get("script_exists") and probes.get("script_executable"):
+            _mark_remote_installer_preflight_clean(
+                state, host=host, user=user, cwd=probes.get("cwd", "")
+            )
+
+        # Expose interactive session tools when the installer requires interactivity
+        if probes.get("is_interactive"):
+            _expose_interactive_session_tools(state)
+
+        # Build enriched, actionable error text
+        parts: list[str] = []
+        parts.append("Remote installer environment scan completed.")
+        if probes.get("script_exists"):
+            if probes.get("script_executable"):
+                parts.append(
+                    f"- Script: {probes['script_path']} (exists and is executable)"
+                )
+            else:
+                parts.append(
+                    f"- Script: {probes['script_path']} (exists but NOT executable)"
+                )
+        else:
+            parts.append(f"- Script: {probes['script_path']} (NOT FOUND)")
+            if probes.get("cwd"):
+                parts.append(f"  Check the correct path in `{probes['cwd']}/` and retry.")
+
+        if probes.get("repo_clean"):
+            parts.append("- Git repo: clean")
+        elif probes.get("cwd"):
+            parts.append("- Git repo: dirty or not a git repository")
+
+        if probes.get("noninteractive_flags"):
+            parts.append(
+                f"- Non-interactive flags detected: {', '.join(probes['noninteractive_flags'])}"
+            )
+        if probes.get("preseed_files"):
+            parts.append(
+                f"- Preseed/config files found: {', '.join(probes['preseed_files'])}"
+            )
+
+        parts.append(f"\n{probes['recommended_approach']}")
+
+        if not probes.get("script_exists"):
+            parts.append(
+                "\nAction required: Verify the installer path before retrying."
+            )
+
+        preflight_guard["error"] = "\n".join(parts)
         preflight_guard["metadata"] = metadata
         return preflight_guard
 
@@ -937,6 +1390,23 @@ async def run_ssh_command(
                     except Exception:
                         pass
         output = last_process_output if isinstance(last_process_output, dict) else {}
+        combined_output = f"{output.get('stdout', '')}{output.get('stderr', '')}"
+        detected_prompt = _detect_interactive_prompt(combined_output)
+        if detected_prompt is not None:
+            return fail(
+                "SSH command appears to be waiting for interactive input. "
+                "Use documented non-interactive flags/config when available, or retry with `ssh_session_start` and answer prompts with `ssh_session_send`.",
+                metadata={
+                    "output": output,
+                    "output_received": True,
+                    "failure_kind": "interactive_prompt_wait",
+                    "ssh_error_class": "interactive_prompt_wait",
+                    "ssh_transport_succeeded": True,
+                    "detected_prompt": detected_prompt,
+                    "suggested_tools": ["ssh_session_start", "ssh_session_read", "ssh_session_send", "ssh_session_close"],
+                    **execution_debug_metadata,
+                },
+            )
         return fail(
             f"SSH command timed out after {timeout_sec}s",
             metadata={

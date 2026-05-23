@@ -266,10 +266,35 @@ async def resume_loop_run(
             write_session_id=str(pending.get("write_session_id") or "").strip() or None,
             cwd=harness.state.cwd,
         )
+        # Inject staged file content into the resume hint so the model has
+        # the legal context to append the next section without violating
+        # the read-before-write gate.
+        session = getattr(harness.state, "write_session", None)
+        staged_content = ""
+        next_section = ""
+        if session is not None:
+            from pathlib import Path
+            staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
+            if staging_path:
+                try:
+                    staged_content = Path(staging_path).read_text(encoding="utf-8")
+                except Exception:
+                    staged_content = ""
+            next_section = str(getattr(session, "write_next_section", "") or "").strip()
+        staged_hint = ""
+        if staged_content:
+            staged_hint = (
+                f"\n\nCurrent staged content for `{outline_resume_path}`:\n"
+                f"```python\n{staged_content[:2000]}\n```"
+            )
+        next_section_hint = ""
+        if next_section:
+            next_section_hint = f" Next section to write: `{next_section}`."
         outline_resume_hint = (
             f"LoopGuard outline confirmed for `{outline_resume_path}`. "
             "Resume the active write session and advance to the next unwritten section. "
             "Do not restart the file from memory."
+            f"{next_section_hint}{staged_hint}"
         )
     if continue_like:
         harness._runlog("step_count_reset", "resetting step count for continuation", old_count=harness.state.step_count)
@@ -623,18 +648,32 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
         guard_error = check_guards(harness.state, harness.guards)
     recovery_hint: tuple[str, str] | None = None
     if guard_error:
-        if "stagnation limit" in guard_error or "loop detected" in guard_error or "repeated tool call loop" in guard_error:
+        if (
+            "stagnation limit" in guard_error
+            or "loop detected" in guard_error
+            or "repeated tool call loop" in guard_error
+            or "Progress stagnation guard tripped" in guard_error
+        ):
             state = getattr(harness, "state", None)
             scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
             transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
             tx_lines = recovery_context_lines(transaction)
             tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
+            phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+            active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+            if phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}:
+                repair_directive = (
+                    " You MUST now call a concrete mutation tool (`file_patch`, `file_write`, or `ast_patch`) "
+                    "or run a focused verifier (`shell_exec`). Do not read, analyze, or plan further."
+                )
+            else:
+                repair_directive = " Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
             harness.state.append_message(
                 ConversationMessage(
                     role="system",
                     content=(
-                        f"System: {guard_error}. "
-                        "You are stuck in a loop. Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
+                        f"System: {guard_error}."
+                        f"{repair_directive}"
                         f"{tx_note}"
                     ),
                     metadata={
@@ -655,7 +694,12 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
                 harness.state.stagnation_counters["repeat_command"] = 0
             if "repeat_patch" in harness.state.stagnation_counters:
                 harness.state.stagnation_counters["repeat_patch"] = 0
-            harness.state.tool_history.clear()
+            phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
+            if phase != "repair":
+                harness.state.tool_history.clear()
+            else:
+                # Keep recent history in repair so failure patterns remain visible
+                harness.state.tool_history = harness.state.tool_history[-6:]
             guard_error = None
 
         if guard_error:

@@ -36,6 +36,17 @@ from ..tools.ssh_files import SSH_FILE_MUTATING_TOOLS
 _ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
 
 
+def _should_auto_record_known_fact(tool_name: str, result: ToolEnvelope) -> bool:
+    if tool_name == "shell_exec":
+        return False
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("skip_auto_fact_record"):
+        return False
+    if not result.success and (is_file_mutating_tool(tool_name) or tool_name in SSH_FILE_MUTATING_TOOLS):
+        return False
+    return True
+
+
 def _coerce_int_or_none(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -1972,7 +1983,7 @@ def apply_artifact_success_outcome(
     )
     _auto_mirror_session_anchor(service.harness, tool_name=tool_name, result=result, arguments=arguments)
 
-    if tool_name != "shell_exec" and not result.metadata.get("skip_auto_fact_record"):
+    if _should_auto_record_known_fact(tool_name, result):
         fact_label = evidence.statement or (artifact.summary if artifact else "") or tool_name
         prefix = f"{tool_name}: "
         if fact_label.startswith(prefix):

@@ -4,7 +4,7 @@ from typing import Any
 from textual.containers import Vertical, VerticalScroll
 
 from ..models.events import UIEvent, UIEventType
-from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget
+from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget, TaskChecklistWidget
 from .display import format_test_time_scaling_event
 
 
@@ -97,6 +97,18 @@ class ConsolePane(VerticalScroll):
 
         if event.event_type == UIEventType.SYSTEM and event.data.get("kind") == "test_time_scaling":
             await self._append_test_time_scaling_event(event)
+            return
+
+        if event.data.get("ui_kind") == "subtask_checklist":
+            turn = await self._ensure_assistant_turn()
+            title = event.data.get("checklist_title") or "Task Checklist"
+            content = event.content or ""
+            self.app._app_logger.debug(
+                "ui_subtask_checklist: title=%r content_len=%d empty=%s",
+                title, len(content), not content.strip(),
+            )
+            await turn.set_task_checklist(content, title=f"📋 {title}")
+            self._schedule_autoscroll()
             return
 
         kind_map = {

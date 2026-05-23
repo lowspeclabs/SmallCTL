@@ -21,6 +21,7 @@ You do not execute tools, write files, run shell commands, approve risk, or mark
 Use only the provided packet.
 Return valid JSON only.
 Prefer the smallest safe next step.
+Allowed verdicts: continue, need_more_evidence, reject_current_plan, propose_patch, final_answer_ok, ask_human, abort, next_action.
 If evidence is insufficient, use verdict need_more_evidence."""
 
 REPAIR_SYSTEM_PROMPT = """You repair invalid escalation responses for SmallCTL.

@@ -844,6 +844,14 @@ class PromptAssembler:
                 ).strip()
                 total_lines = cls._coerce_int_or_none(metadata.get("total_lines"))
                 line_note = f" ({total_lines} lines)" if total_lines is not None else ""
+                excerpt = cls._artifact_content_excerpt_for_prompt(artifact, line_limit=300)
+                if excerpt:
+                    return (
+                        f"Artifact {artifact_id}: {summary}{line_note}. "
+                        "Full file captured; use the excerpt below for immediate context. "
+                        "Use artifact_read only if you need unseen lines or exact line-level detail.\n\n"
+                        f"content_excerpt:\n{excerpt}"
+                    )
                 return (
                     f"Artifact {artifact_id}: {summary}{line_note}. "
                     "Full file captured; use this existing evidence instead of rereading the file."
@@ -1117,6 +1125,7 @@ class PromptAssembler:
 
         if estimate_text_tokens(compact_content) > token_limit:
             truncation_note = ""
+            skip_prompt_truncation = False
             if message.name == "artifact_read":
                 meta = message.metadata if isinstance(message.metadata, dict) else {}
                 if meta.get("truncated") is False:
@@ -1128,9 +1137,25 @@ class PromptAssembler:
                         f"(complete). The truncation above is only for the transcript window. "
                         f"Do not re-call artifact_read with larger max_chars.]"
                     )
-            compact_content = self._truncate_text_for_prompt(
-                compact_content, token_limit=token_limit, truncation_note=truncation_note
-            )
+            elif message.name in {"file_read", "ssh_file_read"}:
+                meta = message.metadata if isinstance(message.metadata, dict) else {}
+                if bool(meta.get("complete_file")) and not bool(meta.get("file_content_truncated")):
+                    total_lines = meta.get("total_lines", "?")
+                    line_start = meta.get("line_start", "?")
+                    line_end = meta.get("line_end", "?")
+                    compact_tokens = estimate_text_tokens(compact_content)
+                    if compact_tokens <= max(48, transcript_token_limit):
+                        skip_prompt_truncation = True
+                    else:
+                        truncation_note = (
+                            f"[file_read already captured lines {line_start}-{line_end} of {total_lines} "
+                            "(complete). The truncation above is only for the transcript window. "
+                            "Do not re-call file_read on the same unchanged path.]"
+                        )
+            if not skip_prompt_truncation:
+                compact_content = self._truncate_text_for_prompt(
+                    compact_content, token_limit=token_limit, truncation_note=truncation_note
+                )
 
         if self.policy.monotonic_transcript_compaction and cache_key is not None:
             self._compaction_cache[cache_key] = compact_content
@@ -1167,17 +1192,44 @@ class PromptAssembler:
             if "\n```text\n" in reused:
                 return reused
             if artifact.kind == "file_read":
-                return (
-                    f"Reused Artifact {artifact.artifact_id}: {summary}. "
-                    "Use the existing file evidence instead of rereading it."
-                )
+                return reused
             return f"Reused Artifact {artifact.artifact_id}: {summary}"
         if artifact.kind in {"file_read", "ssh_file_read"}:
+            line_limit = max(1, int(getattr(self.policy, "file_read_preview_line_limit", 300) or 300))
+            excerpt = self._artifact_content_excerpt_for_prompt(artifact, line_limit=line_limit)
+            if excerpt:
+                return (
+                    f"Artifact {artifact.artifact_id}: {summary}. "
+                    f"Full file already captured; use the excerpt below for immediate context "
+                    f"(up to {line_limit} lines before prompt-preview truncation). "
+                    "Use artifact_read only if you need exact line-level detail beyond this excerpt.\n\n"
+                    f"content_excerpt:\n{excerpt}"
+                )
             return (
                 f"Artifact {artifact.artifact_id}: {summary}. "
                 "Full file already captured; patch, verify, or move on instead of rereading it."
             )
         return f"Artifact {artifact.artifact_id}: {summary}"
+
+    @staticmethod
+    def _artifact_content_excerpt_for_prompt(artifact: Any, *, line_limit: int = 300) -> str:
+        text = str(getattr(artifact, "inline_content", "") or "")
+        if not text:
+            content_path = str(getattr(artifact, "content_path", "") or "").strip()
+            if content_path:
+                try:
+                    text = Path(content_path).read_text(encoding="utf-8")
+                except OSError:
+                    text = ""
+        if not text:
+            text = str(getattr(artifact, "preview_text", "") or "")
+        text = text.rstrip("\n")
+        if not text:
+            return ""
+        lines = text.splitlines()
+        if len(lines) > line_limit:
+            return "\n".join(lines[:line_limit]).rstrip() + f"\n... prompt preview truncated at {line_limit}/{len(lines)} lines"
+        return text
 
     @staticmethod
     def _truncate_text_for_prompt(text: str, *, token_limit: int, truncation_note: str = "") -> str:

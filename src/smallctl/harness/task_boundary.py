@@ -96,6 +96,13 @@ _ORDINAL_FOLLOWUP_RE = re.compile(
     r"\b(?:option|proposal)\s+#?(\d+)\b",
     re.IGNORECASE,
 )
+_ORDINAL_WORD_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
+    r"(?:the\s+)?(?P<word>first|second|third|fourth|fifth)\s+(?:one|option|proposal)?\b"
+    r"|"
+    r"^\s*(?:option|proposal)\s+(?P<option_word>first|second|third|fourth|fifth)\b",
+    re.IGNORECASE,
+)
 _ORDINAL_PREFIX_RE = re.compile(
     r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
     r"(?:option\s+|proposal\s+|#)?\d+[.)]?\s*[,;:]?\s*",
@@ -2641,9 +2648,10 @@ class TaskBoundaryService:
                 return int(match.group(1) or match.group(2))
             except (TypeError, ValueError):
                 return None
-        for word, index in _ORDINAL_WORDS.items():
-            if re.search(rf"\b{word}\s+(?:one|option|proposal)?\b", text):
-                return index
+        word_match = _ORDINAL_WORD_FOLLOWUP_RE.search(text)
+        if word_match:
+            word = str(word_match.group("word") or word_match.group("option_word") or "")
+            return _ORDINAL_WORDS.get(word)
         return None
 
     def _selected_action_option(self, task: str, handoff: dict[str, Any]) -> dict[str, Any] | None:

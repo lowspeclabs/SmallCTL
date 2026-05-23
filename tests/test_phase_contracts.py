@@ -11,7 +11,17 @@ from smallctl.graph.state import PendingToolCall
 from smallctl.prompts import build_system_prompt
 from smallctl.phases import filter_phase_blocked_tools, phase_contract
 from smallctl.tools.register import build_registry
-from smallctl.state import ArtifactSnippet, ContextBrief, EvidenceRecord, ExecutionPlan, LoopState, PlanStep, WriteSession
+from smallctl.models.conversation import ConversationMessage
+from smallctl.state import (
+    ArtifactRecord,
+    ArtifactSnippet,
+    ContextBrief,
+    EvidenceRecord,
+    ExecutionPlan,
+    LoopState,
+    PlanStep,
+    WriteSession,
+)
 
 
 def test_prompt_assembler_includes_plan_phase_handoff_artifacts() -> None:
@@ -181,6 +191,57 @@ def test_prompt_assembler_marks_artifact_snippets_as_not_full_reads() -> None:
     combined_content = "\n".join(str(message.get("content") or "") for message in assembly.messages)
     assert "Artifact summaries (compressed evidence only; these snippets are not full artifact reads):" in combined_content
     assert "temp/app.py preview snippet" in combined_content
+
+
+def test_prompt_compaction_keeps_file_read_artifact_excerpt(tmp_path) -> None:
+    content_path = tmp_path / "A0002.txt"
+    content_path.write_text("alpha = 1\nbeta = 2\n", encoding="utf-8")
+    state = LoopState(cwd="/tmp")
+    state.artifacts["A0002"] = ArtifactRecord(
+        artifact_id="A0002",
+        kind="file_read",
+        source="/tmp/app.py",
+        created_at="2026-05-22T00:00:00+00:00",
+        size_bytes=20,
+        summary="app.py full file (2 lines)",
+        tool_name="file_read",
+        content_path=str(content_path),
+        preview_text="alpha = 1",
+        metadata={"complete_file": True, "total_lines": 2, "truncated": False},
+    )
+    state.recent_messages.append(
+        ConversationMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "file_read", "arguments": '{"path": "/tmp/app.py"}'},
+                }
+            ],
+        )
+    )
+    state.recent_messages.append(
+        ConversationMessage(
+            role="tool",
+            name="file_read",
+            tool_call_id="call-1",
+            content="Tool output captured as Artifact A0002",
+            metadata={"artifact_id": "A0002", "complete_file": True},
+        )
+    )
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=4096, recent_message_limit=4)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+        token_budget=4096,
+    )
+
+    combined_content = "\n".join(str(message.get("content") or "") for message in assembly.messages)
+    assert "Artifact A0002: app.py full file (2 lines)" in combined_content
+    assert "content_excerpt:" in combined_content
+    assert "alpha = 1\nbeta = 2" in combined_content
 
 
 def test_staged_phase_contract_blocks_disallowed_tools_in_explore() -> None:

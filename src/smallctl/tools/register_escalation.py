@@ -24,8 +24,12 @@ def register_escalation_tools(
         make_registration(
             name="escalate_to_bigger_model",
             description=(
-                "Ask the configured larger model for bounded recovery advice. Use only after evidence has been "
-                "gathered and normal repair is stuck. The larger model cannot execute tools."
+                "Ask the configured larger model for bounded recovery advice. "
+                "Call ONLY when: (a) you have at least 2 failed tool attempts or verifier failures, "
+                "AND (b) you have gathered concrete evidence (tool outputs, artifact reads, or verifier results), "
+                "AND (c) you are still stuck after trying repair. "
+                "Do NOT call for simple path corrections or missing tool availability. "
+                "The larger model cannot execute tools."
             ),
             schema=build_tool_schema(
                 required=["reason", "question", "requested_output"],

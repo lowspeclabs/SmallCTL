@@ -388,6 +388,41 @@ def test_patch_first_allows_explicit_rewrite(tmp_path) -> None:
     assert result.success is True
 
 
+def test_patch_first_allows_self_contained_script_authoring_over_existing_file(tmp_path) -> None:
+    async def _dispatch(tool_name: str, args: dict) -> ToolEnvelope:
+        return ToolEnvelope(success=True, metadata={"tool_name": tool_name, "args": args})
+
+    target = tmp_path / "temp" / "patch_dependency_sim.py"
+    target.parent.mkdir()
+    target.write_text("old\n", encoding="utf-8")
+    state = LoopState(cwd=str(tmp_path))
+    state.scratchpad["_task_transaction"] = {
+        "turn_type": "ITERATION",
+        "allowed_paths": ["temp/patch_dependency_sim.py"],
+    }
+    harness = SimpleNamespace(
+        state=state,
+        registry=SimpleNamespace(names=lambda: {"file_write", "file_patch"}),
+        dispatcher=SimpleNamespace(dispatch=_dispatch),
+        _current_user_task=lambda: (
+            "Build a self-contained Python script at ./temp/patch_dependency_sim.py "
+            "that models patch application with prerequisites and conflicts."
+        ),
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(
+        dispatch_tool_call(
+            harness,
+            "file_write",
+            {"path": "./temp/patch_dependency_sim.py", "content": "new\n"},
+        )
+    )
+
+    assert result.success is True
+    assert "_patch_first_blocked_write" not in state.scratchpad
+
+
 def test_subtask_child_state_uses_transaction_scope() -> None:
     parent = LoopState(cwd="/tmp")
     parent.recent_messages.append(SimpleNamespace(role="user", content="old broad transcript", metadata={}))

@@ -59,10 +59,18 @@ def _extract_first_fenced_block(text: str) -> str:
     cleaned = str(text or "")
     if not cleaned.strip():
         return ""
-    match = re.search(r"```[^\n`]*\n?(.*?)```", cleaned, re.DOTALL)
+    match = re.search(r"```([^\n`]*)\n?(.*?)```", cleaned, re.DOTALL)
     if match is None:
         return ""
-    return str(match.group(1) or "").strip()
+    language = str(match.group(1) or "").strip().lower()
+    content = str(match.group(2) or "").strip()
+    # Reject fenced JSON that is actually tool-call schema leakage from models
+    # like Qwen3.5-9b when tool schemas are stripped from the request.
+    if language == "json" and content.startswith("{") and len(content) < 200:
+        schema_keys = ('"name"', '"path"', '"arguments"', '"tool"', '"function"')
+        if any(k in content for k in schema_keys):
+            return ""
+    return content
 
 
 def _extract_unclosed_final_fenced_block(
@@ -80,11 +88,12 @@ def _extract_unclosed_final_fenced_block(
     if not normalized_target or normalized_target.endswith(_RAW_TEXT_TARGET_SUFFIXES):
         return ""
 
-    fence_matches = list(re.finditer(r"```[^\n`]*\n?", cleaned))
+    fence_matches = list(re.finditer(r"```([^\n`]*)\n?", cleaned))
     if not fence_matches:
         return ""
 
     last_fence = fence_matches[-1]
+    language = str(last_fence.group(1) or "").strip().lower()
     recovered = cleaned[last_fence.end():].strip()
     if not recovered:
         return ""
@@ -92,6 +101,12 @@ def _extract_unclosed_final_fenced_block(
         return ""
     if "<tool_call>" in recovered or "<function=" in recovered:
         return ""
+    # Reject fenced JSON that is actually tool-call schema leakage from models
+    # like Qwen3.5-9b when tool schemas are stripped from the request.
+    if language == "json" and recovered.startswith("{") and len(recovered) < 200:
+        schema_keys = ('"name"', '"path"', '"arguments"', '"tool"', '"function"')
+        if any(k in recovered for k in schema_keys):
+            return ""
     return recovered
 
 

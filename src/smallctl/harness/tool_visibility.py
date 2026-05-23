@@ -271,6 +271,12 @@ def _append_retry_tool_exposures(
         tool_name = str(payload.get("tool_name") or "").strip()
         if not tool_name or tool_name in existing_names:
             continue
+        if (
+            normalized_mode == "planning"
+            and tool_name == "file_patch"
+            and not _has_planning_file_patch_context(harness.state)
+        ):
+            continue
         schema = _retry_tool_schema(harness, tool_name=tool_name)
         if not isinstance(schema, dict):
             continue
@@ -314,6 +320,21 @@ def _has_background_jobs(state: Any) -> bool:
     return isinstance(jobs, dict) and bool(jobs)
 
 
+def _has_planning_file_patch_context(state: Any) -> bool:
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict):
+        return False
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "").strip() not in {"file_read", "file_write"}:
+            continue
+        result = record.get("result")
+        if isinstance(result, dict) and bool(result.get("success")):
+            return True
+    return False
+
+
 def filter_tools_for_runtime_state(
     tools: list[dict[str, Any]],
     *,
@@ -330,6 +351,9 @@ def filter_tools_for_runtime_state(
     has_artifacts = _has_artifacts(state)
     has_plan = _has_plan(state)
     has_background_jobs = _has_background_jobs(state)
+    has_planning_file_patch_context = (
+        normalized_mode != "planning" or _has_planning_file_patch_context(state)
+    )
 
     scratchpad = getattr(state, "scratchpad", {}) or {}
     suppressed_tool = str(scratchpad.get("_repeated_tool_loop_suppressed_tool") or "").strip()
@@ -353,6 +377,8 @@ def filter_tools_for_runtime_state(
         if tool_name in _BACKGROUND_JOB_TOOL_NAMES and not has_background_jobs:
             continue
         if tool_name == "finalize_write_session" and not can_finalize_write_session:
+            continue
+        if tool_name == "file_patch" and not has_planning_file_patch_context:
             continue
         if suppressed_tool and tool_name == suppressed_tool:
             continue
@@ -382,6 +408,12 @@ def hidden_tool_reason(
         return "no_background_jobs"
     if normalized_tool_name == "finalize_write_session" and not _has_finalizable_write_session(state):
         return "write_session_not_finalizable"
+    if (
+        normalized_mode == "planning"
+        and normalized_tool_name == "file_patch"
+        and not _has_planning_file_patch_context(state)
+    ):
+        return "planning_file_context_required"
     return None
 
 

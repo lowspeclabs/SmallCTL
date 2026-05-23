@@ -6,9 +6,11 @@ import json
 from types import SimpleNamespace
 
 from smallctl.context.artifacts import ArtifactStore
+from smallctl.context.assembler import PromptAssembler
 from smallctl.context.messages import format_compact_tool_message
 from smallctl.context.policy import ContextPolicy
 from smallctl.harness.tool_result_flow import record_result
+from smallctl.models.conversation import ConversationMessage
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
 from smallctl.tools.artifact import artifact_grep, artifact_read
@@ -169,6 +171,21 @@ def test_artifact_grep_literal_mode_allows_normal_queries(tmp_path: Path) -> Non
     assert "Found 1 matches" in result["output"]
 
 
+def test_artifact_grep_rejects_code_search_on_directory_listing(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="restart_backoff.py [file] (6439 bytes)\n")
+    state.artifacts["A0001"].kind = "dir_list"
+    state.artifacts["A0001"].tool_name = "dir_list"
+    state.artifacts["A0001"].source = str(tmp_path)
+    state.artifacts["A0001"].metadata = {"tool_name": "dir_list", "path": str(tmp_path)}
+
+    result = artifact_grep(state, artifact_id="A0001", query="def calculate_delay")
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "artifact_kind_mismatch"
+    assert result["metadata"]["next_recommended_tool"] == "file_read"
+    assert "contains a directory listing, not file contents" in result["error"]
+
+
 def test_record_result_compacts_ssh_file_write_arguments_in_artifact_json(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.thread_id = "thread-test"
@@ -258,8 +275,167 @@ def test_record_result_keeps_file_reads_inline_without_artifacts(tmp_path: Path)
 
     assert state.artifacts == {}
     assert state.retrieval_cache == []
-    assert message.content == "alpha\nbeta\n"
+    assert "FILE READ STATUS:" in message.content
+    assert "complete_file=false" in message.content
+    assert "alpha\nbeta\n" in message.content
     assert "artifact_id" not in message.metadata
+
+
+def test_record_result_persists_budget_exceeding_file_read_artifact(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-test"
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path / "artifacts", "run-test", session_id=state.thread_id),
+        context_policy=ContextPolicy(tool_result_inline_token_limit=64, artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        client=SimpleNamespace(model="qwen3.5:4b"),
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: "inspect a local file",
+    )
+    service = SimpleNamespace(harness=harness)
+    output = "\n".join(f"line {i}: def calculate_delay_{i}(): pass" for i in range(80))
+
+    message = asyncio.run(
+        record_result(
+            service,
+            tool_name="file_read",
+            tool_call_id="call-1",
+            result=ToolEnvelope(
+                success=True,
+                output=output,
+                metadata={
+                    "path": "restart_backoff.py",
+                    "complete_file": True,
+                    "truncated": False,
+                    "line_start": 1,
+                    "line_end": 80,
+                    "total_lines": 80,
+                },
+            ),
+            arguments={"path": "restart_backoff.py"},
+        )
+    )
+
+    assert list(state.artifacts) == ["A0001"]
+    assert "FILE READ STATUS:" in message.content
+    assert "display_preview_truncated=" in message.content
+    assert "file_content_truncated=false" in message.content
+    assert message.metadata["artifact_id"] == "A0001"
+    assert message.metadata["complete_file"] is True
+
+
+def test_record_result_reused_file_read_preserves_completion_metadata(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-test"
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path / "artifacts", "run-test", session_id=state.thread_id),
+        context_policy=ContextPolicy(tool_result_inline_token_limit=64, artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        client=SimpleNamespace(model="qwen3.5:4b"),
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: "inspect a local file",
+    )
+    service = SimpleNamespace(harness=harness)
+    output = "\n".join(f"line {i}" for i in range(150))
+
+    first = asyncio.run(
+        record_result(
+            service,
+            tool_name="file_read",
+            tool_call_id="call-1",
+            result=ToolEnvelope(
+                success=True,
+                output=output,
+                metadata={
+                    "path": "text_chunker.py",
+                    "complete_file": True,
+                    "truncated": False,
+                    "line_start": 1,
+                    "line_end": 150,
+                    "total_lines": 150,
+                },
+            ),
+            arguments={"path": "text_chunker.py"},
+        )
+    )
+
+    second = asyncio.run(
+        record_result(
+            service,
+            tool_name="file_read",
+            tool_call_id="call-2",
+            result=ToolEnvelope(
+                success=True,
+                output={"status": "cached", "artifact_id": first.metadata["artifact_id"]},
+                metadata={"cache_hit": True, "artifact_id": first.metadata["artifact_id"]},
+            ),
+            arguments={"path": "text_chunker.py"},
+        )
+    )
+
+    assert second.metadata["cache_hit"] is True
+    assert second.metadata["complete_file"] is True
+    assert second.metadata["file_content_truncated"] is False
+    assert second.metadata["line_start"] == 1
+    assert second.metadata["line_end"] == 150
+    assert second.metadata["total_lines"] == 150
+    assert "Full cached content is visible below" not in second.content
+
+
+def test_prompt_assembler_keeps_300_line_file_read_excerpt(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    content = "\n".join(f"line {idx}" for idx in range(1, 351))
+    content_path = tmp_path / "A0001.txt"
+    content_path.write_text(content, encoding="utf-8")
+    state.artifacts["A0001"] = ArtifactRecord(
+        artifact_id="A0001",
+        kind="file_read",
+        source=str(tmp_path / "large_file.py"),
+        created_at="2026-05-23T00:00:00+00:00",
+        size_bytes=len(content.encode("utf-8")),
+        summary="large_file.py full file",
+        tool_name="file_read",
+        content_path=str(content_path),
+        metadata={
+            "path": str(tmp_path / "large_file.py"),
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 350,
+            "total_lines": 350,
+        },
+    )
+    message = ConversationMessage(
+        role="tool",
+        name="file_read",
+        content=content,
+        metadata={
+            "artifact_id": "A0001",
+            "complete_file": True,
+            "file_content_truncated": False,
+            "line_start": 1,
+            "line_end": 350,
+            "total_lines": 350,
+        },
+    )
+    assembler = PromptAssembler(
+        ContextPolicy(
+            tool_result_inline_token_limit=64,
+            transcript_token_limit=10000,
+            file_read_preview_line_limit=300,
+        )
+    )
+
+    compacted = assembler._compact_message_for_prompt(state, message, transcript_token_limit=10000)
+
+    assert "up to 300 lines before prompt-preview truncation" in compacted.content
+    assert "line 300" in compacted.content
+    assert "line 301" not in compacted.content
+    assert "prompt preview truncated at 300/350 lines" in compacted.content
 
 
 def test_record_result_keeps_ssh_file_reads_inline_without_artifacts(tmp_path: Path) -> None:
@@ -294,5 +470,6 @@ def test_record_result_keeps_ssh_file_reads_inline_without_artifacts(tmp_path: P
 
     assert state.artifacts == {}
     assert state.retrieval_cache == []
-    assert message.content == "alpha\nbeta\n"
+    assert "FILE READ STATUS:" in message.content
+    assert "alpha\nbeta\n" in message.content
     assert "artifact_id" not in message.metadata

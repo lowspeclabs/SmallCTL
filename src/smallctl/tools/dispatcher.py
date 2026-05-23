@@ -116,6 +116,17 @@ _HARNESS_TOOL_AS_SHELL_RE = re.compile(
     re.DOTALL,
 )
 _WRITE_SESSION_PATH_REPAIR_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch"}
+_WRITE_SESSION_OPTIONAL_FIELDS = {
+    "write_session_id",
+    "session_id",
+    "section_name",
+    "section_id",
+    "section_role",
+    "next_section_name",
+    "replace_strategy",
+    "expected_followup_verifier",
+}
+_OPTIONAL_NONE_SENTINELS = {"", "none", "null", "nil", "n/a", "na"}
 _REMOTE_GUARDED_FILE_TOOLS = {"dir_list", "file_read", "file_write", "file_patch", "ast_patch"}
 _SSH_TASK_TARGET_RE = re.compile(
     r"\b(?:ssh|scp|sftp)\s+(?:[A-Za-z0-9._-]+@)?(?P<host>[A-Za-z0-9._-]+)\b",
@@ -579,6 +590,26 @@ def _normalize_patch_argument_aliases(
     return normalized, {}
 
 
+def _normalize_optional_none_sentinels(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if tool_name not in _WRITE_SESSION_PATH_REPAIR_TOOLS or not isinstance(arguments, dict):
+        return arguments, {}
+
+    normalized = dict(arguments)
+    repaired: list[str] = []
+    for field in _WRITE_SESSION_OPTIONAL_FIELDS:
+        value = normalized.get(field)
+        if isinstance(value, str) and value.strip().lower() in _OPTIONAL_NONE_SENTINELS:
+            normalized.pop(field, None)
+            repaired.append(field)
+
+    if not repaired:
+        return arguments, {}
+    return normalized, {"optional_none_sentinel_removed": sorted(repaired)}
+
+
 def normalize_tool_request(
     registry: ToolRegistry,
     tool_name: str,
@@ -603,6 +634,10 @@ def normalize_tool_request(
     arguments, patch_alias_metadata = _normalize_patch_argument_aliases(tool_name, arguments)
     if patch_alias_metadata:
         normalization_metadata.update(patch_alias_metadata)
+
+    arguments, none_sentinel_metadata = _normalize_optional_none_sentinels(tool_name, arguments)
+    if none_sentinel_metadata:
+        normalization_metadata.update(none_sentinel_metadata)
 
     if tool_name == "artifact_read":
         tool_name, arguments, artifact_metadata = _normalize_artifact_read_request(arguments, state=state)

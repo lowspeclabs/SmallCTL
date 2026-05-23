@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -40,6 +41,10 @@ _PATCH_META_TOOLS = {
 _REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
 _ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
 _DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
+_FAILED_MUTATION_REPAIR_PROGRESS_KEY = "_failed_mutation_repair_progress"
+_FAILED_MUTATION_REPAIR_PROGRESS_BUDGET = 3
+_PATCH_TARGET_NOT_FOUND_COUNTS_KEY = "_patch_target_not_found_counts"
+_PATCH_TARGET_NOT_FOUND_SUPPRESS_AFTER = 2
 _STALE_VERIFIER_KEY = "_last_verifier_stale_after_mutation"
 _LAST_FAILED_VERIFIER_KEY = "_last_failed_verifier"
 
@@ -107,6 +112,14 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
             if record.result.success and (record.result.metadata or {}).get("changed") is True:
                 return True
 
+    # 2b. A novel failed patch/write attempt can still be actionable repair
+    # progress: the model used the right class of tool against a concrete
+    # verifier failure and learned that its target text was stale. Keep this
+    # bounded so varied-but-wrong patch attempts still trip stagnation.
+    for record in last_tool_results:
+        if _failed_mutation_attempt_is_repair_progress(harness, record, mutation_required=mutation_required):
+            return True
+
     # 3. Plan step state change
     if _plan_step_changed(harness):
         return True
@@ -131,7 +144,7 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
             if _ssh_exec_has_novel_partial_output(harness, record):
                 return True
 
-    # 5. Successful read of a new artifact/ssh_file range or ssh_exec read command
+    # 5. Successful read of a new artifact/ssh_file/file range or ssh_exec read command
     for record in last_tool_results:
         if record.tool_name == "artifact_read" and record.result.success:
             if _artifact_read_is_past_eof(harness, record):
@@ -146,6 +159,11 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
             if _ssh_file_read_is_past_eof(harness, record):
                 return False
             if _ssh_file_read_result_is_new_range(harness, record):
+                return True
+        if record.tool_name == "file_read" and record.result.success:
+            if _read_repeats_fully_read_target_after_failed_verifier(harness, record):
+                continue
+            if _file_read_result_is_new_range(harness, record):
                 return True
         if record.tool_name == "ssh_exec" and record.result.success:
             if _is_ssh_exec_read_command(record):
@@ -233,6 +251,38 @@ def _record_verifier_verdict(harness: Any, record: Any) -> str:
     return str(verifier.get("verdict") or verifier.get("status") or "").strip()
 
 
+def _read_repeats_fully_read_target_after_failed_verifier(harness: Any, record: Any) -> bool:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    if not isinstance(scratchpad.get(_LAST_FAILED_VERIFIER_KEY), dict):
+        return False
+    if not _current_task_requires_file_mutation(state):
+        return False
+    if str(getattr(record, "tool_name", "") or "") != "file_read":
+        return False
+    args = getattr(record, "args", None)
+    if not isinstance(args, dict):
+        args = {}
+    requested_path = str(args.get("path") or "").strip()
+    if not requested_path:
+        return False
+    history = scratchpad.get("_progress_read_history")
+    if not isinstance(history, list):
+        return False
+    for item in reversed(history[-12:]):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("tool_name") or "") != "file_read":
+            continue
+        if str(item.get("path") or "").strip() != requested_path:
+            continue
+        if bool(item.get("complete_file")) and not bool(item.get("file_content_truncated")):
+            return True
+    return False
+
+
 def _record_failed_verifier(state: Any, record: Any) -> None:
     if getattr(record, "tool_name", "") not in {"shell_exec", "ssh_exec"}:
         return
@@ -253,7 +303,158 @@ def _record_failed_verifier(state: Any, record: Any) -> None:
         "tool_name": str(getattr(record, "tool_name", "") or "").strip(),
         "command": command,
         "summary": _summarize_verifier_failure(output_text or str(getattr(result, "error", "") or "")),
+        "raw_output": output_text,
     }
+
+
+def _failed_mutation_attempt_is_repair_progress(
+    harness: Any,
+    record: Any,
+    *,
+    mutation_required: bool,
+) -> bool:
+    if getattr(record, "tool_name", "") not in _MUTATION_TOOLS:
+        return False
+    result = getattr(record, "result", None)
+    if result is None or getattr(result, "success", False):
+        return False
+
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None) if state is not None else None
+    if not isinstance(scratchpad, dict):
+        return False
+    if not mutation_required and not scratchpad.get(_LAST_FAILED_VERIFIER_KEY):
+        return False
+    if not _failed_mutation_is_patch_target_mismatch(record):
+        return False
+
+    path = _mutation_record_path(record)
+    if not path:
+        return False
+    fingerprint = _failed_mutation_fingerprint(record, path)
+    if not fingerprint:
+        return False
+
+    history = scratchpad.get(_FAILED_MUTATION_REPAIR_PROGRESS_KEY)
+    if not isinstance(history, list):
+        history = []
+    for item in history:
+        if isinstance(item, dict) and str(item.get("fingerprint") or "") == fingerprint:
+            return False
+
+    same_target_count = sum(
+        1
+        for item in history
+        if isinstance(item, dict)
+        and str(item.get("tool_name") or "") == str(getattr(record, "tool_name", "") or "")
+        and str(item.get("path") or "") == path
+    )
+    if same_target_count >= _FAILED_MUTATION_REPAIR_PROGRESS_BUDGET:
+        return False
+
+    history.append(
+        {
+            "tool_name": str(getattr(record, "tool_name", "") or ""),
+            "path": path,
+            "fingerprint": fingerprint,
+        }
+    )
+    scratchpad[_FAILED_MUTATION_REPAIR_PROGRESS_KEY] = history[-24:]
+    return True
+
+
+def _maybe_suppress_file_patch_after_target_not_found(state: Any, record: Any) -> None:
+    if getattr(record, "tool_name", "") != "file_patch":
+        return
+    result = getattr(record, "result", None)
+    if result is None or getattr(result, "success", False):
+        return
+    if not _failed_mutation_is_patch_target_mismatch(record):
+        return
+
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    path = _mutation_record_path(record)
+    if not path:
+        return
+    fingerprint = _failed_mutation_fingerprint(record, path)
+    if not fingerprint:
+        return
+
+    counts = scratchpad.get(_PATCH_TARGET_NOT_FOUND_COUNTS_KEY)
+    if not isinstance(counts, dict):
+        counts = {}
+    count = int(counts.get(fingerprint, 0) or 0) + 1
+    counts[fingerprint] = count
+    scratchpad[_PATCH_TARGET_NOT_FOUND_COUNTS_KEY] = dict(list(counts.items())[-24:])
+
+    if count >= _PATCH_TARGET_NOT_FOUND_SUPPRESS_AFTER:
+        scratchpad["_repeated_tool_loop_suppressed_tool"] = "file_patch"
+        scratchpad["_repeated_tool_loop_suppressed_ttl"] = max(
+            int(scratchpad.get("_repeated_tool_loop_suppressed_ttl", 0) or 0),
+            2,
+        )
+        scratchpad["_last_file_patch_suppression"] = {
+            "reason": "repeated_patch_target_not_found",
+            "path": path,
+            "fingerprint": fingerprint,
+            "count": count,
+        }
+
+
+def _failed_mutation_is_patch_target_mismatch(record: Any) -> bool:
+    result = getattr(record, "result", None)
+    metadata = getattr(result, "metadata", {}) if result is not None else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    error_kind = str(metadata.get("error_kind") or metadata.get("failure_kind") or "").strip().lower()
+    if error_kind in {"patch_target_not_found", "target_not_found", "replace_target_not_found"}:
+        return True
+    error = str(getattr(result, "error", "") or "").strip().lower()
+    return (
+        "patch target text was not found" in error
+        or "target text was not found" in error
+        or "target text not found" in error
+    )
+
+
+def _mutation_record_path(record: Any) -> str:
+    args = getattr(record, "args", {}) if isinstance(getattr(record, "args", None), dict) else {}
+    result = getattr(record, "result", None)
+    metadata = getattr(result, "metadata", {}) if result is not None else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return str(metadata.get("path") or args.get("path") or "").strip()
+
+
+def _failed_mutation_fingerprint(record: Any, path: str) -> str:
+    args = getattr(record, "args", {}) if isinstance(getattr(record, "args", None), dict) else {}
+    if not isinstance(args, dict):
+        args = {}
+    relevant_args = {
+        key: args.get(key)
+        for key in (
+            "target_text",
+            "replacement_text",
+            "old_text",
+            "new_text",
+            "before",
+            "after",
+            "content",
+        )
+        if key in args
+    }
+    if not relevant_args:
+        relevant_args = dict(args)
+        relevant_args.pop("path", None)
+    payload = {
+        "tool_name": str(getattr(record, "tool_name", "") or ""),
+        "path": path,
+        "args": json_safe_value(relevant_args),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def _command_looks_like_verifier(command: str) -> bool:
@@ -424,6 +625,29 @@ def _ssh_file_read_result_is_new_range(harness: Any, record: Any) -> bool:
     return True
 
 
+def _file_read_result_is_new_range(harness: Any, record: Any) -> bool:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    path = str(args.get("path") or "").strip()
+    if not path:
+        return False
+    candidate_range = _requested_file_read_range(args)
+    state = getattr(harness, "state", None)
+    if state is None:
+        return True
+    history = getattr(state, "scratchpad", {}).get("_progress_read_history", [])
+    if not isinstance(history, list):
+        return True
+    for item in reversed(history[-12:]):
+        if str(item.get("tool_name", "")) != "file_read":
+            continue
+        if str(item.get("path", "")) != path:
+            continue
+        prior_range = (_coerce_int_or_none(item.get("start_line")), _coerce_int_or_none(item.get("end_line")))
+        if prior_range == candidate_range:
+            return False
+    return True
+
+
 def _ssh_exec_read_is_new(harness: Any, record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
     command = str(args.get("command") or "").strip()
@@ -461,8 +685,22 @@ def _record_progress_read(harness: Any, record: Any) -> None:
         entry["artifact_id"] = _requested_artifact_read_target(args)
     elif record.tool_name == "ssh_file_read":
         entry["path"] = str(args.get("path") or "").strip()
+    elif record.tool_name == "file_read":
+        entry["path"] = str(args.get("path") or "").strip()
     elif record.tool_name == "ssh_exec":
         entry["command"] = str(args.get("command") or "").strip()
+    result = getattr(record, "result", None)
+    metadata = getattr(result, "metadata", {}) if result is not None else {}
+    if isinstance(metadata, dict):
+        if metadata.get("path") and not entry.get("path"):
+            entry["path"] = str(metadata.get("path") or "").strip()
+        entry["source_path"] = str(metadata.get("source_path") or "").strip()
+        entry["read_from_staging"] = bool(metadata.get("read_from_staging") or metadata.get("staged_only"))
+        entry["complete_file"] = bool(metadata.get("complete_file"))
+        entry["file_content_truncated"] = bool(metadata.get("truncated"))
+        entry["total_lines"] = metadata.get("total_lines")
+        entry["line_start"] = metadata.get("line_start")
+        entry["line_end"] = metadata.get("line_end")
     start_line, end_line = _requested_file_read_range(args)
     if start_line is not None:
         entry["start_line"] = start_line
@@ -973,6 +1211,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
         if record.tool_name in _MUTATION_TOOLS and record.result.success and (record.result.metadata or {}).get("changed") is True:
             _mark_verifier_stale_after_mutation(state, record)
         _record_failed_verifier(state, record)
+        _maybe_suppress_file_patch_after_target_not_found(state, record)
     _maybe_inject_verifier_success_nudge(state, graph_state)
     if is_progress:
         counters["no_actionable_progress"] = 0
@@ -1007,7 +1246,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
 
     # Record successful reads for next-turn range comparison
     for record in getattr(graph_state, "last_tool_results", []) or []:
-        if record.tool_name in {"artifact_read", "ssh_file_read"} and record.result.success:
+        if record.tool_name in {"artifact_read", "ssh_file_read", "file_read"} and record.result.success:
             _record_progress_read(harness, record)
         _record_deterministic_read_failure(harness, record)
         if record.tool_name == "ssh_exec" and record.result.success and _is_ssh_exec_read_command(record):
@@ -1032,6 +1271,7 @@ def _build_progress_stagnation_nudge(harness: Any) -> str:
     last_action_note = f" Last stalled action: {last_action}." if last_action else ""
     blocker_note = _latest_blocker_note(scratchpad if isinstance(scratchpad, dict) else {})
     verifier_note = _latest_failed_verifier_note(scratchpad if isinstance(scratchpad, dict) else {})
+    file_read_note = _latest_complete_file_read_note(scratchpad if isinstance(scratchpad, dict) else {})
     tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
     mutation_note = ""
     if _current_task_requires_file_mutation(state):
@@ -1042,13 +1282,44 @@ def _build_progress_stagnation_nudge(harness: Any) -> str:
         )
     return (
         "You have made no actionable progress in the last few turns. "
-        f"Use the evidence already visible in context{goal_note}.{tx_note}{last_action_note}{blocker_note}{verifier_note} "
+        f"Use the evidence already visible in context{goal_note}.{tx_note}{last_action_note}{blocker_note}{verifier_note}{file_read_note} "
         f"{mutation_note} "
         "Perform the next concrete mutation, run a focused verifier, or call "
         "`task_complete(message='...')` if the task is finished. "
         "Do not repeat the same analysis or read operations. "
         "Choose exactly one: A. Explain the blocker and stop. B. Try a different specific fix. C. Ask for missing information."
     )
+
+
+def _latest_complete_file_read_note(scratchpad: dict[str, Any]) -> str:
+    history = scratchpad.get("_progress_read_history")
+    if not isinstance(history, list):
+        return ""
+    for item in reversed(history[-8:]):
+        if str(item.get("tool_name") or "") != "file_read":
+            continue
+        if not bool(item.get("complete_file")):
+            continue
+        if bool(item.get("file_content_truncated")):
+            continue
+        path = str(item.get("path") or "").strip()
+        source_path = str(item.get("source_path") or "").strip()
+        read_from_staging = bool(item.get("read_from_staging")) and source_path and source_path != path
+        if path:
+            if read_from_staging:
+                return (
+                    f" The last `file_read` fully read the active write-session staged copy for `{path}` "
+                    f"from `{source_path}`; that staged read is not proof that the authoritative target file is empty."
+                )
+            return (
+                f" The last `file_read` fully read `{path}`; if a prior message showed `...` or `[truncated]`, "
+                "that was chat display compaction, not evidence that the file content is missing."
+            )
+        return (
+            " The last `file_read` fully read the file; if a prior message showed `...` or `[truncated]`, "
+            "that was chat display compaction, not evidence that the file content is missing."
+        )
+    return ""
 
 
 def _latest_failed_verifier_note(scratchpad: dict[str, Any]) -> str:
@@ -1058,7 +1329,8 @@ def _latest_failed_verifier_note(scratchpad: dict[str, Any]) -> str:
     command = str(verifier.get("command") or "").strip()
     summary = verifier.get("summary")
     lines = [str(item).strip() for item in summary if str(item).strip()] if isinstance(summary, list) else []
-    if not command and not lines:
+    raw_output = str(verifier.get("raw_output") or "").strip()
+    if not command and not lines and not raw_output:
         return ""
     note = ""
     if command:
@@ -1066,6 +1338,13 @@ def _latest_failed_verifier_note(scratchpad: dict[str, Any]) -> str:
     if lines:
         joined = " | ".join(lines[:8])
         note += f" Failure summary: {joined}."
+    if raw_output:
+        truncated = raw_output[-1200:] if len(raw_output) > 1200 else raw_output
+        note += (
+            "\n[REPAIR GROUNDING] The exact verifier output is shown below. "
+            "Your next patch MUST address the concrete failure shown here. Do not invent errors that do not appear:\n"
+            f"```\n{truncated}\n```"
+        )
     note += " Do not reread unchanged evidence; patch the concrete failure or rerun the focused verifier."
     return note
 
@@ -1111,7 +1390,7 @@ def _stagnation_thresholds_for_phase(harness: Any) -> tuple[int, int]:
         return 7, 10
     phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     if phase in {"explore", "repair"}:
-        return 5, 7
+        return 3, 6
     return 3, 5
 
 

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aho-optimizer"
+version = "0.1.0"
+description = "Self-modifying optimization loop for the smallctl harness"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gitpython",
+    "numpy",
+    "openai",
+    "pydantic",
+    "pyyaml",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["static_analysis*", "hypothesis*", "git_manager*", "validation*", "knowledge_store*", "metrics*"]

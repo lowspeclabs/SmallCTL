@@ -150,6 +150,8 @@ async def model_call(
     graph_state.last_assistant_text = parse_result.final_assistant_text
     graph_state.last_thinking_text = parse_result.final_thinking_text
 
+    _maybe_inject_file_truncation_hallucination_nudge(harness, parse_result.final_thinking_text)
+
     if parse_result.final_assistant_text.strip() != result.stream.assistant_text.strip():
         await harness._emit(
             deps.event_handler,
@@ -231,3 +233,70 @@ async def model_call(
                     data=_nodes._planner_speaker_data(graph_state, entry.data),
                 ),
             )
+
+
+def _maybe_inject_file_truncation_hallucination_nudge(harness: Any, thinking_text: str) -> None:
+    """Inject a recovery nudge when the model hallucinates that a fully-read file is truncated."""
+    if not thinking_text:
+        return
+    lowered = thinking_text.lower()
+    hallucination_markers = (
+        "truncated",
+        "incomplete",
+        "only shows lines",
+        "only shows the",
+        "file appears to be",
+        "missing content",
+    )
+    if not any(marker in lowered for marker in hallucination_markers):
+        return
+
+    state = getattr(harness, "state", None)
+    if state is None:
+        return
+    scratchpad = getattr(state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        return
+    history = scratchpad.get("_progress_read_history", [])
+    if not isinstance(history, list):
+        return
+
+    for item in reversed(history[-4:]):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("tool_name", "")) != "file_read":
+            continue
+        if not bool(item.get("complete_file")):
+            continue
+        if bool(item.get("file_content_truncated")):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+
+        nudge_key = f"_file_truncation_hallucination_nudged:{path}"
+        if scratchpad.get(nudge_key):
+            continue
+        scratchpad[nudge_key] = True
+
+        state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"The file `{path}` was fully read and is complete. "
+                    "Do not assume it is truncated or incomplete. "
+                    "Use the evidence already in context to proceed with the next action."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "file_truncation_hallucination",
+                    "path": path,
+                },
+            )
+        )
+        harness._runlog(
+            "file_truncation_hallucination_nudge",
+            "injected recovery nudge for file truncation hallucination",
+            path=path,
+        )
+        break

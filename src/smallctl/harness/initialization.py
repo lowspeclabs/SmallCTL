@@ -174,7 +174,7 @@ def initialize_harness(self: Any, **params: Any) -> None:
     escalation_max_response_tokens = params.get("escalation_max_response_tokens", 1600)
     escalation_temperature = params.get("escalation_temperature", 0.2)
     escalation_timeout_sec = params.get("escalation_timeout_sec", 120)
-    escalation_max_per_task = params.get("escalation_max_per_task", 2)
+    escalation_max_per_task = params.get("escalation_max_per_task", 3)
     escalation_cooldown_turns = params.get("escalation_cooldown_turns", 2)
     escalation_repeated_failure_threshold = params.get("escalation_repeated_failure_threshold", 2)
     escalation_require_tool_plan_evidence = params.get("escalation_require_tool_plan_evidence", True)

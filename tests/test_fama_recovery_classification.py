@@ -80,6 +80,26 @@ def test_wrong_path_detector_sets_narrow_failure_class() -> None:
     assert "path=src/missing.py" in signal.evidence
 
 
+def test_unittest_assertion_not_found_is_not_wrong_path() -> None:
+    state = LoopState(step_count=2)
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": (
+                "FAIL: test_preserve_word_boundaries (__main__.TestChunker.test_preserve_word_boundaries)\n"
+                "Traceback (most recent call last):\n"
+                "AssertionError: 'This is a sentence' not found in 'This is a sententence'\n"
+                "FAILED (failures=1)\n"
+            ),
+            "stderr": "",
+        },
+        error="Shell command exited with code 1",
+    )
+
+    assert detect_wrong_path(state, tool_name="shell_exec", result=result, operation_id="op-test") is None
+
+
 def test_remote_mutation_requires_verification_uses_pending_classification() -> None:
     state = LoopState(step_count=3)
     result = ToolEnvelope(

@@ -79,6 +79,8 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._pending_user_echo: str | None = None
         self._active_approval_prompt: Screen | None = None
         self.closed_by_ctrl_c = False
+        self._task_start_time: float | None = None
+        self._activity_timer: Any | None = None
         self._shell_approval_session_default = bool(
             self.harness_kwargs.pop("shell_approval_session_default", False)
         )

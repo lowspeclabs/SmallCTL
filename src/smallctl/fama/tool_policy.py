@@ -21,6 +21,7 @@ _REPAIR_TOOLS = _LOCAL_MUTATING_TOOLS | _READ_LOOP_TOOLS | {
     "ssh_file_patch",
     "ssh_file_replace_between",
 }
+_INTERACTIVE_SSH_TOOLS = {"ssh_session_start", "ssh_session_read", "ssh_session_send", "ssh_session_close"}
 
 
 def apply_fama_tool_exposure(
@@ -51,15 +52,43 @@ def fama_hidden_tools_for_exposure(
     exported = {_tool_name(schema) for schema in schemas}
     hidden_tools: set[str] = set()
     if "done_gate" in active and "task_complete" in exported:
-        hidden_tools.add("task_complete")
+        # Repair-phase exemption: allow task_complete so the model can exit
+        # after successfully patching a file that previously caused a timeout.
+        state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+        if state_phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}:
+            pass  # keep task_complete visible
+        else:
+            hidden_tools.add("task_complete")
     if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
         hidden_tools.add("task_fail")
     if "remote_tool_exposure_guard" in active:
-        hidden_tools.update(_LOCAL_MUTATING_TOOLS & exported)
+        # Don't hide local mutating tools when the current task explicitly
+        # references local paths — the model needs them to complete the task.
+        if not _current_task_has_explicit_local_targets(state):
+            hidden_tools.update(_LOCAL_MUTATING_TOOLS & exported)
     if "tool_exposure_narrowing" in active:
         repeated_tool = _latest_loop_repeated_tool(state)
         if repeated_tool in _READ_LOOP_TOOLS and repeated_tool in exported:
             hidden_tools.add(repeated_tool)
+    # Repair-phase read-only loop breaker: if the model has made repeated
+    # read-only calls without mutation progress in repair phase, suppress
+    # further reads and force mutation action.
+    state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+    if state_phase == "repair":
+        stagnation = getattr(state, "stagnation_counters", None)
+        if isinstance(stagnation, dict):
+            no_progress = int(stagnation.get("no_actionable_progress") or 0)
+            if no_progress >= 2:
+                for read_tool in _READ_LOOP_TOOLS:
+                    if read_tool in exported:
+                        hidden_tools.add(read_tool)
+                # Also suppress meta read tools that don't mutate
+                for meta_tool in ("artifact_grep", "artifact_print", "log_note"):
+                    if meta_tool in exported:
+                        hidden_tools.add(meta_tool)
+    if not _interactive_ssh_tools_exposed(state):
+        hidden_tools.update(_INTERACTIVE_SSH_TOOLS & exported)
     return hidden_tools
 
 
@@ -87,12 +116,22 @@ def enforce_fama_tool_call(
         return None
     required_fps = active_done_gate_fingerprints(state)
     actual_fp = normalize_verifier_target(str((verifier or {}).get("command") or (verifier or {}).get("target") or ""))
+    verdict_label = str((verifier or {}).get("verdict") or "").strip().lower()
+    failure_mode = str((verifier or {}).get("failure_mode") or "").strip()
+    semantic_failure = str((verifier or {}).get("key_stderr") or (verifier or {}).get("key_stdout") or "").strip()
+    if not semantic_failure and verdict_label == "fail":
+        semantic_failure = "The latest verifier returned a failure verdict."
+    error_msg = (
+        "FAMA done_gate blocked task_complete because the latest verifier or "
+        "acceptance evidence is not satisfied yet."
+    )
+    if verdict_label == "fail" and failure_mode:
+        error_msg += f" Verdict: FAIL (failure_mode={failure_mode}). {semantic_failure}"
+    elif verdict_label == "fail":
+        error_msg += f" Verdict: FAIL. {semantic_failure}"
     return ToolEnvelope(
         success=False,
-        error=(
-            "FAMA done_gate blocked task_complete because the latest verifier or "
-            "acceptance evidence is not satisfied yet."
-        ),
+        error=error_msg,
         metadata={
             "reason": "fama_done_gate",
             "active_mitigation": "done_gate",
@@ -104,6 +143,39 @@ def enforce_fama_tool_call(
             "next_required_action": "run verification, satisfy acceptance, or call task_fail with the blocker",
         },
     )
+
+
+def _interactive_ssh_tools_exposed(state: Any) -> bool:
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        return bool(
+            scratchpad.get("_expose_interactive_session_tools")
+            or scratchpad.get("_expose_interactive_ssh_tools")
+        )
+    return False
+
+
+def _current_task_has_explicit_local_targets(state: Any) -> bool:
+    """Return True if the current task or goal references local-only paths."""
+    if state is None:
+        return False
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    if run_brief is not None:
+        texts.append(str(getattr(run_brief, "original_task", "") or ""))
+        texts.append(str(getattr(run_brief, "effective_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    if working_memory is not None:
+        texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            texts.append(str(handoff.get("effective_task") or ""))
+            texts.append(str(handoff.get("current_goal") or ""))
+    combined = " ".join(texts).lower()
+    local_markers = ("./", "../", "/home/", "/tmp/", "/var/", "/opt/", "/usr/")
+    return any(marker in combined for marker in local_markers)
 
 
 def _tool_name(entry: dict[str, Any]) -> str:

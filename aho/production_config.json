@@ -1,0 +1,60 @@
+{
+  "inline_tool_results": {
+    "enabled": true,
+    "distilled_mode": true,
+    "validation": {
+      "enabled": true,
+      "min_confidence": 0.5,
+      "auto_fallback": true,
+      "strict_mode": false
+    },
+    "rollout": {
+      "current_stage": "full",
+      "stages": [
+        {"name": "shadow", "traffic_pct": 0, "metrics_window": 50},
+        {"name": "canary", "traffic_pct": 5, "metrics_window": 100},
+        {"name": "pilot", "traffic_pct": 25, "metrics_window": 200},
+        {"name": "gradual", "traffic_pct": 50, "metrics_window": 300},
+        {"name": "full", "traffic_pct": 100, "metrics_window": 500}
+      ],
+      "auto_advance": false,
+      "health_check_interval_hours": 1
+    },
+    "monitoring": {
+      "enabled": true,
+      "alert_thresholds": {
+        "min_success_rate": 0.95,
+        "min_confidence": 0.70,
+        "max_fallback_rate": 0.30,
+        "max_latency_increase_pct": 20.0
+      },
+      "dashboard_enabled": true,
+      "metrics_retention_days": 30
+    },
+    "domains": {
+      "climate_policy": {
+        "enabled": true,
+        "ground_truth_source": "aho/ground_truth/climate_policy.json"
+      },
+      "carbon_markets": {
+        "enabled": true,
+        "ground_truth_source": "aho/ground_truth/carbon_markets.json"
+      },
+      "policy_analysis": {
+        "enabled": true,
+        "ground_truth_source": "aho/ground_truth/policy_analysis.json"
+      },
+      "energy_trading": {
+        "enabled": true,
+        "ground_truth_source": "aho/ground_truth/energy_trading.json"
+      }
+    }
+  },
+  "feature_flags": {
+    "query_context_extraction": true,
+    "smart_relevance_scoring": true,
+    "auto_domain_detection": true,
+    "fuzzy_matching": true,
+    "ab_testing": false
+  }
+}

@@ -407,7 +407,9 @@ def build_system_prompt(
                         "Do not reconstruct target text from memory or previews. If the remote file may have changed since your last read, re-read it immediately before patching. "
                         "FILESYSTEM NAMESPACES: `file_read`, `file_write`, `dir_list`, and `shell_exec` operate on the LOCAL orchestrator filesystem ONLY. "
                         "`ssh_file_read`, `ssh_file_write`, `ssh_file_patch`, and `ssh_file_replace_between` operate on REMOTE hosts. "
-                        "After writing a file remotely with `ssh_file_write`, verify it with `ssh_file_read`, NEVER with `file_read`."
+                        "After writing a file remotely with `ssh_file_write`, verify it with `ssh_file_read`, NEVER with `file_read`. "
+                        "PATH DISAMBIGUATION: When the task asks to save results to a local path such as `./temp/filename.txt`, use `file_write` on the LOCAL filesystem. "
+                        "Do not write to `/tmp/` on the remote host and assume it satisfies a local `./temp/` requirement."
                     )
                 if is_small_model_name(state.scratchpad.get("_model_name")):
                     parts.append(
@@ -547,7 +549,11 @@ def build_planning_prompt(
         "Do not call `task_complete` to exit planning; use `plan_request_execution` to pause for approval. "
         "Use plan export paths only for plan documents (.md, .txt, .text), never for implementation files like .py. "
         "Exactly one level of subplanning is allowed. "
-        "The required plan shape is: goal, inputs, outputs, constraints, acceptance_criteria, implementation_plan, and steps."
+        "The required plan shape is: goal, inputs, outputs, constraints, acceptance_criteria, implementation_plan, and steps. "
+        "STEP TITLE RULE: Each step title must be ≤8 words, imperative mood, and free of file paths. "
+        "Example good title: 'Write backoff script'. "
+        "Example bad title: 'Build a self-contained Python script at ./temp/restart_backoff.py'. "
+        "Put verbose implementation details in the step's `description` or `task` field, never in `title`."
     )
     prompt = build_system_prompt(
         state,

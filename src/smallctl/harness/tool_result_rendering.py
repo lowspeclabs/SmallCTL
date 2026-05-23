@@ -43,6 +43,38 @@ def _read_file_output_text(result: ToolEnvelope) -> str:
     return str(output or "")
 
 
+def _inline_file_read_status(result: ToolEnvelope) -> str:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    path = str(metadata.get("path") or "").strip()
+    source_path = str(metadata.get("source_path") or "").strip()
+    read_from_staging = bool(metadata.get("read_from_staging") or metadata.get("staged_only"))
+    complete_file = bool(metadata.get("complete_file"))
+    file_content_truncated = bool(metadata.get("truncated"))
+    line_start = metadata.get("line_start")
+    line_end = metadata.get("line_end")
+    total_lines = metadata.get("total_lines")
+    lines = [
+        "FILE READ STATUS:",
+        f"path={path or '(unknown)'}",
+    ]
+    if source_path and source_path != path:
+        lines.append(f"source_path={source_path}")
+    if read_from_staging:
+        session_id = str(metadata.get("write_session_id") or "").strip()
+        detail = f"true; write_session_id={session_id}" if session_id else "true"
+        lines.append(f"read_from_active_write_session_staging={detail}")
+    lines.extend(
+        [
+            f"complete_file={'true' if complete_file else 'false'}",
+            "display_preview_truncated=false",
+            f"file_content_truncated={'true' if file_content_truncated else 'false'}",
+        ]
+    )
+    if isinstance(line_start, int) or isinstance(line_end, int) or isinstance(total_lines, int):
+        lines.append(f"lines={line_start}-{line_end} of {total_lines}")
+    return "\n".join(lines)
+
+
 async def build_tool_result_message(
     service: Any,
     *,
@@ -78,10 +110,10 @@ async def build_tool_result_message(
             result,
             request_text=request_text,
             inline_full_file=not compact_full_file,
-            full_file_preview_chars=preview_chars if compact_full_file else None,
+            full_file_preview_chars=None,
         )
     elif tool_name in {"file_read", "ssh_file_read"}:
-        compact_content = _read_file_output_text(result)
+        compact_content = f"{_inline_file_read_status(result)}\n\n{_read_file_output_text(result)}"
     else:
         compact_content = (
             service.harness.artifact_store.compact_tool_message(
@@ -127,6 +159,14 @@ async def build_tool_result_message(
         msg_metadata["total_lines"] = result.metadata.get("total_lines")
         msg_metadata["line_start"] = result.metadata.get("line_start")
         msg_metadata["line_end"] = result.metadata.get("line_end")
+    if tool_name in {"file_read", "ssh_file_read"} and result.success and isinstance(result.metadata, dict):
+        msg_metadata["path"] = result.metadata.get("path")
+        msg_metadata["source_path"] = result.metadata.get("source_path")
+        msg_metadata["complete_file"] = result.metadata.get("complete_file")
+        msg_metadata["file_content_truncated"] = result.metadata.get("truncated")
+        msg_metadata["line_start"] = result.metadata.get("line_start")
+        msg_metadata["line_end"] = result.metadata.get("line_end")
+        msg_metadata["total_lines"] = result.metadata.get("total_lines")
 
     message = ConversationMessage(
         role="tool",

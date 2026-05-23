@@ -50,7 +50,13 @@ def build_registry(
     state_provider.log.info("build_registry: starting registration")
 
     def _inject_cwd(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
-        return lambda **kwargs: func(cwd=state_provider.state.cwd, **kwargs)
+        def _wrapper(**kwargs: Any) -> Awaitable[dict[str, Any]]:
+            # The model sometimes hallucinates a `cwd` argument; drop it so
+            # we always use the canonical state cwd and avoid duplicate-kwarg
+            # crashes for tools like `read_log` that do not accept `cwd`.
+            kwargs.pop("cwd", None)
+            return func(cwd=state_provider.state.cwd, **kwargs)
+        return _wrapper
 
     def _inject_state_and_cwd(func: Callable[..., Awaitable[dict[str, Any]]]) -> Handler:
         return lambda **kwargs: func(cwd=state_provider.state.cwd, state=state_provider.state, **kwargs)

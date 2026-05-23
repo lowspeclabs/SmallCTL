@@ -20,11 +20,12 @@ from smallctl.tools.registry import ToolRegistry
 
 
 class FakeArtifact:
-    def __init__(self, artifact_id: str, source: str, text: str = "", summary: str = ""):
+    def __init__(self, artifact_id: str, source: str, text: str = "", summary: str = "", kind: str = ""):
         self.artifact_id = artifact_id
         self.source = source
         self.text = text
         self.summary = summary
+        self.kind = kind
 
 
 def _make_harness() -> MagicMock:
@@ -143,7 +144,7 @@ class TestGroundTruthDiffusion:
     def test_fires_when_artifact_matches_error_path(self):
         harness = _make_harness()
         harness.state.artifacts = {
-            "A0013": FakeArtifact("A0013", "/etc/nginx/sites-enabled/test-1", text="enabled\n"),
+            "A0013": FakeArtifact("A0013", "/etc/nginx/sites-enabled/test-1", text="enabled\n", kind="file_read"),
         }
         record = _make_record(
             "ssh_exec",
@@ -156,12 +157,13 @@ class TestGroundTruthDiffusion:
         assert "Ground truth" in msg.content
         assert "/etc/nginx/sites-enabled/test-1" in msg.content
         assert "enabled" in msg.content
+        assert "latest authoritative file-read content" in msg.content
         assert msg.metadata["recovery_kind"] == "ground_truth_diffusion"
 
     def test_deduplicates(self):
         harness = _make_harness()
         harness.state.artifacts = {
-            "A0013": FakeArtifact("A0013", "/etc/nginx/sites-enabled/test-1", text="enabled\n"),
+            "A0013": FakeArtifact("A0013", "/etc/nginx/sites-enabled/test-1", text="enabled\n", kind="file_read"),
         }
         record = _make_record(
             "ssh_exec",
@@ -180,6 +182,63 @@ class TestGroundTruthDiffusion:
             error="missing file /etc/nginx/sites-enabled/other:2",
         )
         assert _maybe_emit_ground_truth_diffusion(harness, record) is False
+
+    def test_ignores_summary_only_artifacts_as_file_content(self):
+        harness = _make_harness()
+        harness.state.artifacts = {
+            "A0001": FakeArtifact(
+                "A0001",
+                "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py",
+                summary="No active write session found for session ID `leader_election_sim_write`.",
+                kind="file_write",
+            ),
+            "A0002": FakeArtifact(
+                "A0002",
+                "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py",
+                summary="leader_election_sim.py full file (390 lines)",
+                kind="file_read",
+            ),
+        }
+        record = _make_record(
+            "shell_exec",
+            success=False,
+            error=(
+                "Traceback (most recent call last):\n"
+                '  File "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py", line 64, in __init__\n'
+                "NameError: name 'defaultdict' is not defined"
+            ),
+        )
+
+        assert _maybe_emit_ground_truth_diffusion(harness, record) is False
+        harness.state.append_message.assert_not_called()
+
+    def test_prefers_latest_real_file_read_text_over_write_artifact_summary(self):
+        harness = _make_harness()
+        harness.state.artifacts = {
+            "A0001": FakeArtifact(
+                "A0001",
+                "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py",
+                summary="No active write session found for session ID `leader_election_sim_write`.",
+                kind="file_write",
+            ),
+            "A0002": FakeArtifact(
+                "A0002",
+                "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py",
+                text="from collections import defaultdict\n",
+                summary="leader_election_sim.py full file (270 lines)",
+                kind="file_read",
+            ),
+        }
+        record = _make_record(
+            "shell_exec",
+            success=False,
+            error='File "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py", line 64, in __init__',
+        )
+
+        assert _maybe_emit_ground_truth_diffusion(harness, record) is True
+        msg = harness.state.append_message.call_args[0][0]
+        assert "from collections import defaultdict" in msg.content
+        assert "No active write session" not in msg.content
 
 
 def test_nginx_verifier_stdout_failure_overrides_masked_exit_zero() -> None:
@@ -359,3 +418,21 @@ class TestWebSearchOnRepeatedError:
         assert gs.pending_tool_calls == []
         msg = harness.state.append_message.call_args[0][0]
         assert "Consider searching" in msg.content
+
+    def test_skips_web_search_for_local_python_traceback(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = (
+            "test_initial_election (leader_election_sim.TestLeaderElection.test_initial_election) ... ERROR\n"
+            "Traceback (most recent call last):\n"
+            '  File "/home/stephen/Scripts/Harness-Redo/temp/leader_election_sim.py", line 64, in __init__\n'
+            "NameError: name 'defaultdict' is not defined\n"
+            "FAILED (errors=5)"
+        )
+        record = _make_record("shell_exec", success=False, error=error)
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert gs.pending_tool_calls == []
+        harness.state.append_message.assert_not_called()

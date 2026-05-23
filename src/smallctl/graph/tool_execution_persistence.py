@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..harness.subtask_checklist import emit_subtask_checklist_if_changed
 from .state import GraphRunState
 from .tool_execution_support import (
     _conversation_message_from_dict,
@@ -49,6 +50,7 @@ async def persist_tool_results(graph_state: GraphRunState, deps: Any) -> None:
             stored["hidden_from_prompt"] = True
             harness.state.tool_execution_records[record.operation_id] = stored
             continue
+        await emit_subtask_checklist_if_changed(harness, deps.event_handler)
         if _has_matching_tool_message(harness, message):
             continue
         harness.state.append_message(message)

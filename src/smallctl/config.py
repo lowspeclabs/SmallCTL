@@ -139,7 +139,7 @@ class SmallctlConfig:
     escalation_max_response_tokens: int = 1600
     escalation_temperature: float = 0.2
     escalation_timeout_sec: int = 120
-    escalation_max_per_task: int = 2
+    escalation_max_per_task: int = 3
     escalation_cooldown_turns: int = 2
     escalation_repeated_failure_threshold: int = 2
     escalation_require_tool_plan_evidence: bool = True

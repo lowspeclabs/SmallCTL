@@ -345,6 +345,37 @@ def _maybe_promote_terminal_prose_task_complete(
     return True
 
 
+def _maybe_promote_raw_terminal_json_task_complete(
+    graph_state: GraphRunState,
+    harness: Any,
+) -> bool:
+    message = _raw_terminal_json_completion_message(graph_state.last_assistant_text)
+    if not message:
+        return False
+
+    raw_arguments = json.dumps({"message": message}, ensure_ascii=True)
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="task_complete",
+            args={"message": message},
+            tool_call_id=f"synthetic-terminal-json-{harness.state.step_count + 1}",
+            raw_arguments=raw_arguments,
+            source="system",
+        )
+    ]
+    harness.state.scratchpad["_terminal_json_task_complete_autopromoted"] = {
+        "recovery_kind": "terminal_json_task_complete",
+        "message_preview": message[:500],
+    }
+    harness._runlog(
+        "terminal_json_task_complete_autopromoted",
+        "promoted fenced terminal JSON into task_complete tool call",
+        recovery_kind="terminal_json_task_complete",
+        message_preview=message[:240],
+    )
+    return True
+
+
 def _consume_reasoning_fallback_flag(harness: Any) -> bool:
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
     if not isinstance(scratchpad, dict):
@@ -1346,6 +1377,14 @@ async def interpret_chat_output(
     # Smalltalk bypass: pure chat tasks with no actionable work should
     # finalize directly after a natural-language response, not nudge.
     task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
+    if (
+        graph_state.run_mode == "chat"
+        and assistant_text_for_guards
+        and not graph_state.pending_tool_calls
+        and _maybe_promote_raw_terminal_json_task_complete(graph_state, harness)
+    ):
+        return LoopRoute.DISPATCH_TOOLS
+
     if (
         graph_state.run_mode == "chat"
         and task_mode == "chat"

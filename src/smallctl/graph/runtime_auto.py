@@ -26,6 +26,7 @@ class AutoGraphRuntime:
 
     async def run(self, task: str) -> dict[str, object]:
         from .runtime import ChatGraphRuntime, LoopGraphRuntime
+        from .runtime_staged import StagedExecutionRuntime
         from .runtime_specialized import IndexerGraphRuntime, PlanningGraphRuntime, ToolPlanRuntime
 
         harness = self.deps.harness
@@ -56,6 +57,11 @@ class AutoGraphRuntime:
                 )
                 if interrupt_kind == "plan_execute_approval":
                     return await PlanningGraphRuntime.from_harness(
+                        harness,
+                        event_handler=self.deps.event_handler,
+                    ).resume(task)
+                if self._should_resume_staged_interrupt(interrupt_kind):
+                    return await StagedExecutionRuntime.from_harness(
                         harness,
                         event_handler=self.deps.event_handler,
                     ).resume(task)
@@ -147,8 +153,6 @@ class AutoGraphRuntime:
             and bool(getattr(getattr(harness, "config", None), "staged_execution_enabled", False))
             and not getattr(harness.state, "plan_execution_mode", False)
         ):
-            from .runtime_staged import StagedExecutionRuntime
-
             harness._runlog(
                 "runtime_route",
                 "auto-transitioning loop runtime to staged execution",
@@ -165,3 +169,12 @@ class AutoGraphRuntime:
 
     def _execution_path(self) -> str:
         return "compiled"
+
+    def _should_resume_staged_interrupt(self, interrupt_kind: str) -> bool:
+        harness = self.deps.harness
+        if interrupt_kind == "staged_step_blocked":
+            return True
+        return bool(
+            getattr(harness.state, "plan_execution_mode", False)
+            and getattr(getattr(harness, "config", None), "staged_execution_enabled", False)
+        )

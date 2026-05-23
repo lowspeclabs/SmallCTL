@@ -142,6 +142,51 @@ def _maybe_emit_nginx_sites_enabled_nudge(
 _ERROR_PATH_RE = re.compile(
     r"(/(?:etc|var|usr|home|opt|srv|tmp|lib|run)/[a-zA-Z0-9_./\-]+)"
 )
+_LOCAL_SOURCE_TRACEBACK_RE = re.compile(
+    r"(?:"
+    r"Traceback \(most recent call last\)"
+    r"|\bFile \"[^\"]+\.py\", line \d+"
+    r"|\bFAILED \((?:errors|failures)=\d+\)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _artifact_kind(artifact: Any) -> str:
+    return str(getattr(artifact, "kind", "") or "").strip().lower()
+
+
+def _artifact_text(artifact: Any) -> str:
+    return str(getattr(artifact, "text", "") or "").strip()
+
+
+def _artifact_is_authoritative_file_content(artifact: Any) -> bool:
+    kind = _artifact_kind(artifact)
+    if kind and kind not in {"file_read", "file", "ssh_file_read"}:
+        return False
+    return bool(_artifact_text(artifact))
+
+
+def _artifact_matches_path(artifact: Any, path: str) -> bool:
+    source = str(getattr(artifact, "source", "") or "").strip()
+    if not source:
+        return False
+    return source == path or source.endswith(path)
+
+
+def _ground_truth_nudged_keys(scratchpad: dict[str, Any]) -> set[str]:
+    raw = scratchpad.get("_ground_truth_nudged_keys")
+    if isinstance(raw, list):
+        return {str(item) for item in raw if str(item)}
+    legacy = str(scratchpad.get("_ground_truth_nudged") or "").strip()
+    return {legacy} if legacy else set()
+
+
+def _remember_ground_truth_nudge(scratchpad: dict[str, Any], key: str) -> None:
+    keys = _ground_truth_nudged_keys(scratchpad)
+    keys.add(key)
+    scratchpad["_ground_truth_nudged_keys"] = sorted(keys)[-64:]
+    scratchpad["_ground_truth_nudged"] = key
 
 
 def _maybe_emit_ground_truth_diffusion(
@@ -168,60 +213,57 @@ def _maybe_emit_ground_truth_diffusion(
         scratchpad = {}
 
     emitted = False
-    for path in paths:
-        # Look for an artifact whose source matches this path
-        for artifact_id, artifact in (getattr(harness.state, "artifacts", {}) or {}).items():
-            source = str(getattr(artifact, "source", "") or "").strip()
-            if not source:
+    for path in dict.fromkeys(paths):
+        nudge_key = f"ground_truth:{path}"
+        if nudge_key in _ground_truth_nudged_keys(scratchpad):
+            continue
+
+        matching_artifact: tuple[str, Any] | None = None
+        for artifact_id, artifact in reversed(list((getattr(harness.state, "artifacts", {}) or {}).items())):
+            if not _artifact_matches_path(artifact, path):
                 continue
-            if source != path and not source.endswith(path):
+            if not _artifact_is_authoritative_file_content(artifact):
                 continue
-
-            # Found ground-truth artifact
-            content = ""
-            if hasattr(artifact, "text"):
-                content = str(getattr(artifact, "text", "") or "").strip()
-            elif hasattr(artifact, "summary"):
-                content = str(getattr(artifact, "summary", "") or "").strip()
-            if not content:
-                continue
-
-            nudge_key = f"ground_truth:{path}:{artifact_id}"
-            if scratchpad.get("_ground_truth_nudged") == nudge_key:
-                continue
-            scratchpad["_ground_truth_nudged"] = nudge_key
-
-            # Truncate very long content for the nudge
-            display = content[:400]
-            if len(content) > 400:
-                display += " …"
-
-            message = (
-                f"Ground truth: The error references `{path}`. "
-                f"The current content of this file is:\n{display}\n"
-                f"Ensure your diagnosis and fix target this exact file, not a different path."
-            )
-
-            harness.state.append_message(
-                ConversationMessage(
-                    role="system",
-                    content=message,
-                    metadata={
-                        "is_recovery_nudge": True,
-                        "recovery_kind": "ground_truth_diffusion",
-                        "path": path,
-                        "artifact_id": artifact_id,
-                    },
-                )
-            )
-            harness._runlog(
-                "ground_truth_diffusion",
-                "injected ground-truth observation for error-referenced file",
-                path=path,
-                artifact_id=artifact_id,
-            )
-            emitted = True
+            matching_artifact = (artifact_id, artifact)
             break
+
+        if matching_artifact is None:
+            continue
+
+        artifact_id, artifact = matching_artifact
+        content = _artifact_text(artifact)
+        _remember_ground_truth_nudge(scratchpad, nudge_key)
+
+        # Truncate very long content for the nudge
+        display = content[:400]
+        if len(content) > 400:
+            display += " …"
+
+        message = (
+            f"Ground truth: The error references `{path}`. "
+            f"The latest authoritative file-read content available for this path is:\n{display}\n"
+            f"Ensure your diagnosis and fix target this exact file, not a different path."
+        )
+
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=message,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "ground_truth_diffusion",
+                    "path": path,
+                    "artifact_id": artifact_id,
+                },
+            )
+        )
+        harness._runlog(
+            "ground_truth_diffusion",
+            "injected ground-truth observation for error-referenced file",
+            path=path,
+            artifact_id=artifact_id,
+        )
+        emitted = True
 
     return emitted
 
@@ -231,6 +273,11 @@ def _maybe_emit_ground_truth_diffusion(
 # ---------------------------------------------------------------------------
 
 _MAX_ERROR_SIGNATURE_LEN = 200
+
+
+def _web_search_query_for_repeated_error(error: str) -> str:
+    prefix = "nginx error" if _NGINX_CONFIG_TEST_RE.search(error) else "error"
+    return f"{prefix}: {error[:150]}"
 
 
 def _maybe_schedule_web_search_for_repeated_error(
@@ -248,6 +295,8 @@ def _maybe_schedule_web_search_for_repeated_error(
     if not error or len(error) < 20:
         return False
     if record.tool_name in {"ssh_exec", "shell_exec"} and _LOCAL_REMOTE_BLOCKER_RE.search(error):
+        return False
+    if record.tool_name in {"ssh_exec", "shell_exec"} and _LOCAL_SOURCE_TRACEBACK_RE.search(error):
         return False
 
     # Normalize signature: first 200 chars, collapsed whitespace
@@ -277,7 +326,7 @@ def _maybe_schedule_web_search_for_repeated_error(
     except Exception:
         has_web_search = False
 
-    query = f"nginx error: {error[:150]}"
+    query = _web_search_query_for_repeated_error(error)
 
     if has_web_search:
         # Schedule the search as the very next tool call

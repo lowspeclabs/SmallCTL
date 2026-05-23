@@ -11,12 +11,32 @@ from smallctl.context.observations import build_observation_packets
 from smallctl.evidence import normalize_tool_result
 from smallctl.graph.state import PendingToolCall
 from smallctl.graph.tool_outcomes import _store_tool_execution_record
+from smallctl.harness.tool_result_artifact_updates import _should_auto_record_known_fact
 from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.risk_policy import evaluate_risk_policy
 from smallctl.state import ArtifactRecord, LoopState
 from smallctl.state import EvidenceRecord
 from smallctl.tools.artifact import artifact_read
+
+
+def test_failed_file_mutation_control_errors_are_not_auto_known_facts() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="No active write session found for session ID `leader_election_sim_write`.",
+        metadata={"error_kind": "missing_active_write_session"},
+    )
+
+    assert _should_auto_record_known_fact("file_write", result) is False
+
+
+def test_successful_file_mutation_can_still_record_known_fact() -> None:
+    result = ToolEnvelope(
+        success=True,
+        metadata={"path": "app.py"},
+    )
+
+    assert _should_auto_record_known_fact("file_write", result) is True
 
 
 def _make_harness(tmp_path: Path) -> SimpleNamespace:
@@ -576,7 +596,7 @@ def test_artifact_read_cache_hit_marks_replayed_evidence(tmp_path: Path) -> None
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 600), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-3",
@@ -630,7 +650,7 @@ def test_fresh_artifact_read_with_reused_ids_clears_stale_markers(tmp_path: Path
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 600), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-seed",
@@ -690,7 +710,7 @@ def test_artifact_read_cache_hit_with_reused_ids_keeps_stale_markers(tmp_path: P
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 600), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-seed-cache",
@@ -753,7 +773,7 @@ def test_artifact_print_reuses_existing_artifact(tmp_path: Path) -> None:
         harness = _make_harness(tmp_path)
         service = ToolResultService(harness)
 
-        initial = ToolEnvelope(success=True, output=("cached content\n" * 100), metadata={"path": "README.md"})
+        initial = ToolEnvelope(success=True, output=("cached content\n" * 600), metadata={"path": "README.md"})
         _prime_execution_record(
             harness,
             operation_id="op-5",

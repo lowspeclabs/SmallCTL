@@ -1,0 +1,44 @@
+{
+  "strategy_id": "coding_stress_baseline",
+  "version": 1,
+  "endpoint": "http://192.168.1.9:1234/v1",
+  "model": "unsloth/qwen3.5-4b",
+  "provider_profile": "lmstudio",
+  "api_key": "local-dev-key",
+  "context_limit": 8192,
+  "max_prompt_tokens": 7000,
+  "n_trials": 3,
+  "trial_timeout_sec": 180,
+  "harness_evolution_enabled": false,
+  "strategy": {
+    "thought_architecture": "think_before_every_tool_call",
+    "delimiter_style": "xml",
+    "error_handling": "retry_with_hint",
+    "system_prompt_addendum": "You are a senior software architect. Always use tools to gather facts before proposing code.",
+    "tool_call_format": "strict_xml",
+    "forbidden_patterns": [],
+    "max_steps": 15
+  },
+  "task": {
+    "description": "Synthesize a CarbonTradingEngine in Python. You MUST:\n1. Use long_context_lookup(topic='global climate policy') to find the linear reduction factor.\n2. Use summarize_report(subject='carbon markets Q4 2025') to find the latest EUA price.\n3. Implement a class CarbonTradingEngine with a method calculate_compliance(emissions, limit) using the reduction factor.\n4. Ensure the output mentiones 'EUA price' and the 'linear reduction factor'.",
+    "ground_truth": {
+      "expected_keywords": [
+        "CarbonTradingEngine",
+        "calculate_compliance",
+        "2.2",
+        "EUA",
+        "ETS"
+      ],
+      "required_tool_calls": [
+        "long_context_lookup",
+        "summarize_report"
+      ]
+    }
+  },
+  "scoring": {
+    "w_accuracy": 0.6,
+    "w_format": 0.3,
+    "w_latency": 0.1,
+    "latency_penalty_per_100_tokens": 0.01
+  }
+}

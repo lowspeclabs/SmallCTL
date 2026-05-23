@@ -79,15 +79,23 @@ def _should_persist_tool_artifact(
 ) -> bool:
     if tool_name == "file_read":
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
-        output_len = len(str(result.output or ""))
-        # Artifactize file reads when content is large enough to be
-        # observation-truncated (~600 chars) or when the model explicitly
-        # requested a line slice (paging intent).
-        return (
-            output_len > 600
-            or metadata.get("requested_start_line") is not None
-            or metadata.get("requested_end_line") is not None
-        )
+        total_lines = metadata.get("total_lines")
+        if total_lines is None:
+            output_text = str(result.output or "")
+            total_lines = len(output_text.splitlines()) if output_text else 0
+        if metadata.get("requested_start_line") is not None or metadata.get("requested_end_line") is not None:
+            return True
+        output_text = result.output if isinstance(result.output, str) else str(result.output or "")
+        inline_limit = int(getattr(service.harness.context_policy, "tool_result_inline_token_limit", 325) or 325)
+        if _prompt_pressure_requires_artifact(service):
+            inline_limit = max(80, inline_limit // 2)
+        # Small file reads can stay inline, but only when the full rendered text fits
+        # comfortably in the tool-result budget. Otherwise keep a file_read artifact
+        # available so later artifact searches target the file content, not a nearby
+        # directory listing artifact.
+        if total_lines < 500 and estimate_text_tokens(output_text) <= inline_limit:
+            return False
+        return True
     if tool_name == "ssh_file_read":
         return False
     if tool_name != "ssh_exec":

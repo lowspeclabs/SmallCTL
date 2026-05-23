@@ -119,14 +119,14 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
             result=result,
         )
         self._pending_task_shutdown_reason = ""
-    summary_path = str((task_summary or {}).get("summary_path") or "").strip()
+    task_summary_path = str((task_summary or {}).get("summary_path") or "").strip()
     task_id = str((task_summary or {}).get("task_id") or "").strip()
     self._runlog(
         "task_finalize",
         "task finished",
         result=result,
         task_id=task_id,
-        task_summary_path=summary_path,
+        task_summary_path=task_summary_path,
     )
     self._record_terminal_experience(result)
     self._rewrite_active_plan_export()
@@ -153,12 +153,19 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                         postmortem_summary = str(message.get("question") or message.get("message") or "").strip()
                     elif isinstance(message, str):
                         postmortem_summary = message.strip()
+                if not postmortem_summary:
+                    postmortem_summary = str(result.get("assistant") or "").strip()
             postmortem_summary = postmortem_summary or "No reason provided"
             summary_payload = {
                 "final_task_status": result.get("status", "unknown"),
                 "total_tool_calls": self.state.step_count,
-                "guard_trips": sum(1 for e in (getattr(self.state, "recent_errors", []) or []) if "Guard tripped" in str(e)),
+                "guard_trips": sum(
+                    1 for e in (getattr(self.state, "recent_errors", []) or [])
+                    if any(marker in str(e) for marker in ("Guard tripped", "file_read_hard_block", "human_resteer"))
+                ),
                 "postmortem_summary": postmortem_summary,
+                "latest_task_id": task_id,
+                "latest_task_summary_path": task_summary_path,
             }
             summary_path = self.run_logger.run_dir / "task_summary.json"
             schedule = getattr(self, "_schedule_background_persistence", None)
@@ -166,6 +173,22 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 schedule(_write_json_file, summary_path, summary_payload, trailing_newline=True)
             else:
                 _write_json_file(summary_path, summary_payload, trailing_newline=True)
+            session_summary_path = self.run_logger.run_dir / "session_summary.json"
+            tasks_dir = self.run_logger.run_dir / "tasks"
+            task_summary_paths = (
+                [str(path) for path in sorted(tasks_dir.glob("task-*/task_summary.json"))]
+                if tasks_dir.exists()
+                else []
+            )
+            session_summary_payload = {
+                **summary_payload,
+                "task_count": len(task_summary_paths),
+                "task_summary_paths": task_summary_paths,
+            }
+            if callable(schedule):
+                schedule(_write_json_file, session_summary_path, session_summary_payload, trailing_newline=True)
+            else:
+                _write_json_file(session_summary_path, session_summary_payload, trailing_newline=True)
         except Exception:
             pass
 

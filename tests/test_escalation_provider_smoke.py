@@ -74,5 +74,6 @@ def test_escalation_provider_smoke() -> None:
         "propose_patch",
         "ask_human",
         "abort",
+        "next_action",
     }
     assert isinstance(result.get("recommended_next_action"), dict)

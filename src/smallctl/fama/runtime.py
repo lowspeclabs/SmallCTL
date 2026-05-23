@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .config import (
@@ -257,6 +258,57 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
     detect_tool_plan_hard_route(state)
 
 
+def _model_claims_hallucinated_bug(state: Any) -> bool:
+    """Detect if the model's recent output claims an error absent from the actual verifier output.
+
+    Returns True when the most recent assistant text references a specific exception
+    or error message that does not appear in the raw verifier output stored in
+    `_last_failed_verifier`. This prevents the harness from silently deduplicating
+    verifier failures while the model chases a hallucinated bug.
+    """
+    scratchpad = getattr(state, "scratchpad", None) or {}
+    verifier = scratchpad.get("_last_failed_verifier") if isinstance(scratchpad, dict) else None
+    if not isinstance(verifier, dict):
+        return False
+
+    raw_output = str(verifier.get("raw_output") or "").strip()
+    if not raw_output:
+        return False
+
+    # Collect recent assistant text
+    recent_text = ""
+    for msg in getattr(state, "recent_messages", [])[-4:]:
+        if getattr(msg, "role", "") == "assistant":
+            content = getattr(msg, "content", "") or ""
+            recent_text += " " + content
+
+    if not recent_text.strip():
+        return False
+
+    # Extract specific error claims: ExceptionType: description
+    _ERROR_CLAIM_RE = re.compile(
+        r"\b(AttributeError|NameError|TypeError|ValueError|AssertionError|"
+        r"IndexError|KeyError|ImportError|ModuleNotFoundError|RuntimeError|"
+        r"OSError|IOError|ZeroDivisionError|FileNotFoundError|"
+        r"NotImplementedError|OverflowError|RecursionError)\s*:\s*[^\n]+",
+        re.IGNORECASE,
+    )
+    claimed_errors = set()
+    for match in _ERROR_CLAIM_RE.finditer(recent_text):
+        claimed_errors.add(match.group(0).strip())
+
+    if not claimed_errors:
+        return False
+
+    raw_lower = raw_output.lower()
+    for error in claimed_errors:
+        if error.lower() not in raw_lower:
+            # Model claimed an error that does not exist in the actual verifier output
+            return True
+
+    return False
+
+
 def _handle_signal(
     harness: Any,
     *,
@@ -267,19 +319,118 @@ def _handle_signal(
 ) -> bool:
     signature = _signal_signature(signal)
     if dedupe and _signature_seen(state, signature):
-        _runlog(
-            harness,
-            "fama_signal_suppressed",
-            "FAMA signal suppressed by deduplication",
-            signature=signature,
-            kind=signal.kind.value,
-            severity=signal.severity,
-            source=signal.source,
-            step=signal.step,
-            tool_name=signal.tool_name,
-            evidence=signal.evidence,
-        )
-        return False
+        # Carve-out: loop_guard looping signals escalate after repeated suppression
+        if signal.kind.value == "looping" and signal.source == "loop_guard":
+            payload = get_fama_state(state)
+            key = f"_fama_loop_guard_suppression_count:{signature}"
+            try:
+                count = int(payload.get(key, 0)) + 1
+            except (TypeError, ValueError):
+                count = 1
+            payload[key] = count
+            if count >= 3:
+                _runlog(
+                    harness,
+                    "fama_signal_escalated",
+                    "FAMA looping signal escalated after repeated suppression",
+                    signature=signature,
+                    kind=signal.kind.value,
+                    severity=signal.severity,
+                    source=signal.source,
+                    step=signal.step,
+                    tool_name=signal.tool_name,
+                    evidence=signal.evidence,
+                    suppression_count=count,
+                )
+                # fall through to process the signal
+            else:
+                _runlog(
+                    harness,
+                    "fama_signal_suppressed",
+                    "FAMA signal suppressed by deduplication",
+                    signature=signature,
+                    kind=signal.kind.value,
+                    severity=signal.severity,
+                    source=signal.source,
+                    step=signal.step,
+                    tool_name=signal.tool_name,
+                    evidence=signal.evidence,
+                    suppression_count=count,
+                )
+                return False
+        else:
+            # Carve-out: repeated verifier failures escalate so the harness
+            # does not silently swallow legitimate recurring test/verifier errors.
+            if signal.source == "verifier" and signal.kind.value == "early_stop":
+                payload = get_fama_state(state)
+                key = f"_fama_verifier_suppression_count:{signature}"
+                try:
+                    count = int(payload.get(key, 0)) + 1
+                except (TypeError, ValueError):
+                    count = 1
+                payload[key] = count
+
+                # Detect hallucinated bugs on first suppression and escalate immediately
+                is_hallucination = _model_claims_hallucinated_bug(state)
+                if is_hallucination or count >= 3:
+                    _runlog(
+                        harness,
+                        "fama_signal_escalated",
+                        "FAMA verifier signal escalated after hallucination or repeated suppression",
+                        signature=signature,
+                        kind=signal.kind.value,
+                        severity=signal.severity,
+                        source=signal.source,
+                        step=signal.step,
+                        tool_name=signal.tool_name,
+                        evidence=signal.evidence,
+                        suppression_count=count,
+                        hallucination=is_hallucination,
+                    )
+                    # Escalate severity and force re-processing
+                    signal = signal.model_copy(update={
+                        "severity": 3,
+                        "evidence": f"{signal.evidence} (hallucination={is_hallucination}, repeated={count}x)",
+                    })
+                    # fall through to process the signal
+                else:
+                    _runlog(
+                        harness,
+                        "fama_signal_suppressed",
+                        "FAMA signal suppressed by deduplication",
+                        signature=signature,
+                        kind=signal.kind.value,
+                        severity=signal.severity,
+                        source=signal.source,
+                        step=signal.step,
+                        tool_name=signal.tool_name,
+                        evidence=signal.evidence,
+                        suppression_count=count,
+                    )
+                    return False
+            else:
+                _runlog(
+                    harness,
+                    "fama_signal_suppressed",
+                    "FAMA signal suppressed by deduplication",
+                    signature=signature,
+                    kind=signal.kind.value,
+                    severity=signal.severity,
+                    source=signal.source,
+                    step=signal.step,
+                    tool_name=signal.tool_name,
+                    evidence=signal.evidence,
+                )
+                return False
+    # Clear suppression counts on successful pass-through
+    if signal.kind.value == "looping" and signal.source == "loop_guard":
+        payload = get_fama_state(state)
+        key = f"_fama_loop_guard_suppression_count:{signature}"
+        payload.pop(key, None)
+    if signal.source == "verifier" and signal.kind.value == "early_stop":
+        payload = get_fama_state(state)
+        key = f"_fama_verifier_suppression_count:{signature}"
+        payload.pop(key, None)
     push_fama_signal(state, signal, window=signal_window(config))
     _mark_signature_seen(state, signature)
     increment_metric_bucket(state, "fama_signals_by_kind", signal.kind.value)

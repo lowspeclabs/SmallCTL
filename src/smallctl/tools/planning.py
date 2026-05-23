@@ -25,7 +25,8 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
     if not isinstance(value, dict):
         return None
     step_id = str(value.get("step_id", "") or "").strip()
-    title = str(value.get("title", "") or "").strip()
+    task = str(value.get("task", "") or "").strip()
+    title = str(value.get("title", "") or task).strip()
     if not step_id and not title:
         return None
     resolved_step_id = step_id or str(fallback_step_id or title).strip()
@@ -48,7 +49,7 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
         ],
         evidence_refs=[str(item) for item in (value.get("evidence_refs") or []) if str(item).strip()],
         claim_refs=[str(item) for item in (value.get("claim_refs") or []) if str(item).strip()],
-        task=str(value.get("task", "") or ""),
+        task=task,
         difficulty=str(value.get("difficulty", "") or "").strip().lower(),
         tool_allowlist=_coerce_string_list(value.get("tool_allowlist")),
         prompt_token_budget=max(0, _coerce_int(value.get("prompt_token_budget"), default=0)),
@@ -301,6 +302,12 @@ async def plan_set(
     else:
         state.acceptance_ledger = {}
     state.sync_plan_mirror()
+    ledger_service = getattr(harness, "subtask_ledger", None)
+    if ledger_service is not None:
+        try:
+            ledger_service.import_plan_if_needed(replace_synthetic_root=True)
+        except Exception:
+            pass
     artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
     state.touch()
     payload = {

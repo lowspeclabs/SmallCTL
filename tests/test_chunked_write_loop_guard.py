@@ -41,6 +41,41 @@ def _attach_write_session(state: LoopState, target: Path, *, session_id: str = "
     )
 
 
+def test_loop_guard_status_reports_recent_complete_file_reads(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    state.scratchpad["_progress_read_history"] = [
+        {
+            "tool_name": "file_read",
+            "path": "temp/artifact_retention.py",
+            "complete_file": True,
+            "file_content_truncated": False,
+            "total_lines": 334,
+            "line_start": 1,
+            "line_end": 334,
+        },
+        {
+            "tool_name": "file_read",
+            "path": "temp/partial.py",
+            "complete_file": False,
+            "file_content_truncated": False,
+        },
+    ]
+
+    status = build_loop_guard_status(state)
+
+    assert status["recent_complete_reads"] == [
+        {
+            "tool_name": "file_read",
+            "path": "temp/artifact_retention.py",
+            "artifact_id": "",
+            "total_lines": 334,
+            "line_start": 1,
+            "line_end": 334,
+            "note": "Full content is already covered; do not reread only because chat preview was truncated.",
+        }
+    ]
+
+
 def test_file_patch_blocks_identical_repeat_when_replacement_keeps_target(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
     target = tmp_path / "task_queue.py"
@@ -72,6 +107,28 @@ def test_file_patch_blocks_identical_repeat_when_replacement_keeps_target(tmp_pa
     assert second["success"] is False
     assert second["metadata"]["error_kind"] == "repeat_sensitive_patch_already_applied"
     assert target.read_text(encoding="utf-8").count("task_id: str") == 1
+
+
+def test_file_patch_rejects_identical_target_and_replacement(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "text_chunker.py"
+    content = "def chunk(text):\n    return [text]\n"
+    target.write_text(content, encoding="utf-8")
+
+    result = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text=content,
+            replacement_text=content,
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "patch_noop_identical_text"
+    assert result["metadata"]["changed"] is False
+    assert target.read_text(encoding="utf-8") == content
 
 
 def test_file_patch_reports_already_landed_replacement_before_repair_read_gate(tmp_path: Path) -> None:
@@ -256,6 +313,77 @@ def test_full_script_under_imports_requires_explicit_finalization(tmp_path: Path
     assert "section_name='full_file'" in result["error"]
 
 
+def test_imports_chunk_without_next_section_infers_continuation(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "task_queue.py"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+    state.write_session.suggested_sections = ["imports", "types/interfaces", "main_logic"]
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="import sys\nimport unittest\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="imports",
+            next_section_name="",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is False
+    assert result["metadata"]["write_next_section_inferred"] is True
+    assert result["metadata"]["write_next_section"] == "types/interfaces"
+    assert state.write_session.write_next_section == "types/interfaces"
+
+    fuzzy = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="class Task:\n    pass\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="types",
+            next_section_name="",
+        )
+    )
+
+    assert fuzzy["success"] is True
+    assert fuzzy["metadata"]["write_session_final_chunk"] is False
+    assert fuzzy["metadata"]["write_next_section_inferred"] is True
+    assert fuzzy["metadata"]["write_next_section"] == "main_logic"
+    assert state.write_session.write_next_section == "main_logic"
+
+
+def test_last_suggested_section_without_next_section_can_finalize(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "task_queue.py"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+    state.write_session.suggested_sections = ["imports", "main_logic"]
+    state.write_session.write_sections_completed = ["imports"]
+    state.write_session.write_next_section = "main_logic"
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="def main():\n    return 0\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="main_logic",
+            next_section_name="",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section_inferred"] is False
+    assert state.write_session.write_next_section == ""
+
+
 def test_full_script_under_full_file_can_finalize_candidate(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
     target = tmp_path / "task_queue.py"
@@ -287,6 +415,43 @@ def test_full_script_under_full_file_can_finalize_candidate(tmp_path: Path) -> N
 
     assert result["success"] is True
     assert result["metadata"]["write_session_final_chunk"] is True
+
+
+def test_full_script_under_main_file_overwrite_can_finalize_candidate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "text_chunker.py"
+    _attach_write_session(state, target)
+    full_script = (
+        "#!/usr/bin/env python3\n"
+        "import unittest\n\n"
+        "class TextChunker:\n"
+        "    def split(self, text):\n"
+        "        return [text] if text else []\n\n"
+        "def create_chunker():\n"
+        "    return TextChunker()\n\n"
+        "class TestTextChunker(unittest.TestCase):\n"
+        "    def test_empty(self):\n"
+        "        self.assertEqual(create_chunker().split(''), [])\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n"
+    )
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=full_script,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="main_file",
+            replace_strategy="overwrite",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section"] == ""
+    assert state.write_session.write_next_section == ""
 
 
 def test_accidental_full_file_first_chunk_with_next_section_becomes_final_candidate(tmp_path: Path) -> None:

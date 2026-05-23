@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -576,38 +578,57 @@ async def _handle_write_session_outcome(harness: Any, record: ToolExecutionRecor
 
 async def _run_syntax_check(harness: Any, path: str) -> dict[str, Any] | None:
     ext = Path(path).suffix.lower()
-    command = ""
+    argv: list[str] = []
     if ext == ".py":
-        command = f"python3 -m py_compile {path}"
+        argv = ["python3", "-m", "py_compile", path]
     elif ext in {".js", ".ts"}:
-        command = f"node --check {path}"
-    elif ext == ".json":
-        command = f"python3 -c \"import json, sys; json.load(open('{path}'))\""
-    elif ext in {".yaml", ".yml"}:
-        command = f"python3 -c \"import yaml, sys; yaml.safe_load(open('{path}'))\""
-
-    if not command:
+        argv = ["node", "--check", path]
+    elif ext not in {".json", ".yaml", ".yml"}:
         return None
 
+    command = (
+        " ".join(shlex.quote(part) for part in argv)
+        if argv
+        else f"parse {shlex.quote(path)}"
+    )
     harness._runlog("write_session_auto_verify", f"Running automated syntax check: {command}")
 
-    import subprocess
-
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            cwd=getattr(harness.state, "cwd", None),
-        )
-        success = proc.returncode == 0
+        cwd = getattr(harness.state, "cwd", None)
+        if argv:
+            proc = subprocess.run(
+                argv,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=cwd,
+            )
+            output = proc.stdout + proc.stderr
+            exit_code = proc.returncode
+        else:
+            check_path = Path(path)
+            if not check_path.is_absolute() and cwd:
+                check_path = Path(cwd) / check_path
+            try:
+                with check_path.open(encoding="utf-8") as fh:
+                    if ext == ".json":
+                        json.load(fh)
+                    else:
+                        import yaml
+
+                        yaml.safe_load(fh)
+                output = ""
+                exit_code = 0
+            except Exception as exc:
+                output = str(exc)
+                exit_code = 1
+        success = exit_code == 0
         return {
             "verdict": "pass" if success else "fail",
             "command": command,
-            "output": proc.stdout + proc.stderr,
-            "exit_code": proc.returncode,
+            "output": output,
+            "exit_code": exit_code,
             "timestamp": time.time(),
         }
     except Exception as exc:

@@ -1,0 +1,83 @@
+{
+  "strategy_id": "v17-ultimate-hybrid",
+  "version": 17,
+  "endpoint": "http://192.168.1.9:1234/v1",
+  "model": "unsloth/qwen3.5-4b",
+  "provider_profile": "lmstudio",
+  "api_key": "local-dev-key",
+  "context_limit": 16384,
+  "max_prompt_tokens": 12000,
+  "runtime_context_probe": false,
+  "n_trials": 5,
+  "trial_timeout_sec": 180,
+  "context_optimization": "smart",
+  "harness_evolution_enabled": false,
+  "tool_guard_enabled": true,
+  "adaptive_compression": true,
+  "adaptive_steps": true,
+  "max_loops": 2,
+  "distilled_mode": true,
+  "inline_tool_results": {
+    "enabled": true,
+    "mode": "smart",
+    "features": {
+      "distilled_by_default": true,
+      "dynamic_fact_extraction": true,
+      "fact_validation": true,
+      "confidence_threshold": 0.8
+    },
+    "tool_specific": {
+      "long_context_lookup": {
+        "distilled_default": true,
+        "max_facts": 5
+      },
+      "summarize_report": {
+        "distilled_default": true,
+        "max_facts": 3
+      }
+    }
+  },
+  "strategy": {
+    "thought_architecture": "chain_of_thought",
+    "delimiter_style": "xml",
+    "error_handling": "retry_with_hint",
+    "dynamic_few_shot_mode": "ultimate",
+    "system_prompt_addendum": "STRICT WORKFLOW: 1) Call long_context_lookup ONCE. 2) Call summarize_report ONCE. 3) Tool results include KEY FACTS - you already have the data, DO NOT call artifact_read. 4) Immediately write class with required method. 5) Call task_complete. NO memory_update. NO re-reading.",
+    "tool_call_format": "strict_xml",
+    "forbidden_patterns": [
+      "memory_update",
+      "Let me read again",
+      "Let me check again"
+    ],
+    "max_steps": 15,
+    "tool_guard_enabled": true,
+    "context_optimization": "smart"
+  },
+  "task": {
+    "description": "Synthesize a CarbonTradingEngine in Python.\n1. Use long_context_lookup(topic='global climate policy') to find the linear reduction factor (2.2%).\n2. Use summarize_report(subject='carbon markets Q4 2025') to find the latest EUA price (\u20ac56.10).\n3. Implement CarbonTradingEngine with calculate_compliance(emissions, limit) method.\n4. Include exact values: 2.2% reduction factor and \u20ac56.10 EUA price.",
+    "ground_truth": {
+      "expected_keywords": [
+        "CarbonTradingEngine",
+        "calculate_compliance",
+        "2.2",
+        "EUA",
+        "56.10"
+      ],
+      "required_tool_calls": [
+        "long_context_lookup",
+        "summarize_report"
+      ]
+    }
+  },
+  "scoring": {
+    "w_accuracy": 0.6,
+    "w_format": 0.3,
+    "w_latency": 0.1,
+    "latency_penalty_per_100_tokens": 0.01
+  },
+  "auto_batch": {
+    "enabled": true,
+    "batch_window_ms": 50.0,
+    "max_batch_size": 5
+  }
+}

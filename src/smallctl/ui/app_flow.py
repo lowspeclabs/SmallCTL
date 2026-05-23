@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from typing import Any
 
 from textual import events
@@ -173,6 +174,9 @@ class SmallctlAppFlowMixin:
         assert self.harness is not None
         self._set_activity("thinking...")
         self._refresh_status(step_override="running")
+        self._task_start_time = time.monotonic()
+        self._activity_timer = self.set_interval(1.0, self._tick_activity_timer)
+        step_override = None
         try:
             bridge = getattr(self, "_harness_bridge", None)
             if bridge is not None:
@@ -186,29 +190,32 @@ class SmallctlAppFlowMixin:
                 "ui_task_finished",
                 status=result.get("status"),
             )
+            console = self._get_console()
+            if console is not None:
+                await self._maybe_render_terminal_result(result, console=console)
+                status = str(result.get("status") or "done")
+                await self._append_system_line(
+                    f"Task {status}. Type a new message or press Ctrl+C to exit."
+                )
         except asyncio.CancelledError:
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Task cancelled.")
-            self._set_activity("")
-            self._refresh_status(step_override="cancelled")
-            self._pending_user_echo = None
-            return
+            step_override = "cancelled"
         except Exception as exc:
             console = self._get_console()
             if console is not None:
                 await self._append_system_line(f"Task failed: {exc}")
-            self._set_activity("")
-            self._refresh_status(step_override="error")
+            step_override = "error"
+        finally:
+            if self._activity_timer is not None:
+                self._activity_timer.stop()
+                self._activity_timer = None
+            self._task_start_time = None
+            self.active_task = None
             self._pending_user_echo = None
-            return
-        console = self._get_console()
-        if console is not None:
-            await self._maybe_render_terminal_result(result, console=console)
-            await self._append_system_line(f"RESULT {json.dumps(result, ensure_ascii=True)}")
-        self._set_activity("")
-        self._refresh_status()
-        self._pending_user_echo = None
+            self._set_activity("")
+            self._refresh_status(step_override=step_override)
 
     async def on_harness_event(self, event: UIEvent | "HarnessEvent") -> None:
         harness_event_type = _harness_event_message_type()
@@ -681,6 +688,13 @@ class SmallctlAppFlowMixin:
 
     def _set_activity(self, text: str | None) -> None:
         self._status_activity = str(text or "").strip()
+
+    def _tick_activity_timer(self) -> None:
+        if self._task_start_time is None:
+            return
+        elapsed = int(time.monotonic() - self._task_start_time)
+        self._set_activity(f"thinking... ({elapsed}s)")
+        self._refresh_status()
 
     def _set_shell_approval_session_default(self, enabled: bool) -> None:
         self._shell_approval_session_default = bool(enabled)

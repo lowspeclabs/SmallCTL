@@ -77,6 +77,33 @@ def test_removal_find_matches_are_verifier_failure() -> None:
     assert verdict["verifier_kind"] == "removal_absence_probe"
 
 
+def test_removal_task_heredoc_write_is_not_absence_probe() -> None:
+    state = _cleanup_state()
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "Evidence saved to incident_triage.txt\n", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.89",
+            "command": (
+                "cat >> /home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt << 'EOF'\n"
+                "cleanup/removal notes: find showed no stale fog resources\n"
+                "EOF"
+            ),
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict.get("verifier_kind") != "removal_absence_probe"
+    assert verdict.get("failure_mode") != "removal_residue"
+
+
 def test_non_removal_grep_exit_one_still_fails() -> None:
     state = LoopState()
     state.run_brief.original_task = "Check whether FOG is installed."
@@ -94,7 +121,87 @@ def test_non_removal_grep_exit_one_still_fails() -> None:
 
     assert verdict is not None
     assert verdict["verdict"] == "fail"
+
+
+def test_zero_unittest_cases_is_verifier_failure_even_with_exit_zero() -> None:
+    state = LoopState()
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "----------------------------------------------------------------------\nRan 0 tests in 0.000s\n\nNO TESTS RAN\n",
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "python3 ./temp/text_chunker.py"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert "Ran 0 tests" in verdict["acceptance_delta"]["notes"][0] or "NO TESTS RAN" in verdict["acceptance_delta"]["notes"][0]
     assert "verifier_kind" not in verdict
+
+
+def test_unittest_failure_text_is_failure_even_when_pipeline_exit_is_zero() -> None:
+    state = LoopState()
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "exit_code": 0,
+            "stdout": (
+                "test_exact_size_chunks (text_chunker.TestChunker.test_exact_size_chunks) ... FAIL\n"
+                "======================================================================\n"
+                "FAIL: test_exact_size_chunks (text_chunker.TestChunker.test_exact_size_chunks)\n"
+                "FAILED (failures=4)\n"
+            ),
+            "stderr": "",
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "python3 -m unittest text_chunker -v 2>&1 | head -50"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict["failure_mode"] == "test"
+    assert "FAILED (failures=4)" in verdict["acceptance_delta"]["notes"][0]
+
+
+def test_py_compile_pass_does_not_clear_prior_failed_runtime_verifier() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Build ./temp/text_chunker.py. Run Script when done to verify functionality, fix until complete."
+    state.scratchpad["_last_failed_verifier"] = {
+        "tool_name": "shell_exec",
+        "command": "cd /repo && python3 ./temp/text_chunker.py",
+        "summary": ["FAILED (failures=4)"],
+        "raw_output": "FAILED (failures=4)",
+    }
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "cd /repo && python3 -m py_compile ./temp/text_chunker.py"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict["failure_mode"] == "insufficient_verifier"
+    assert verdict["insufficient_verifier"] is True
+    assert "prior failed verifier" in verdict["acceptance_delta"]["notes"][0]
 
 
 def test_diagnostic_status_probe_exit_one_is_pass() -> None:

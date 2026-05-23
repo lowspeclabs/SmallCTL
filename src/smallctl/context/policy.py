@@ -35,6 +35,7 @@ class ContextPolicy:
     max_prior_outcomes: int = 4
     tool_result_inline_token_limit: int = 325
     artifact_read_inline_token_limit: int = 1024
+    file_read_preview_line_limit: int = 300
     memory_staleness_step_limit: int = 8
     memory_low_confidence_threshold: float = 0.6
     

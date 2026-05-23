@@ -146,18 +146,32 @@ def _reasoning_only_limits(tools: list[dict[str, Any]]) -> tuple[float, int]:
     )
 
 
-def _build_reasoning_only_nudge(tools: list[dict[str, Any]]) -> str:
+def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "") -> str:
     names = _tool_names(tools)
+    base = (
+        "The prior response stream spent too long in reasoning without producing assistant content "
+        "or a tool call."
+    )
+    if phase == "repair":
+        if "escalate_to_bigger_model" in names:
+            return (
+                f"{base} You are in REPAIR phase. Stop analyzing and emit ONE concrete action now: "
+                "call file_patch/file_write/ast_patch to fix the code, call shell_exec to re-run the verifier, "
+                "or call escalate_to_bigger_model if you are stuck. Do not continue hidden reasoning only."
+            )
+        return (
+            f"{base} You are in REPAIR phase. Stop analyzing and emit ONE concrete action now: "
+            "call file_patch/file_write/ast_patch to fix the code, or call shell_exec to re-run the verifier. "
+            "Do not continue hidden reasoning only."
+        )
     if "escalate_to_bigger_model" in names:
         return (
-            "The prior response stream spent too long in reasoning without producing assistant content "
-            "or a tool call. Continue now with a concrete action: call file/read tools if you can make "
+            f"{base} Continue now with a concrete action: call file/read tools if you can make "
             "progress, or call escalate_to_bigger_model if you are stuck or need stronger reasoning. "
             "Do not continue hidden reasoning only."
         )
     return (
-        "The prior response stream spent too long in reasoning without producing assistant content "
-        "or a tool call. Continue now by calling an appropriate available tool, or answer directly if "
+        f"{base} Continue now by calling an appropriate available tool, or answer directly if "
         "no tool is needed. Do not continue hidden reasoning only."
     )
 
@@ -445,7 +459,8 @@ async def run_model_stream_loop(
                                 _stop_after_reasoning_only_stall = True
                                 break
                             reasoning_only_retries += 1
-                            nudge = _build_reasoning_only_nudge(tools)
+                            current_phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
+                            nudge = _build_reasoning_only_nudge(tools, phase=current_phase)
                             messages = list(messages) + [ConversationMessage(role="user", content=nudge).to_dict()]
                             harness.state.scratchpad["_last_reasoning_only_retry"] = {
                                 "attempt": _model_attempt + 1,

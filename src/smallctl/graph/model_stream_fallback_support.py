@@ -186,6 +186,51 @@ def _extract_code_from_fallback_response(
     return str(recovered_content or "").strip()
 
 
+def _recovered_write_content_is_plausible(content: str, *, target_path: str = "") -> bool:
+    candidate = str(content or "").strip()
+    if len(candidate) < 8:
+        return False
+
+    if re.fullmatch(r'(?s)(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')', candidate):
+        return False
+
+    # Reject JSON schema fragments that leaked from tool-call streams.
+    # Models like Qwen3.5-9b sometimes emit `{"name":...` into assistant
+    # content when tools are stripped from the request. These are not source code.
+    if candidate.startswith("{"):
+        first_line = candidate.splitlines()[0] if candidate else ""
+        if re.search(r'^\s*\{\s*"\w+":', first_line):
+            code_indicators = (
+                "def ", "class ", "import ", "from ", "# ", "/* ", "// ",
+                "function ", "const ", "let ", "var ", "package ", "func ",
+                "struct ", "type ", "interface ",
+            )
+            if not any(ind in candidate for ind in code_indicators):
+                return False
+
+    meaningful_lines: list[str] = []
+    for raw_line in candidate.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("```"):
+            continue
+        if line in {'"""', "'''", '""""""', "''''''"}:
+            continue
+        meaningful_lines.append(line)
+
+    if not meaningful_lines:
+        return False
+    if not any(re.search(r"[A-Za-z0-9_]", line) for line in meaningful_lines):
+        return False
+
+    suffix = str(target_path or "").strip().lower()
+    if suffix.endswith(".py"):
+        joined = "\n".join(meaningful_lines)
+        if re.fullmatch(r'(?s)(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')', joined.strip()):
+            return False
+
+    return True
+
+
 def _fallback_response_ready_for_early_exit(
     assistant_text: str,
     *,
@@ -197,7 +242,7 @@ def _fallback_response_ready_for_early_exit(
         target_path=target_path,
         path_confidence=path_confidence,
     )
-    return bool(code)
+    return _recovered_write_content_is_plausible(code, target_path=target_path)
 
 
 def _build_synthetic_write_tool_call(fallback_intent: Any) -> dict[str, Any]:

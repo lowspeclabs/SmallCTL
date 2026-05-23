@@ -98,6 +98,8 @@ def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool
     """Determine if an event should be rendered based on user preferences."""
     if event.event_type == UIEventType.STATUS:
         return False
+    if event.data.get("ui_kind") == "subtask_checklist":
+        return True
     if event.event_type in {UIEventType.SYSTEM, UIEventType.METRICS} and not show_system_messages:
         return False
     # Treat most ALERTs as system-level noise, but preserve interactive prompts

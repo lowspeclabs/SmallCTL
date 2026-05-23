@@ -34,6 +34,15 @@ WRONG_PATH_MARKERS = (
     "filenotfounderror",
     "path does not exist",
 )
+_TEST_OUTPUT_MARKERS = (
+    "assertionerror",
+    "traceback",
+    "failed (failures=",
+    "failed (errors=",
+    "ran ",
+    "pytest",
+    "unittest",
+)
 WRITE_TOOLS = {"file_write", "file_append", "ssh_file_write"}
 _TEST_FAILURE_MARKERS = (
     "failed",
@@ -220,6 +229,8 @@ def detect_wrong_path(
     if str(metadata.get("reason") or "").strip() in _REMOTE_CONFUSION_REASONS:
         return None
     combined = _result_text(result, metadata=metadata).lower()
+    if str(tool_name or "").strip() in {"shell_exec", "ssh_exec"} and _looks_like_test_failure_output(combined):
+        return None
     if _is_patch_target_miss(tool_name, combined):
         return None
     marker = next((item for item in WRONG_PATH_MARKERS if item in combined), "")
@@ -240,6 +251,17 @@ def detect_wrong_path(
         failure_class="wrong_path",
         next_safe_action="Run a narrow directory/file check in the correct scope, then retry with the verified path.",
     )
+
+
+def _looks_like_test_failure_output(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    if "not found in" in lowered and any(marker in lowered for marker in _TEST_OUTPUT_MARKERS):
+        return True
+    if "assertionerror" in lowered and any(marker in lowered for marker in ("failed", "traceback", "ran ")):
+        return True
+    return False
 
 
 def _is_patch_target_miss(tool_name: str, combined_result_text: str) -> bool:
@@ -368,6 +390,18 @@ def detect_verifier_failure_from_result(
     if diagnostic_failure_task(state):
         return None
     failure_class = detect_test_failure_from_verdict(verifier) or "verifier_failed"
+    # Distinguish timeout / infinite-loop from ordinary test failures
+    if failure_class == "verifier_failed":
+        failure_mode = str(verifier.get("failure_mode") or "").strip().lower()
+        if failure_mode == "environment":
+            stdout = str(verifier.get("key_stdout") or "").strip()
+            stderr = str(verifier.get("key_stderr") or "").strip()
+            error_text = " ".join([stdout, stderr]).lower()
+            if "timed out" in error_text or "timeout" in error_text:
+                if not stdout and not stderr:
+                    failure_class = "infinite_loop_suspected"
+                else:
+                    failure_class = "verifier_timeout"
     return FamaSignal(
         kind=FamaFailureKind.EARLY_STOP,
         severity=2,

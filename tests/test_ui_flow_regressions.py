@@ -680,7 +680,7 @@ def test_run_harness_task_backfills_terminal_result_into_assistant_transcript() 
         )
     ]
     assert system_lines == [
-        'RESULT {"status": "completed", "message": {"status": "complete", "message": "Jacksonville is 85F today."}, "assistant": ""}'
+        "Task completed. Type a new message or press Ctrl+C to exit."
     ]
 
 

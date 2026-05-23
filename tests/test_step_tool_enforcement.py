@@ -129,6 +129,72 @@ def test_task_complete_cannot_finalize_while_staged_execution_is_active() -> Non
     assert "staged execution" in str(result.get("error") or "").lower()
 
 
+def test_task_complete_marks_subobjective_without_global_completion() -> None:
+    task = """fix the following issues "  - High: apply_patch() ignores conflicts. Add conflict check before applying.
+  - High: compute_safe_order() ignores missing dependencies. Report missing prerequisites.
+"""
+    state = LoopState()
+    state.run_brief.original_task = task
+    state.last_verifier_verdict = {"verdict": "pass", "command": "python temp/patch_dependency_sim.py -v"}
+    state.scratchpad["_resolved_followup"] = {"option_index": 1}
+
+    result = asyncio.run(
+        control.task_complete(
+            "Implemented apply_patch conflict checks and verified the script.",
+            state,
+            SimpleNamespace(),
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "multi_objective_incomplete"
+    assert result["metadata"]["completed_objectives"] == ["O1"]
+    assert [item["objective_id"] for item in result["metadata"]["remaining_objectives"]] == ["O2"]
+    assert state.scratchpad["_multi_objective_ledger"]["objectives"][0]["status"] == "done"
+    assert state.scratchpad["_multi_objective_ledger"]["objectives"][1]["status"] == "pending"
+    assert "_task_complete" not in state.scratchpad
+
+
+def test_task_complete_finalizes_after_all_subobjectives_done() -> None:
+    task = """fix the following issues
+  - High: apply_patch() ignores conflicts. Add conflict check before applying.
+  - High: compute_safe_order() ignores missing dependencies. Report missing prerequisites.
+"""
+    state = LoopState()
+    state.run_brief.original_task = task
+    state.last_verifier_verdict = {"verdict": "pass", "command": "python temp/patch_dependency_sim.py -v"}
+    state.scratchpad["_multi_objective_ledger"] = {
+        "status": "active",
+        "parent_goal": task,
+        "objectives": [
+            {
+                "objective_id": "O1",
+                "title": "High: apply_patch() ignores conflicts. Add conflict check before applying.",
+                "status": "done",
+                "evidence": ["verified conflict checks"],
+            },
+            {
+                "objective_id": "O2",
+                "title": "High: compute_safe_order() ignores missing dependencies. Report missing prerequisites.",
+                "status": "pending",
+                "evidence": [],
+            },
+        ],
+    }
+
+    result = asyncio.run(
+        control.task_complete(
+            "Implemented compute_safe_order missing dependencies reporting and verified the script.",
+            state,
+            SimpleNamespace(),
+        )
+    )
+
+    assert result["success"] is True
+    assert state.scratchpad["_multi_objective_ledger"]["status"] == "done"
+    assert state.scratchpad["_task_complete"] is True
+
+
 def test_step_complete_signals_step_completion_without_global_finalization() -> None:
     state = LoopState(
         plan_execution_mode=True,

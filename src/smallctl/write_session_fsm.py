@@ -178,6 +178,7 @@ def archive_terminal_write_session(
         session=session,
         details={"reason": payload["reason"]},
     )
+    _record_dead_write_session_id(state, payload.get("write_session_id"))
     state.write_session = None
     return payload
 
@@ -202,7 +203,24 @@ def archive_interrupted_write_session(
         session=session,
         details={"reason": payload["reason"]},
     )
+    _record_dead_write_session_id(state, payload.get("write_session_id"))
     return payload
+
+
+def _record_dead_write_session_id(state: Any, session_id: str | None) -> None:
+    if state is None or not session_id:
+        return
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    key = "_dead_write_session_ids"
+    dead = scratchpad.get(key)
+    if not isinstance(dead, list):
+        dead = []
+    sid = str(session_id).strip()
+    if sid and sid not in dead:
+        dead.append(sid)
+    scratchpad[key] = dead[-24:]
 
 
 def recent_write_session_events(state: Any, *, limit: int = 10) -> list[dict[str, Any]]:

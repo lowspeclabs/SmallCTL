@@ -64,6 +64,28 @@ class _FallbackClient:
         }
 
 
+class _WeakFallbackClient:
+    model = "qwen3.5:9b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "```python\n#"
+                        }
+                    }
+                ]
+            },
+        }
+
+
 class _RemoteFallbackClient:
     model = "qwen3.5:9b"
 
@@ -724,6 +746,50 @@ def test_stalled_file_write_stream_uses_no_tools_fallback_without_session() -> N
     assert harness.client.calls[0]["tools"] == []
     assert harness.client.calls[0]["messages"][-1]["role"] == "user"
     assert state.scratchpad["_last_text_write_fallback"]["target_path"] == "temp/logwatch.py"
+
+
+def test_stalled_file_write_fallback_rejects_tiny_code_fragment() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_task_target_paths"] = ["temp/artifact_retention.py"]
+    state.run_brief.original_task = "write temp/artifact_retention.py"
+    harness = _Harness(state)
+    harness.client = _WeakFallbackClient()
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    partial_stream = StreamResult(
+        tool_calls=[
+            {
+                "id": "call-empty",
+                "type": "function",
+                "function": {"name": "file_write", "arguments": ""},
+            }
+        ]
+    )
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=[],
+            salvage_partial_stream=partial_stream,
+            last_chunk_error_details={"reason": "tool_call_continuation_timeout"},
+            stream_ended_without_done=False,
+            stream_ended_without_done_details={},
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=False,
+            echo_to_stdout=False,
+            messages=[{"role": "user", "content": "write temp/artifact_retention.py"}],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.stream.tool_calls == partial_stream.tool_calls
+    assert harness.client.calls[0]["tools"] == []
+    assert state.scratchpad["_last_text_write_fallback"]["status"] == "failed"
+    assert any(event[0][0] == "stream_text_write_fallback_rejected" for event in harness.runlog_events)
 
 
 def test_stalled_ssh_file_write_stream_uses_remote_write_fallback() -> None:

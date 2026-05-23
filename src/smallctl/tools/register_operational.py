@@ -24,6 +24,7 @@ def register_operational_tools(
                     "Execute a REMOTE command on a remote host via SSH with live streaming support. "
                     "Prefer `target='user@host'` when a username is known, for example "
                     "`target='root@192.168.1.63'`, rather than splitting identity across separate fields. "
+                    "For interactive installers or scripts that prompt for input, use `ssh_session_start` instead. "
                     "Exit code 1 from diagnostic probes (systemctl status, dpkg -l, apt list, which, etc.) that report 'not found' is valid negative intelligence, not an error."
                 ),
                 schema={
@@ -47,6 +48,95 @@ def register_operational_tools(
                     "additionalProperties": False,
                 },
                 handler=inject_state_and_harness(network.ssh_exec),
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
+                name="ssh_session_start",
+                description=(
+                    "Start an interactive REMOTE SSH command with a pseudo-terminal. This is the preferred tool for "
+                    "running interactive installers or scripts that prompt for input (e.g., FOG install, package config). "
+                    "After starting, poll output with `ssh_session_read`, send answers with `ssh_session_send`, and "
+                    "close with `ssh_session_close`. If the installer supports a non-interactive flag (like `--autoaccept`), "
+                    "consider using `ssh_exec` with that flag instead."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "Preferred SSH target in `user@host` or `host` form."},
+                        "host": {"type": "string", "description": "Target hostname or IP."},
+                        "command": {"type": "string", "description": "Interactive command to run remotely."},
+                        "user": {"type": "string", "description": "SSH username."},
+                        "username": {"type": "string", "description": "Alias for `user`."},
+                        "port": {"type": "integer", "default": 22},
+                        "identity_file": {"type": "string", "description": "Path to SSH private key."},
+                        "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
+                        "timeout_sec": {"type": "integer", "default": 900},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state_and_harness(network.ssh_session_start),
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
+                name="ssh_session_read",
+                description="Read current output and detected prompt state from an active interactive SSH session.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "wait_sec": {"type": "number", "default": 1.0},
+                        "max_chars": {"type": "integer", "default": 6000},
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+                handler=network.ssh_session_read,
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
+                name="ssh_session_send",
+                description="Send input to an active interactive SSH session, usually one prompt answer ending in a newline.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "input": {"type": "string", "description": "Text to write to remote stdin; include trailing newline for prompt answers."},
+                        "wait_sec": {"type": "number", "default": 0.5},
+                        "max_chars": {"type": "integer", "default": 6000},
+                    },
+                    "required": ["session_id", "input"],
+                    "additionalProperties": False,
+                },
+                handler=network.ssh_session_send,
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
+                name="ssh_session_close",
+                description="Close an active interactive SSH session, optionally terminating the remote command.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "terminate": {"type": "boolean", "default": True},
+                        "max_chars": {"type": "integer", "default": 6000},
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+                handler=network.ssh_session_close,
                 category="network",
                 risk="high",
                 allowed_modes={"chat", "loop", "planning"},
@@ -89,7 +179,9 @@ def register_operational_tools(
                 description=(
                     "Write or overwrite a REMOTE file over SSH with atomic replace and readback hash verification. "
                     "Prefer this over `ssh_exec` with here-docs, tee, or shell redirection for remote file writes. "
-                    "This tool operates on the REMOTE host filesystem ONLY. After writing, verify the file with `ssh_file_read`, never with `file_read`."
+                    "This tool operates on the REMOTE host filesystem ONLY. The `path` argument is resolved on the REMOTE host, "
+                    "not the local orchestrator. Do NOT pass local absolute paths (e.g. /home/stephen/...) unless the remote host "
+                    "has an identical directory structure. After writing, verify the file with `ssh_file_read`, never with `file_read`."
                 ),
                 schema={
                     "type": "object",

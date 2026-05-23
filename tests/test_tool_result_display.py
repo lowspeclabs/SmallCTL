@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from smallctl.graph.display import format_tool_result_display
-from smallctl.context.messages import format_compact_tool_message
+from smallctl.context.messages import format_compact_tool_message, format_reused_artifact_message
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord
 from smallctl.tool_output_formatting import structured_plain_text
@@ -152,6 +152,204 @@ def test_ssh_file_write_compact_message_is_actionable_confirmation() -> None:
     assert "readback verified: yes" in rendered
     assert "Tool output captured as Artifact" not in rendered
     assert "artifact_read" not in rendered
+
+
+def test_file_write_compact_message_is_actionable_disk_confirmation() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0104",
+        kind="file_write",
+        source="/repo/temp/leader_election_sim.py",
+        created_at="2026-05-22T00:00:00+00:00",
+        size_bytes=924,
+        summary="leader_election_sim.py written",
+        tool_name="file_write",
+    )
+    result = ToolEnvelope(
+        success=True,
+        output="written",
+        metadata={
+            "path": "/repo/temp/leader_election_sim.py",
+            "bytes": 817,
+            "changed": True,
+        },
+    )
+
+    rendered = format_compact_tool_message(artifact, result)
+
+    assert "Local file written: /repo/temp/leader_election_sim.py" in rendered
+    assert "bytes_written: 817" in rendered
+    assert "changed: yes" in rendered
+    assert "persisted_to_target: yes" in rendered
+    assert "Tool output captured as Artifact" not in rendered
+
+
+def test_write_session_compact_message_labels_staged_only_not_persisted() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0105",
+        kind="file_write",
+        source="/repo/temp/leader_election_sim.py",
+        created_at="2026-05-22T00:00:00+00:00",
+        size_bytes=924,
+        summary="leader_election_sim.py staged",
+        tool_name="file_write",
+    )
+    result = ToolEnvelope(
+        success=True,
+        output="section written",
+        metadata={
+            "path": "/repo/temp/leader_election_sim.py",
+            "staging_path": "/repo/.smallctl/write_sessions/ws_1__leader_election_sim__stage.py",
+            "write_session_id": "ws_1",
+            "staged_only": True,
+            "bytes": 817,
+            "changed": True,
+        },
+    )
+
+    rendered = format_compact_tool_message(artifact, result)
+
+    assert "Local file written: /repo/temp/leader_election_sim.py" in rendered
+    assert "staging_path: /repo/.smallctl/write_sessions/ws_1__leader_election_sim__stage.py" in rendered
+    assert "write_session_id: ws_1" in rendered
+    assert "persisted_to_target: no; staged_only=true" in rendered
+
+
+def test_file_read_compact_message_distinguishes_preview_from_file_truncation() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0102",
+        kind="file_read",
+        source="/repo/temp/restart_backoff.py",
+        created_at="2026-05-22T00:00:00+00:00",
+        size_bytes=4096,
+        summary="restart_backoff.py read",
+        tool_name="file_read",
+    )
+    content = "def calculate_delay(attempt):\n    return attempt\n" + ("# filler\n" * 200)
+    result = ToolEnvelope(
+        success=True,
+        output=content,
+        metadata={
+            "path": "/repo/temp/restart_backoff.py",
+            "source_path": "/repo/temp/restart_backoff.py",
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 202,
+            "total_lines": 202,
+        },
+    )
+
+    rendered = format_compact_tool_message(
+        artifact,
+        result,
+        inline_full_file=False,
+        full_file_preview_chars=80,
+    )
+
+    assert "FILE READ STATUS:" in rendered
+    assert "complete_file=true" in rendered
+    assert "display_preview_truncated=true" in rendered
+    assert "file_content_truncated=false" in rendered
+    assert "The file itself was not truncated" in rendered
+    assert "artifact_id=A0102" in rendered
+
+
+def test_small_model_file_read_preview_defaults_to_300_lines_before_truncation() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0110",
+        kind="file_read",
+        source="/repo/temp/large_file.py",
+        created_at="2026-05-23T00:00:00+00:00",
+        size_bytes=4096,
+        summary="large_file.py read",
+        tool_name="file_read",
+    )
+    content = "\n".join(f"line {idx}" for idx in range(1, 351))
+    result = ToolEnvelope(
+        success=True,
+        output=content,
+        metadata={
+            "path": "/repo/temp/large_file.py",
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 350,
+            "total_lines": 350,
+        },
+    )
+
+    rendered = format_compact_tool_message(artifact, result, inline_full_file=False)
+
+    assert "Preview (first 300 of 350 lines):" in rendered
+    assert "line 300" in rendered
+    assert "line 301" not in rendered
+    assert "file_content_truncated=false" in rendered
+
+
+def test_reused_file_read_message_is_status_not_misleading_full_inline() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0111",
+        kind="file_read",
+        source="/repo/temp/text_chunker.py",
+        created_at="2026-05-23T00:00:00+00:00",
+        size_bytes=4096,
+        summary="text_chunker.py full file",
+        tool_name="file_read",
+        inline_content="print('cached')\n",
+        metadata={
+            "path": "/repo/temp/text_chunker.py",
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 150,
+            "total_lines": 150,
+        },
+    )
+
+    rendered = format_reused_artifact_message(artifact, tool_name="file_read")
+
+    assert "FILE READ CACHE STATUS:" in rendered
+    assert "complete_file=true" in rendered
+    assert "file_content_truncated=false" in rendered
+    assert "lines=1-150 of 150" in rendered
+    assert "Full cached content is visible below" not in rendered
+    assert "```text" not in rendered
+
+
+def test_file_read_compact_message_labels_active_write_session_staging() -> None:
+    artifact = ArtifactRecord(
+        artifact_id="A0103",
+        kind="file_read",
+        source="/repo/temp/patch_dependency_sim.py",
+        created_at="2026-05-22T00:00:00+00:00",
+        size_bytes=32,
+        summary="patch_dependency_sim.py read",
+        tool_name="file_read",
+    )
+    result = ToolEnvelope(
+        success=True,
+        output="print('staged')\n",
+        metadata={
+            "path": "/repo/temp/patch_dependency_sim.py",
+            "source_path": "/repo/.smallctl/write_sessions/ws_abc123__patch_dependency_sim__stage.py",
+            "read_from_staging": True,
+            "write_session_id": "ws_abc123",
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 1,
+            "total_lines": 1,
+        },
+    )
+
+    rendered = format_compact_tool_message(
+        artifact,
+        result,
+        inline_full_file=True,
+    )
+
+    assert "source_path=/repo/.smallctl/write_sessions/ws_abc123__patch_dependency_sim__stage.py" in rendered
+    assert "read_from_active_write_session_staging=true; write_session_id=ws_abc123" in rendered
 
 
 def test_ssh_exec_compact_message_labels_remote_nonzero_as_reached_host() -> None:

@@ -29,7 +29,7 @@ def _escalation_harness_kwargs(config: object) -> dict[str, object]:
         "escalation_max_response_tokens": getattr(config, "escalation_max_response_tokens", 1600),
         "escalation_temperature": getattr(config, "escalation_temperature", 0.2),
         "escalation_timeout_sec": getattr(config, "escalation_timeout_sec", 120),
-        "escalation_max_per_task": getattr(config, "escalation_max_per_task", 2),
+        "escalation_max_per_task": getattr(config, "escalation_max_per_task", 3),
         "escalation_cooldown_turns": getattr(config, "escalation_cooldown_turns", 2),
         "escalation_repeated_failure_threshold": getattr(config, "escalation_repeated_failure_threshold", 2),
         "escalation_require_tool_plan_evidence": getattr(config, "escalation_require_tool_plan_evidence", True),
@@ -257,12 +257,17 @@ def _resolve_session_id(harness: object | None) -> str:
     return ""
 
 
-def _print_shutdown_alert(session_id: str) -> None:
+def _print_shutdown_alert(session_id: str, status: str = "alert") -> None:
+    message = (
+        "smallctl closed via Ctrl+C"
+        if status == "alert"
+        else "smallctl TUI closed"
+    )
     print(
         json.dumps(
             {
-                "status": "alert",
-                "message": "smallctl closed via Ctrl+C",
+                "status": status,
+                "message": message,
                 "session_id": session_id or "unknown",
             },
             indent=2,
@@ -435,7 +440,8 @@ def cli(argv: list[str] | None = None) -> int:
             sys.stdout.write("\033[?1000l\033[?1006l\033[?25h")
             sys.stdout.flush()
         if getattr(app, "closed_by_ctrl_c", False):
-            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
+            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)), status="exited")
+            return 130
     elif config.task or config.restore_graph_state:
         strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
         max_prompt_tokens_explicit = bool(

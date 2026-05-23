@@ -35,40 +35,82 @@ class SubtaskLedgerService:
         self._enforce_limits()
         return state.subtask_ledger
 
-    def import_plan_if_needed(self) -> None:
+    def import_plan_if_needed(self, *, replace_synthetic_root: bool = False) -> None:
         state = self.harness.state
         plan = state.active_plan or state.draft_plan
         if plan is None:
             self._enforce_limits()
             return
         task_text = str(getattr(plan, "goal", "") or state.run_brief.original_task or "").strip()
-        ledger = self.ensure_ledger(task_text)
+        plan_steps = list(plan.iter_steps())
+        if state.subtask_ledger is None:
+            state.subtask_ledger = SubtaskLedger(
+                task_id=_task_id(task_text),
+                subtasks=[],
+                active_subtask_id=None,
+            )
+        ledger = state.subtask_ledger
+        transferred_evidence: list[str] = []
+        transferred_blockers: list[str] = []
+        transferred_failures: list[str] = []
+        transferred_attempts = 0
+        if replace_synthetic_root or plan_steps:
+            retained: list[Subtask] = []
+            for task in ledger.subtasks:
+                if _is_synthetic_root(task):
+                    transferred_evidence.extend(task.evidence)
+                    transferred_blockers.extend(task.blockers)
+                    transferred_failures.extend(task.failure_classes)
+                    transferred_attempts += int(task.attempts or 0)
+                    if ledger.active_subtask_id == task.subtask_id:
+                        ledger.active_subtask_id = None
+                    _log_transition(self.harness, task, task.status, "abandoned", reason="plan_import_replaced_root")
+                    continue
+                retained.append(task)
+            ledger.subtasks = retained
         existing = {task.subtask_id for task in ledger.subtasks}
+        existing_titles = {_subtask_display_key(task) for task in ledger.subtasks if _subtask_display_key(task)}
+        plan_goal_key = _normalize_task_text(task_text)
         imported: list[Subtask] = []
-        for index, step in enumerate(plan.iter_steps(), start=1):
+        for index, step in enumerate(plan_steps, start=1):
             subtask_id = str(getattr(step, "step_id", "") or f"S{index}").strip()
             if subtask_id in existing:
+                continue
+            title = str(getattr(step, "title", "") or subtask_id)
+            goal = str(getattr(step, "description", "") or getattr(step, "task", "") or getattr(step, "title", "") or "")
+            display_key = _normalize_task_text(title or goal)
+            if display_key and (display_key == plan_goal_key or display_key in existing_titles):
                 continue
             status = _status_from_plan_status(str(getattr(step, "status", "") or "pending"))
             imported.append(
                 Subtask(
                     subtask_id=subtask_id,
-                    title=str(getattr(step, "title", "") or subtask_id),
-                    goal=str(getattr(step, "description", "") or getattr(step, "task", "") or getattr(step, "title", "") or ""),
+                    title=title,
+                    goal=goal,
                     status=status,
                     acceptance=list(getattr(step, "acceptance", []) or []),
                 )
             )
+            if display_key:
+                existing_titles.add(display_key)
         if imported:
             ledger.subtasks.extend(imported)
             increment_metric(state, "subtasks_created", len(imported))
             _runlog(self.harness, "subtasks_imported", count=len(imported))
+        if (transferred_evidence or transferred_blockers or transferred_failures or transferred_attempts) and ledger.subtasks:
+            target = next((task for task in ledger.subtasks if task.status in {"active", "pending"}), ledger.subtasks[0])
+            target.evidence = _dedupe_list(target.evidence + transferred_evidence)[-6:]
+            target.blockers = _dedupe_list(target.blockers + transferred_blockers)[-5:]
+            target.failure_classes = _dedupe_list(target.failure_classes + transferred_failures)[-5:]
+            target.attempts += transferred_attempts
         if not ledger.active_subtask_id or ledger.active() is None:
             active = next((task for task in ledger.subtasks if task.status == "active"), None)
             active = active or next((task for task in ledger.subtasks if task.status == "pending"), None)
+            active = active or next((task for task in ledger.subtasks if task.status == "blocked"), None)
             if active is not None:
                 old_status = active.status
-                active.status = "active"
+                if active.status == "pending":
+                    active.status = "active"
                 ledger.active_subtask_id = active.subtask_id
                 _log_transition(self.harness, active, old_status, active.status, reason="import_plan_activate")
         self._enforce_limits()
@@ -82,12 +124,16 @@ class SubtaskLedgerService:
         if active is not None:
             return active
         for task in ledger.subtasks:
-            if task.status in {"pending", "blocked"}:
+            if task.status == "pending":
                 old_status = task.status
                 task.status = "active"
                 task.updated_at = time()
                 ledger.active_subtask_id = task.subtask_id
                 _log_transition(self.harness, task, old_status, task.status, reason="infer_active_subtask")
+                return task
+        for task in ledger.subtasks:
+            if task.status == "blocked":
+                ledger.active_subtask_id = task.subtask_id
                 return task
         subtask = Subtask(
             subtask_id=f"S{len(ledger.subtasks) + 1}",
@@ -131,8 +177,16 @@ class SubtaskLedgerService:
             task.blockers = task.blockers[-5:]
         if failure.suggested_next_action:
             task.next_action = failure.suggested_next_action
-        if task.status == "active":
+        if task.status == "active" and task.attempts >= _blocked_attempt_threshold(self.harness):
+            old_status = task.status
+            task.status = "blocked"
+            if not task.next_action:
+                task.next_action = (
+                    "Roadblock reached. Call escalate_to_bigger_model for stronger reasoning, "
+                    "or ask_human if progress requires missing information or approval."
+                )
             increment_metric(self.harness.state, "subtasks_blocked")
+            _log_transition(self.harness, task, old_status, task.status, reason="failure_threshold")
         task.updated_at = time()
 
     def mark_done_if_verified(self, subtask_id: str, verifier: dict[str, Any] | None) -> bool:
@@ -232,6 +286,48 @@ def _task_id(task_text: str) -> str | None:
     if not text:
         return None
     return "task-" + hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def _is_synthetic_root(task: Subtask) -> bool:
+    return (
+        str(task.subtask_id or "") == "S1"
+        and str(task.title or "") == "Complete user task"
+        and str(task.goal or "").strip()
+        and list(task.acceptance or []) == ["User request satisfied with tool-backed evidence when needed."]
+    )
+
+
+def _dedupe_list(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in deduped:
+            deduped.append(text)
+    return deduped
+
+
+def _subtask_display_key(task: Subtask) -> str:
+    title = str(task.title or "").strip()
+    if title and title not in {"Complete user task", "Continue user task", "Follow latest user direction"}:
+        return _normalize_task_text(title)
+    return _normalize_task_text(str(task.goal or "").strip() or title)
+
+
+def _normalize_task_text(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    for prefix in ("execute:", "planning:", "repair:", "verify:", "verification:"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+            break
+    return normalized
+
+
+def _blocked_attempt_threshold(harness: Any) -> int:
+    config = getattr(harness, "config", None)
+    try:
+        return max(1, int(getattr(config, "subtask_block_after_failures", 3) or 3))
+    except (TypeError, ValueError):
+        return 3
 
 
 def _status_from_plan_status(status: str) -> str:

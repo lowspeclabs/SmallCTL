@@ -7,7 +7,10 @@ from smallctl.context.messages import next_step_hint
 from smallctl.graph.chat_progress import build_file_read_recovery_message
 from smallctl.graph.interpret_nodes import _working_memory_signals_completion
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
-from smallctl.graph.tool_outcomes import _maybe_emit_missing_requested_output_file_nudge
+from smallctl.graph.tool_outcomes import (
+    _maybe_clear_missing_input_after_remote_readback,
+    _maybe_emit_missing_requested_output_file_nudge,
+)
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
 from smallctl.tools.control import task_complete
@@ -81,6 +84,94 @@ def test_first_missing_requested_output_file_read_schedules_write_retry(tmp_path
     assert "file_write(path='./temp/listening_ports.txt'" in recovery_message.content
     assert state.scratchpad["_retry_tool_exposures"][0]["tool_name"] == "file_write"
     assert "missing_requested_output_file_nudge" in runlog_events
+
+
+def test_remote_missing_requested_output_file_read_schedules_ssh_readback(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = (
+        "SSH to root@192.168.1.89, gather incident triage, print a concise summary, "
+        "and save evidence to ./temp/incident_triage.txt."
+    )
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.tool_history = [
+        'ssh_exec|{"command": "cat >> /home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt", "host": "192.168.1.89", "user": "root"}|success',
+    ]
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+    )
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-remote-missing-output", run_mode="chat")
+    record = ToolExecutionRecord(
+        operation_id="op-local-file-read-remote-output",
+        tool_name="file_read",
+        args={"path": "./temp/incident_triage.txt"},
+        tool_call_id="call-local-file-read-remote-output",
+        result=ToolEnvelope(
+            success=False,
+            error=f"File does not exist: {tmp_path / 'temp' / 'incident_triage.txt'}",
+            metadata={
+                "path": str(tmp_path / "temp" / "incident_triage.txt"),
+                "read_result": "missing",
+                "requested_path": "./temp/incident_triage.txt",
+            },
+        ),
+    )
+
+    assert _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record) is True
+
+    recovery_message = state.recent_messages[-1]
+    assert recovery_message.metadata["recovery_kind"] == "missing_remote_requested_output_file"
+    assert recovery_message.metadata["retry_tool_name"] == "ssh_file_read"
+    assert recovery_message.metadata["retry_scheduled"] is True
+    assert "local workspace" in recovery_message.content
+    assert "ssh_file_read" in recovery_message.content
+    assert "_unresolved_missing_input_file" not in state.scratchpad
+    assert state.scratchpad["_retry_tool_exposures"][0]["tool_name"] == "ssh_file_read"
+    assert "missing_remote_requested_output_file_nudge" in runlog_events
+
+
+def test_successful_remote_readback_clears_stale_local_missing_input_blocker(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = (
+        "SSH to root@192.168.1.89, gather incident triage, print a concise summary, "
+        "and save evidence to ./temp/incident_triage.txt."
+    )
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.scratchpad["_unresolved_missing_input_file"] = {
+        "path": "home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt"
+    }
+    state.scratchpad["_missing_input_file_nudged"] = (
+        "missing-input-file:home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt"
+    )
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-ssh-file-read-output",
+        tool_name="ssh_file_read",
+        args={"path": "/home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt"},
+        tool_call_id="call-ssh-file-read-output",
+        result=ToolEnvelope(
+            success=True,
+            output={"content": "incident triage"},
+            metadata={
+                "path": "/home/stephen/Scripts/Harness-Redo/temp/incident_triage.txt",
+                "host": "192.168.1.89",
+                "complete_file": True,
+            },
+        ),
+    )
+
+    assert _maybe_clear_missing_input_after_remote_readback(harness, record) is True
+
+    assert "_unresolved_missing_input_file" not in state.scratchpad
+    assert "_missing_input_file_nudged" not in state.scratchpad
+    assert "missing_required_input_file_blocker_cleared_by_ssh_file_read" in runlog_events
 
 
 def test_missing_requested_output_file_nudge_only_emits_once(tmp_path) -> None:

@@ -407,6 +407,93 @@ def test_task_complete_remote_mutation_block_surfaces_exact_ssh_file_read_hint()
     }
 
 
+def test_task_complete_remote_binary_mutation_requests_presence_probe() -> None:
+    state = LoopState(cwd=".")
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.63",
+        "user": "root",
+        "guessed_paths": ["/usr/share/keyrings/grafana.gpg"],
+    }
+
+    blocked = asyncio.run(task_complete("done", state=state, harness=None))
+
+    action = blocked["metadata"]["next_required_action"]
+    assert blocked["success"] is False
+    assert action["tool_names"] == ["ssh_exec"]
+    assert action["required_arguments"] == {
+        "host": "192.168.1.63",
+        "user": "root",
+        "command": "test -s /usr/share/keyrings/grafana.gpg && sha256sum /usr/share/keyrings/grafana.gpg",
+    }
+    assert "binary or key file" in blocked["error"]
+
+
+def test_presence_hash_probe_clears_binary_remote_requirement() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.63",
+        "user": "root",
+        "guessed_paths": ["/usr/share/keyrings/grafana.gpg"],
+    }
+
+    tool_result_artifact_updates._handle_remote_mutation_verifier_result(
+        service,
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "stdout": "abc123  /usr/share/keyrings/grafana.gpg\n",
+                "stderr": "",
+                "exit_code": 0,
+            },
+        ),
+        arguments={
+            "host": "192.168.1.63",
+            "user": "root",
+            "command": "test -s /usr/share/keyrings/grafana.gpg && sha256sum /usr/share/keyrings/grafana.gpg",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_ssh_file_read_returns_binary_metadata_on_decode_failure(monkeypatch) -> None:
+    async def _fake_run_ssh_command(**kwargs):
+        payload = {
+            "ok": True,
+            "path": "/usr/share/keyrings/grafana.gpg",
+            "bytes": 4,
+            "sha256": "abc123",
+            "content": "",
+            "truncated": False,
+            "encoding": "utf-8",
+            "binary": True,
+            "decode_error": "invalid start byte",
+            "message": "Remote file is not valid text for the requested encoding; returning metadata only.",
+        }
+        return {
+            "success": True,
+            "output": {"stdout": json.dumps(payload), "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(ssh_files.network, "run_ssh_command", _fake_run_ssh_command)
+
+    result = asyncio.run(
+        ssh_files.ssh_file_read(
+            target="root@192.168.1.63",
+            path="/usr/share/keyrings/grafana.gpg",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["output"]["binary"] is True
+    assert result["output"]["content"] == ""
+    assert result["metadata"]["sha256"] == "abc123"
+
+
 def test_ssh_file_read_can_fail_on_max_size_when_truncation_disabled(monkeypatch) -> None:
     async def _fake_run_ssh_command(**kwargs):
         payload = {

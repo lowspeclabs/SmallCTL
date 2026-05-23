@@ -181,6 +181,45 @@ def test_chat_mode_tools_hides_index_queries_until_an_index_exists(tmp_path) -> 
     assert exposure["names"] == ["file_read"]
 
 
+def test_chat_local_execute_exposes_finalize_for_ready_write_session(tmp_path) -> None:
+    harness = _real_registry_harness(
+        tmp_path,
+        task="Build a Python script at ./temp/text_chunker.py. Run Script when done.",
+    )
+    harness.state.write_session = WriteSession(
+        write_session_id="ws_ready",
+        write_target_path="./temp/text_chunker.py",
+        write_session_mode="chunked_author",
+        write_sections_completed=["main_file"],
+        write_next_section="",
+        status="open",
+    )
+
+    names = set(_tool_names(chat_mode_tools(harness)))
+
+    assert "finalize_write_session" in names
+
+
+def test_chat_repair_exposes_finalize_for_ready_write_session(tmp_path) -> None:
+    harness = _real_registry_harness(
+        tmp_path,
+        task="continue fixing ./temp/text_chunker.py",
+    )
+    harness.state.current_phase = "repair"
+    harness.state.write_session = WriteSession(
+        write_session_id="ws_repair",
+        write_target_path="./temp/text_chunker.py",
+        write_session_mode="chunked_author",
+        write_sections_completed=["main_file"],
+        write_next_section="",
+        status="open",
+    )
+
+    names = set(_tool_names(chat_mode_tools(harness)))
+
+    assert "finalize_write_session" in names
+
+
 def test_chat_mode_tools_exposes_ssh_for_active_remote_handoff(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"

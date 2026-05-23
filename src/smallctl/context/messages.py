@@ -11,8 +11,9 @@ from .rendering import render_shell_failure, render_shell_output
 _LISTING_PREVIEW_ENTRY_LIMIT = 50
 _ARTIFACT_PREVIEW_CHAR_LIMIT = 4000
 _SHELL_EXEC_INLINE_CHAR_LIMIT = 1600
-_REUSED_ARTIFACT_INLINE_CHAR_LIMIT = 4096
-_REUSED_ARTIFACT_INLINE_LINE_LIMIT = 100
+_REUSED_ARTIFACT_INLINE_CHAR_LIMIT = 24000
+_REUSED_ARTIFACT_INLINE_LINE_LIMIT = 500
+_FILE_READ_PREVIEW_LINE_LIMIT = 300
 _WRITE_OUTPUT_KEYWORDS = (
     "save",
     "write",
@@ -162,6 +163,9 @@ def format_compact_tool_message(
     full_file_preview_chars: int | None = None,
 ) -> str:
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    local_mutation_message = _format_local_file_mutation_message(artifact, result, metadata=metadata)
+    if local_mutation_message:
+        return local_mutation_message
     mutation_message = _format_ssh_file_mutation_message(artifact, result, metadata=metadata)
     if mutation_message:
         return mutation_message
@@ -169,6 +173,13 @@ def format_compact_tool_message(
         return _format_shell_exec_message(artifact, result, request_text=request_text)
 
     msg = f"Tool output captured as Artifact {artifact.artifact_id} ({artifact.size_bytes} bytes)."
+    file_status_header = _file_read_status_header(
+        artifact,
+        metadata=metadata,
+        inline_full_file=inline_full_file,
+        full_file_preview_chars=full_file_preview_chars,
+        result=result,
+    )
     complete_file = bool(metadata.get("complete_file"))
     total_lines = metadata.get("total_lines")
     file_text = ""
@@ -180,17 +191,55 @@ def format_compact_tool_message(
 
     if file_text:
         line_label = f"{total_lines} lines" if isinstance(total_lines, int) else "the full file"
+        file_lines = file_text.splitlines()
         if inline_full_file:
-            msg = (
-                f"{msg}\n\nFull file captured ({line_label}).\n\nfull_file_content:\n"
-                f"{file_text}"
-            )
+            if len(file_lines) <= 500:
+                msg = (
+                    f"{msg}{file_status_header}\n\nFull file captured ({line_label}).\n\nfull_file_content:\n"
+                    f"{file_text}"
+                )
+            else:
+                truncated_text = "\n".join(file_lines[:490])
+                file_status_header = _file_read_status_header(
+                    artifact,
+                    metadata=metadata,
+                    inline_full_file=inline_full_file,
+                    full_file_preview_chars=full_file_preview_chars,
+                    result=result,
+                    force_display_preview_truncated=True,
+                )
+                msg = (
+                    f"{msg}{file_status_header}\n\nFile captured ({line_label}). Showing first 490 lines.\n\n"
+                    f"file_content_preview:\n{truncated_text}\n\n"
+                    f"... display preview truncated at 490/{len(file_lines)} lines. "
+                    f"Use `artifact_read(artifact_id='{artifact.artifact_id}')` for the rest."
+                )
         else:
-            preview_limit = full_file_preview_chars or 600
-            preview = file_text
-            if len(preview) > preview_limit:
-                preview = f"{preview[:preview_limit].rstrip()}..."
-            msg = f"{msg}\n\nFull file captured ({line_label}).\n\nPreview:\n{preview}"
+            display_preview_truncated = False
+            if full_file_preview_chars is not None:
+                preview = file_text
+                if len(preview) > full_file_preview_chars:
+                    preview = f"{preview[:full_file_preview_chars].rstrip()}..."
+                    display_preview_truncated = True
+                preview_note = "Preview"
+            else:
+                display_preview_truncated = len(file_lines) > _FILE_READ_PREVIEW_LINE_LIMIT
+                preview = "\n".join(file_lines[:_FILE_READ_PREVIEW_LINE_LIMIT])
+                preview_note = (
+                    f"Preview (first {_FILE_READ_PREVIEW_LINE_LIMIT} of {len(file_lines)} lines)"
+                    if display_preview_truncated
+                    else "Preview"
+                )
+            if display_preview_truncated and "display_preview_truncated=true" not in file_status_header:
+                file_status_header = _file_read_status_header(
+                    artifact,
+                    metadata=metadata,
+                    inline_full_file=inline_full_file,
+                    full_file_preview_chars=full_file_preview_chars,
+                    result=result,
+                    force_display_preview_truncated=True,
+                )
+            msg = f"{msg}{file_status_header}\n\nFull file captured ({line_label}).\n\n{preview_note}:\n{preview}"
     elif metadata.get("source_artifact_id") and isinstance(result.output, str):
         preview = _preview_result_text(result.output)
         if preview:
@@ -205,6 +254,117 @@ def format_compact_tool_message(
     if hint:
         msg = f"{msg}\n\n{hint}"
     return msg
+
+
+def _file_read_status_header(
+    artifact: ArtifactRecord,
+    *,
+    metadata: dict[str, object],
+    inline_full_file: bool,
+    full_file_preview_chars: int | None,
+    result: ToolEnvelope,
+    force_display_preview_truncated: bool = False,
+) -> str:
+    tool_name = str(artifact.kind or artifact.tool_name or "").strip()
+    if tool_name not in {"file_read", "ssh_file_read"}:
+        return ""
+    path = str(metadata.get("path") or artifact.source or "").strip()
+    source_path = str(metadata.get("source_path") or "").strip()
+    read_from_staging = bool(metadata.get("read_from_staging") or metadata.get("staged_only"))
+    complete_file = bool(metadata.get("complete_file"))
+    file_content_truncated = bool(metadata.get("truncated"))
+    total_lines = metadata.get("total_lines")
+    line_start = metadata.get("line_start")
+    line_end = metadata.get("line_end")
+    display_preview_truncated = force_display_preview_truncated
+    if not display_preview_truncated and not inline_full_file:
+        output = result.output
+        if tool_name == "ssh_file_read" and isinstance(output, dict):
+            text = str(output.get("content") or "")
+        else:
+            text = output if isinstance(output, str) else ""
+        if full_file_preview_chars is not None:
+            display_preview_truncated = bool(text and len(text.rstrip()) > full_file_preview_chars)
+        else:
+            display_preview_truncated = bool(text and len(text.rstrip().splitlines()) > _FILE_READ_PREVIEW_LINE_LIMIT)
+    lines = [
+        "",
+        "",
+        "FILE READ STATUS:",
+        f"path={path or '(unknown)'}",
+    ]
+    if source_path and source_path != path:
+        lines.append(f"source_path={source_path}")
+    if read_from_staging:
+        session_id = str(metadata.get("write_session_id") or "").strip()
+        detail = f"true; write_session_id={session_id}" if session_id else "true"
+        lines.append(f"read_from_active_write_session_staging={detail}")
+    lines.extend(
+        [
+            f"complete_file={'true' if complete_file else 'false'}",
+            f"display_preview_truncated={'true' if display_preview_truncated else 'false'}",
+            f"file_content_truncated={'true' if file_content_truncated else 'false'}",
+            f"artifact_id={artifact.artifact_id}",
+        ]
+    )
+    if isinstance(line_start, int) or isinstance(line_end, int) or isinstance(total_lines, int):
+        lines.append(f"lines={line_start}-{line_end} of {total_lines}")
+    if display_preview_truncated and not file_content_truncated:
+        lines.append(
+            "NOTE: The file itself was not truncated; only this chat preview was shortened. "
+            "Use artifact_read on this artifact to inspect more content."
+        )
+    return "\n".join(lines)
+
+
+def _format_local_file_mutation_message(
+    artifact: ArtifactRecord,
+    result: ToolEnvelope,
+    *,
+    metadata: dict[str, object],
+) -> str:
+    tool_name = str(artifact.kind or artifact.tool_name or "").strip()
+    if not result.success or tool_name not in {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
+        return ""
+
+    path = str(metadata.get("path") or artifact.source or "").strip()
+    if tool_name == "file_write":
+        lines = [f"Local file written: {path or 'local file'}"]
+    elif tool_name == "file_append":
+        lines = [f"Local file appended: {path or 'local file'}"]
+    elif tool_name in {"file_patch", "ast_patch"}:
+        lines = [f"Local file patched: {path or 'local file'}"]
+    else:
+        lines = [f"Local file deleted: {path or 'local file'}"]
+
+    changed = metadata.get("changed")
+    if isinstance(changed, bool):
+        lines.append(f"changed: {'yes' if changed else 'no'}")
+
+    bytes_written = metadata.get("bytes_written")
+    if bytes_written in (None, ""):
+        bytes_written = metadata.get("bytes")
+    if bytes_written not in (None, ""):
+        lines.append(f"bytes_written: {bytes_written}")
+
+    for key in ("actual_occurrences", "expected_occurrences"):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            lines.append(f"{key}: {value}")
+
+    staging_path = str(metadata.get("staging_path") or "").strip()
+    if staging_path:
+        lines.append(f"staging_path: {staging_path}")
+
+    session_id = str(metadata.get("write_session_id") or "").strip()
+    if session_id:
+        lines.append(f"write_session_id: {session_id}")
+    if bool(metadata.get("staged_only")):
+        lines.append("persisted_to_target: no; staged_only=true")
+    elif tool_name != "file_delete":
+        lines.append("persisted_to_target: yes")
+
+    return "\n".join(lines)
 
 
 def _format_ssh_file_mutation_message(
@@ -336,6 +496,8 @@ def _format_shell_exec_message(
 def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str | None = None) -> str:
     summary = artifact.summary or artifact.source or artifact.kind or "cached artifact"
     normalized_tool = str(tool_name or "").strip().lower()
+    if artifact.kind in {"file_read", "ssh_file_read"}:
+        return _format_reused_file_read_message(artifact, summary=summary)
     inline_content = _small_complete_artifact_content(artifact)
     if inline_content:
         path = str(artifact.source or artifact.metadata.get("path") or "").strip()
@@ -352,16 +514,34 @@ def format_reused_artifact_message(artifact: ArtifactRecord, *, tool_name: str |
             "This evidence is already visible in context, so do not print it again. "
             "Synthesize the answer from it or call `task_complete(message='...')` if you are finished."
         )
-    if artifact.kind == "file_read":
-        path = str(artifact.source or artifact.metadata.get("path") or artifact.content_path or "").strip()
-        path_note = f" for `{path}`" if path else ""
-        return (
-            f"Reused Artifact {artifact.artifact_id}: {summary}{path_note}. "
-            "You already have the full file evidence in context. "
-            "Do not call `file_read` again on the same path in this repair cycle unless a new repair-cycle gate explicitly requires it. "
-            "Work from this artifact, patch the file, or use `artifact_read` if you need paging."
-        )
     return f"Reused Artifact {artifact.artifact_id}: {summary}"
+
+
+def _format_reused_file_read_message(artifact: ArtifactRecord, *, summary: str) -> str:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    path = str(artifact.source or metadata.get("path") or artifact.content_path or "").strip()
+    path_note = f" for `{path}`" if path else ""
+    complete_file = bool(metadata.get("complete_file"))
+    file_content_truncated = bool(metadata.get("truncated"))
+    total_lines = metadata.get("total_lines")
+    line_start = metadata.get("line_start")
+    line_end = metadata.get("line_end")
+    lines = [
+        f"Reused Artifact {artifact.artifact_id}: {summary}{path_note}.",
+        "FILE READ CACHE STATUS:",
+        f"complete_file={'true' if complete_file else 'false'}",
+        f"file_content_truncated={'true' if file_content_truncated else 'false'}",
+    ]
+    if isinstance(line_start, int) or isinstance(line_end, int) or isinstance(total_lines, int):
+        lines.append(f"lines={line_start}-{line_end} of {total_lines}")
+    if complete_file and not file_content_truncated:
+        lines.append(
+            "The full file was already captured; any prompt preview shortening is transcript compaction, "
+            "not missing file content. Patch, verify, or move on instead of rereading the same path."
+        )
+    else:
+        lines.append("Use artifact_read or start_line/end_line only if you need lines not already read.")
+    return "\n".join(lines)
 
 
 def _small_complete_artifact_content(artifact: ArtifactRecord) -> str:

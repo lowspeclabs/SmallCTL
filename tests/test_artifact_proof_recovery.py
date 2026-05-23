@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 from smallctl.context import format_reused_artifact_message
 from smallctl.graph.chat_progress import build_repeated_tool_loop_interrupt_payload
-from smallctl.graph.state import PendingToolCall
+from smallctl.graph.state import PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_execution_recovery import handle_repeated_tool_loop
+from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
 
 
@@ -78,6 +79,52 @@ def test_repeated_missing_artifact_loop_injects_non_synthesis_nudge() -> None:
     assert recovery_message.metadata["recovery_kind"] == "artifact_missing_evidence"
     assert "The artifact you requested, `E-A0001`, does not exist in this session." in recovery_message.content
     assert "cannot verify the claim from the current session" in recovery_message.content
+
+
+def test_repeated_successful_shell_exec_is_suppressed_and_steers_to_completion() -> None:
+    harness = _make_harness()
+    harness.state.run_brief.original_task = "Create temp/restart_backoff.py and verify tests pass"
+    pending = PendingToolCall(
+        tool_name="shell_exec",
+        args={"command": "python3 -m pytest temp/restart_backoff.py -v"},
+    )
+    graph_state = SimpleNamespace(
+        pending_tool_calls=[pending],
+        last_tool_results=[
+            ToolExecutionRecord(
+                operation_id="op:shell_exec",
+                tool_name="shell_exec",
+                args=dict(pending.args),
+                tool_call_id=None,
+                result=ToolEnvelope(
+                    success=True,
+                    output={"stdout": "5 passed", "stderr": "", "exit_code": 0},
+                    metadata={"verdict": "pass"},
+                ),
+            )
+        ],
+        thread_id="thread-1",
+    )
+    deps = SimpleNamespace(event_handler=None)
+
+    result = asyncio.run(
+        handle_repeated_tool_loop(
+            harness=harness,
+            graph_state=graph_state,
+            deps=deps,
+            pending=pending,
+            repeat_error="Guard tripped: repeated tool call loop (shell_exec repeated with identical arguments after prior nudge)",
+        )
+    )
+
+    assert result is None
+    assert graph_state.pending_tool_calls == []
+    assert graph_state.last_tool_results == []
+    assert not hasattr(graph_state, "final_result")
+    recovery_message = harness.state.recent_messages[-1]
+    assert recovery_message.metadata["recovery_kind"] == "shell_exec_already_succeeded"
+    assert "already succeeded" in recovery_message.content
+    assert "task_complete" in recovery_message.content
 
 
 def test_missing_artifact_guidance_skips_small_model_specific_sentence_for_9b() -> None:

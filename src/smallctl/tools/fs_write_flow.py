@@ -17,10 +17,11 @@ from .fs_sessions import (
     _repair_cycle_session_id_failure,
     _same_target_path,
     _mark_repeat_patch,
-    _write_session_can_finalize,
     _looks_like_full_script_content,
     _record_file_change,
     _section_name_allows_full_file_finalization,
+    _infer_next_suggested_section,
+    _write_session_should_finalize,
 )
 from .fs_write_sessions import (
     _content_hash,
@@ -176,12 +177,14 @@ def handle_file_write_session(
             content,
         )
         effective_strategy = "replace_section"
-    elif strategy == "overwrite" and not previous_sections:
+    elif strategy == "overwrite":
         updated_content = content
         updated_ranges = {
             normalized_section_name: {"start": 0, "end": len(content)}
         }
         effective_strategy = "overwrite"
+        session.write_sections_completed = []
+        session.write_section_ranges = {}
     else:
         if (
             session.write_session_intent == "patch_existing"
@@ -263,12 +266,30 @@ def handle_file_write_session(
     if (
         normalized_next_section
         and strategy == "overwrite"
-        and not previous_sections
         and _looks_like_full_script_content(content, normalized_section_name)
     ):
         normalized_next_section = ""
 
-    final_chunk = not normalized_next_section and _write_session_can_finalize(session)
+    inferred_next_section = False
+    final_chunk = _write_session_should_finalize(
+        session,
+        section_name=normalized_section_name,
+        next_section_name=normalized_next_section,
+        replace_strategy=strategy,
+        content=content,
+    )
+    if not normalized_next_section and not final_chunk:
+        inferred = _infer_next_suggested_section(session, normalized_section_name)
+        if inferred:
+            normalized_next_section = inferred
+            inferred_next_section = True
+    final_chunk = _write_session_should_finalize(
+        session,
+        section_name=normalized_section_name,
+        next_section_name=normalized_next_section,
+        replace_strategy=strategy,
+        content=content,
+    )
 
     append_overlap_ratio = 0.0
     if effective_strategy == "append" and staged_content and len(content) >= 0.5 * len(staged_content):
@@ -346,7 +367,10 @@ def handle_file_write_session(
 
     msg = f"Section `{normalized_section_name}` written to `{path}`."
     if normalized_next_section:
-        msg += f" Waiting for next section: `{normalized_next_section}`."
+        if inferred_next_section:
+            msg += f" Next section inferred: `{normalized_next_section}`."
+        else:
+            msg += f" Waiting for next section: `{normalized_next_section}`."
     elif final_chunk:
         msg += " Final section candidate recorded. Awaiting verifier."
     else:
@@ -371,6 +395,7 @@ def handle_file_write_session(
             "write_session_status_block": status_block,
             "write_session_finalized": False,
             "write_session_final_chunk": final_chunk,
+            "write_next_section_inferred": inferred_next_section,
             "section_name": normalized_section_name,
             "section_id": str(section_id or normalized_section_name),
             "section_role": str(section_role or ""),

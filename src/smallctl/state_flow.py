@@ -886,26 +886,29 @@ class LoopStateFlowMixin:
                 if should_mark_stale and self._is_execute_repair_transition(detail_payload) and self._artifact_has_failure_semantics(artifact):
                     should_mark_stale = False
             elif reason_label == "verifier_failed":
-                should_mark_stale = (
-                    (
-                        str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
-                        or self._is_optimistic_statement(str(getattr(artifact, "summary", "") or ""))
+                if self._artifact_has_failure_semantics(artifact):
+                    should_mark_stale = False
+                else:
+                    should_mark_stale = (
+                        (
+                            str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                            or self._is_optimistic_statement(str(getattr(artifact, "summary", "") or ""))
+                        )
+                        and self._verifier_failure_related_to_text(
+                            " ".join(
+                                str(part or "")
+                                for part in (
+                                    getattr(artifact, "source", ""),
+                                    getattr(artifact, "summary", ""),
+                                    metadata.get("path", ""),
+                                    metadata.get("command", ""),
+                                    metadata.get("verifier_command", ""),
+                                    metadata.get("verifier_target", ""),
+                                )
+                            ),
+                            detail_payload,
+                        )
                     )
-                    and self._verifier_failure_related_to_text(
-                        " ".join(
-                            str(part or "")
-                            for part in (
-                                getattr(artifact, "source", ""),
-                                getattr(artifact, "summary", ""),
-                                metadata.get("path", ""),
-                                metadata.get("command", ""),
-                                metadata.get("verifier_command", ""),
-                                metadata.get("verifier_target", ""),
-                            )
-                        ),
-                        detail_payload,
-                    )
-                )
             if should_mark_stale:
                 invalidated_artifact_ids.append(normalized_artifact_id)
                 self._mark_lane_stale(
@@ -942,25 +945,28 @@ class LoopStateFlowMixin:
                 if should_mark_stale and self._is_execute_repair_transition(detail_payload) and self._evidence_has_failure_semantics(evidence):
                     should_mark_stale = False
             elif reason_label == "verifier_failed":
-                should_mark_stale = (
-                    (
-                        str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
-                        or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
+                if self._evidence_has_failure_semantics(evidence):
+                    should_mark_stale = False
+                else:
+                    should_mark_stale = (
+                        (
+                            str(metadata.get("verifier_verdict") or "").strip().lower() == "pass"
+                            or self._is_optimistic_statement(str(getattr(evidence, "statement", "") or ""))
+                        )
+                        and not getattr(evidence, "negative", False)
+                        and self._verifier_failure_related_to_text(
+                            " ".join(
+                                str(part or "")
+                                for part in (
+                                    getattr(evidence, "statement", ""),
+                                    getattr(evidence, "source", ""),
+                                    metadata.get("path", ""),
+                                    metadata.get("command", ""),
+                                )
+                            ),
+                            detail_payload,
+                        )
                     )
-                    and not getattr(evidence, "negative", False)
-                    and self._verifier_failure_related_to_text(
-                        " ".join(
-                            str(part or "")
-                            for part in (
-                                getattr(evidence, "statement", ""),
-                                getattr(evidence, "source", ""),
-                                metadata.get("path", ""),
-                                metadata.get("command", ""),
-                            )
-                        ),
-                        detail_payload,
-                    )
-                )
             if should_mark_stale:
                 invalidated_observation_ids.append(evidence_id)
                 self._mark_lane_stale(

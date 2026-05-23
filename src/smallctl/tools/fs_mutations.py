@@ -12,6 +12,7 @@ from .fs_sessions import (
     _repair_cycle_allows_patch,
     _repair_cycle_read_required_metadata,
     _record_file_change,
+    _same_target_path,
 )
 from .fs_write_session_policy import _guard_suspicious_temp_root_path, _guard_write_session_staging_mutation
 from .fs_write_sessions import _resolve
@@ -146,6 +147,40 @@ async def file_delete(
                 "proof_bundle": risk_decision.proof_bundle,
             },
         )
+
+    result_metadata: dict[str, Any] = {"path": str(target)}
+
+    # Abort an active write session targeting this path so the model can start fresh.
+    if state is not None:
+        active_session = getattr(state, "write_session", None)
+        if (
+            active_session is not None
+            and str(getattr(active_session, "status", "") or "").strip().lower() not in {"complete"}
+            and _same_target_path(
+                str(getattr(active_session, "write_target_path", "") or ""), path, cwd
+            )
+        ):
+            staging_path = str(getattr(active_session, "write_staging_path", "") or "").strip()
+            if staging_path:
+                try:
+                    Path(staging_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            from ..write_session_fsm import archive_interrupted_write_session
+            archive_interrupted_write_session(
+                state,
+                reason="file_delete_aborted_session",
+            )
+            state.write_session = None
+            result_metadata.update(
+                {
+                    "write_session_id": str(
+                        getattr(active_session, "write_session_id", "") or ""
+                    ).strip(),
+                    "reason": "active_write_session_aborted_by_delete",
+                }
+            )
+
     try:
         if not target.exists():
             return fail(f"File does not exist: {target}")
@@ -153,4 +188,4 @@ async def file_delete(
     except Exception as exc:
         return fail(f"Unable to delete file: {exc}")
     _record_file_change(state, target)
-    return ok("deleted", metadata={"path": str(target)})
+    return ok("deleted", metadata=result_metadata)

@@ -5,7 +5,10 @@ import json
 import logging
 from typing import Any
 
-from textual.widgets import Button
+from textual.app import ComposeResult
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, Static
 
 from ..chat_sessions import load_chat_session_state, load_chat_session_summaries
 from ..logging_utils import log_kv
@@ -72,6 +75,7 @@ class SmallctlAppActionsMixin:
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
             bridge.cancel(source="ui_stop_button")
+            bridge.abort()
         elif self.harness is not None:
             self.harness.cancel(source="ui_stop_button")
         if self.active_task and not self.active_task.done():
@@ -347,8 +351,13 @@ class SmallctlAppActionsMixin:
         if self.active_task and not self.active_task.done():
             await self.action_cancel_task()
             return
-        self.closed_by_ctrl_c = True
-        self.exit()
+
+        def _on_result(quit: bool | None) -> None:
+            if quit:
+                self.closed_by_ctrl_c = True
+                self.exit()
+
+        await self.push_screen(QuitConfirmScreen(), callback=_on_result)
 
     async def action_copy_last_system_message(self) -> None:
         console = self._get_console()
@@ -468,3 +477,29 @@ class SmallctlAppActionsMixin:
         if self.history_index == len(self.task_history):
             return ""
         return self.task_history[self.history_index]
+
+
+class QuitConfirmScreen(ModalScreen[bool]):
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="quit-confirm-dialog"):
+            with Vertical():
+                yield Static("Quit smallctl?", id="quit-confirm-title")
+                with Horizontal(id="quit-confirm-buttons"):
+                    yield Button("Quit", id="quit-confirm-yes", variant="error")
+                    yield Button("Cancel", id="quit-confirm-no", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#quit-confirm-no", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "quit-confirm-yes":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)

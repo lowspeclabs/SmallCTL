@@ -46,3 +46,10 @@ temp/
 !evals/test_time_scaling/*.yml
 !evals/test_time_scaling/*.jsonl
 !evals/test_time_scaling/README.md
+
+# Generated artifacts
+*.swp
+*.swo
+*.patch
+*.egg-info/
+fizzbuzz.py

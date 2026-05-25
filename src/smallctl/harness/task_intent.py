@@ -131,6 +131,25 @@ def infer_requested_tool_name(harness: Any, task: str) -> str:
         if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
             return "shell_exec"
         return "shell_exec"
+    from .task_classifier import task_is_local_coding_target
+    if task_is_local_coding_target(task):
+        if looks_like_write_patch_request(task):
+            return "file_patch"
+        if looks_like_write_file_request(task) or looks_like_author_write_request(task):
+            return "write_file"
+        if "file_patch" in text or "patch file" in text:
+            return "file_patch"
+        if "ast_patch" in text or "structural patch" in text:
+            return "ast_patch"
+        if any(marker in text for marker in _MEMORY_MARKERS):
+            return "memory_update"
+        if "read_file" in text or "cat" in text:
+            return "read_file"
+        if "write_file" in text:
+            return "write_file"
+        if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
+            return "shell_exec"
+        return ""
     remote_task = bool(
         _REMOTE_TASK_HINT_RE.search(text)
         or _IPV4_RE.search(text)

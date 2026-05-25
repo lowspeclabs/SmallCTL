@@ -120,6 +120,7 @@ class UIStatusSnapshot:
     token_usage: int = 0
     token_total: int = 0
     token_limit: int = 0
+    context_window: int = 0
     api_errors: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +139,7 @@ class UIStatusSnapshot:
             "token_usage": self.token_usage,
             "token_total": self.token_total,
             "token_limit": self.token_limit,
+            "context_window": self.context_window,
             "api_errors": self.api_errors,
         }
 
@@ -163,6 +165,7 @@ class UIStatusSnapshot:
         token_usage = 0
         token_total = 0
         token_limit = 0
+        context_window = 0
 
         if api_errors is None and harness is not None:
             api_errors = int(getattr(harness.state, "scratchpad", {}).get("_ui_api_error_count", 0) or 0)
@@ -197,6 +200,7 @@ class UIStatusSnapshot:
                 or getattr(guards, "max_tokens", 0)
                 or 0
             )
+            context_window = int(server_context_limit or 0)
 
         return cls(
             model=model,
@@ -213,5 +217,6 @@ class UIStatusSnapshot:
             token_usage=max(0, token_usage),
             token_total=max(0, token_total),
             token_limit=max(0, token_limit),
+            context_window=max(0, context_window),
             api_errors=max(0, int(api_errors)),
         )

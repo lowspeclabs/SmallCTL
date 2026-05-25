@@ -3,6 +3,7 @@ from __future__ import annotations
 from .state_records import (
     _coerce_artifact_record,
     _coerce_background_process_record,
+    _coerce_challenge_progress_state,
     _coerce_claim_record,
     _coerce_context_brief,
     _coerce_conversation_message,

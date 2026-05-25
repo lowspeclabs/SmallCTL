@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from ..guards import is_small_model_name
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType, UIStatusSnapshot, compute_activity_for_event
+from ..challenge_progress import challenge_progress_report
 from ..remote_scope import (
     has_any_session_ssh_target,
     handoff_supports_remote_continuation,
@@ -28,7 +29,13 @@ from ..state import (
 )
 from ..normalization import dedupe_keep_tail
 from ..tools import build_registry
-from ..tools.profiles import MUTATE_PROFILE, NETWORK_PROFILE, NETWORK_READ_PROFILE, classify_tool_profiles
+from ..tools.profiles import (
+    MUTATE_PROFILE,
+    NETWORK_PROFILE,
+    NETWORK_RAW_PROFILE,
+    NETWORK_READ_PROFILE,
+    classify_tool_profiles,
+)
 from .task_intent import completion_next_action, extract_intent_state, next_action_for_task
 from .tool_message_compaction import trim_recent_messages_window
 
@@ -136,6 +143,9 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     result["step_count"] = self.state.step_count
     result["inactive_steps"] = self.state.inactive_steps
     result["token_usage"] = self.state.token_usage
+    challenge_progress = challenge_progress_report(self.state)
+    if challenge_progress:
+        result["challenge_progress"] = challenge_progress
     _inject_recovery_metrics(result, self.state)
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
@@ -156,8 +166,22 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 if not postmortem_summary:
                     postmortem_summary = str(result.get("assistant") or "").strip()
             postmortem_summary = postmortem_summary or "No reason provided"
+            scratchpad = getattr(self.state, "scratchpad", {}) or {}
+            status = result.get("status", "unknown")
+            stall_classification = None
+            if status == "timeout":
+                if scratchpad.get("_first_tool_dispatch_complete_time") is None:
+                    if scratchpad.get("_first_assistant_text_time") is not None:
+                        stall_classification = "timeout_pre_tool_after_text"
+                    else:
+                        stall_classification = "timeout_no_first_tool"
+                else:
+                    stall_classification = "timeout_after_progress"
+            error_type = result.get("error_type", "")
+            if error_type == "backend_stream_failure":
+                stall_classification = "backend_failed"
             summary_payload = {
-                "final_task_status": result.get("status", "unknown"),
+                "final_task_status": status,
                 "total_tool_calls": self.state.step_count,
                 "guard_trips": sum(
                     1 for e in (getattr(self.state, "recent_errors", []) or [])
@@ -166,7 +190,11 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "postmortem_summary": postmortem_summary,
                 "latest_task_id": task_id,
                 "latest_task_summary_path": task_summary_path,
+                "stall_classification": stall_classification,
+                "error_type": error_type,
             }
+            if challenge_progress:
+                summary_payload["challenge_progress"] = challenge_progress
             summary_path = self.run_logger.run_dir / "task_summary.json"
             schedule = getattr(self, "_schedule_background_persistence", None)
             if callable(schedule):
@@ -489,8 +517,14 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
         profiles = classify_tool_profiles(task)
         handoff = self.state.scratchpad.get("_last_task_handoff")
         prior_profiles = handoff.get("active_tool_profiles") if isinstance(handoff, dict) else None
-        if str(getattr(self.state, "task_mode", "") or "").strip().lower() == "remote_execute":
+        task_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
+        if task_mode == "remote_execute":
             profiles.add(NETWORK_PROFILE)
+        elif task_mode == "local_execute":
+            # Coding/local tasks do not need SSH tools; removing them prevents
+            # small models from hallucinating remote operations during local work.
+            profiles.discard(NETWORK_PROFILE)
+            profiles.discard(NETWORK_RAW_PROFILE)
         resolved_remote = self.state.scratchpad.get("_resolved_remote_followup")
         if isinstance(resolved_remote, dict) and resolved_remote:
             profiles.add(NETWORK_PROFILE)

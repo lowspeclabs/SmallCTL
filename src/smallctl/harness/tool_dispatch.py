@@ -341,6 +341,18 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
 
 
 async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any]) -> ToolEnvelope:
+    # Hard block: SSH tools are never valid for local coding tasks.
+    task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
+    if (
+        tool_name in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
+        and task_mode == "local_execute"
+    ):
+        return ToolEnvelope(
+            success=False,
+            error="SSH tools are not available for local coding tasks. Use local file_write, file_read, and shell_exec only.",
+            metadata={"tool_name": tool_name, "blocked_reason": "local_coding_ssh_block"},
+        )
+
     cached = maybe_reuse_file_read(harness, tool_name=tool_name, args=args)
     if cached is not None:
         return cached
@@ -385,7 +397,28 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
     if patch_first is not None:
         return patch_first
 
-    return await harness.dispatcher.dispatch(tool_name, args)
+    # Terminal-state breaker: block exploratory read-only tools when terminal readiness is reached
+    from ..challenge_progress import terminal_readiness_state
+    if terminal_readiness_state(harness.state):
+        if tool_name in {"dir_list", "file_read", "loop_status", "artifact_read", "artifact_grep", "artifact_print"}:
+            return ToolEnvelope(
+                success=False,
+                status="blocked",
+                error="Terminal readiness reached. The required artifact exists and is verified. Stop exploratory reads and call task_complete or task_fail.",
+                metadata={
+                    "tool_name": tool_name,
+                    "reason": "terminal_readiness_breaker",
+                    "active_mitigation": "terminal_state_block",
+                },
+            )
+
+    result = await harness.dispatcher.dispatch(tool_name, args)
+    if getattr(result, "success", False) or (isinstance(result, dict) and result.get("success")):
+        import time
+        scratchpad = harness.state.scratchpad
+        if "_first_tool_dispatch_complete_time" not in scratchpad:
+            scratchpad["_first_tool_dispatch_complete_time"] = time.time()
+    return result
 
 
 def attempt_tool_sanitization(harness: Any, tool_name: str) -> str | None:

@@ -8,6 +8,7 @@ from typing import Any
 
 from ..models.conversation import ConversationMessage
 from ..models.tool_result import ToolEnvelope
+from ..challenge_progress import record_code_change
 from ..normalization import dedupe_keep_tail
 from ..recovery_metrics import increment_metric
 from ..state_schema import MemoryEntry
@@ -1844,6 +1845,12 @@ def apply_artifact_success_outcome(
                     tool_name=tool_name,
                     paths=[mutated_path],
                 )
+            record_code_change(
+                service.harness.state,
+                tool_name=tool_name,
+                path=mutated_path,
+                changed=True,
+            )
             _record_touched_symbols_from_mutation(
                 service,
                 tool_name=tool_name,

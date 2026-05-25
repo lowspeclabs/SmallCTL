@@ -153,7 +153,7 @@ def normalize_ssh_target(*, host: str, user: str | None = None) -> tuple[str, st
     bare_host = bare_host.strip()
     if not embedded_user or not bare_host:
         raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
-    if user_text is not None:
+    if user_text is not None and user_text != embedded_user:
         raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
     return bare_host, embedded_user
 

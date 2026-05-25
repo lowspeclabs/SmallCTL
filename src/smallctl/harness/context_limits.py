@@ -99,6 +99,24 @@ def apply_server_context_limit(
         harness.state.recent_message_limit = harness.context_policy.recent_message_limit
         harness._harness_kwargs["context_limit"] = harness.server_context_limit
 
+    # One-time terminal banner so headless users see their context budget.
+    # Skip in TUI mode (event_handler is set) to avoid corrupting the terminal.
+    if (
+        not getattr(harness, "_context_banner_printed", False)
+        and getattr(harness, "event_handler", None) is None
+    ):
+        harness._context_banner_printed = True
+        total_ctx = harness.server_context_limit or 0
+        free_ctx = harness.context_policy.max_prompt_tokens or 0
+        if total_ctx > 0:
+            import sys
+
+            sys.stderr.write(
+                f"[CONTEXT] {free_ctx:,} / {total_ctx:,} tokens available "
+                f"({free_ctx / total_ctx * 100:.0f}% free)\n"
+            )
+            sys.stderr.flush()
+
     harness._runlog(
         "context_limit",
         "server context limit applied",
@@ -128,5 +146,5 @@ def derive_prompt_budget_from_context_limit(
         return build_request_budget(limit).effective_prompt_budget
     # Use a fixed reserve for completion/tools rather than a percentage,
     # so large context windows are not disproportionately penalized.
-    reserve = min(2048, limit // 4)
+    reserve = min(4096, limit // 8)
     return max(64, limit - reserve)

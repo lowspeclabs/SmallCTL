@@ -378,7 +378,7 @@ def register_operational_tools(
                     "required": ["url", "output_path"],
                     "additionalProperties": False,
                 },
-                handler=http.file_download,
+                handler=inject_state(http.file_download),
                 category="http",
                 risk="high",
                 allowed_modes={"loop"},

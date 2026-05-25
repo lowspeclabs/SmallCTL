@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..docker_retry_normalization import docker_retry_family
-from ..guards import is_four_b_or_under_model_name
+from ..guards import is_four_b_or_under_model_name, is_seven_b_or_under_model_name
 from ..repeat_loop_policy import strict_identical_limit, strict_window_limit
 from ..state import json_safe_value
 from .state import PendingToolCall
@@ -245,7 +245,9 @@ def _model_name_for_loop_guard(harness: Any) -> str:
 
 
 def _directive_hint_for_repeated_tool(harness: Any, pending: PendingToolCall) -> str:
-    if not is_four_b_or_under_model_name(_model_name_for_loop_guard(harness)):
+    model_name = _model_name_for_loop_guard(harness)
+    is_small = is_seven_b_or_under_model_name(model_name)
+    if not is_small and not is_four_b_or_under_model_name(model_name):
         return ""
 
     args = dict(getattr(pending, "args", {}) or {})
@@ -281,6 +283,16 @@ def _directive_hint_for_repeated_tool(harness: Any, pending: PendingToolCall) ->
         return (
             "Directive Hint: Stop rerunning the same command. Use the existing command output or artifact; "
             "only run a different focused command if it will produce new evidence."
+        )
+    if tool_name == "ssh_exec":
+        return (
+            "Directive Hint: Stop rerunning similar SSH commands. Combine remaining discovery into a single `ssh_exec` using `&&` or `;`. "
+            "Prefer `ssh_file_read` over `ssh_exec cat` for reading remote files. Then synthesize findings and move forward."
+        )
+    if tool_name == "ssh_file_read":
+        return (
+            f"Directive Hint: Stop re-reading the same remote file{path_note}. Use the evidence already in Working Memory. "
+            "If you need to verify state, run one focused `ssh_exec` command. Otherwise synthesize and proceed."
         )
     return (
         f"Directive Hint: Stop repeating `{tool_name}` with near-identical arguments. Use the current evidence and choose a different next action: "
@@ -798,6 +810,13 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
         return None
     if _ssh_file_read_after_remote_mutation_is_progress(harness, pending):
         return None
+    from ..challenge_progress import terminal_readiness_state
+    if terminal_readiness_state(getattr(harness, "state", None)):
+        if pending.tool_name in {"dir_list", "file_read", "loop_status", "artifact_read", "artifact_grep", "artifact_print"}:
+            return _format_repeated_tool_loop_message(
+                harness, pending,
+                "Guard tripped: terminal readiness reached. Stop exploratory reads and call task_complete or task_fail."
+            )
     cwd = _cwd_for_fingerprint(harness)
     history = _tool_attempt_history(harness)
     candidate = {

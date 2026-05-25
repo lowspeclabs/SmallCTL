@@ -82,6 +82,11 @@ def fama_hidden_tools_for_exposure(
             if no_progress >= 2:
                 for read_tool in _READ_LOOP_TOOLS:
                     if read_tool in exported:
+                        # Don't hide file_read if a repair cycle is actively
+                        # waiting for a read snapshot; hiding it would deadlock
+                        # the recovery.
+                        if read_tool == "file_read" and getattr(state, "repair_cycle_id", None):
+                            continue
                         hidden_tools.add(read_tool)
                 # Also suppress meta read tools that don't mutate
                 for meta_tool in ("artifact_grep", "artifact_print", "log_note"):

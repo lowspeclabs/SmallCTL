@@ -21,9 +21,10 @@ def render_subtask_checklist(state: Any, *, max_items: int = 12) -> str:
         return ""
 
     lines: list[str] = []
-    goal = _goal_text(state)
+    raw_goal = _raw_goal_text(state)
+    goal = _clip_line(raw_goal, limit=80) if raw_goal else ""
     if goal:
-        lines.append(f"Task Objective: {goal}")
+        lines.append(f"Goal Objective: {goal}")
 
     # Separate synthetic roots from real subtasks.
     # When real subtasks exist we skip synthetic roots so the checklist
@@ -35,22 +36,28 @@ def render_subtask_checklist(state: Any, *, max_items: int = 12) -> str:
 
     rendered_tasks = 0
     skipped_tasks = len(synthetic_roots) if real_tasks else 0
-    goal_key = _normalize_title(goal)
+    goal_key = _normalize_title(raw_goal)
     seen_titles: set[str] = set()
     for task in tasks_to_render:
+        title = str(getattr(task, "title", "") or "").strip()
+        if title and title not in _GENERIC_TITLES:
+            dedup_key = _normalize_title(title)
+        else:
+            dedup_key = _normalize_title(str(getattr(task, "goal", "") or "").strip())
+        # Dedup real subtasks against the goal, but keep synthetic roots visible
+        # so the second level always shows the current task state.
+        if not _is_synthetic_root(task) and goal_key and dedup_key == goal_key:
+            skipped_tasks += 1
+            continue
+        if dedup_key and dedup_key in seen_titles:
+            skipped_tasks += 1
+            continue
+        if dedup_key:
+            seen_titles.add(dedup_key)
         display_title = _display_title(task)
-        title_key = _normalize_title(display_title)
-        if goal_key and title_key == goal_key:
-            skipped_tasks += 1
-            continue
-        if title_key and title_key in seen_titles:
-            skipped_tasks += 1
-            continue
-        if title_key:
-            seen_titles.add(title_key)
         symbol = _status_symbol(str(getattr(task, "status", "") or "pending"))
-        title = _clip_line(display_title)
-        lines.append(f"  {symbol} {title}")
+        clipped_title = _clip_line(display_title)
+        lines.append(f"  {symbol} {clipped_title}")
         rendered_tasks += 1
 
     result = "\n".join(lines)
@@ -83,7 +90,7 @@ async def emit_subtask_checklist_if_changed(harness: Any, event_handler: Any) ->
         return
     lines = text.splitlines()
     title = ""
-    if lines and lines[0].startswith("Task Objective: "):
+    if lines and lines[0].startswith("Goal Objective: "):
         title = _clip_line(lines[0][16:].strip(), limit=40)
     emit = getattr(harness, "_emit", None)
     if not callable(emit):
@@ -106,17 +113,22 @@ async def emit_subtask_checklist_if_changed(harness: Any, event_handler: Any) ->
     )
 
 
-def _goal_text(state: Any) -> str:
+def _raw_goal_text(state: Any) -> str:
     plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
     if plan is not None:
         text = str(getattr(plan, "goal", "") or "").strip()
         if text:
-            return _clip_line(text, limit=80)
+            return text
     run_brief = getattr(state, "run_brief", None)
     text = str(getattr(run_brief, "current_phase_objective", "") or "").strip()
     if not text:
         text = str(getattr(run_brief, "original_task", "") or "").strip()
-    return _clip_line(text, limit=80) if text else ""
+    return text
+
+
+def _goal_text(state: Any) -> str:
+    raw = _raw_goal_text(state)
+    return _clip_line(raw, limit=80) if raw else ""
 
 
 def _subtask_checklist_digest(state: Any) -> str:
@@ -160,13 +172,32 @@ def _display_title(task: Any) -> str:
     """Return the best human-readable title for a subtask.
 
     When the title is a generic placeholder (e.g. "Complete user task"),
-    fall back to the goal field which contains the actual task description.
+    fall back to a short summary extracted from the goal field.
     """
     title = str(getattr(task, "title", "") or "").strip()
     if title and title not in _GENERIC_TITLES:
         return title
     goal = str(getattr(task, "goal", "") or "").strip()
-    return goal or title or "Untitled task"
+    return _short_summary_from_goal(goal) if goal else title or "Untitled task"
+
+
+def _short_summary_from_goal(text: str, *, max_words: int = 6) -> str:
+    """Extract a concise task name from a verbose goal description.
+
+    Stops at the first preposition/conjunction (at, in, for, with, to,
+    from, on, into, onto, and, or, that, which, by) or after max_words.
+    """
+    words = str(text or "").strip().split()
+    stop_words = {"at", "in", "for", "with", "to", "from", "on", "into", "onto", "and", "or", "that", "which", "by"}
+    result: list[str] = []
+    for word in words:
+        clean = word.strip(".,;:!?").lower()
+        if clean in stop_words and result:
+            break
+        result.append(word)
+        if len(result) >= max_words:
+            break
+    return " ".join(result) if result else str(text or "").strip()
 
 
 def _is_synthetic_root(task: Any) -> bool:

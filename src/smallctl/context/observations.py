@@ -280,8 +280,12 @@ def _is_stale_packet(state: LoopState, packet: ObservationPacket) -> bool:
         if reason == "file_changed" and packet.path:
             if any(_path_match(packet.path, changed) for changed in path_list):
                 return True
-        if reason == "verifier_failed" and packet.kind == "verifier_verdict":
-            return True
+        # NOTE: Removed blanket verifier_failed invalidation.
+        # _observation_staleness (managed in state_flow.py) already handles
+        # invalidating optimistic/passing verifier verdicts with proper path
+        # matching. This blanket check was incorrectly marking *new* successful
+        # test runs as stale because old failures remained in the last-24
+        # invalidation window.
     return False
 
 

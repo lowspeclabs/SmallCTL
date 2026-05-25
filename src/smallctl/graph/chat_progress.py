@@ -296,6 +296,18 @@ def chat_completion_recovery_guard(harness: Any) -> dict[str, str] | None:
     }
 
 
+def build_terminal_state_nudge(harness: Any) -> str | None:
+    from ..challenge_progress import terminal_readiness_state
+    readiness = terminal_readiness_state(harness.state)
+    if not readiness:
+        return None
+    return (
+        "The required artifact exists and verification is complete. "
+        "Next action must be `task_complete` or `task_fail` with a concrete blocker. "
+        "Do not run exploratory read-only tools."
+    )
+
+
 def build_artifact_summary_exit_message(harness: Any, *, artifact_id: str = "") -> str:
     objective = str(getattr(getattr(harness, "state", None), "run_brief", None).original_task or "").strip()
     artifact_note = f" from artifact {artifact_id}" if artifact_id else ""

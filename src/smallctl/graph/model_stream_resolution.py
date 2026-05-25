@@ -97,6 +97,8 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
 
 def _chunk_error_failure_type(details: dict[str, Any] | None) -> str:
     details = details if isinstance(details, dict) else {}
+    if details.get("reason") == "backend_stream_failure":
+        return "backend_stream_failure"
     if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
         return "provider"
     if details.get("reason") == "openrouter_authentication_failed":

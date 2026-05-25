@@ -26,6 +26,10 @@ _BACKGROUND_JOB_TOOL_NAMES = {
     "process_kill",
 }
 _LOOPISH_TOOL_MODES = {"loop", "execute"}
+_LOCAL_CODING_SSH_TOOLS = {
+    "ssh_exec", "ssh_file_read", "ssh_file_write",
+    "ssh_file_patch", "ssh_file_replace_between",
+}
 _RETRYABLE_HIDDEN_TOOL_NAMES = {
     "shell_exec",
     "ssh_exec",
@@ -277,6 +281,13 @@ def _append_retry_tool_exposures(
             and not _has_planning_file_patch_context(harness.state)
         ):
             continue
+        from ..harness.task_classifier import task_is_local_coding_target
+        task_text = ""
+        run_brief = getattr(harness.state, "run_brief", None)
+        if run_brief is not None:
+            task_text = str(getattr(run_brief, "original_task", "") or "")
+        if task_is_local_coding_target(task_text) and tool_name in _LOCAL_CODING_SSH_TOOLS:
+            continue
         schema = _retry_tool_schema(harness, tool_name=tool_name)
         if not isinstance(schema, dict):
             continue
@@ -383,6 +394,13 @@ def filter_tools_for_runtime_state(
         if suppressed_tool and tool_name == suppressed_tool:
             continue
         filtered.append(entry)
+    from ..harness.task_classifier import task_is_local_coding_target
+    task_text = ""
+    run_brief = getattr(state, "run_brief", None)
+    if run_brief is not None:
+        task_text = str(getattr(run_brief, "original_task", "") or "")
+    if task_is_local_coding_target(task_text):
+        filtered = [t for t in filtered if _tool_name(t) not in _LOCAL_CODING_SSH_TOOLS]
     return filtered
 
 

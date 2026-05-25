@@ -32,8 +32,56 @@ class SubtaskLedgerService:
             state.subtask_ledger.active_subtask_id = root.subtask_id
             increment_metric(state, "subtasks_created")
             _runlog(self.harness, "subtask_created", subtask=root)
+            self._maybe_split_compound_task(task_text)
         self._enforce_limits()
         return state.subtask_ledger
+
+    def _maybe_split_compound_task(self, task_text: str) -> None:
+        """Auto-split compound prompts into explicit subtask phases (all models)."""
+        ledger = self.harness.state.subtask_ledger
+        if ledger is None or len(ledger.subtasks) != 1:
+            return
+        text_lower = task_text.lower()
+        compound_markers = {
+            "inspect", "compare", "determine", "analyze", "summarize",
+            "write", "generate", "create", "build", "report",
+            "and then", "followed by", "first ", "next ", "finally ", "after ",
+        }
+        if not any(m in text_lower for m in compound_markers):
+            return
+        # Replace the synthetic root with explicit phase subtasks
+        ledger.subtasks = []
+        phases: list[tuple[str, str, list[str]]] = [
+            (
+                "S1-gather",
+                "Gather evidence",
+                ["Collect all required data, logs, files, or command output needed for the task."],
+            ),
+            (
+                "S1-analyze",
+                "Analyze findings",
+                ["Review gathered evidence and draw conclusions. Do not mutate state yet."],
+            ),
+            (
+                "S1-synthesize",
+                "Synthesize and deliver",
+                ["Produce the final output, write files, or call task_complete with the answer."],
+            ),
+        ]
+        for subtask_id, title, acceptance in phases:
+            subtask = Subtask(
+                subtask_id=subtask_id,
+                title=title,
+                goal=f"{title} for: {task_text}",
+                acceptance=acceptance,
+                status="pending",
+            )
+            ledger.subtasks.append(subtask)
+        # Activate the first phase
+        ledger.subtasks[0].status = "active"
+        ledger.active_subtask_id = ledger.subtasks[0].subtask_id
+        increment_metric(self.harness.state, "subtasks_created", len(phases))
+        _runlog(self.harness, "subtask_auto_split", count=len(phases), task=task_text[:120])
 
     def import_plan_if_needed(self, *, replace_synthetic_root: bool = False) -> None:
         state = self.harness.state
@@ -82,6 +130,11 @@ class SubtaskLedgerService:
             if display_key and (display_key == plan_goal_key or display_key in existing_titles):
                 continue
             status = _status_from_plan_status(str(getattr(step, "status", "") or "pending"))
+            # Never create a new subtask as "done" from a plan step that claims to be
+            # completed. The model often marks steps done prematurely; subtasks should
+            # only reach "done" via verifier pass or task_complete.
+            if status == "done":
+                status = "pending"
             imported.append(
                 Subtask(
                     subtask_id=subtask_id,

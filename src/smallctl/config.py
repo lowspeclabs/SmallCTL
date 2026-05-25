@@ -76,6 +76,8 @@ class SmallctlConfig:
     graph_model_call_timeout_sec: int = 600
     graph_dispatch_tools_timeout_sec: int = 300
     graph_idle_watchdog_sec: int = 300
+    graph_recursion_limit: int = 1024
+    graph_coding_recursion_limit: int = 2048
     needs_human_timeout_sec: int = 600
     restore_graph_state: bool = False
     graph_thread_id: str | None = None
@@ -281,6 +283,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         cli_clean["write_recovery_allow_raw_text_targets"] = _to_bool(
             cli_clean["write_recovery_allow_raw_text_targets"]
         )
+    if "chunk_mode_new_file_only" in cli_clean:
+        cli_clean["chunk_mode_new_file_only"] = _to_bool(cli_clean["chunk_mode_new_file_only"])
+    if "allow_multi_section_turns_for_small_edits" in cli_clean:
+        cli_clean["allow_multi_section_turns_for_small_edits"] = _to_bool(
+            cli_clean["allow_multi_section_turns_for_small_edits"]
+        )
     for key in (
         "loop_guard_enabled",
         "loop_guard_cumulative_write_gate",
@@ -342,6 +350,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "graph_model_call_timeout_sec",
         "graph_dispatch_tools_timeout_sec",
         "graph_idle_watchdog_sec",
+        "graph_recursion_limit",
+        "graph_coding_recursion_limit",
+        "needs_human_timeout_sec",
         "recent_message_limit",
         "max_summary_items",
         "max_artifact_snippets",
@@ -350,6 +361,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "multi_file_primary_file_limit",
         "remote_task_artifact_snippet_limit",
         "remote_task_primary_file_limit",
+        "artifact_summarization_threshold",
+        "chunk_mode_min_bytes",
+        "small_model_soft_write_chars",
+        "small_model_hard_write_chars",
+        "new_file_chunk_mode_line_estimate",
+        "failed_local_patch_limit",
         "loop_guard_stagnation_threshold",
         "loop_guard_level2_threshold",
         "loop_guard_recent_writes_limit",
@@ -364,6 +381,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "graph_model_call_timeout_sec",
         "graph_dispatch_tools_timeout_sec",
         "graph_idle_watchdog_sec",
+        "graph_recursion_limit",
+        "graph_coding_recursion_limit",
         "reflexion_max_items",
         "reflexion_inject_top_k",
         "subtask_max_active",
@@ -427,6 +446,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
             for item in cli_clean["test_time_scaling_runtimes"].split(",")
             if item.strip()
         ]
+    if "chunk_mode_supported_models" in cli_clean and isinstance(cli_clean["chunk_mode_supported_models"], str):
+        cli_clean["chunk_mode_supported_models"] = [
+            item.strip()
+            for item in cli_clean["chunk_mode_supported_models"].split(",")
+            if item.strip()
+        ]
     if "healthcheck_url" not in cli_clean and "backend_healthcheck_url" in cli_clean:
         cli_clean["healthcheck_url"] = cli_clean["backend_healthcheck_url"]
     if "restart_command" not in cli_clean and "backend_restart_command" in cli_clean:
@@ -472,6 +497,11 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "solver_refine_on_final_answer",
         "solver_refine_on_patch_plan",
         "solver_refine_on_task_complete",
+        "chunk_mode_new_file_only",
+        "allow_multi_section_turns_for_small_edits",
+        "enable_write_intent_recovery",
+        "enable_assistant_code_write_recovery",
+        "write_recovery_allow_raw_text_targets",
         "rewoo_lane_frames_enabled",
         "rewoo_planner_frame_enabled",
         "rewoo_solver_frame_enabled",
@@ -507,6 +537,13 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         "tool_dag_timeout_sec",
         "solver_refine_max_passes",
         "solver_refine_token_budget",
+        "artifact_summarization_threshold",
+        "chunk_mode_min_bytes",
+        "small_model_soft_write_chars",
+        "small_model_hard_write_chars",
+        "new_file_chunk_mode_line_estimate",
+        "failed_local_patch_limit",
+        "needs_human_timeout_sec",
         "rewoo_frame_token_budget",
         "test_time_scaling_max_candidates",
         "test_time_scaling_min_candidates",
@@ -541,6 +578,12 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["test_time_scaling_runtimes"] = [
             item.strip()
             for item in merged["test_time_scaling_runtimes"].split(",")
+            if item.strip()
+        ]
+    if "chunk_mode_supported_models" in merged and isinstance(merged["chunk_mode_supported_models"], str):
+        merged["chunk_mode_supported_models"] = [
+            item.strip()
+            for item in merged["chunk_mode_supported_models"].split(",")
             if item.strip()
         ]
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..models.conversation import ConversationMessage
@@ -55,6 +56,52 @@ def _conversation_tool_calls_from_pending(
             }
         )
     return tool_calls
+
+
+def _conclusion_signature(text: str) -> str:
+    lowered = str(text or "").lower()
+    lowered = re.sub(r'```.*?```', '', lowered, flags=re.DOTALL)
+    lowered = re.sub(r'\{.*?\}', '', lowered)
+    markers = [
+        "enough evidence", "sufficient evidence", "all evidence gathered",
+        "now write report", "prepare report", "create artifact",
+        "final answer ready", "call task_complete", "complete task",
+    ]
+    for m in markers:
+        if m in lowered:
+            return m
+    return ""
+
+
+def _apply_terminal_conclusion_tracking(harness: Any, graph_state: GraphRunState, assistant_text: str) -> bool:
+    sig = _conclusion_signature(assistant_text)
+    scratchpad = harness.state.scratchpad
+    if not sig:
+        scratchpad["_terminal_conclusion_signatures"] = []
+        return False
+    sigs = scratchpad.setdefault("_terminal_conclusion_signatures", [])
+    if isinstance(sigs, list) and len(sigs) >= 1 and sigs[-1] == sig and not graph_state.pending_tool_calls:
+        from ..challenge_progress import terminal_readiness_state
+        readiness = terminal_readiness_state(harness.state)
+        if readiness:
+            nudge_msg = "The required artifact exists and verification is complete. Call task_complete now."
+        else:
+            nudge_msg = "You have repeated the same conclusion twice without tool action. Either write the required artifact or call task_complete."
+        harness.state.append_message(
+            ConversationMessage(
+                role="user",
+                content=nudge_msg,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "terminal_conclusion_repetition",
+                },
+            )
+        )
+        scratchpad["_terminal_conclusion_signatures"] = []
+        harness._runlog("terminal_state_breaker", "injected terminal conclusion nudge", signature=sig)
+        return True
+    scratchpad["_terminal_conclusion_signatures"] = [sig]
+    return False
 
 
 async def model_call(
@@ -114,6 +161,17 @@ async def model_call(
     graph_state.last_usage = usage_payload
     graph_state.last_assistant_text = result.stream.assistant_text
     graph_state.last_thinking_text = result.stream.thinking_text
+
+    # Timestamp tracking for pre-tool stall classification
+    import time
+    scratchpad = harness.state.scratchpad
+    if "_first_assistant_token_time" not in scratchpad:
+        scratchpad["_first_assistant_token_time"] = time.time()
+    if result.stream.assistant_text and "_first_assistant_text_time" not in scratchpad:
+        scratchpad["_first_assistant_text_time"] = time.time()
+
+    # Conclusion signature tracking for same-conclusion repetition breaker
+    _apply_terminal_conclusion_tracking(harness, graph_state, result.stream.assistant_text)
 
     duration = result.duration
     ttft = result.ttft

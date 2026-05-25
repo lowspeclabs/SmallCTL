@@ -162,6 +162,11 @@ def ensure_remote_tool_profile(harness: Any) -> None:
     profiles = list(raw_profiles) if isinstance(raw_profiles, (list, tuple, set)) else []
     if "network" in profiles:
         return
+    from ..harness.task_classifier import task_is_local_coding_target
+    run_brief = getattr(state, "run_brief", None)
+    task_text = str(getattr(run_brief, "original_task", "") or "") if run_brief else ""
+    if task_is_local_coding_target(task_text):
+        return
     profiles.append("network")
     try:
         state.active_tool_profiles = profiles

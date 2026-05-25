@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from ..models.conversation import ConversationMessage
 from ..redaction import redact_sensitive_text
 from ..state_memory import trim_recent_messages
+from ..guards import is_seven_b_or_under_model_name
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -380,6 +381,21 @@ class PromptAssembler:
             if frame.experience_packet.memories
             else ""
         )
+        # For small models, warn against assuming prior identical-task memories mean
+        # the current task is already complete.
+        if experience_text and frame.experience_packet.memories and is_seven_b_or_under_model_name(
+            str(getattr(state, "scratchpad", {}).get("_model_name") or "").strip()
+        ):
+            task_goal = str(frame.spine.task_goal or "").strip().lower()
+            for m in frame.experience_packet.memories:
+                memory_text = f"{str(m.notes or '').strip()} {str(m.intent or '').strip()}".lower()
+                if task_goal and task_goal in memory_text:
+                    experience_text = (
+                        "WARNING: The memories below describe a PRIOR task with similar wording. "
+                        "Do NOT assume the current task is already complete. Treat them only as reference.\n\n"
+                        + experience_text
+                    )
+                    break
         resume_contract_text = self._render_resume_contract(state)
         if resume_contract_text:
             section_tokens["resume_contract"] = estimate_text_tokens(resume_contract_text)

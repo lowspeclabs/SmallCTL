@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state import LoopState
+from ..shell_utils import is_read_only_shell_evidence_action
 
 
 def _normalize_section_name(section_name: str | None, section_id: str | None) -> str:
@@ -266,7 +267,38 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
     normalized = str(path.resolve()) if hasattr(path, "resolve") else str(path)
     if normalized in reads:
         return True
+    # If the target file does not exist, the repair-cycle read requirement is
+    # impossible to satisfy and is likely stale state carried over from a
+    # prior failed task. Clear it and allow the write/patch to proceed.
+    try:
+        if not path.exists():
+            if normalized in reads:
+                reads.discard(normalized)
+                state.scratchpad["_repair_cycle_reads"] = list(reads)
+            return True
+    except OSError:
+        pass
     return _latest_path_evidence_allows_repair_patch(state, path)
+
+
+def _shell_command_targets_path(command: str, path: Path, cwd: str | None) -> bool:
+    """Heuristic: check if a read-only shell command references the given path."""
+    command_str = str(command or "")
+    if not command_str:
+        return False
+
+    candidates = [str(path)]
+    try:
+        candidates.append(str(path.name))
+        if cwd:
+            candidates.append(str(path.relative_to(Path(cwd))))
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate and candidate in command_str:
+            return True
+    return False
 
 
 def _latest_path_evidence_allows_repair_patch(state: LoopState, path: Path) -> bool:
@@ -278,6 +310,17 @@ def _latest_path_evidence_allows_repair_patch(state: LoopState, path: Path) -> b
         if not isinstance(record, dict):
             continue
         tool_name = str(record.get("tool_name") or "").strip()
+
+        if tool_name == "shell_exec":
+            args = record.get("args")
+            if isinstance(args, dict):
+                command = str(args.get("command") or "").strip()
+                if command and is_read_only_shell_evidence_action(command):
+                    if _shell_command_targets_path(command, path, getattr(state, "cwd", None)):
+                        result = record.get("result")
+                        return isinstance(result, dict) and bool(result.get("success"))
+            continue
+
         if tool_name not in {"file_read", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
             continue
         if not _record_targets_path(record, path, getattr(state, "cwd", None)):
@@ -336,7 +379,8 @@ def _repair_cycle_read_required_metadata(
         "error_kind": "repair_cycle_read_required",
         "recovery_hint": (
             "This is a new repair-cycle read requirement. Prior file_read artifacts do not satisfy "
-            "the current repair cycle; call file_read on this path to refresh the disk snapshot."
+            "the current repair cycle; call file_read on this path to refresh the disk snapshot, "
+            "even if the file is currently missing."
         ),
         "next_required_tool": {
             "tool_name": "file_read",

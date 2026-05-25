@@ -1857,7 +1857,21 @@ class TaskBoundaryService:
         self.harness.state.last_failure_class = ""
         self.harness.state.failure_events = preserved_failure_events if preserve_memory else []
         self.harness.state.reflexion_memory = preserved_reflexion_memory if preserve_reflexion_memory else []
-        self.harness.state.subtask_ledger = preserved_subtask_ledger if preserve_memory else None
+        # Preserve ledger across task switches so the checklist history is continuous.
+        # Mark old active/pending subtasks as done on hard resets; keep done/failed/
+        # abandoned history so the UI shows a continuous trail.
+        ledger = preserved_subtask_ledger
+        if ledger is not None:
+            for task in getattr(ledger, "subtasks", []) or []:
+                if str(getattr(task, "status", "") or "").strip().lower() in {"active", "pending"}:
+                    task.status = "done"
+                    task.updated_at = time()
+            new_task_text = str(new_task or "").strip()
+            if new_task_text:
+                from .subtask_ledger_service import _task_id
+
+                ledger.task_id = _task_id(new_task_text)
+        self.harness.state.subtask_ledger = ledger
 
         self.harness.state.files_changed_this_cycle = []
         self.harness.state.repair_cycle_id = ""

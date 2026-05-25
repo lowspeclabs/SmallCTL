@@ -115,7 +115,13 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         )
 
     async def on_mount(self) -> None:
-        self._create_harness()
+        await self._create_harness()
+        if self.harness is None:
+            # Harness init failed; error already surfaced by _create_harness.
+            # Keep UI alive so user can read the message and exit cleanly.
+            self._refresh_status(step_override="error")
+            self.query_one(InputPane).focus()
+            return
         restore_status = await self._maybe_restore_harness_state()
         if self.run_logger:
             self.run_logger.set_listener(self._on_run_log_row)

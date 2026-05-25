@@ -82,7 +82,11 @@ class RunLogger:
                     counter += 1
                 self.run_dir.rename(candidate)
                 self.run_dir = candidate
-            return self.run_dir
+            finalized_run_dir = str(self.run_dir)
+
+        if hasattr(self, '_finalize_listener') and callable(self._finalize_listener):
+            self._finalize_listener(finalized_run_dir)
+        return self.run_dir
 
     def set_extra_field(self, key: str, value: Any) -> None:
         normalized = str(key or "").strip()

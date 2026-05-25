@@ -35,7 +35,11 @@ class HarnessBridge:
         thread = threading.Thread(target=self._thread_main, name=self._thread_name, daemon=True)
         self._thread = thread
         thread.start()
-        self._ready.wait()
+        if not self._ready.wait(timeout=30.0):
+            raise RuntimeError(
+                "HarnessBridge background thread failed to start within 30 seconds. "
+                "Check that Harness initialization does not deadlock or throw unhandled exceptions."
+            )
 
     async def run_auto(self, task: str) -> dict[str, Any]:
         return await self._submit_coroutine(

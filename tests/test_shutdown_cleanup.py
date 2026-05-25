@@ -287,10 +287,10 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
     monkeypatch.setattr(main_module, "setup_logging", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "create_run_logger", lambda _path: SimpleNamespace(run_dir=Path(".")))
     monkeypatch.setattr(main_module, "log_kv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main_module, "_print_shutdown_alert", lambda session_id: alerts.append(session_id))
+    monkeypatch.setattr(main_module, "_print_shutdown_alert", lambda session_id, status="alert": alerts.append(session_id))
     monkeypatch.setattr(ui_module, "SmallctlApp", _FakeApp)
 
     result = main_module.cli(["--tui"])
 
-    assert result == 0
+    assert result == 130
     assert alerts == ["thread-123"]

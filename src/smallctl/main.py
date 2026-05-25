@@ -288,6 +288,13 @@ def cli(argv: list[str] | None = None) -> int:
 
     setup_logging(config.debug, log_file=config.log_file, stream_to_terminal=not args.tui)
     run_logger = create_run_logger("logs")
+
+    def _emit_log_dir_finalized(final_dir: str) -> None:
+        print(json.dumps({"status": "log_dir_finalized", "run_log_dir": final_dir}))
+        run_logger.log("harness", "log_dir_finalized", run_log_dir=final_dir)
+
+    run_logger._finalize_listener = _emit_log_dir_finalized
+
     log = logging.getLogger("smallctl")
     log_kv(
         log,
@@ -320,6 +327,17 @@ def cli(argv: list[str] | None = None) -> int:
         )
 
     if args.tui:
+        if not sys.stdin.isatty():
+            print(
+                json.dumps(
+                    {
+                        "status": "warning",
+                        "reason": "TUI launched without an interactive terminal (tty); rendering may fail or appear blank. Run without --tui or allocate a pseudo-tty (e.g., script, ssh -t).",
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
         try:
             from .ui import SmallctlApp
         except Exception as exc:
@@ -345,6 +363,13 @@ def cli(argv: list[str] | None = None) -> int:
             "checkpoint_path": config.checkpoint_path,
             "graph_checkpointer": config.graph_checkpointer,
             "graph_checkpoint_path": config.graph_checkpoint_path,
+            "graph_node_timeout_sec": getattr(config, "graph_node_timeout_sec", 300),
+            "graph_model_call_timeout_sec": getattr(config, "graph_model_call_timeout_sec", 600),
+            "graph_dispatch_tools_timeout_sec": getattr(config, "graph_dispatch_tools_timeout_sec", 300),
+            "graph_idle_watchdog_sec": getattr(config, "graph_idle_watchdog_sec", 300),
+            "graph_recursion_limit": getattr(config, "graph_recursion_limit", 1024),
+            "graph_coding_recursion_limit": getattr(config, "graph_coding_recursion_limit", 2048),
+            "needs_human_timeout_sec": getattr(config, "needs_human_timeout_sec", 600),
             "fresh_run": config.fresh_run,
             "fresh_run_turns": config.fresh_run_turns,
             "planning_mode": config.planning_mode,
@@ -372,6 +397,7 @@ def cli(argv: list[str] | None = None) -> int:
             "max_summary_items": config.max_summary_items,
             "max_artifact_snippets": config.max_artifact_snippets,
             "artifact_snippet_token_limit": config.artifact_snippet_token_limit,
+            "artifact_summarization_threshold": getattr(config, "artifact_summarization_threshold", 1200),
             "multi_file_artifact_snippet_limit": config.multi_file_artifact_snippet_limit,
             "multi_file_primary_file_limit": config.multi_file_primary_file_limit,
             "remote_task_artifact_snippet_limit": config.remote_task_artifact_snippet_limit,
@@ -389,16 +415,50 @@ def cli(argv: list[str] | None = None) -> int:
             "tool_plan_solver_fresh_output_limit": getattr(config, "tool_plan_solver_fresh_output_limit", 1200),
             "tool_plan_allow_web": getattr(config, "tool_plan_allow_web", True),
             "tool_plan_allow_artifact_read": getattr(config, "tool_plan_allow_artifact_read", True),
+            "tool_plan_allow_git": getattr(config, "tool_plan_allow_git", False),
             "tool_plan_fallback_to_loop_on_invalid_plan": getattr(config, "tool_plan_fallback_to_loop_on_invalid_plan", True),
             "tool_dag_enabled": getattr(config, "tool_dag_enabled", False),
             "tool_dag_max_parallel": getattr(config, "tool_dag_max_parallel", 4),
             "tool_dag_timeout_sec": getattr(config, "tool_dag_timeout_sec", 30),
             "tool_dag_preserve_result_order": getattr(config, "tool_dag_preserve_result_order", True),
+            "min_exploration_steps": getattr(config, "min_exploration_steps", 1),
+            "chunk_mode_min_bytes": getattr(config, "chunk_mode_min_bytes", 4096),
+            "chunk_mode_new_file_only": getattr(config, "chunk_mode_new_file_only", True),
+            "chunk_mode_supported_models": getattr(config, "chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3"]),
+            "small_model_soft_write_chars": getattr(config, "small_model_soft_write_chars", 2000),
+            "small_model_hard_write_chars": getattr(config, "small_model_hard_write_chars", 4000),
+            "new_file_chunk_mode_line_estimate": getattr(config, "new_file_chunk_mode_line_estimate", 100),
+            "allow_multi_section_turns_for_small_edits": getattr(config, "allow_multi_section_turns_for_small_edits", True),
+            "failed_local_patch_limit": getattr(config, "failed_local_patch_limit", 2),
+            "enable_write_intent_recovery": getattr(config, "enable_write_intent_recovery", True),
+            "enable_assistant_code_write_recovery": getattr(config, "enable_assistant_code_write_recovery", True),
+            "write_recovery_min_confidence": getattr(config, "write_recovery_min_confidence", "high"),
+            "write_recovery_allow_raw_text_targets": getattr(config, "write_recovery_allow_raw_text_targets", True),
+            "solver_refine_enabled": getattr(config, "solver_refine_enabled", False),
+            "solver_refine_max_passes": getattr(config, "solver_refine_max_passes", 1),
+            "solver_refine_on_final_answer": getattr(config, "solver_refine_on_final_answer", True),
+            "solver_refine_on_patch_plan": getattr(config, "solver_refine_on_patch_plan", True),
+            "solver_refine_on_task_complete": getattr(config, "solver_refine_on_task_complete", True),
+            "solver_refine_token_budget": getattr(config, "solver_refine_token_budget", 700),
             "rewoo_lane_frames_enabled": getattr(config, "rewoo_lane_frames_enabled", False),
             "rewoo_planner_frame_enabled": getattr(config, "rewoo_planner_frame_enabled", False),
             "rewoo_solver_frame_enabled": getattr(config, "rewoo_solver_frame_enabled", False),
             "rewoo_refiner_frame_enabled": getattr(config, "rewoo_refiner_frame_enabled", False),
             "rewoo_frame_token_budget": getattr(config, "rewoo_frame_token_budget", 1200),
+            "staged_execution_enabled": getattr(config, "staged_execution_enabled", False),
+            "staged_step_prompt_tokens": getattr(config, "staged_step_prompt_tokens", 4096),
+            "test_time_scaling_enabled": getattr(config, "test_time_scaling_enabled", False),
+            "test_time_scaling_runtimes": getattr(config, "test_time_scaling_runtimes", ["staged_execution"]),
+            "test_time_scaling_trigger": getattr(config, "test_time_scaling_trigger", "retry_or_explicit"),
+            "test_time_scaling_max_candidates": getattr(config, "test_time_scaling_max_candidates", 3),
+            "test_time_scaling_min_candidates": getattr(config, "test_time_scaling_min_candidates", 2),
+            "test_time_scaling_policy": getattr(config, "test_time_scaling_policy", "proposal_then_execute"),
+            "test_time_scaling_strategy": getattr(config, "test_time_scaling_strategy", "diverse_nudges"),
+            "test_time_scaling_score_threshold": getattr(config, "test_time_scaling_score_threshold", 0.85),
+            "test_time_scaling_parallel_max": getattr(config, "test_time_scaling_parallel_max", 1),
+            "test_time_scaling_timeout_sec": getattr(config, "test_time_scaling_timeout_sec", 120),
+            "test_time_scaling_mutating_parallel_enabled": getattr(config, "test_time_scaling_mutating_parallel_enabled", False),
+            "test_time_scaling_all_fail_action": getattr(config, "test_time_scaling_all_fail_action", "fallback_normal_retry"),
             **_escalation_harness_kwargs(config),
             "run_logger": run_logger,
             "task": config.task,
@@ -432,11 +492,13 @@ def cli(argv: list[str] | None = None) -> int:
             log.exception("tui_fatal_error")
             print(f"\n[FATAL ERROR] TUI crashed: {exc}")
             # Ensure terminal mode is reset if possible
+            sys.stdout.write("\033[?1049l")  # exit alternate screen buffer
             sys.stdout.write("\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l")
             sys.stdout.flush()
             return 1
         finally:
             # Force secondary terminal reset code just in case textual cleanup was partial
+            sys.stdout.write("\033[?1049l")  # exit alternate screen buffer
             sys.stdout.write("\033[?1000l\033[?1006l\033[?25h")
             sys.stdout.flush()
         if getattr(app, "closed_by_ctrl_c", False):
@@ -463,6 +525,13 @@ def cli(argv: list[str] | None = None) -> int:
             checkpoint_path=config.checkpoint_path,
             graph_checkpointer=config.graph_checkpointer,
             graph_checkpoint_path=config.graph_checkpoint_path,
+            graph_node_timeout_sec=getattr(config, "graph_node_timeout_sec", 300),
+            graph_model_call_timeout_sec=getattr(config, "graph_model_call_timeout_sec", 600),
+            graph_dispatch_tools_timeout_sec=getattr(config, "graph_dispatch_tools_timeout_sec", 300),
+            graph_idle_watchdog_sec=getattr(config, "graph_idle_watchdog_sec", 300),
+            graph_recursion_limit=getattr(config, "graph_recursion_limit", 1024),
+            graph_coding_recursion_limit=getattr(config, "graph_coding_recursion_limit", 2048),
+            needs_human_timeout_sec=getattr(config, "needs_human_timeout_sec", 600),
             fresh_run=config.fresh_run,
             fresh_run_turns=config.fresh_run_turns,
             contract_flow_ui=config.contract_flow_ui,
@@ -489,6 +558,7 @@ def cli(argv: list[str] | None = None) -> int:
             max_summary_items=config.max_summary_items,
             max_artifact_snippets=config.max_artifact_snippets,
             artifact_snippet_token_limit=config.artifact_snippet_token_limit,
+            artifact_summarization_threshold=getattr(config, "artifact_summarization_threshold", 1200),
             multi_file_artifact_snippet_limit=config.multi_file_artifact_snippet_limit,
             multi_file_primary_file_limit=config.multi_file_primary_file_limit,
             remote_task_artifact_snippet_limit=config.remote_task_artifact_snippet_limit,
@@ -506,11 +576,31 @@ def cli(argv: list[str] | None = None) -> int:
             tool_plan_solver_fresh_output_limit=getattr(config, "tool_plan_solver_fresh_output_limit", 1200),
             tool_plan_allow_web=getattr(config, "tool_plan_allow_web", True),
             tool_plan_allow_artifact_read=getattr(config, "tool_plan_allow_artifact_read", True),
+            tool_plan_allow_git=getattr(config, "tool_plan_allow_git", False),
             tool_plan_fallback_to_loop_on_invalid_plan=getattr(config, "tool_plan_fallback_to_loop_on_invalid_plan", True),
             tool_dag_enabled=getattr(config, "tool_dag_enabled", False),
             tool_dag_max_parallel=getattr(config, "tool_dag_max_parallel", 4),
             tool_dag_timeout_sec=getattr(config, "tool_dag_timeout_sec", 30),
             tool_dag_preserve_result_order=getattr(config, "tool_dag_preserve_result_order", True),
+            min_exploration_steps=getattr(config, "min_exploration_steps", 1),
+            chunk_mode_min_bytes=getattr(config, "chunk_mode_min_bytes", 4096),
+            chunk_mode_new_file_only=getattr(config, "chunk_mode_new_file_only", True),
+            chunk_mode_supported_models=getattr(config, "chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3"]),
+            small_model_soft_write_chars=getattr(config, "small_model_soft_write_chars", 2000),
+            small_model_hard_write_chars=getattr(config, "small_model_hard_write_chars", 4000),
+            new_file_chunk_mode_line_estimate=getattr(config, "new_file_chunk_mode_line_estimate", 100),
+            allow_multi_section_turns_for_small_edits=getattr(config, "allow_multi_section_turns_for_small_edits", True),
+            failed_local_patch_limit=getattr(config, "failed_local_patch_limit", 2),
+            enable_write_intent_recovery=getattr(config, "enable_write_intent_recovery", True),
+            enable_assistant_code_write_recovery=getattr(config, "enable_assistant_code_write_recovery", True),
+            write_recovery_min_confidence=getattr(config, "write_recovery_min_confidence", "high"),
+            write_recovery_allow_raw_text_targets=getattr(config, "write_recovery_allow_raw_text_targets", True),
+            solver_refine_enabled=getattr(config, "solver_refine_enabled", False),
+            solver_refine_max_passes=getattr(config, "solver_refine_max_passes", 1),
+            solver_refine_on_final_answer=getattr(config, "solver_refine_on_final_answer", True),
+            solver_refine_on_patch_plan=getattr(config, "solver_refine_on_patch_plan", True),
+            solver_refine_on_task_complete=getattr(config, "solver_refine_on_task_complete", True),
+            solver_refine_token_budget=getattr(config, "solver_refine_token_budget", 700),
             rewoo_lane_frames_enabled=getattr(config, "rewoo_lane_frames_enabled", False),
             rewoo_planner_frame_enabled=getattr(config, "rewoo_planner_frame_enabled", False),
             rewoo_solver_frame_enabled=getattr(config, "rewoo_solver_frame_enabled", False),

@@ -642,6 +642,87 @@ def test_escalation_tool_surfaces_blocked_service_result_as_tool_failure():
     assert result["metadata"]["escalation_result"]["status"] == "blocked"
 
 
+def test_escalation_tool_converts_ask_human_advisory_to_needs_human(monkeypatch):
+    class FakeEscalationService:
+        def __init__(self, harness):
+            self.harness = harness
+
+        async def run(self, **kwargs):
+            return {
+                "success": True,
+                "status": "advisory",
+                "verdict": "ask_human",
+                "confidence": 0.95,
+                "failure_diagnosis": "Remote access is blocked.",
+                "recommended_next_action": {
+                    "type": "ask_human",
+                    "tool": "ask_human",
+                    "reason": "Ask the user to enable SSH tools or provide exported logs.",
+                },
+                "escalation_id": "esc-test",
+            }
+
+    monkeypatch.setattr("smallctl.harness.escalation_service.EscalationService", FakeEscalationService)
+    harness = _harness(escalation_enabled=True)
+
+    import asyncio
+
+    result = asyncio.run(
+        escalate_to_bigger_model(
+            reason="Repeated SSH failures.",
+            question="What next?",
+            requested_output="next_action",
+            state=harness.state,
+            harness=harness,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "needs_human"
+    assert result["metadata"]["reason"] == "escalation_ask_human"
+    assert result["metadata"]["escalation_result"]["verdict"] == "ask_human"
+    assert "enable SSH tools" in result["metadata"]["question"]
+
+
+def test_escalation_tool_keeps_state_for_non_human_advisory(monkeypatch):
+    class FakeEscalationService:
+        def __init__(self, harness):
+            self.harness = harness
+
+        async def run(self, **kwargs):
+            return {
+                "success": True,
+                "status": "advisory",
+                "verdict": "next_action",
+                "confidence": 0.8,
+                "recommended_next_action": {
+                    "type": "tool_call",
+                    "tool": "file_read",
+                    "args": {"path": "temp/output.txt"},
+                    "reason": "Read the available local artifact.",
+                },
+                "escalation_id": "esc-test",
+            }
+
+    monkeypatch.setattr("smallctl.harness.escalation_service.EscalationService", FakeEscalationService)
+    harness = _harness(escalation_enabled=True)
+
+    import asyncio
+
+    result = asyncio.run(
+        escalate_to_bigger_model(
+            reason="Repeated failures.",
+            question="What next?",
+            requested_output="next_action",
+            state=harness.state,
+            harness=harness,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["advisory_text"].startswith("ESCALATION ADVISORY")
+
+
 def test_escalation_service_success_with_mocked_provider(monkeypatch):
     class FakeClient:
         instances = []

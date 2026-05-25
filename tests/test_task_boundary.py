@@ -855,7 +855,9 @@ def test_unrelated_task_hard_resets_guard_state_and_durable_memory() -> None:
     assert state.working_memory.known_facts == []
     assert state.failure_events == []
     assert state.reflexion_memory == []
-    assert state.subtask_ledger is None
+    # Ledger is preserved across hard resets; old active subtasks are marked done.
+    assert state.subtask_ledger is not None
+    assert state.subtask_ledger.subtasks[0].status == "done"
     assert state.scratchpad["_recovery_config"] == {"reflexion_enabled": True}
     assert "_tool_attempt_history" not in state.scratchpad
     assert "A0010" in state.artifacts
@@ -906,7 +908,9 @@ def test_unrelated_task_preserves_reflexions_when_cross_task_enabled() -> None:
 
     assert state.failure_events == []
     assert [reflection.reflection_id for reflection in state.reflexion_memory] == ["R-prior"]
-    assert state.subtask_ledger is None
+    # Ledger is preserved across hard resets; old active subtasks are marked done.
+    assert state.subtask_ledger is not None
+    assert state.subtask_ledger.subtasks[0].status == "done"
 
 
 def test_finalize_task_scope_adds_prompt_visible_episodic_summary() -> None:

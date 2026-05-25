@@ -123,7 +123,7 @@ def test_subtask_checklist_update_renders_goal_and_task_statuses() -> None:
 
     first = build_subtask_checklist_update(state)
 
-    assert "Task Objective: Deploy app" in first
+    assert "Goal Objective: Deploy app" in first
     assert "  ○ SSH to remote server" in first
     assert "  ○ Run verifier" in first
     assert build_subtask_checklist_update(state) == ""
@@ -152,7 +152,7 @@ def test_subtask_checklist_does_not_render_parent_objective_as_child() -> None:
 
     rendered = build_subtask_checklist_update(state)
 
-    assert f"Task Objective: {objective}" in rendered
+    assert f"Goal Objective: {objective}" in rendered
     assert rendered.count(objective) == 1
     assert "  ○ Save evidence and summarize" in rendered
 
@@ -169,9 +169,37 @@ def test_subtask_checklist_treats_phase_prefixed_objective_as_duplicate_child() 
 
     rendered = build_subtask_checklist_update(state)
 
-    assert f"Task Objective: execute: {objective}" in rendered
+    assert f"Goal Objective: execute: {objective}" in rendered
     assert rendered.count(objective) == 1
     assert "\n  ○ " not in rendered
+
+
+def test_subtask_checklist_dedups_long_synthetic_root_against_original_task() -> None:
+    objective = (
+        "Build a self-contained Python script at ./temp/restart_backoff.py "
+        "that simulates a tiny message processor with retry, backoff, and dead-letter queue behavior."
+    )
+    state = LoopState()
+    state.run_brief.original_task = objective
+    state.run_brief.current_phase_objective = f"repair: {objective}"
+    state.subtask_ledger = SubtaskLedger(task_id="task-1", subtasks=[], active_subtask_id=None)
+    state.subtask_ledger.subtasks.append(
+        Subtask(
+            subtask_id="S1",
+            title="Complete user task",
+            goal=objective,
+            status="blocked",
+            acceptance=["User request satisfied with tool-backed evidence when needed."],
+        )
+    )
+
+    rendered = build_subtask_checklist_update(state)
+
+    assert rendered.startswith("Goal Objective: repair: Build a self-contained Python script")
+    lines = rendered.splitlines()
+    assert len(lines) == 2  # goal + synthetic root child with short summary
+    assert "⚠" in lines[1]
+    assert "Build a self-contained Python script" in lines[1]  # extracted short summary, not full text
 
 
 def test_plan_import_dedupes_duplicate_step_titles() -> None:

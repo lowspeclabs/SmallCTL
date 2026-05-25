@@ -1860,6 +1860,19 @@ def test_normalize_ssh_arguments_supports_username_alias() -> None:
     assert normalized["user"] == "root"
 
 
+def test_normalize_ssh_arguments_accepts_redundant_user_with_target() -> None:
+    normalized = network.normalize_ssh_arguments(
+        {
+            "target": "root@192.168.1.63",
+            "user": "root",
+            "command": "whoami",
+        }
+    )
+
+    assert normalized["host"] == "192.168.1.63"
+    assert normalized["user"] == "root"
+
+
 def test_normalize_ssh_arguments_requires_host_or_target() -> None:
     try:
         network.normalize_ssh_arguments({"command": "whoami"})

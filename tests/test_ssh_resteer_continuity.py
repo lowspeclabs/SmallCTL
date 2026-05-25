@@ -106,6 +106,20 @@ def test_remote_research_install_task_activates_network_and_web_profiles() -> No
     assert "network_read" in state.active_tool_profiles
 
 
+def test_local_execute_profile_activation_discards_network_raw_without_name_error() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    harness = _make_harness(state)
+    task = "fix the local python script using http parsing helpers"
+
+    Harness._initialize_run_brief(harness, task, raw_task=task)
+    state.task_mode = "local_execute"
+    Harness._activate_tool_profiles(harness, task)
+
+    assert state.task_mode == "local_execute"
+    assert "network" not in state.active_tool_profiles
+    assert "network_raw" not in state.active_tool_profiles
+
+
 def test_bare_remote_continue_preserves_network_read_profile_after_research_followup() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = (

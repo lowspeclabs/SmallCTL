@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Button
 
-from ..harness import Harness
+from ..harness import Harness, HarnessConfig
 from ..logging_utils import RunLogger
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
@@ -54,14 +54,13 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
     def __init__(self, harness_kwargs: dict[str, Any]) -> None:
         super().__init__()
         self._app_logger = logging.getLogger("smallctl.ui")
-        self.harness_kwargs = dict(harness_kwargs)
-        self.fresh_run = bool(self.harness_kwargs.pop("fresh_run", False))
-        self.restore_graph_state_on_startup = bool(
-            self.harness_kwargs.pop("restore_graph_state_on_startup", False)
-        )
-        self.restore_thread_id = self.harness_kwargs.pop("restore_thread_id", None)
-        self.initial_task = self.harness_kwargs.pop("task", None)
-        self.run_logger: RunLogger | None = harness_kwargs.get("run_logger")
+        raw = dict(harness_kwargs)
+        self.restore_graph_state_on_startup = bool(raw.pop("restore_graph_state_on_startup", False))
+        self.restore_thread_id = raw.pop("restore_thread_id", None)
+        self.initial_task = raw.pop("task", None)
+        self.run_logger: RunLogger | None = raw.get("run_logger")
+        self.harness_config = HarnessConfig(**raw)
+        self.fresh_run = self.harness_config.fresh_run
         self.harness: Harness | None = None
         self.active_task: asyncio.Task[None] | None = None
         self.task_history: list[str] = []
@@ -81,9 +80,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self.closed_by_ctrl_c = False
         self._task_start_time: float | None = None
         self._activity_timer: Any | None = None
-        self._shell_approval_session_default = bool(
-            self.harness_kwargs.pop("shell_approval_session_default", False)
-        )
+        self._shell_approval_session_default = bool(self.harness_config.shell_approval_session_default)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):

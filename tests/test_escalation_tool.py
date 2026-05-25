@@ -8,7 +8,7 @@ from smallctl.config import resolve_config
 from smallctl.client.stream_collectors import StreamResult
 from smallctl.context import ChildRunRequest
 from smallctl.main import _escalation_harness_kwargs
-from smallctl.harness import Harness
+from smallctl.harness import Harness, HarnessConfig
 from smallctl.harness.escalation_packet import build_escalation_packet
 from smallctl.harness.escalation_service import EscalationService
 from smallctl.harness.escalation_config import build_escalation_model_config
@@ -130,8 +130,8 @@ def test_child_harness_inherits_escalation_config():
     )
     captured = {}
 
-    def fake_factory(**kwargs):
-        captured.update(kwargs)
+    def fake_factory(config: HarnessConfig):
+        captured.update(config.__dict__)
         return SimpleNamespace(state=SimpleNamespace(cwd=""))
 
     child = parent.subtasks.create_child_harness(

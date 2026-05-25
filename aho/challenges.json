@@ -1,0 +1,32 @@
+[
+  {
+    "id": "dir-list-loop-001",
+    "description": "Inspect the repository root with dir_list once, summarize the top-level layout, and do not repeat the same listing after progress has been made.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["repository", "layout", "summary"],
+      "required_tool_calls": ["dir_list", "task_complete"]
+    }
+  },
+  {
+    "id": "test-calc-001",
+    "description": "Write a python script in ./temp call it test-calc.py, it should be a python script that provides a cli interface for a calculator. Then run it and confirm it works.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["test-calc.py", "calculator", "success"],
+      "required_tool_calls": ["file_write", "shell_exec"]
+    }
+  },
+  {
+    "id": "weather-paris-001",
+    "description": "Find the current weather in Paris, France, then recommend one specific clothing item for that weather.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["Paris", "weather", "clothing"],
+      "required_tool_calls": ["weather_lookup", "clothing_suggest"]
+    }
+  }
+]

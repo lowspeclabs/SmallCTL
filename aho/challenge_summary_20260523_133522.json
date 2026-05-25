@@ -1,0 +1,468 @@
+{
+  "created_at": "2026-05-23T17:35:22.829313+00:00",
+  "dry_run": true,
+  "challenge_filter": null,
+  "total": 30,
+  "baseline_mean_pass_at_n": 0.0,
+  "baseline_mean_harness_score": 0.0,
+  "counts": {
+    "improved": 0,
+    "not_improved": 0,
+    "perfect": 0,
+    "patch_failed": 0,
+    "dry_run": 30,
+    "baseline": 0
+  },
+  "outcomes": [
+    {
+      "challenge_id": "code-001-fizzbuzz-cli",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-002-word-count",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-003-roman-numerals",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-004-todo-json",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-005-file-deduper",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-006-config-loader",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-007-log-parser",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-008-mini-http-server",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-009-matrix-ops",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-010-markdown-converter",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-011-chat-message-store",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-012-path-finder",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-013-csv-analytics",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-014-plugin-registry",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "code-015-test-harness-refactor",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-001-host-reachability",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-002-service-inventory",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-003-user-audit",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-004-disk-usage",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-005-system-services",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-006-log-review",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-007-config-backup-check",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-008-package-audit",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-009-network-summary",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-010-permission-review",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-011-startup-review",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-012-backup-integrity",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-013-log-correlation",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-014-hardening-gap-review",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    },
+    {
+      "challenge_id": "sys-015-operational-report",
+      "status": "dry_run",
+      "branch_name": null,
+      "baseline": null,
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "would run baseline trials",
+        "would score with eval.score_strategy",
+        "would propose a patch with HypothesisEngine",
+        "would branch, apply, benchmark, and merge if improvement is positive"
+      ],
+      "hypothesis": null
+    }
+  ]
+}

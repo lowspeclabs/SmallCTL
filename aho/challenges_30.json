@@ -1,0 +1,512 @@
+[
+  {
+    "id": "code-001-fizzbuzz-cli",
+    "category": "coding",
+    "difficulty": "easy",
+    "description": "Write a Python CLI script that reads an integer N and prints the numbers from 1 to N using classic FizzBuzz rules. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["Python", "CLI", "FizzBuzz", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-002-word-count",
+    "category": "coding",
+    "difficulty": "easy",
+    "description": "Implement a small Python utility that counts lines, words, and characters in a text file and prints a formatted summary. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["lines", "words", "characters", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-003-roman-numerals",
+    "category": "coding",
+    "difficulty": "easy",
+    "description": "Create a Python function that converts integers to Roman numerals and includes a few simple tests. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["Roman", "numeral", "tests", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-004-todo-json",
+    "category": "coding",
+    "difficulty": "easy",
+    "description": "Build a tiny JSON-backed todo list CLI with add, list, and complete commands. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["todo", "JSON", "CLI", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-005-file-deduper",
+    "category": "coding",
+    "difficulty": "easy",
+    "description": "Write a script that scans a directory and reports duplicate files by checksum. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["duplicate", "checksum", "directory", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-006-config-loader",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Implement a Python configuration loader that merges defaults, environment variables, and a YAML file. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["defaults", "environment", "YAML", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-007-log-parser",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Create a log parser that extracts timestamps, severity levels, and error counts from application logs. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["timestamps", "severity", "errors", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-008-mini-http-server",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Write a small Python HTTP server with two endpoints: one health check and one JSON status endpoint. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["HTTP", "health", "JSON", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-009-matrix-ops",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Implement basic matrix operations in Python without external libraries: transpose, multiply, and determinant for 2x2 and 3x3 matrices. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["transpose", "multiply", "determinant", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-010-markdown-converter",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Build a simple markdown-to-HTML converter for headings, bold text, italics, and unordered lists. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["markdown", "HTML", "headings", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-011-chat-message-store",
+    "category": "coding",
+    "difficulty": "medium",
+    "description": "Create a Python module that stores chat messages, supports search by keyword, and exports conversations to JSON. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["search", "keyword", "JSON", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-012-path-finder",
+    "category": "coding",
+    "difficulty": "hard",
+    "description": "Implement a shortest-path solver for weighted graphs using Dijkstra's algorithm and provide tests for disconnected graphs. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["Dijkstra", "graphs", "disconnected", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-013-csv-analytics",
+    "category": "coding",
+    "difficulty": "hard",
+    "description": "Write a CSV analytics tool that computes grouped statistics, handles missing values, and emits a summary report. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["CSV", "grouped", "statistics", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-014-plugin-registry",
+    "category": "coding",
+    "difficulty": "hard",
+    "description": "Design a plugin registry system in Python that supports dynamic loading, validation, and dependency ordering. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["plugin", "dynamic loading", "dependency ordering", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "code-015-test-harness-refactor",
+    "category": "coding",
+    "difficulty": "hard",
+    "description": "Refactor a small Python test harness so it can run parameterized cases, isolate failures, and produce a concise machine-readable summary. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["parameterized", "failures", "summary", "run", "debug"],
+      "required_tool_calls": ["file_write", "shell_exec"],
+      "required_tool_counts": {
+        "file_write": 2,
+        "shell_exec": 2
+      },
+      "required_tool_sequence": [
+        "file_write",
+        "shell_exec",
+        "file_write",
+        "shell_exec"
+      ]
+    }
+  },
+  {
+    "id": "sys-001-host-reachability",
+    "category": "sysadmin",
+    "difficulty": "easy",
+    "description": "Using the provided test-host credentials, verify that 192.168.1.63 is reachable and report the OS family and hostname.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["192.168.1.63", "hostname", "reachable"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-002-service-inventory",
+    "category": "sysadmin",
+    "difficulty": "easy",
+    "description": "On 192.168.1.63, inventory the listening services and summarize which ports are open and what they appear to run.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["ports", "services", "listening"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-003-user-audit",
+    "category": "sysadmin",
+    "difficulty": "easy",
+    "description": "Inspect the local user and group setup on 192.168.1.63 and summarize the important administrative accounts.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["users", "groups", "administrative"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-004-disk-usage",
+    "category": "sysadmin",
+    "difficulty": "medium",
+    "description": "Check disk usage and mounted filesystems on 192.168.1.63, then identify any partitions that look close to capacity.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["disk", "mounted", "capacity"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-005-system-services",
+    "category": "sysadmin",
+    "difficulty": "medium",
+    "description": "List enabled system services on 192.168.1.63 and highlight any that seem related to SSH, web, logging, or monitoring.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["enabled", "services", "monitoring"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-006-log-review",
+    "category": "sysadmin",
+    "difficulty": "medium",
+    "description": "Review recent authentication or system logs on 192.168.1.63 and summarize any repeated warnings or failed login attempts.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["logs", "warnings", "failed login"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-007-config-backup-check",
+    "category": "sysadmin",
+    "difficulty": "medium",
+    "description": "Inspect common configuration locations on 192.168.1.63 and confirm whether recent backups or snapshots are present.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["configuration", "backups", "snapshots"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-008-package-audit",
+    "category": "sysadmin",
+    "difficulty": "medium",
+    "description": "On 192.168.1.63, audit installed packages and identify any that look outdated or unusually sensitive for a root-managed host.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["packages", "outdated", "sensitive"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-009-network-summary",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Generate a concise network summary for 192.168.1.63, including interfaces, addresses, default route, and DNS configuration.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["interfaces", "default route", "DNS"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-010-permission-review",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Inspect file and directory permissions on key system paths on 192.168.1.63 and summarize any overly permissive settings.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["permissions", "overly permissive", "system paths"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-011-startup-review",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Review startup scripts, timers, or scheduled jobs on 192.168.1.63 and identify anything unexpected or misconfigured.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["startup", "timers", "scheduled jobs"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-012-backup-integrity",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Verify the integrity of a recent backup set on 192.168.1.63 and report whether the backup appears complete and readable.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["integrity", "backup", "readable"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-013-log-correlation",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Correlate authentication, system, and application logs on 192.168.1.63 to reconstruct the timeline of a recent incident.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["correlate", "timeline", "incident"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-014-hardening-gap-review",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Assess the hardening posture of 192.168.1.63 by checking SSH settings, firewall state, and privilege boundaries, then summarize the biggest gaps.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["SSH", "firewall", "privilege boundaries"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  },
+  {
+    "id": "sys-015-operational-report",
+    "category": "sysadmin",
+    "difficulty": "hard",
+    "description": "Produce an operations report for 192.168.1.63 covering host health, service state, disk pressure, network exposure, and any immediate follow-up actions.",
+    "baseline_trials": 1,
+    "benchmark_trials": 2,
+    "ground_truth": {
+      "expected_keywords": ["health", "service state", "follow-up"],
+      "required_tool_calls": ["shell_exec", "task_complete"]
+    }
+  }
+]

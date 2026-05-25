@@ -223,6 +223,8 @@ class LoopState(LoopStateFlowMixin):
             "stagnation_counters": json_safe_value(self.stagnation_counters),
             "draft_plan": json_safe_value(self.draft_plan),
             "active_plan": json_safe_value(self.active_plan),
+            "plan_resolved": self.plan_resolved,
+            "plan_artifact_id": self.plan_artifact_id,
             "planning_mode_enabled": self.planning_mode_enabled,
             "planner_requested_output_path": self.planner_requested_output_path,
             "planner_requested_output_format": self.planner_requested_output_format,
@@ -343,6 +345,8 @@ class LoopState(LoopStateFlowMixin):
         raw["stagnation_counters"] = _coerce_int_map(migrated.get("stagnation_counters"))
         raw["draft_plan"] = _coerce_execution_plan(migrated.get("draft_plan"))
         raw["active_plan"] = _coerce_execution_plan(migrated.get("active_plan"))
+        raw["plan_resolved"] = bool(migrated.get("plan_resolved", False))
+        raw["plan_artifact_id"] = str(migrated.get("plan_artifact_id", "") or "")
         raw["planning_mode_enabled"] = bool(migrated.get("planning_mode_enabled", False))
         raw["planner_requested_output_path"] = str(migrated.get("planner_requested_output_path", "") or "")
         raw["planner_requested_output_format"] = str(migrated.get("planner_requested_output_format", "") or "")

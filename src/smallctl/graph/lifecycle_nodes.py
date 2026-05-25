@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from ..guards import check_guards
+from ..guards import check_guards, is_seven_b_or_under_model_name
 from ..interrupt_replies import interrupt_response_action
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
@@ -155,6 +155,15 @@ async def initialize_loop_run(
         harness.state.scratchpad.pop("_progress_prior_verdict", None)
         harness.state.scratchpad.pop("_progress_prior_plan_step", None)
         harness.state.scratchpad.pop("_ssh_auth_recovery_state", None)
+        # Clear stale repair-cycle locks and FAMA suppression state so a
+        # failed prior task cannot deadlock the continued run.
+        harness.state.repair_cycle_id = ""
+        harness.state.scratchpad.pop("_repair_cycle_reads", None)
+        _fama_state = harness.state.scratchpad.get("_fama_state")
+        if isinstance(_fama_state, dict):
+            for key in list(_fama_state.keys()):
+                if key.startswith("_fama_loop_guard_suppression_count:") or key.startswith("_fama_verifier_suppression_count:"):
+                    _fama_state.pop(key, None)
     else:
         maybe_reset = getattr(harness, "_maybe_reset_for_new_task", None)
         if callable(maybe_reset):
@@ -177,6 +186,37 @@ async def initialize_loop_run(
     await harness._ensure_context_limit()
     harness._initialize_run_brief(resolved_task, raw_task=task)
     harness._activate_tool_profiles(resolved_task)
+
+    # Small-model compound-remote-task gating: inject constraints that help ≤7B
+    # models avoid getting lost in multi-phase SSH work.
+    model_name = str(
+        getattr(harness.state, "scratchpad", {}).get("_model_name")
+        or getattr(getattr(harness, "client", None), "model", "")
+        or ""
+    ).strip()
+    if is_seven_b_or_under_model_name(model_name):
+        active_profiles = set(getattr(harness.state, "active_tool_profiles", []) or [])
+        task_lower = resolved_task.lower()
+        is_remote = any(k in task_lower for k in ("ssh", "remote", "server", "host"))
+        is_compound = any(k in task_lower for k in (
+            "inspect", "compare", "determine", "analyze", "summarize",
+            "write", "generate", "create", "build", "report",
+        ))
+        if is_remote and is_compound:
+            harness.state.run_brief.constraints = list(
+                dict.fromkeys(
+                    harness.state.run_brief.constraints
+                    + ["compound_remote_task: break into gather→analyze→synthesize phases"]
+                )
+            )
+        if active_profiles & {"network", "network_read"}:
+            harness.state.run_brief.constraints = list(
+                dict.fromkeys(
+                    harness.state.run_brief.constraints
+                    + ["batch_ssh_discovery: combine multiple commands into one ssh_exec using && or ;"]
+                )
+            )
+
     harness.state.append_message(ConversationMessage(role="user", content=task))
     harness._log_conversation_state("user_message")
     await harness._emit(
@@ -568,6 +608,40 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
         await maybe_finalize_stranded_write_session(harness, graph_state)
 
     harness.state.step_count += 1
+
+    # Hard step-budget safety net for small models: if we've burned >12 steps
+    # without convergence, force a synthesize-and-exit directive.
+    if harness.state.step_count > 12:
+        model_name = str(
+            getattr(harness.state, "scratchpad", {}).get("_model_name")
+            or getattr(getattr(harness, "client", None), "model", "")
+            or ""
+        ).strip()
+        if is_seven_b_or_under_model_name(model_name):
+            if graph_state.final_result is None and getattr(harness.state, "write_session", None) is None:
+                # Only force-exit if the model hasn't already called task_complete/task_fail
+                # and isn't in the middle of a write session.
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=(
+                            "Step budget exceeded (12+ steps). You must now call `task_complete` "
+                            "with your best synthesis of findings, or call `task_fail` if blocked. "
+                            "Do not issue any more discovery commands."
+                        ),
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "step_budget_exceeded",
+                        },
+                    )
+                )
+                harness._runlog(
+                    "step_budget_exceeded",
+                    "injected hard step-budget nudge for small model",
+                    step=harness.state.step_count,
+                    model_name=model_name,
+                )
+
     harness.state.decay_experiences()
     harness.dispatcher.phase = normalize_phase(harness.state.contract_phase())
     prior_phase = harness.state.current_phase

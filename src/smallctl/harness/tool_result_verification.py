@@ -13,6 +13,7 @@ from ..docker_retry_normalization import (
     extract_docker_command_target,
 )
 from ..models.tool_result import ToolEnvelope
+from ..challenge_progress import record_verifier_result
 from ..shell_utils import strip_benign_shell_redirections as _strip_benign_shell_redirections
 
 # Patterns that indicate the command is probing for a binary's presence.
@@ -235,6 +236,8 @@ def _update_ssh_auth_recovery_state(
         scratchpad[_SSH_AUTH_RECOVERY_KEY] = recovery_state
 
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("reason") == "tool_not_exposed_this_turn":
+        return None
     output = result.output if isinstance(result.output, dict) else {}
     if not output:
         metadata_output = metadata.get("output")
@@ -297,6 +300,8 @@ def _store_verifier_verdict(
     if tool_name not in {"shell_exec", "ssh_exec"}:
         return None
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("reason") == "tool_not_exposed_this_turn":
+        return None
     output = result.output if isinstance(result.output, dict) else {}
     if not output:
         metadata_output = metadata.get("output")
@@ -452,6 +457,14 @@ def _store_verifier_verdict(
         normalized["latest_blocker"] = blocker
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
+    record_verifier_result(
+        state,
+        tool_name=tool_name,
+        command=command,
+        verifier_kind=str(normalized.get("verifier_kind") or current_verifier_kind),
+        verdict=verdict,
+        exit_code=exit_code,
+    )
     if blocker:
         _store_latest_execution_blocker(state, blocker)
     state.scratchpad.pop("_last_verifier_stale_after_mutation", None)

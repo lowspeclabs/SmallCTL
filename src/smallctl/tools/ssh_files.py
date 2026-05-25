@@ -24,6 +24,23 @@ _MAX_ARGV_PAYLOAD_SIZE = 128 * 1024
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+def _guard_ssh_local_path(path: str) -> dict[str, Any] | None:
+    normalized = str(path or "").strip()
+    if normalized.startswith("./temp/") and normalized.endswith((".txt", ".md", ".py")):
+        return fail(
+            f"Use local `file_write(path='{normalized}')` for local artifacts. "
+            "SSH file tools are for remote evidence gathering only.",
+            metadata={
+                "error_kind": "ssh_local_path_blocked",
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "arguments": {"path": normalized},
+                },
+            },
+        )
+    return None
+
+
 def _preview_text(value: str, *, limit: int = 160) -> dict[str, Any]:
     text = str(value or "")
     clipped = len(text) > limit
@@ -1089,6 +1106,9 @@ async def ssh_file_write(
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
+    local_guard = _guard_ssh_local_path(path)
+    if local_guard is not None:
+        return local_guard
     intended_sha = _sha256_text(content, encoding)
     if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
         return fail(
@@ -1166,6 +1186,9 @@ async def ssh_file_patch(
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
+    local_guard = _guard_ssh_local_path(path)
+    if local_guard is not None:
+        return local_guard
     if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
         return fail(
             "expected_sha256 is not a valid 64-character hex SHA-256 hash. "
@@ -1247,6 +1270,9 @@ async def ssh_file_replace_between(
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
+    local_guard = _guard_ssh_local_path(path)
+    if local_guard is not None:
+        return local_guard
     if expected_sha256 is not None and not _SHA256_HEX_RE.match(str(expected_sha256).strip()):
         return fail(
             "expected_sha256 is not a valid 64-character hex SHA-256 hash. "

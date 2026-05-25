@@ -27,14 +27,23 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
     step_id = str(value.get("step_id", "") or "").strip()
     task = str(value.get("task", "") or "").strip()
     title = str(value.get("title", "") or task).strip()
+    # Enforce concise step titles: truncate to first 6 words
+    title_words = title.split()
+    if len(title_words) > 6:
+        title = " ".join(title_words[:6])
     if not step_id and not title:
         return None
     resolved_step_id = step_id or str(fallback_step_id or title).strip()
+    # Prevent the model from creating pre-completed plan steps. Steps should only
+    # be marked completed by the system after concrete evidence or task_complete.
+    raw_status = str(value.get("status", "pending") or "pending").strip().lower()
+    if raw_status in {"completed", "done", "pass", "passed"}:
+        raw_status = "pending"
     return PlanStep(
         step_id=resolved_step_id,
         title=title or step_id or resolved_step_id,
         description=str(value.get("description", "") or ""),
-        status=str(value.get("status", "pending") or "pending"),
+        status=raw_status,
         notes=[str(item) for item in (value.get("notes") or []) if str(item).strip()],
         depends_on=[str(item) for item in (value.get("depends_on") or []) if str(item).strip()],
         substeps=[

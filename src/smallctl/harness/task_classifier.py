@@ -368,6 +368,17 @@ def looks_like_analysis_request(task: str) -> bool:
     return False
 
 
+def task_is_local_coding_target(task: str) -> bool:
+    text = str(task or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    has_coding_marker = any(m in lowered for m in ("build a self-contained python script", "unittest", "./temp/"))
+    has_py_target = bool(re.search(r'\.\/?temp\/[^\s\'"]+\.py', text))
+    has_explicit_remote = has_remote_execution_target(text)
+    return has_coding_marker and has_py_target and not has_explicit_remote
+
+
 def classify_task_mode(task: str) -> str:
     text = task.strip()
     if not text:
@@ -379,12 +390,10 @@ def classify_task_mode(task: str) -> str:
         return "chat"
     if looks_like_plan_only_request(text):
         return "plan_only"
-    if (
-        looks_like_write_patch_request(text)
-        or looks_like_write_file_request(text)
-        or looks_like_author_write_request(text)
-    ):
-        return "local_execute"
+    # Remote context wins: if the task explicitly targets a remote host,
+    # don't let local-write markers override it. Sysadmin tasks often say
+    # "SSH to host X ... save report to ./temp/xxx.txt" — the remote
+    # execution is the primary intent; the local write is secondary.
     if has_remote_execution_target(text) and (
         looks_like_action_request(text)
         or looks_like_shell_request(text)
@@ -392,6 +401,12 @@ def classify_task_mode(task: str) -> str:
         or needs_contextual_loop_escalation([], text)
     ):
         return "remote_execute"
+    if (
+        looks_like_write_patch_request(text)
+        or looks_like_write_file_request(text)
+        or looks_like_author_write_request(text)
+    ):
+        return "local_execute"
     if looks_like_debug_inspection_request(text):
         return "debug_inspect"
     if looks_like_action_request(text) or looks_like_shell_request(text):

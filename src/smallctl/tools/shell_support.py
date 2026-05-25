@@ -30,6 +30,31 @@ _INVALID_INPUT_MARKERS = (
 _REMOTE_INSTALLER_PREFLIGHT_KEY = "_remote_installer_preflight"
 
 
+def compose_remote_command(*parts: str, via_script: bool = False, script_path: str = "/tmp/smallctl_probe.sh") -> str:
+    """Compose a remote SSH command with safe quoting. For long or complex commands, upload a script."""
+    if via_script or len(shlex.join(parts)) > 400:
+        script_body = "\n".join(parts)
+        return f"cat > {script_path} << 'EOF'\n{script_body}\nEOF\nbash {script_path}"
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def classify_shell_outcome(command: str, returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
+    """Classify expected miss commands as empty_result when stdout/stderr semantics are clear."""
+    cmd = str(command or "").strip()
+    if returncode == 0:
+        return {"status": "success", "kind": "ok"}
+    absence_patterns = [
+        (r'\bfind\s+.*-name\s+', "absence_probe"),
+        (r'\bwhich\s+', "absence_probe"),
+        (r'\bgrep\s+-[qLl]', "absence_probe"),
+        (r'\btest\s+-[efdx]', "absence_probe"),
+    ]
+    for pat, kind in absence_patterns:
+        if re.search(pat, cmd) and not stdout.strip():
+            return {"status": "success", "kind": "empty_result", "exit_code": returncode}
+    return {"status": "failure", "kind": "error", "exit_code": returncode}
+
+
 def _interactive_installer_yes_pipe_guard(
     command: str,
     *,

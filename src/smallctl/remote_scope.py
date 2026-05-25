@@ -259,6 +259,14 @@ def remote_scope_is_active(state: Any | None) -> bool:
     return handoff_supports_remote_continuation(state)
 
 
+def sysadmin_local_artifact_paths(state: Any) -> list[str]:
+    task_mode = _normalized_mode(getattr(state, "task_mode", ""))
+    if task_mode != "remote_execute":
+        return []
+    texts = _current_task_texts(state)
+    return [p for p in extract_task_target_paths(" ".join(texts)) if p.startswith("./temp/") and p.endswith((".txt", ".md"))]
+
+
 def recent_remote_target_paths(state: Any | None) -> list[str]:
     scratchpad = _scratchpad(state)
     handoff = scratchpad.get("_last_task_handoff")

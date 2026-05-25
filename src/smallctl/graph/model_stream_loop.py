@@ -77,7 +77,13 @@ def _chunk_delta(event: dict[str, Any]) -> dict[str, Any]:
 def _chunk_has_assistant_content(event: dict[str, Any]) -> bool:
     delta = _chunk_delta(event)
     content = delta.get("content")
-    return isinstance(content, str) and bool(content.strip())
+    if isinstance(content, str) and bool(content.strip()):
+        return True
+    # Some backends (llama.cpp, OpenRouter/DeepInfra) populate reasoning_content
+    # while leaving content null. Treat reasoning as valid assistant output so the
+    # stream is not incorrectly flagged as a reasoning-only stall.
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    return isinstance(reasoning, str) and bool(reasoning.strip())
 
 
 def _chunk_has_reasoning(event: dict[str, Any]) -> bool:
@@ -461,7 +467,7 @@ async def run_model_stream_loop(
                             reasoning_only_retries += 1
                             current_phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
                             nudge = _build_reasoning_only_nudge(tools, phase=current_phase)
-                            messages = list(messages) + [ConversationMessage(role="user", content=nudge).to_dict()]
+                            messages = list(messages) + [ConversationMessage(role="system", content=nudge).to_dict()]
                             harness.state.scratchpad["_last_reasoning_only_retry"] = {
                                 "attempt": _model_attempt + 1,
                                 "reasoning_only_chunks": reasoning_only_chunks,

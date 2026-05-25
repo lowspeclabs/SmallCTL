@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 MEMORY_NAMESPACES = {
     "chat",
@@ -93,6 +93,11 @@ class NamespaceRouting:
     preferred_bonus: float = 9.0
     allowed_bonus: float = 0.5
     neutral_penalty: float = -3.0
+
+
+def is_remote_only_memory(memory: Any) -> bool:
+    text = str(getattr(memory, "content", "") or getattr(memory, "summary", "")).lower()
+    return any(t in text for t in ("ssh_exec", "ssh_file_patch", "requested_ssh_file_patch", "ssh_file_write"))
 
 
 def normalize_memory_namespace(value: str) -> str:

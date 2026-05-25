@@ -190,6 +190,21 @@ async def maybe_apply_terminal_tool_outcome(
         }
         return True
 
+    if record.result.metadata.get("approval_denied"):
+        if chat_mode:
+            _clear_chat_progress_guard(harness)
+        message = str(record.result.error or "Approval denied by user.")
+        graph_state.final_result = {
+            "status": "denied",
+            "message": message,
+            "assistant": graph_state.last_assistant_text,
+            "thinking": graph_state.last_thinking_text,
+            "usage": graph_state.last_usage,
+            "tool_name": record.tool_name,
+            "metadata": dict(record.result.metadata),
+        }
+        return True
+
     if (
         getattr(record.result, "status", None) == "needs_human"
         or record.result.metadata.get("status") == "needs_human"

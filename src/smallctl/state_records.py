@@ -5,6 +5,7 @@ from typing import Any
 
 from .models.conversation import ConversationMessage
 from .state_schema import (
+    ChallengeProgressState,
     ClaimRecord,
     DecisionRecord,
     EvidenceRecord,
@@ -315,6 +316,37 @@ def _coerce_step_verification_result(value: Any) -> StepVerificationResult | Non
     payload["verifier_results"] = results if isinstance(results, list) else []
     payload["evidence_artifact_id"] = str(payload.get("evidence_artifact_id", "") or "")
     return StepVerificationResult(**_filter_dataclass_payload(StepVerificationResult, payload))
+
+
+def _coerce_challenge_progress_state(value: Any) -> ChallengeProgressState:
+    if isinstance(value, ChallengeProgressState):
+        return value
+    if not isinstance(value, dict):
+        return ChallengeProgressState()
+    payload = dict(value)
+    payload["task_category"] = str(payload.get("task_category", "") or "")
+    payload["challenge_id"] = str(payload.get("challenge_id", "") or "")
+    payload["required_output_paths"] = _coerce_string_list(payload.get("required_output_paths"))
+    payload["last_code_change_step"] = max(0, _coerce_int(payload.get("last_code_change_step"), default=0))
+    payload["last_code_change_paths"] = _coerce_string_list(payload.get("last_code_change_paths"))
+    payload["code_change_count"] = max(0, _coerce_int(payload.get("code_change_count"), default=0))
+    payload["last_verifier_step"] = max(0, _coerce_int(payload.get("last_verifier_step"), default=0))
+    payload["last_verifier_command"] = str(payload.get("last_verifier_command", "") or "")
+    payload["last_verifier_kind"] = str(payload.get("last_verifier_kind", "") or "")
+    payload["last_verifier_verdict"] = str(payload.get("last_verifier_verdict", "") or "")
+    exit_code = payload.get("last_verifier_exit_code")
+    payload["last_verifier_exit_code"] = None if exit_code in (None, "") else _coerce_int(exit_code, default=0)
+    payload["verified_after_last_change"] = _coerce_bool(payload.get("verified_after_last_change"), default=False)
+    payload["redundant_verifier_count"] = max(0, _coerce_int(payload.get("redundant_verifier_count"), default=0))
+    payload["post_pass_nonterminal_steps"] = max(0, _coerce_int(payload.get("post_pass_nonterminal_steps"), default=0))
+    payload["no_change_steps_after_write"] = max(0, _coerce_int(payload.get("no_change_steps_after_write"), default=0))
+    payload["phase"] = str(payload.get("phase", "") or "")
+    payload["phase_started_at_step"] = max(0, _coerce_int(payload.get("phase_started_at_step"), default=0))
+    try:
+        payload["phase_started_at_monotonic_sec"] = float(payload.get("phase_started_at_monotonic_sec") or 0.0)
+    except (TypeError, ValueError):
+        payload["phase_started_at_monotonic_sec"] = 0.0
+    return ChallengeProgressState(**_filter_dataclass_payload(ChallengeProgressState, payload))
 
 
 def _coerce_step_evidence_artifact(value: Any, *, step_id: str | None = None) -> StepEvidenceArtifact | None:

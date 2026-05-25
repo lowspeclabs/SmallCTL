@@ -115,6 +115,23 @@ class PromptStateFrameCompiler:
             state=state,
             experiences=list(retrieved_experiences),
         )
+        from ..harness.task_classifier import task_is_local_coding_target
+        from ..memory_namespace import is_remote_only_memory
+        task_text = str(getattr(state.run_brief, "original_task", "") or "")
+        if task_is_local_coding_target(task_text):
+            filtered_experiences = []
+            dropped_remote_ids = []
+            for e in experiences:
+                if is_remote_only_memory(e):
+                    dropped_remote_ids.append(getattr(e, "id", str(e)))
+                else:
+                    filtered_experiences.append(e)
+            if dropped_remote_ids:
+                state.scratchpad["_remote_memory_suppressed_for_local_task"] = {
+                    "count": len(dropped_remote_ids),
+                    "reason": "local_coding_task",
+                }
+            experiences = filtered_experiences
         artifacts, dropped_artifact_ids = self._filter_invalidated_artifact_snippets(
             state=state,
             snippets=list(retrieved_artifacts),
@@ -146,6 +163,14 @@ class PromptStateFrameCompiler:
             next_allowed_action = self._render_write_session_next_action(state.write_session)
         if not next_allowed_action and state.working_memory.next_actions:
             next_allowed_action = state.working_memory.next_actions[-1]
+        if next_allowed_action and task_is_local_coding_target(task_text):
+            lowered_next = next_allowed_action.lower()
+            if any(t in lowered_next for t in ("ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between")):
+                next_allowed_action = state.run_brief.current_phase_objective or state.run_brief.original_task
+                state.scratchpad["_remote_next_action_suppressed_for_local_task"] = {
+                    "original_next_action": state.working_memory.next_actions[-1] if state.working_memory.next_actions else None,
+                    "reason": "local_coding_task",
+                }
         if not next_allowed_action:
             next_allowed_action = state.run_brief.current_phase_objective or state.run_brief.original_task
 

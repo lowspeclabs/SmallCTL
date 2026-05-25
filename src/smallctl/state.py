@@ -13,6 +13,7 @@ from .state_flow import LoopStateFlowMixin
 from .state_schema import (
     ArtifactRecord,
     ArtifactSnippet,
+    ChallengeProgressState,
     ClaimRecord,
     ContextBrief,
     DecisionRecord,
@@ -46,6 +47,7 @@ from .state_coercion import (
     _coerce_step_verification_result,
     _coerce_artifact_record,
     _coerce_episodic_summary,
+    _coerce_challenge_progress_state,
     _coerce_context_brief,
     _coerce_prompt_budget,
     _coerce_background_process_record,
@@ -106,6 +108,7 @@ class LoopState(LoopStateFlowMixin):
     acceptance_waivers: list[str] = field(default_factory=list)
     acceptance_waived: bool = False
     last_verifier_verdict: dict[str, Any] | None = None
+    challenge_progress: ChallengeProgressState = field(default_factory=ChallengeProgressState)
     last_failure_class: str = ""
     failure_events: list[FailureEvent] = field(default_factory=list)
     reflexion_memory: list[ReflectionMemory] = field(default_factory=list)
@@ -210,6 +213,7 @@ class LoopState(LoopStateFlowMixin):
             "acceptance_waivers": json_safe_value(self.acceptance_waivers),
             "acceptance_waived": self.acceptance_waived,
             "last_verifier_verdict": json_safe_value(self.last_verifier_verdict),
+            "challenge_progress": json_safe_value(self.challenge_progress),
             "last_failure_class": self.last_failure_class,
             "failure_events": json_safe_value(self.failure_events),
             "reflexion_memory": json_safe_value(self.reflexion_memory),
@@ -321,6 +325,7 @@ class LoopState(LoopStateFlowMixin):
         raw["acceptance_waivers"] = _coerce_string_list(migrated.get("acceptance_waivers"))
         raw["acceptance_waived"] = bool(migrated.get("acceptance_waived", False))
         raw["last_verifier_verdict"] = _coerce_json_dict_payload(migrated.get("last_verifier_verdict"))
+        raw["challenge_progress"] = _coerce_challenge_progress_state(migrated.get("challenge_progress"))
         raw["last_failure_class"] = str(migrated.get("last_failure_class", "") or "")
         raw["failure_events"] = [
             event

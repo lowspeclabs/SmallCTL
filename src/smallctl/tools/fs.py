@@ -107,7 +107,15 @@ async def file_write(
     if not content and not write_session_id:
         return fail(
             "File write received empty content. If you intended to create an empty file, please use `\"\"` (or use shell commands like touch). "
-            "If you forgot the content, please retry with the full content payload."
+            "If you forgot the content, please retry with the full content payload.",
+            metadata={
+                "error_kind": "empty_content_without_session",
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "required_fields": ["path", "content"],
+                    "required_arguments": {"path": path},
+                },
+            },
         )
     
     if write_session_id and state is not None:

@@ -141,7 +141,7 @@ def register_control_planning_tools(
                         "implementation_plan": {"type": "array", "description": "Short implementation stages or ordered authoring plan items."},
                         "steps": {
                             "type": "array",
-                            "description": "Ordered plan steps. Each step must have a short `title` (≤8 words, imperative mood, e.g. 'Write backoff script'). Put the full implementation spec in `description` or `task`, not in `title`. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
+                            "description": "Ordered plan steps. Each step must have a short `title` (≤6 words, imperative mood, e.g. 'Write backoff script'). The title is ONLY a concise task name for the checklist UI. Put ALL implementation details, file paths, and full specs in the `description` or `task` field. Never put file paths or long descriptions in `title`. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
                             "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
                         },
                         "output_path": {"type": "string", "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py."},

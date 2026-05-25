@@ -59,6 +59,28 @@ class StepVerificationResult:
 
 
 @dataclass
+class ChallengeProgressState:
+    task_category: str = ""
+    challenge_id: str = ""
+    required_output_paths: list[str] = field(default_factory=list)
+    last_code_change_step: int = 0
+    last_code_change_paths: list[str] = field(default_factory=list)
+    code_change_count: int = 0
+    last_verifier_step: int = 0
+    last_verifier_command: str = ""
+    last_verifier_kind: str = ""
+    last_verifier_verdict: str = ""
+    last_verifier_exit_code: int | None = None
+    verified_after_last_change: bool = False
+    redundant_verifier_count: int = 0
+    post_pass_nonterminal_steps: int = 0
+    no_change_steps_after_write: int = 0
+    phase: str = ""
+    phase_started_at_step: int = 0
+    phase_started_at_monotonic_sec: float = 0.0
+
+
+@dataclass
 class StepEvidenceArtifact:
     step_id: str
     step_run_id: str = ""

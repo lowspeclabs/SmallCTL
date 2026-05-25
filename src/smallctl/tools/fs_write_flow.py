@@ -95,7 +95,19 @@ def handle_file_write_session(
         )
     session = state.write_session
     if session.write_session_id != write_session_id:
-        return fail(f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.")
+        return fail(
+            f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.",
+            metadata={
+                "error_kind": "write_session_id_mismatch",
+                "expected_session_id": session.write_session_id,
+                "provided_session_id": write_session_id,
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "required_fields": ["path", "content", "write_session_id"],
+                    "required_arguments": {"path": path, "write_session_id": session.write_session_id},
+                },
+            },
+        )
 
     session_status = str(getattr(session, "status", "") or "open").strip().lower() or "open"
     if session_status not in {"open", "local_repair", "fallback"}:
@@ -155,7 +167,19 @@ def handle_file_write_session(
             session.write_last_attempt_snapshot_path = ""
             session.write_target_existed_at_start = False
         else:
-            return fail(f"Session target path mismatch: expected `{session.write_target_path}`, got `{path}`.")
+            return fail(
+                f"Session target path mismatch: expected `{session.write_target_path}`, got `{path}`.",
+                metadata={
+                    "error_kind": "write_session_target_mismatch",
+                    "expected_path": session.write_target_path,
+                    "provided_path": path,
+                    "next_required_tool": {
+                        "tool_name": "file_write",
+                        "required_fields": ["path", "content", "write_session_id"],
+                        "required_arguments": {"path": session.write_target_path, "write_session_id": write_session_id},
+                    },
+                },
+            )
 
     normalized_section_name = _normalize_section_name(section_name, section_id)
     normalized_next_section = str(next_section_name or "").strip()
@@ -207,7 +231,19 @@ def handle_file_write_session(
                     "write_session_intent": session.write_session_intent,
                     "replace_strategy": strategy,
                     "staged_only": True,
-                    "error_kind": "patch_existing_requires_explicit_replace_strategy",
+                    "error_kind": "patch_existing_first_chunk",
+                    "next_required_tool": {
+                        "tool_name": "file_write",
+                        "required_fields": ["path", "content", "write_session_id", "replace_strategy"],
+                        "required_arguments": {
+                            "path": path,
+                            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                            "replace_strategy": "overwrite",
+                        },
+                        "notes": [
+                            "Alternatively use file_patch or ast_patch for narrow edits, or file_read to inspect the staged copy.",
+                        ],
+                    },
                 },
             )
         start = len(staged_content)
@@ -331,7 +367,25 @@ def handle_file_write_session(
     try:
         _write_text_file(staging_path, updated_content, encoding=encoding)
     except Exception as exc:
-        return fail(f"Unable to write section `{normalized_section_name}` to `{path}`: {exc}")
+        return fail(
+            f"Unable to write section `{normalized_section_name}` to `{path}`: {exc}",
+            metadata={
+                "error_kind": "staging_write_io_error",
+                "path": str(target),
+                "staging_path": str(staging_path),
+                "section_name": normalized_section_name,
+                "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "required_fields": ["path", "content", "write_session_id"],
+                    "required_arguments": {
+                        "path": path,
+                        "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                    },
+                    "notes": ["Retry the same section write; if the error persists, call file_read on the staged copy first."],
+                },
+            },
+        )
 
     session.write_last_staged_hash = _content_hash(updated_content)
     session.write_section_ranges = updated_ranges

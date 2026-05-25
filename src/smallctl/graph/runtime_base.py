@@ -30,6 +30,8 @@ from .state import GraphRunState
 DEFAULT_GRAPH_NODE_TIMEOUT_SEC = 300.0
 DEFAULT_GRAPH_MODEL_CALL_TIMEOUT_SEC = 600.0
 DEFAULT_GRAPH_DISPATCH_TOOLS_TIMEOUT_SEC = 300.0
+DEFAULT_GRAPH_RECURSION_LIMIT = 1024
+DEFAULT_GRAPH_CODING_RECURSION_LIMIT = 2048
 
 
 class GraphNodeTimeoutError(TimeoutError):
@@ -131,7 +133,7 @@ class RuntimeGraphBuilder:
                     elapsed_sec=round(elapsed, 3),
                 )
                 raise
-            except Exception:
+            except Exception as exc:
                 elapsed = time.monotonic() - started
                 touch_graph_activity(harness)
                 runlog(
@@ -140,6 +142,8 @@ class RuntimeGraphBuilder:
                     "graph node failed",
                     node=node_name,
                     elapsed_sec=round(elapsed, 3),
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
                 )
                 raise
             elapsed = time.monotonic() - started
@@ -171,7 +175,7 @@ class CompiledGraphRuntimeBase:
     _run_mode = "loop"
     _run_execution_message = "executing loop runtime"
     _empty_result_message = "Graph loop ended without a terminal result."
-    _recursion_limit = 512
+    _recursion_limit = DEFAULT_GRAPH_RECURSION_LIMIT
 
     def __init__(self, deps: Any) -> None:
         self.deps = deps
@@ -211,12 +215,21 @@ class CompiledGraphRuntimeBase:
         return await self._execute_langgraph(payload)
 
     async def _execute_langgraph(self, payload: LoopGraphPayload | Command) -> dict[str, object]:
+        harness = self.deps.harness
+        recursion_limit = resolve_graph_recursion_limit(harness, default=self._recursion_limit)
+        publish_graph_step_budget(harness, recursion_limit=recursion_limit)
+        harness._runlog(
+            "runtime_recursion_limit",
+            "resolved graph recursion limit",
+            recursion_limit=recursion_limit,
+            task_mode=str(getattr(getattr(harness, "state", None), "task_mode", "") or ""),
+        )
         return await execute_streaming_graph(
             self,
             payload,
             build_graph=self._build_compiled_graph,
             empty_result_message=self._empty_result_message,
-            recursion_limit=self._recursion_limit,
+            recursion_limit=recursion_limit,
         )
 
     def _build_compiled_graph(self):
@@ -226,7 +239,9 @@ class CompiledGraphRuntimeBase:
         return "compiled"
 
     def restore(self, *, thread_id: str | None = None) -> bool:
-        return restore_runtime_state(self, thread_id=thread_id, recursion_limit=self._recursion_limit)
+        recursion_limit = resolve_graph_recursion_limit(self.deps.harness, default=self._recursion_limit)
+        publish_graph_step_budget(self.deps.harness, recursion_limit=recursion_limit)
+        return restore_runtime_state(self, thread_id=thread_id, recursion_limit=recursion_limit)
 
 
 def runlog(harness: Any, event: str, message: str, **data: Any) -> None:
@@ -248,6 +263,56 @@ def positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def is_coding_graph_task(harness: Any) -> bool:
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode in {"local_execute", "debug_inspect"}:
+        return True
+    if getattr(state, "write_session", None) is not None:
+        return True
+    if getattr(state, "files_changed_this_cycle", None):
+        return True
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if active_intent in {"author_write", "requested_write_file", "requested_patch_file"}:
+        return True
+    intent_tags = [str(tag or "").strip().lower() for tag in (getattr(state, "intent_tags", None) or [])]
+    return any(tag in {"coding", "local_coding", "write_file", "patch_file"} for tag in intent_tags)
+
+
+def resolve_graph_recursion_limit(harness: Any, *, default: int = DEFAULT_GRAPH_RECURSION_LIMIT) -> int:
+    base_default = positive_int(default, DEFAULT_GRAPH_RECURSION_LIMIT)
+    base_limit = positive_int(config_value(harness, "graph_recursion_limit", base_default), base_default)
+    if not is_coding_graph_task(harness):
+        return base_limit
+    coding_default = max(DEFAULT_GRAPH_CODING_RECURSION_LIMIT, base_limit)
+    coding_limit = positive_int(config_value(harness, "graph_coding_recursion_limit", coding_default), coding_default)
+    return max(base_limit, coding_limit)
+
+
+def publish_graph_step_budget(harness: Any, *, recursion_limit: int) -> None:
+    state = getattr(harness, "state", None)
+    publish_graph_step_budget_for_state(state, recursion_limit=recursion_limit)
+
+
+def publish_graph_step_budget_for_state(state: Any, *, recursion_limit: int) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    step_count = positive_int(getattr(state, "step_count", 0), 0)
+    scratchpad["_graph_recursion_limit"] = recursion_limit
+    scratchpad["_graph_steps_remaining"] = max(0, recursion_limit - step_count)
 
 
 def graph_node_timeout_sec(harness: Any, node_name: str) -> float | None:
@@ -278,6 +343,8 @@ async def prepare_prompt_node(
     prepare_fn: Callable[[Any, Any], Awaitable[list[dict[str, Any]] | None]],
 ) -> LoopGraphPayload:
     graph_state = load_runtime_state(runtime, payload)
+    recursion_limit = resolve_graph_recursion_limit(runtime.deps.harness, default=runtime._recursion_limit)
+    publish_graph_step_budget_for_state(graph_state.loop_state, recursion_limit=recursion_limit)
     messages = await prepare_fn(graph_state, runtime.deps)
     next_payload = serialize_runtime_state(graph_state)
     if messages is not None:

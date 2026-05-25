@@ -17,7 +17,7 @@ from ..memory_namespace import (
 from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
 from ..redaction import redact_sensitive_text
 from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
-from ..guards import is_over_twenty_b_model_name
+from ..guards import is_over_twenty_b_model_name, is_seven_b_or_under_model_name
 from ..state import (
     ArtifactRecord,
     ArtifactSnippet,
@@ -832,6 +832,15 @@ class LexicalRetriever:
                 score *= 0.35
             if self._query_requests_live_remote_correction(query_text):
                 score *= 0.45
+
+        # De-prioritize identical-task memories for small models (≤7B) to avoid
+        # confusing the model into thinking the current task is already done.
+        if is_seven_b_or_under_model_name(self._state_model_name(state)):
+            current_task = str(state.run_brief.original_task or "").strip().lower()
+            memory_notes = str(m.notes or "").strip().lower()
+            memory_intent = str(m.intent or "").strip().lower()
+            if current_task and (current_task in memory_notes or current_task in memory_intent or memory_notes in current_task):
+                score *= 0.3
 
         return score
 

@@ -28,6 +28,23 @@ _REMOTE_CLEANUP_TASK_KEYWORDS = (
 )
 
 
+def _graph_step_budget_prompt(scratchpad: Any) -> str | None:
+    if not isinstance(scratchpad, dict):
+        return None
+    try:
+        remaining = int(scratchpad.get("_graph_steps_remaining"))
+        limit = int(scratchpad.get("_graph_recursion_limit"))
+    except (TypeError, ValueError):
+        return None
+    if remaining <= 0 or limit <= 0:
+        return None
+    return (
+        f"STEP BUDGET: You have approximately {remaining} graph steps remaining out of {limit}. "
+        "If you already wrote and verified the file once, do not re-verify unless the latest test output shows a real failure. "
+        "When evidence is sufficient, call `task_complete`; when blocked by repeated identical checks, call `task_fail` or escalate instead of looping. "
+    )
+
+
 def is_gemma_model_name(model_name: str | None) -> bool:
     normalized = str(model_name or "").strip().lower()
     return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
@@ -141,6 +158,9 @@ def build_system_prompt(
             "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
             "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
             "SHELL: When verifying a Python script that has `if __name__ == '__main__': main()`, do not run it bare without arguments if `main()` reads from stdin. Pipe sample input (e.g., `echo '{}' | python3 script.py`) or use `python3 -m unittest discover` / `python3 -m pytest` instead of bare execution. ",
+            "REMOTE PROBES: Batch read-only checks into single ssh_exec calls using && or ;. "
+            "For commands longer than ~300 chars or with nested quotes, upload a temporary script "
+            "(cat > /tmp/probe.sh << 'EOF' ...) and execute it. Use shlex.quote() for interpolated paths. ",
             "MEMORY: Use `memory_update` to persist key facts. ",
             "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
             "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
@@ -191,6 +211,16 @@ def build_system_prompt(
             "or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
             "If tools are needed, emit only the JSON object. The backticked task_complete examples in this prompt "
             "describe intent only; do not copy that literal syntax into the response. "
+        )
+    step_budget_prompt = _graph_step_budget_prompt(scratchpad)
+    if step_budget_prompt:
+        parts.append(step_budget_prompt)
+    from .remote_scope import sysadmin_local_artifact_paths
+    local_artifacts = sysadmin_local_artifact_paths(state)
+    if local_artifacts:
+        parts.append(
+            f"LOCAL ARTIFACT TASK: Remote evidence collection is required, but the final report must be written to local path(s): {', '.join(local_artifacts)}. "
+            "Use local file_write for the report; use SSH tools only for evidence gathering."
         )
     if state.contract_phase() == "repair":
         repair_bits = []
@@ -379,7 +409,7 @@ def build_system_prompt(
             parts.append(
                 f"Available tools on this turn: {tool_names}. Use these names exactly and do not claim the tool list is unknown. Do not merge calls."
             )
-            if "ssh_exec" in available_tool_names:
+            if "ssh_exec" in available_tool_names and str(getattr(state, "task_mode", "") or "").strip().lower() != "local_execute":
                 parts.append(
                     "NETWORK: Use `ssh_exec` for remote SSH commands and `shell_exec` for local shell work only. "
                     "Do not shell out to `ssh` through `shell_exec` when `ssh_exec` is available. "
@@ -550,10 +580,10 @@ def build_planning_prompt(
         "Use plan export paths only for plan documents (.md, .txt, .text), never for implementation files like .py. "
         "Exactly one level of subplanning is allowed. "
         "The required plan shape is: goal, inputs, outputs, constraints, acceptance_criteria, implementation_plan, and steps. "
-        "STEP TITLE RULE: Each step title must be ≤8 words, imperative mood, and free of file paths. "
+        "STEP TITLE RULE: Each step title must be a simple ≤6 word task name, imperative mood, and free of file paths. "
+        "The title is ONLY a concise checklist label; put ALL details in `description` or `task`. "
         "Example good title: 'Write backoff script'. "
-        "Example bad title: 'Build a self-contained Python script at ./temp/restart_backoff.py'. "
-        "Put verbose implementation details in the step's `description` or `task` field, never in `title`."
+        "Example bad title: 'Build a self-contained Python script at ./temp/restart_backoff.py'."
     )
     prompt = build_system_prompt(
         state,

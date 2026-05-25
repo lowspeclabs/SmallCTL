@@ -105,10 +105,6 @@ class SSEStreamer:
         Yields chunk events with parsed JSON data and done events when complete.
         Also handles error chunks and timeout conditions.
         """
-        chunk_count = 0
-        saw_done = False
-        tool_call_stream_active = False
-        recent_chunks: deque[dict[str, Any]] = deque(maxlen=5)
         read_timeout_cap = max(
             float(self.STREAM_READ_TIMEOUT_SEC),
             float(self.tool_call_continuation_timeout_sec),
@@ -119,6 +115,50 @@ class SSEStreamer:
             write=self.STREAM_WRITE_TIMEOUT_SEC,
             pool=self.STREAM_POOL_TIMEOUT_SEC,
         )
+        attempt = 0
+        max_attempts = 2
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                async for event in self._stream_sse_once(client, url, headers, payload, timeout):
+                    yield event
+                return
+            except httpx.RemoteProtocolError as exc:
+                if attempt < max_attempts:
+                    log_kv(
+                        self.log,
+                        logging.WARNING,
+                        "chat_stream_remote_protocol_error_retry",
+                        attempt=attempt,
+                        error=str(exc),
+                        provider_profile=self.provider_profile,
+                    )
+                    continue
+                yield {
+                    "type": "chunk_error",
+                    "error": "Remote protocol error after retry",
+                    "details": {
+                        "reason": "backend_stream_failure",
+                        "provider_profile": self.provider_profile,
+                        "attempt_count": attempt,
+                        "exception_type": "httpx.RemoteProtocolError",
+                        "message": str(exc),
+                    },
+                }
+                return
+
+    async def _stream_sse_once(
+        self,
+        client: Any,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout: httpx.Timeout,
+    ) -> AsyncIterator[dict[str, Any]]:
+        chunk_count = 0
+        saw_done = False
+        tool_call_stream_active = False
+        recent_chunks: deque[dict[str, Any]] = deque(maxlen=5)
         async with client.stream("POST", url, headers=headers, json=payload, timeout=timeout) as response:
             response.raise_for_status()
             line_iter = response.aiter_lines()

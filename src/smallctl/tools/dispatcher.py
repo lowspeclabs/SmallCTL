@@ -9,6 +9,7 @@ from ..logging_utils import RunLogger, log_kv
 from ..models.tool_result import ToolEnvelope
 from ..remote_scope import has_single_confirmed_ssh_target, remote_scope_is_active
 from ..state import json_safe_value
+from ..challenge_progress import redundant_verifier_block
 from . import network
 from .registry import ToolRegistry
 
@@ -292,6 +293,22 @@ class ToolDispatcher:
                     mode=self.phase,
                 )
             return blocked_by_fama
+        blocked_by_challenge_progress = redundant_verifier_block(
+            self.state,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        if blocked_by_challenge_progress is not None:
+            if self.run_logger:
+                self.run_logger.log(
+                    "tools",
+                    "challenge_progress_tool_call_blocked",
+                    "challenge progress policy blocked tool call",
+                    tool_name=tool_name,
+                    active_mitigation=blocked_by_challenge_progress.metadata.get("active_mitigation"),
+                    reason=blocked_by_challenge_progress.metadata.get("reason"),
+                )
+            return blocked_by_challenge_progress
         if not spec.phase_allowed(self.phase):
             log_kv(
                 self.log,

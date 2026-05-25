@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import fail
+from .common import fail, needs_human
 
 
 def _format_advisory_text(advisory: dict[str, Any]) -> str:
@@ -59,7 +59,6 @@ async def escalate_to_bigger_model(
     state: Any = None,
     harness: Any = None,
 ) -> dict[str, Any]:
-    del state
     if harness is None:
         return {"success": False, "status": "error", "error": "Harness is required for escalation."}
     from ..harness.escalation_service import EscalationService
@@ -82,6 +81,18 @@ async def escalate_to_bigger_model(
     # Reformat the raw advisory JSON into structured text the acting model can easily consume.
     if isinstance(result, dict):
         result["advisory_text"] = _format_advisory_text(result)
+        if _advisory_requires_human(result):
+            question_text = _advisory_human_question(result, question)
+            return needs_human(
+                question_text,
+                metadata={
+                    "reason": "escalation_ask_human",
+                    "escalation_result": result,
+                    "escalation_id": result.get("escalation_id"),
+                    "verdict": result.get("verdict"),
+                    "advisory_text": result.get("advisory_text"),
+                },
+            )
         # Inject the recommended next action into working memory so the model
         # treats it as a concrete goal rather than drifting back to task_complete.
         action = result.get("recommended_next_action")
@@ -108,6 +119,32 @@ async def escalate_to_bigger_model(
         if isinstance(repair_plan, str) and repair_plan.strip():
             _inject_next_action(state, f"Repair plan (from bigger model): {repair_plan.strip()}")
     return result
+
+
+def _advisory_requires_human(advisory: dict[str, Any]) -> bool:
+    if bool(advisory.get("requires_human_approval")):
+        return True
+    if str(advisory.get("verdict") or "").strip() == "ask_human":
+        return True
+    action = advisory.get("recommended_next_action")
+    if not isinstance(action, dict):
+        return False
+    return str(action.get("type") or "").strip() == "ask_human"
+
+
+def _advisory_human_question(advisory: dict[str, Any], fallback: str) -> str:
+    action = advisory.get("recommended_next_action")
+    if isinstance(action, dict):
+        for key in ("question", "reason"):
+            value = action.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for key in ("question", "failure_diagnosis"):
+        value = advisory.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    fallback = str(fallback or "").strip()
+    return fallback or "Human input is required to continue."
 
 
 def _inject_next_action(state: Any, text: str) -> None:

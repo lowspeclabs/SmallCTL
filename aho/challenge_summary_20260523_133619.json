@@ -1,0 +1,157 @@
+{
+  "created_at": "2026-05-23T17:36:19.791582+00:00",
+  "dry_run": false,
+  "challenge_filter": "code-001-fizzbuzz-cli",
+  "total": 1,
+  "baseline_mean_pass_at_n": 0.0,
+  "baseline_mean_harness_score": 0.0,
+  "counts": {
+    "improved": 0,
+    "not_improved": 0,
+    "perfect": 0,
+    "patch_failed": 0,
+    "dry_run": 0,
+    "baseline": 1
+  },
+  "outcomes": [
+    {
+      "challenge_id": "code-001-fizzbuzz-cli",
+      "status": "baseline",
+      "branch_name": null,
+      "baseline": {
+        "cfg": {
+          "strategy_id": "challenge-code-001-fizzbuzz-cli",
+          "version": 17,
+          "endpoint": "http://192.168.1.9:1234/v1",
+          "model": "unsloth/qwen3.5-4b",
+          "provider_profile": "lmstudio",
+          "api_key": "local-dev-key",
+          "context_limit": 4096,
+          "max_prompt_tokens": 4000,
+          "n_trials": 1,
+          "trial_timeout_sec": 180,
+          "context_optimization": "smart",
+          "harness_evolution_enabled": false,
+          "tool_guard_enabled": true,
+          "adaptive_compression": true,
+          "adaptive_steps": true,
+          "max_loops": 2,
+          "distilled_mode": true,
+          "inline_tool_results": {
+            "enabled": true,
+            "mode": "smart",
+            "features": {
+              "distilled_by_default": true,
+              "dynamic_fact_extraction": true,
+              "fact_validation": true,
+              "confidence_threshold": 0.8
+            },
+            "tool_specific": {
+              "long_context_lookup": {
+                "distilled_default": true,
+                "max_facts": 5
+              },
+              "summarize_report": {
+                "distilled_default": true,
+                "max_facts": 3
+              }
+            }
+          },
+          "strategy": {
+            "thought_architecture": "chain_of_thought",
+            "delimiter_style": "xml",
+            "error_handling": "retry_with_hint",
+            "dynamic_few_shot_mode": "ultimate",
+            "system_prompt_addendum": "STRICT WORKFLOW: 1) Call long_context_lookup ONCE. 2) Call summarize_report ONCE. 3) Tool results include KEY FACTS - you already have the data, DO NOT call artifact_read. 4) Immediately write class with required method. 5) Call task_complete. NO memory_update. NO re-reading.",
+            "tool_call_format": "strict_xml",
+            "forbidden_patterns": [
+              "memory_update",
+              "Let me read again",
+              "Let me check again"
+            ],
+            "max_steps": 15,
+            "tool_guard_enabled": true,
+            "context_optimization": "smart"
+          },
+          "task": {
+            "description": "Write a Python CLI script that reads an integer N and prints the numbers from 1 to N using classic FizzBuzz rules. Generate the file, write the code to disk, run it, inspect any mistakes, debug the script, and rerun it until it behaves correctly."
+          },
+          "scoring": {
+            "w_accuracy": 0.6,
+            "w_format": 0.3,
+            "w_latency": 0.1,
+            "latency_penalty_per_100_tokens": 0.01
+          },
+          "auto_batch": {
+            "enabled": true,
+            "batch_window_ms": 50.0,
+            "max_batch_size": 5
+          }
+        },
+        "trials": [
+          {
+            "trial_id": 0,
+            "result": {
+              "status": "failed",
+              "reason": "PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072.",
+              "error": {
+                "type": "prompt_budget",
+                "message": "PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072.",
+                "details": {}
+              },
+              "latency_metrics": {
+                "overhead_preparation_duration_sec": 0.003
+              },
+              "step_count": 1,
+              "inactive_steps": 0,
+              "token_usage": 0
+            },
+            "token_usage": 0,
+            "tool_records": {},
+            "step_count": 1,
+            "elapsed_sec": 7.28,
+            "failure_events": [],
+            "stagnation_counters": {},
+            "tool_history": [],
+            "error": null
+          }
+        ],
+        "scores": {
+          "pass_at_n": 0.0,
+          "mean_harness_score": 0.0,
+          "mean_token_usage": 0.0,
+          "trial_scores": [
+            {
+              "accuracy": 0.0,
+              "format_score": 0.0,
+              "token_usage": 0,
+              "latency_penalty": 0.0,
+              "stagnation_penalty": 1.0,
+              "harness_score": 0.0,
+              "failure_modes": [
+                "trial_error: PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072."
+              ],
+              "bugs": [
+                "trial crashed: PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072."
+              ],
+              "step_count": 1
+            }
+          ],
+          "failure_modes": [
+            "trial_error: PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072. (1/1)"
+          ],
+          "bugs": [
+            "trial crashed: PROMPT BUDGET OVERFLOW: 6081 tokens assembled, which exceeds the max prompt limit of 3072. (1/1)"
+          ],
+          "n_bugs": 1
+        }
+      },
+      "candidate": null,
+      "benchmark": null,
+      "notes": [
+        "baseline-only run; no intervention attempted"
+      ],
+      "hypothesis": null
+    }
+  ]
+}

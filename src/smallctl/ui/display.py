@@ -415,7 +415,7 @@ class StatusState:
     def from_harness(
         cls,
         harness: Any,
-        harness_kwargs: dict[str, Any],
+        config: Any,
         *,
         activity: str = "",
         api_errors: int = 0,
@@ -426,7 +426,7 @@ class StatusState:
             snapshot_activity = "thinking..."
         snapshot = UIStatusSnapshot.from_harness(
             harness,
-            harness_kwargs,
+            config,
             activity=snapshot_activity,
             api_errors=api_errors,
         )

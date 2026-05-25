@@ -20,10 +20,9 @@ SmallCTL is not a claim that a 4B-9B model is a fully autonomous senior engineer
 Requires Python 3.10+.
 
 ```bash
-git clone <repo-url>
-cd Harness-Redo
-./install.sh
-source .venv/bin/activate
+git clone https://github.com/cheeseonamonkey/SmallCTL
+cd SmallCTL
+pip install -e .
 smallctl --help
 ```
 
@@ -31,6 +30,7 @@ Optional local config:
 
 ```bash
 cp .smallctl.yaml.example .smallctl.yaml
+cp .env.example .env
 ```
 
 Set the model endpoint with CLI flags, `.smallctl.yaml`, `.env`, or environment variables:

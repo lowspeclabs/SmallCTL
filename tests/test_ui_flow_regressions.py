@@ -647,6 +647,8 @@ def test_run_harness_task_backfills_terminal_result_into_assistant_transcript() 
             self._show_system_messages = True
             self._show_tool_calls = True
             self.active_task = None
+            self._task_start_time = None
+            self._activity_timer = None
             self.console = _Console()
             self._app_logger = logging.getLogger("test.ui_flow_regressions.terminal_result")
 
@@ -663,6 +665,13 @@ def test_run_harness_task_backfills_terminal_result_into_assistant_transcript() 
             snapshot: dict[str, object] | None = None,
         ) -> None:
             return None
+
+        def set_interval(self, interval: float, callback: object) -> object:
+            class _Timer:
+                def stop(self) -> None:
+                    return None
+
+            return _Timer()
 
         async def _append_system_line(self, text: str, *, force: bool = False) -> None:
             system_lines.append(text)
@@ -682,6 +691,69 @@ def test_run_harness_task_backfills_terminal_result_into_assistant_transcript() 
     assert system_lines == [
         "Task completed. Type a new message or press Ctrl+C to exit."
     ]
+
+
+def test_run_harness_task_forces_pre_stream_failure_visible_when_system_hidden() -> None:
+    system_lines: list[tuple[str, bool]] = []
+    status_steps: list[int | str | None] = []
+
+    class _Console:
+        pass
+
+    class _Bridge:
+        async def run_auto(self, task: str) -> dict[str, object]:
+            assert task == "next task"
+            raise RuntimeError("initialize_run failed before model_call")
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.harness = object()
+            self._harness_bridge = _Bridge()
+            self._status_activity = ""
+            self._api_error_count = 0
+            self._pending_user_echo = "next task"
+            self._show_system_messages = False
+            self._show_tool_calls = False
+            self.active_task = object()
+            self._task_start_time = None
+            self._activity_timer = None
+            self.console = _Console()
+            self._app_logger = logging.getLogger("test.ui_flow_regressions.pre_stream_failure")
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+        def _set_activity(self, text: str | None) -> None:
+            self._status_activity = str(text or "")
+
+        def _refresh_status(
+            self,
+            step_override: int | str | None = None,
+            *,
+            snapshot: dict[str, object] | None = None,
+        ) -> None:
+            status_steps.append(step_override)
+
+        def set_interval(self, interval: float, callback: object) -> object:
+            class _Timer:
+                def stop(self) -> None:
+                    return None
+
+            return _Timer()
+
+        async def _append_system_line(self, text: str, *, force: bool = False) -> None:
+            if not force and not self._show_system_messages:
+                return
+            system_lines.append((text, force))
+
+    flow = _Flow()
+
+    asyncio.run(flow._run_harness_task("next task"))
+
+    assert system_lines == [("Task failed: initialize_run failed before model_call", True)]
+    assert status_steps[-1] == "error"
+    assert flow.active_task is None
+    assert flow._pending_user_echo is None
 
 
 def test_task_complete_message_is_not_promoted_over_streamed_assistant_text() -> None:

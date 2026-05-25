@@ -391,6 +391,7 @@ class StatusState:
         token_usage: int = 0,
         token_total: int = 0,
         token_limit: int = 0,
+        context_window: int = 0,
         api_errors: int = 0,
     ) -> None:
         self.model = model
@@ -407,6 +408,7 @@ class StatusState:
         self.token_usage = token_usage
         self.token_total = token_total
         self.token_limit = token_limit
+        self.context_window = context_window
         self.api_errors = api_errors
 
     @classmethod
@@ -451,5 +453,6 @@ class StatusState:
             token_usage=max(0, int(payload.get("token_usage", 0) or 0)),
             token_total=max(0, int(payload.get("token_total", 0) or 0)),
             token_limit=max(0, int(payload.get("token_limit", 0) or 0)),
+            context_window=max(0, int(payload.get("context_window", 0) or 0)),
             api_errors=max(0, int(payload.get("api_errors", 0) or 0)),
         )

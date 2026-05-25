@@ -147,7 +147,7 @@ def test_chat_session_screen_returns_selected_thread() -> None:
 def test_smallctl_app_chat_button_starts_new_chat(monkeypatch) -> None:
     create_calls = 0
 
-    def _fake_create_harness(self: SmallctlApp) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
         nonlocal create_calls
         create_calls += 1
 
@@ -205,7 +205,7 @@ def test_smallctl_app_chat_resume_lists_sessions_and_restores_selection(monkeypa
         created_at="2026-04-23T12:00:00+00:00",
     )
 
-    def _fake_create_harness(self: SmallctlApp) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
         async def _teardown() -> None:
             return None
 
@@ -271,7 +271,7 @@ def test_smallctl_app_chat_resume_falls_back_to_saved_state(monkeypatch, tmp_pat
         model="alpha-model",
     )
 
-    def _fake_create_harness(self: SmallctlApp) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
         async def _teardown() -> None:
             return None
 

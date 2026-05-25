@@ -338,7 +338,7 @@ def test_smallctl_app_model_button_opens_selector_and_accepts_text(monkeypatch) 
 
     monkeypatch.setattr(model_selector, "fetch_available_models", _fake_fetch)
 
-    def _fake_create_harness(self: SmallctlApp) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
         async def _teardown() -> None:
             return None
 

@@ -38,8 +38,9 @@ class StatusBar(Static):
         self._acceptance_progress = acceptance_progress
         self._latest_verdict = latest_verdict
         self._token_usage = 0  # Current prompt estimate
-        self._token_limit = 0  # Context window limit
+        self._token_limit = 0  # Effective prompt budget (free)
         self._token_total = 0  # Cumulative session tokens
+        self._context_window = 0  # Total server context window
         self._api_errors = 0
         self._refresh_display()
 
@@ -63,7 +64,8 @@ class StatusBar(Static):
         latest_verdict: str,
         token_usage: int, # prompt estimate
         token_total: int, # cumulative
-        token_limit: int, # window
+        token_limit: int, # effective prompt budget (free)
+        context_window: int = 0, # total server context window
         api_errors: int = 0,
     ) -> None:
         self._model = model
@@ -80,6 +82,7 @@ class StatusBar(Static):
         self._token_usage = max(0, token_usage)
         self._token_total = max(0, token_total)
         self._token_limit = max(0, token_limit)
+        self._context_window = max(0, context_window)
         self._api_errors = api_errors
         self._refresh_display()
 
@@ -133,9 +136,18 @@ class StatusBar(Static):
         limit_label = f"{self._token_limit//1024}k" if self._token_limit >= 1024 else str(self._token_limit)
         parts.append(f"pressure: {bar_markup} {self._token_usage}/{limit_label}")
         
+        # Context window display: free / total
+        if self._context_window > 0:
+            free_k = f"{self._token_limit / 1000:.1f}k"
+            total_k = f"{self._context_window / 1000:.1f}k"
+            parts.append(f"ctx: {free_k}/{total_k}")
+        elif self._token_limit > 0:
+            limit_k = f"{self._token_limit / 1000:.1f}k"
+            parts.append(f"ctx: {limit_k}")
+
         # Cumulative Total
         parts.append(f"total: {self._token_total:,}")
-        
+
         return " | ".join(parts)
 
     def _refresh_display(self) -> None:

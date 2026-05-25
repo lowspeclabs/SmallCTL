@@ -208,7 +208,7 @@ class SmallctlAppActionsMixin:
         elif old_harness is not None:
             await old_harness.teardown()
         self.restore_thread_id = thread_id
-        self._create_harness()
+        await self._create_harness()
         if old_checkpointer is not None and self.harness is not None:
             setattr(self.harness, "_graph_checkpointer", old_checkpointer)
         bridge = getattr(self, "_harness_bridge", None)
@@ -417,7 +417,7 @@ class SmallctlAppActionsMixin:
             self._harness_bridge = None
         elif old_harness is not None:
             await old_harness.teardown()
-        self._create_harness()
+        await self._create_harness()
         if old_checkpointer is not None and self.harness is not None:
             setattr(self.harness, "_graph_checkpointer", old_checkpointer)
         self._capture_status_snapshot_from_harness()

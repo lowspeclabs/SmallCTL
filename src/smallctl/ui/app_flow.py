@@ -200,12 +200,12 @@ class SmallctlAppFlowMixin:
         except asyncio.CancelledError:
             console = self._get_console()
             if console is not None:
-                await self._append_system_line("Task cancelled.")
+                await self._append_system_line("Task cancelled.", force=True)
             step_override = "cancelled"
         except Exception as exc:
             console = self._get_console()
             if console is not None:
-                await self._append_system_line(f"Task failed: {exc}")
+                await self._append_system_line(f"Task failed: {exc}", force=True)
             step_override = "error"
         finally:
             if self._activity_timer is not None:
@@ -464,6 +464,7 @@ class SmallctlAppFlowMixin:
                 token_usage=state.token_usage,
                 token_total=state.token_total,
                 token_limit=state.token_limit,
+                context_window=state.context_window,
                 api_errors=state.api_errors,
             )
         except (NoMatches, ScreenStackError):
@@ -475,8 +476,34 @@ class SmallctlAppFlowMixin:
         except (NoMatches, ScreenStackError):
             return None
 
-    def _create_harness(self) -> None:
-        self.harness = Harness(**self.harness_kwargs)
+    async def _create_harness(self) -> None:
+        # Defensive: shut down any existing bridge/harness before creating new ones
+        old_bridge = getattr(self, "_harness_bridge", None)
+        if old_bridge is not None:
+            try:
+                await old_bridge.shutdown()
+            except Exception:
+                pass
+            self._harness_bridge = None
+        elif getattr(self, "harness", None) is not None:
+            try:
+                await self.harness.teardown()
+            except Exception:
+                pass
+            self.harness = None
+
+        try:
+            self.harness = Harness(**self.harness_kwargs)
+        except Exception as exc:
+            self._app_logger.exception("harness_init_failed")
+            await self._append_system_line(
+                f"Failed to initialize harness: {exc}", force=True
+            )
+            self._refresh_status(step_override="error")
+            self.harness = None
+            self._harness_bridge = None
+            return
+
         interactive_setter = getattr(self.harness, "set_interactive_shell_approval", None)
         if callable(interactive_setter):
             interactive_setter(True)
@@ -487,7 +514,7 @@ class SmallctlAppFlowMixin:
             harness=self.harness,
             post_ui_event=self._post_harness_bridge_event,
         )
-        self._harness_bridge.start()
+        await asyncio.to_thread(self._harness_bridge.start)
 
     def _post_harness_bridge_event(self, event: UIEvent) -> None:
         if not getattr(self, "is_running", False):
@@ -550,8 +577,20 @@ class SmallctlAppFlowMixin:
                 )
                 self.harness_kwargs["context_limit"] = None
             else:
+                old_bridge = getattr(self, "_harness_bridge", None)
+                if old_bridge is not None:
+                    try:
+                        await old_bridge.shutdown()
+                    except Exception:
+                        pass
+                    self._harness_bridge = None
+                elif harness is not None:
+                    try:
+                        await harness.teardown()
+                    except Exception:
+                        pass
                 old_state = harness.state
-                self._create_harness()
+                await self._create_harness()
                 if self.harness is not None:
                     self.harness.state = old_state
                     self.harness.state.scratchpad["_model_name"] = model_name

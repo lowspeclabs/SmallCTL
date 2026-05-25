@@ -448,6 +448,7 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
     assert "reading the target file before patching" in blocked["error"]
     assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
     assert blocked["metadata"]["recovery_hint"].startswith("This is a new repair-cycle read requirement")
+    assert "even if the file is currently missing" in blocked["metadata"]["recovery_hint"]
     assert blocked["metadata"]["next_required_tool"] == {
         "tool_name": "file_read",
         "required_arguments": {"path": str(target)},
@@ -501,6 +502,68 @@ def test_repair_cycle_accepts_existing_successful_file_read_for_same_path(tmp_pa
 
     assert allowed["success"] is True
     assert target.read_text(encoding="utf-8") == "patched\n"
+
+
+def test_repair_cycle_accepts_read_only_shell_exec_for_same_path(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "example.txt"
+    target.write_text("original\n", encoding="utf-8")
+    state.tool_execution_records["op-shell"] = {
+        "tool_name": "shell_exec",
+        "args": {"command": f"cat {target}"},
+        "result": {
+            "success": True,
+            "output": "original\n",
+            "metadata": {"command": f"cat {target}"},
+        },
+    }
+
+    allowed = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="original",
+            replacement_text="patched",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert allowed["success"] is True
+    assert target.read_text(encoding="utf-8") == "patched\n"
+
+
+def test_repair_cycle_rejects_mutating_shell_exec_for_same_path(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.repair_cycle_id = "repair-1"
+
+    target = tmp_path / "example.txt"
+    target.write_text("original\n", encoding="utf-8")
+    state.tool_execution_records["op-shell"] = {
+        "tool_name": "shell_exec",
+        "args": {"command": f"sed -i 's/original/patched/' {target}"},
+        "result": {
+            "success": True,
+            "output": "",
+            "metadata": {"command": f"sed -i 's/original/patched/' {target}"},
+        },
+    }
+
+    blocked = asyncio.run(
+        fs.file_patch(
+            path=str(target),
+            target_text="patched",
+            replacement_text="final",
+            cwd=str(tmp_path),
+            state=state,
+        )
+    )
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
 
 
 def test_repair_cycle_requires_new_read_after_failed_file_patch_on_same_path(tmp_path: Path) -> None:

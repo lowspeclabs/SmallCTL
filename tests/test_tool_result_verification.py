@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from smallctl.harness.tool_result_verification import _store_verifier_verdict
+from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.graph.progress_guard import _build_progress_stagnation_nudge
+from smallctl.graph.tool_outcome_resolution import maybe_apply_terminal_tool_outcome
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
 
@@ -301,6 +306,38 @@ def test_approval_denied_verifier_is_needs_human_and_does_not_start_repair() -> 
     assert verdict["acceptance_delta"]["status"] == "pending"
     assert "denied by user" in verdict["acceptance_delta"]["notes"][0].lower()
     assert state.repair_cycle_id == ""
+
+
+def test_approval_denied_tool_outcome_stops_generation() -> None:
+    state = LoopState()
+    graph_state = GraphRunState(loop_state=state, thread_id="approval-denied", run_mode="loop")
+    record = ToolExecutionRecord(
+        operation_id="op-denied",
+        tool_name="shell_exec",
+        args={"command": "python3 test.py"},
+        tool_call_id="call-denied",
+        result=ToolEnvelope(
+            success=False,
+            error="Shell execution denied by user.",
+            metadata={"approval_denied": True, "command": "python3 test.py"},
+        ),
+    )
+    harness = SimpleNamespace(state=state)
+    deps = SimpleNamespace(harness=harness, event_handler=None)
+
+    handled = asyncio.run(
+        maybe_apply_terminal_tool_outcome(
+            graph_state,
+            deps,
+            record,
+            chat_mode=False,
+        )
+    )
+
+    assert handled is True
+    assert graph_state.final_result["status"] == "denied"
+    assert graph_state.final_result["message"] == "Shell execution denied by user."
+    assert graph_state.interrupt_payload is None
 
 
 def test_latest_blocker_tracks_fogproject_account_over_interactive_prompt() -> None:

@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     httpx = None
 
 from ..logging_utils import log_kv
-from ..redaction import redact_sensitive_text
+from ..redaction import redact_sensitive_messages, redact_sensitive_text
 from .adapters.common import merge_system_messages_for_single_system_providers
 from .chunk_parser import chunk_contains_tool_call_delta
 from .provider_adapters import sanitize_messages_for_openrouter
@@ -454,6 +454,43 @@ def _openrouter_auth_failure_message(details: dict[str, Any]) -> str:
     return (
         "OpenRouter authentication failed: API key is invalid, revoked, "
         f"or belongs to a missing account{suffix}. Update SMALLCTL_API_KEY."
+    )
+
+
+def _content_policy_violation_details(
+    client: Any,
+    *,
+    status_code: int,
+    body: str,
+    phase: str,
+) -> dict[str, Any]:
+    provider_error = _openrouter_error_message_from_body(body)
+    is_empty_body = not bool(str(body or "").strip())
+    return {
+        "type": "content_policy_violation",
+        "reason": "provider_content_policy_block",
+        "provider_profile": client.provider_profile,
+        "model": client.model,
+        "status_code": int(status_code),
+        "provider_error": provider_error,
+        "body": str(body or "")[:1000],
+        "phase": phase,
+        "recoverable": False,
+        "hint": (
+            "The provider rejected this request as a content-policy violation. "
+            "This often happens when passwords, credentials, or PII appear in the prompt. "
+            "Use .env or tool configuration for secrets instead of including them in task text."
+        ),
+        "empty_body": is_empty_body,
+    }
+
+
+def _content_policy_violation_message(details: dict[str, Any]) -> str:
+    provider_error = str(details.get("provider_error") or "").strip()
+    suffix = f" ({provider_error})" if provider_error else ""
+    return (
+        "Provider content policy violation: the request was blocked by the provider's safety filter"
+        f"{suffix}. Remove credentials or sensitive data from the prompt and retry."
     )
 
 
@@ -1252,6 +1289,22 @@ async def stream_chat(
     original_tools = [dict(tool) for tool in tools]
     messages = client.adapter.sanitize_messages(messages)
     messages = _repair_llamacpp_system_messages_for_transport(client, messages)
+    redacted_messages = redact_sensitive_messages(messages)
+    if redacted_messages != messages:
+        log_kv(
+            client.log,
+            logging.WARNING,
+            "prompt_sensitive_data_redacted",
+            message_count=len(messages),
+        )
+        if client.run_logger:
+            client.run_logger.log(
+                "chat",
+                "prompt_sensitive_data_redacted",
+                "sensitive data redacted from prompt before sending to provider",
+                message_count=len(messages),
+            )
+        messages = redacted_messages
 
     url = f"{client.base_url}{client.chat_endpoint}"
     headers = {
@@ -1535,6 +1588,28 @@ async def stream_chat(
                     "details": details,
                 }
                 return
+            if status_code == 403:
+                body = _http_error_body(exc)
+                details = _content_policy_violation_details(
+                    client,
+                    status_code=status_code,
+                    body=body,
+                    phase="chat_completion",
+                )
+                log_kv(client.log, logging.ERROR, "content_policy_violation", **details)
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "content_policy_violation",
+                        "provider rejected request as content policy violation",
+                        **details,
+                    )
+                yield {
+                    "type": "chunk_error",
+                    "error": _content_policy_violation_message(details),
+                    "details": details,
+                }
+                return
             if (
                 _is_llamacpp_jinja_system_message_error(client, exc)
                 and not llamacpp_jinja_repair_attempted
@@ -1722,6 +1797,28 @@ async def stream_chat(
                         except httpx.HTTPStatusError as fallback_exc:
                             last_error = fallback_exc
                             _log_http_error(client, "chat_nonstream_http_error", fallback_exc)
+                            if int(fallback_exc.response.status_code) == 403:
+                                body = _http_error_body(fallback_exc)
+                                details = _content_policy_violation_details(
+                                    client,
+                                    status_code=403,
+                                    body=body,
+                                    phase="nonstream_fallback",
+                                )
+                                log_kv(client.log, logging.ERROR, "content_policy_violation_nonstream", **details)
+                                if client.run_logger:
+                                    client.run_logger.log(
+                                        "chat",
+                                        "content_policy_violation_nonstream",
+                                        "provider rejected non-stream request as content policy violation",
+                                        **details,
+                                    )
+                                yield {
+                                    "type": "chunk_error",
+                                    "error": _content_policy_violation_message(details),
+                                    "details": details,
+                                }
+                                return
                             await _reset_async_client(client)
                             async_client = _get_async_client(client)
                             continue

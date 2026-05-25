@@ -62,6 +62,7 @@ _SSH_PASSWORD_INVALID_TOKENS = {
     "required",
     "prompt",
     "prompted",
+    "[REDACTED]",
 }
 _TOOL_ALIAS_REPAIRS = {
     "use_shell_exec": "shell_exec",
@@ -1323,6 +1324,13 @@ def _recover_ssh_arguments_from_task_context(
     user = str(repaired.get("user") or "").strip()
     password = str(repaired.get("password") or "").strip()
     command = str(repaired.get("command") or "").strip()
+
+    # If the model echoed a redacted placeholder back as the password value,
+    # treat it as missing so we can recover the real credential from context.
+    if password.startswith("[REDACTED]"):
+        repaired.pop("password", None)
+        password = ""
+
     password_source = "explicit" if password else "none"
 
     target = str(repaired.get("target") or "").strip()

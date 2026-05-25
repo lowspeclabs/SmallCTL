@@ -176,3 +176,29 @@ def redact_sensitive_text(text: str) -> str:
 
         redacted = pattern.sub(_get_repl(pattern.groups), redacted)
     return redacted
+
+
+def has_sensitive_text(text: str) -> bool:
+    """Return True if the text contains patterns that would be redacted."""
+    value = str(text or "")
+    if not value:
+        return False
+    for pattern in _SENSITIVE_TEXT_PATTERNS:
+        if pattern.search(value):
+            return True
+    return False
+
+
+def redact_sensitive_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a copy of messages with sensitive text redacted from content fields."""
+    redacted_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            redacted_messages.append(message)
+            continue
+        redacted = dict(message)
+        content = redacted.get("content")
+        if isinstance(content, str):
+            redacted["content"] = redact_sensitive_text(content)
+        redacted_messages.append(redacted)
+    return redacted_messages

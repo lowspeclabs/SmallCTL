@@ -25,6 +25,15 @@ def _classify_model_call_error(exc: Exception) -> tuple[str, dict[str, Any]]:
     details: dict[str, Any] = {}
     if isinstance(status_code, int):
         details["status_code"] = status_code
+        if status_code == 403:
+            try:
+                body = str(getattr(response, "text", "") or "").strip()
+            except Exception:
+                body = ""
+            if body:
+                details["body"] = body[:1000]
+            details["retryable"] = False
+            return "content_policy_violation", details
         if status_code in _PROVIDER_HTTP_STATUS_CODES:
             details["retryable"] = True
         try:

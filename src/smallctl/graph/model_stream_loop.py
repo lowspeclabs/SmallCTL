@@ -542,15 +542,18 @@ async def run_model_stream_loop(
             harness.log.exception("stream_chat failed")
             log_kv(harness.log, logging.ERROR, "harness_stream_error", error=str(exc))
             error_type, details = _classify_model_call_error(exc)
-            is_api = error_type == "provider"
-            content_prefix = "Provider error" if is_api else "Stream error"
+            is_api = error_type in ("provider", "content_policy_violation")
+            if error_type == "content_policy_violation":
+                content_prefix = "Content policy violation"
+            else:
+                content_prefix = "Provider error" if is_api else "Stream error"
 
             await harness._emit(
                 deps.event_handler,
                 UIEvent(
                     event_type=UIEventType.ERROR,
                     content=f"{content_prefix}: {exc}",
-                    data={"is_api_error": is_api},
+                    data={"is_api_error": is_api, "error_type": error_type, "details": details},
                 ),
             )
             err_msg = str(exc) or type(exc).__name__

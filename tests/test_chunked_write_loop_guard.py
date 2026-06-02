@@ -505,6 +505,243 @@ def test_accidental_full_file_first_chunk_with_next_section_becomes_final_candid
     assert state.write_session.write_next_section == ""
 
 
+def test_overwrite_new_section_after_progress_is_rejected(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "tetris.html"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+
+    header = "<!DOCTYPE html>\n<html><body>\n"
+    first = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=header,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="header",
+            next_section_name="implementation",
+        )
+    )
+    assert first["success"] is True
+    assert state.write_session.write_sections_completed == ["header"]
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="<script>function gameLoop() {}</script>\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="implementation",
+            replace_strategy="overwrite",
+            next_section_name="footer",
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["error_kind"] == "chunked_write_overwrite_new_section_after_progress"
+    assert state.write_session.write_sections_completed == ["header"]
+    assert state.write_session.write_section_ranges == {"header": {"start": 0, "end": len(header)}}
+    assert state.write_session.write_next_section == "implementation"
+
+
+def test_html_full_file_overwrite_with_next_section_becomes_final_candidate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "tetris.html"
+    _attach_write_session(state, target)
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tetris</title></head>
+<body>
+<canvas id="gameCanvas" width="300" height="600"></canvas>
+<script>
+const COLS = 10;
+const ROWS = 20;
+function createPiece() { return { x: 3, y: 0 }; }
+function drawBoard() { return COLS * ROWS; }
+function gameLoop() { requestAnimationFrame(gameLoop); }
+function startGame() { gameLoop(); }
+document.addEventListener('keydown', () => {});
+startGame();
+</script>
+</body>
+</html>
+"""
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=html,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="header",
+            replace_strategy="overwrite",
+            next_section_name="footer",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section"] == ""
+    assert state.write_session.write_next_section == ""
+
+
+def test_complete_staged_html_append_without_next_section_becomes_final_candidate(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "tetris.html"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+    state.write_session.suggested_sections = ["header", "implementation", "footer"]
+
+    header = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tetris</title><style>
+body { background: #111; color: white; }
+</style></head>
+<body>
+<canvas id="gameCanvas" width="300" height="600"></canvas>
+<script>
+"""
+    first = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=header,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="header",
+            next_section_name="script",
+        )
+    )
+    assert first["success"] is True
+
+    script_and_footer = """const COLS = 10;
+const ROWS = 20;
+function createPiece() { return { x: 3, y: 0 }; }
+function drawBoard() { return COLS * ROWS; }
+function gameLoop() { requestAnimationFrame(gameLoop); }
+function startGame() { gameLoop(); }
+document.addEventListener('keydown', () => {});
+startGame();
+</script>
+</body>
+</html>
+"""
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=script_and_footer,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="script",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section"] == ""
+    assert result["metadata"]["write_next_section_inferred"] is False
+    assert state.write_session.write_next_section == ""
+
+
+def test_complete_html_overwrite_recovery_with_header_label_becomes_full_file(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "tetris.html"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+
+    first = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="<!DOCTYPE html>\n<html><body><script>\nconst broken = true;\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="header",
+            next_section_name="game_logic",
+        )
+    )
+    second = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="function tick() { return 1; }\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="game_logic",
+        )
+    )
+    assert first["success"] is True
+    assert second["success"] is True
+    assert state.write_session.write_sections_completed == ["header", "game_logic"]
+
+    full_html = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Tetris</title></head>
+<body>
+<canvas id="gameCanvas" width="300" height="600"></canvas>
+<script>
+const COLS = 10;
+const ROWS = 20;
+function createPiece() { return { x: 3, y: 0 }; }
+function drawBoard() { return COLS * ROWS; }
+function gameLoop() { requestAnimationFrame(gameLoop); }
+function startGame() { gameLoop(); }
+document.addEventListener('keydown', () => {});
+startGame();
+</script>
+</body>
+</html>
+"""
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content=full_html,
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="header",
+            replace_strategy="overwrite",
+            next_section_name="game_logic",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["section_name"] == "full_file"
+    assert result["metadata"]["write_session_final_chunk"] is True
+    assert result["metadata"]["write_next_section"] == ""
+    assert state.write_session.write_sections_completed == ["full_file"]
+    assert state.write_session.write_next_section == ""
+
+
+def test_html_unknown_section_without_next_does_not_infer_generic_implementation(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    target = tmp_path / "tetris.html"
+    _attach_write_session(state, target)
+    assert state.write_session is not None
+    state.write_session.suggested_sections = ["header", "implementation", "footer"]
+
+    result = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="const COLS = 10;\nfunction createPiece() { return {}; }\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="game_logic",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["write_session_final_chunk"] is False
+    assert result["metadata"]["write_next_section"] == ""
+    assert result["metadata"]["write_next_section_inferred"] is False
+    assert state.write_session.write_next_section == ""
+
+
 def _seed_outline_mode(state: LoopState, target: Path, *, pending_read: bool = False) -> str:
     resolved = str(target.resolve())
     state.scratchpad["_chunk_write_loop_guard"] = {

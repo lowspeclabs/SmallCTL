@@ -14,8 +14,10 @@ from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_approvals import handle_approval_prompt, handle_sudo_password_prompt
 from smallctl.ui.approval import ShellApprovalDecision
 from smallctl.harness import HarnessConfig
+from smallctl.ui.app import SmallctlApp
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
 from smallctl.ui.display import compute_activity_for_event, format_test_time_scaling_event
+from smallctl.ui.input import InputPane
 from smallctl.ui.model_selector import ModelSelectButton
 from smallctl.ui.statusbar import StatusBar
 
@@ -455,6 +457,176 @@ def test_refresh_status_without_cached_snapshot_uses_defaults_not_live_harness()
     assert flow.status.kwargs["api_errors"] == 2
 
 
+def test_model_bar_layout_toggle_hides_old_row_and_shows_sidebar() -> None:
+    class _Widget:
+        def __init__(self) -> None:
+            self.classes: dict[str, bool] = {}
+            self.label = ""
+
+        def set_class(self, enabled: bool, class_name: str) -> None:
+            self.classes[class_name] = enabled
+
+    class _Actions(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self._model_bar_layout = "bottom"
+            self.widgets = {
+                "#status-row": _Widget(),
+                "#model-sidebar": _Widget(),
+                "#model-bar-toggle": _Widget(),
+                "#model-bar-toggle-sidebar": _Widget(),
+            }
+
+        def query_one(self, selector: str, *_args) -> _Widget:
+            return self.widgets[selector]
+
+    actions = _Actions()
+
+    actions.action_toggle_model_bar_layout()
+
+    assert actions._model_bar_layout == "right"
+    assert actions.widgets["#status-row"].classes["hidden"] is True
+    assert actions.widgets["#model-sidebar"].classes["hidden"] is False
+
+    actions.action_toggle_model_bar_layout()
+
+    assert actions._model_bar_layout == "bottom"
+    assert actions.widgets["#status-row"].classes["hidden"] is False
+    assert actions.widgets["#model-sidebar"].classes["hidden"] is True
+
+
+def test_smallctl_app_model_bar_toggle_binding_switches_layout(monkeypatch) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
+        async def _teardown() -> None:
+            return None
+
+        self.harness = SimpleNamespace(
+            state=SimpleNamespace(
+                current_phase="explore",
+                step_count=0,
+                planning_mode_enabled=False,
+                active_plan=None,
+                draft_plan=None,
+                scratchpad={},
+                token_usage=0,
+                contract_phase=lambda: "",
+                acceptance_checklist=lambda: [],
+                current_verifier_verdict=lambda: None,
+            ),
+            context_policy=SimpleNamespace(max_prompt_tokens=4096),
+            server_context_limit=None,
+            guards=SimpleNamespace(max_tokens=4096),
+            set_interactive_shell_approval=lambda enabled: None,
+            set_shell_approval_session_default=lambda enabled: None,
+            teardown=_teardown,
+        )
+
+    monkeypatch.setattr(SmallctlApp, "_create_harness", _fake_create_harness)
+
+    async def _run() -> tuple[bool, bool, bool, bool, bool]:
+        app = SmallctlApp({"endpoint": "http://example.test/v1", "model": "alpha-model"})
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            status_row = app.query_one("#status-row")
+            sidebar = app.query_one("#model-sidebar")
+            initial = (status_row.has_class("hidden"), sidebar.has_class("hidden"))
+            labels_synced = "alpha-model" in str(app.query_one("#model-button-sidebar").label)
+            await pilot.press("ctrl+alt+b")
+            await pilot.pause(0.2)
+            toggled = (status_row.has_class("hidden"), sidebar.has_class("hidden"))
+            return initial + toggled + (labels_synced,)
+
+    assert asyncio.run(_run()) == (False, True, True, False, True)
+
+
+def test_subtask_checklist_moves_to_sidebar_in_right_layout() -> None:
+    appended: list[UIEvent] = []
+
+    class _Objective:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def update(self, text: str) -> None:
+            self.text = text
+
+    class _Console:
+        async def append_event(self, event: UIEvent) -> None:
+            appended.append(event)
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._model_bar_layout = "right"
+            self._status_activity = ""
+            self._show_system_messages = False
+            self._show_tool_calls = True
+            self.active_task = None
+            self.objective = _Objective()
+            self.console = _Console()
+
+        def query_one(self, selector: str, *_args) -> _Objective:
+            if selector == "#objective-sidebar":
+                return self.objective
+            raise NoMatches("unexpected query")
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+    event = UIEvent(
+        event_type=UIEventType.ALERT,
+        content="Goal Objective: implement the right sidebar\n  ○ wire status",
+        data={"ui_kind": "subtask_checklist"},
+    )
+
+    asyncio.run(flow._handle_harness_event(event))
+
+    assert "Objective" in flow.objective.text
+    assert "implement the right sidebar" in flow.objective.text
+    assert "[bold #bfdbfe]Task[/]" in flow.objective.text
+    assert "[#94a3b8]○ wire status[/]" in flow.objective.text
+    assert appended == []
+
+
+def test_subtask_checklist_still_renders_in_bottom_layout() -> None:
+    appended: list[UIEvent] = []
+
+    class _Objective:
+        def update(self, text: str) -> None:
+            self.text = text
+
+    class _Console:
+        async def append_event(self, event: UIEvent) -> None:
+            appended.append(event)
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._model_bar_layout = "bottom"
+            self._status_activity = ""
+            self._show_system_messages = False
+            self._show_tool_calls = True
+            self.active_task = None
+            self.objective = _Objective()
+            self.console = _Console()
+
+        def query_one(self, selector: str, *_args) -> _Objective:
+            if selector == "#objective-sidebar":
+                return self.objective
+            raise NoMatches("unexpected query")
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+    event = UIEvent(
+        event_type=UIEventType.ALERT,
+        content="Goal Objective: keep bottom layout behavior",
+        data={"ui_kind": "subtask_checklist"},
+    )
+
+    asyncio.run(flow._handle_harness_event(event))
+
+    assert appended == [event]
+
+
 def test_status_events_are_coalesced_latest_wins() -> None:
     calls: list[dict[str, object]] = []
 
@@ -566,6 +738,66 @@ def test_render_restored_chat_uses_serialized_messages_without_harness_state_rea
         (UIEventType.USER, "hello"),
         (UIEventType.ASSISTANT, "hi"),
     ]
+
+
+def test_submitted_paste_renders_full_user_bubble_and_runs_full_task() -> None:
+    rendered: list[tuple[UIEventType, str]] = []
+    started: list[str] = []
+    recorded: list[str] = []
+
+    class _Input:
+        text = "[pasted ~541 chars]"
+
+    class _Console:
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content))
+
+        async def begin_assistant_turn(self) -> None:
+            return None
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.input = _Input()
+            self.console = _Console()
+            self.task_history = []
+            self.history_index = 0
+            self.active_task = None
+            self._pending_user_echo = None
+            self._status_activity = ""
+            self._api_error_count = 0
+            self._app_logger = logging.getLogger("test.ui_flow_regressions.submitted_paste")
+
+        def query_one(self, widget_type: type[object]) -> object:
+            return self.input
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+        def _record_chat_session_prompt(self, task: str) -> None:
+            recorded.append(task)
+
+        def _set_activity(self, text: str | None) -> None:
+            self._status_activity = str(text or "")
+
+        def _refresh_status(self, *args, **kwargs) -> None:
+            return None
+
+        async def _run_harness_task(self, task: str) -> None:
+            started.append(task)
+
+    full_text = "x" * 541
+    flow = _Flow()
+
+    async def _run() -> None:
+        await flow.on_input_pane_submitted(InputPane.Submitted(full_text, display_value="[pasted ~541 chars]"))
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    assert flow.input.text == ""
+    assert rendered == [(UIEventType.USER, full_text)]
+    assert recorded == [full_text]
+    assert started == [full_text]
 
 
 def test_on_harness_event_coalesces_queued_status_events_latest_wins() -> None:

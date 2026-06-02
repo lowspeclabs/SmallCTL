@@ -40,7 +40,7 @@ def register_control_planning_tools(
                     "required": ["message"],
                     "additionalProperties": False,
                 },
-                handler=inject_state(control.task_fail),
+                handler=inject_state_and_harness(control.task_fail),
                 category="control",
                 risk="medium",
                 allowed_phases={"explore", "plan", "execute", "verify", "repair"},
@@ -127,6 +127,31 @@ def register_control_planning_tools(
                 profiles={core_profile},
             ),
             make_registration(
+                name="phase_contract_update",
+                description="Create or replace the active phase contract for a phased coding rollout. Use after reading the spec before promoting phases.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "contract": {
+                            "type": "object",
+                            "description": "Phase contract with version, active_phase, and phases containing expected_files, required_symbols, checks, and promotion requirements.",
+                        },
+                        "persist": {
+                            "type": "boolean",
+                            "description": "Persist to .smallctl/phase_contract.json in addition to session scratchpad. Defaults false.",
+                        },
+                    },
+                    "required": ["contract"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state(control.phase_contract_update),
+                category="control",
+                risk="low",
+                allowed_phases={"explore", "plan", "execute", "verify", "repair"},
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={core_profile},
+            ),
+            make_registration(
                 name="plan_set",
                 description="Create or replace the current draft execution plan. Provide the full spec contract: goal, inputs, outputs, constraints, acceptance criteria, implementation plan, and steps. Export fields are only for plan documents, never implementation files.",
                 schema={
@@ -187,6 +212,25 @@ def register_control_planning_tools(
                     "additionalProperties": False,
                 },
                 handler=inject_state_and_harness(planning.plan_request_execution),
+                category="planning",
+                risk="low",
+                allowed_modes={"planning"},
+                profiles={core_profile},
+            ),
+            make_registration(
+                name="request_validation_execution",
+                description="Pause planning and request approval to run one validation/test command in loop mode via shell_exec.",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "question": {"type": "string"},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state_and_harness(planning.request_validation_execution),
                 category="planning",
                 risk="low",
                 allowed_modes={"planning"},

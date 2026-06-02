@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import difflib
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,9 @@ def _workspace_relative_hint(path: str, cwd: str | None = None) -> str | None:
 
 
 def _missing_path_error(*, requested_path: str, resolved_path: Path, cwd: str | None = None) -> str:
+    near_match = _nearby_path_suggestion(requested_path=requested_path, resolved_path=resolved_path)
+    if near_match:
+        return f"{requested_path} not found; did you mean {near_match}?"
     message = f"File does not exist: {resolved_path}"
     suggestion = _workspace_relative_hint(requested_path, cwd)
     if suggestion:
@@ -155,6 +159,42 @@ def _missing_path_error(*, requested_path: str, resolved_path: Path, cwd: str | 
     except Exception:
         pass
     return message
+
+
+def _nearby_path_suggestion(*, requested_path: str, resolved_path: Path) -> str | None:
+    parent = resolved_path.parent
+    try:
+        if not parent.exists() or not parent.is_dir():
+            return None
+        names = [child.name for child in parent.iterdir()]
+    except Exception:
+        return None
+    matches = difflib.get_close_matches(resolved_path.name, names, n=1, cutoff=0.72)
+    if not matches:
+        return None
+    raw = str(requested_path or "").strip()
+    suggested = resolved_path.with_name(matches[0])
+    if raw and not Path(raw).is_absolute():
+        try:
+            return str(Path(raw).with_name(matches[0]))
+        except Exception:
+            return matches[0]
+    return str(suggested)
+
+
+def _nearby_path_suggestion_confidence(*, requested_path: str, resolved_path: Path, suggested_path: str) -> str:
+    requested_name = resolved_path.name
+    suggested_name = Path(suggested_path).name
+    similarity = difflib.SequenceMatcher(None, requested_name, suggested_name).ratio()
+    same_parent = False
+    try:
+        suggested = Path(suggested_path)
+        if not suggested.is_absolute():
+            suggested = resolved_path.parent / suggested.name
+        same_parent = suggested.resolve().parent == resolved_path.parent.resolve()
+    except Exception:
+        same_parent = False
+    return "high" if same_parent and similarity >= 0.84 else "low"
 
 
 def _missing_dir_error(*, requested_path: str, resolved_path: Path, cwd: str | None = None) -> str:
@@ -228,9 +268,24 @@ async def file_read(
     session = getattr(state, "write_session", None) if state is not None else None
     if not source.exists():
         _record_repair_cycle_read(state, target)
+        suggested = _nearby_path_suggestion(requested_path=path, resolved_path=target)
         return fail(
             _missing_path_error(requested_path=path, resolved_path=target, cwd=cwd),
-            metadata={"path": str(target), "requested_path": path, "read_result": "missing"},
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "read_result": "missing",
+                "suggested_path": suggested or "",
+                "suggestion_confidence": (
+                    _nearby_path_suggestion_confidence(
+                        requested_path=path,
+                        resolved_path=target,
+                        suggested_path=suggested,
+                    )
+                    if suggested
+                    else ""
+                ),
+            },
         )
     try:
         source_size = source.stat().st_size

@@ -333,6 +333,42 @@ class ToolDispatcher:
                 metadata={"tool_name": tool_name, "phase": self.phase},
             )
 
+        # Pre-dispatch validation for ssh_file_replace_between boundary overlap
+        if tool_name == "ssh_file_replace_between":
+            start_text = str(arguments.get("start_text") or "").strip()
+            end_text = str(arguments.get("end_text") or "").strip()
+            if start_text and end_text and end_text.startswith(start_text):
+                validation_error = (
+                    "Invalid ssh_file_replace_between: start_text is a prefix of end_text, "
+                    "so there is no valid bounded region between them. "
+                    "If you need to replace most of a small file, use ssh_file_write instead."
+                )
+                log_kv(
+                    self.log,
+                    logging.WARNING,
+                    "tool_dispatch_validation_error",
+                    tool_name=tool_name,
+                    error=validation_error,
+                )
+                if self.run_logger:
+                    self.run_logger.log(
+                        "tools",
+                        "validation_error",
+                        "tool argument validation failed",
+                        tool_name=tool_name,
+                        error=validation_error,
+                    )
+                return ToolEnvelope(
+                    success=False,
+                    error=validation_error,
+                    metadata={
+                        "tool_name": tool_name,
+                        "validation_kind": "invalid_boundary_overlap",
+                        "path": arguments.get("path"),
+                        "host": arguments.get("host"),
+                    },
+                )
+
         if intercepted_result is not None:
             intercepted_result.metadata = {
                 **dispatch_metadata,
@@ -361,6 +397,34 @@ class ToolDispatcher:
             return intercepted_result
 
         args, dropped_keys = self._coerce_args(spec.schema, arguments)
+
+        # Reject empty shell/ssh commands before dispatch
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            cmd = str(args.get("command") or "").strip()
+            if not cmd:
+                validation_error = "shell_exec requires a non-empty command string"
+                log_kv(
+                    self.log,
+                    logging.WARNING,
+                    "tool_dispatch_validation_error",
+                    tool_name=tool_name,
+                    error=validation_error,
+                )
+                if self.run_logger:
+                    self.run_logger.log(
+                        "tools",
+                        "validation_error",
+                        "tool argument validation failed",
+                        tool_name=tool_name,
+                        error=validation_error,
+                        arguments_preview=json_safe_value(args),
+                    )
+                return ToolEnvelope(
+                    success=False,
+                    error=validation_error,
+                    metadata={"tool_name": tool_name, "validation_error": "empty_command"},
+                )
+
         validation_error = self._validate_args(spec.schema, args)
         if validation_error:
             log_kv(
@@ -836,6 +900,9 @@ def normalize_tool_request(
         )
         if remote_shell_guard is not None:
             return tool_name, arguments, remote_shell_guard, normalization_metadata
+        # Respect escalation guidance: if bigger model recommends local shell_exec, don't block it
+        if _escalation_recommends_local_shell(state):
+            return tool_name, arguments, None, normalization_metadata
         if not _recent_ssh_auth_failure(state) and _task_clearly_targets_remote_ssh_host(state) and not re.search(r"\b(?:ssh|scp|sftp)\b", command):
             metadata = {
                 "tool_name": tool_name,
@@ -1174,6 +1241,36 @@ def _recent_ssh_auth_failure(state: Any | None) -> bool:
         if "permission denied" in combined and ("publickey" in combined or "password" in combined):
             return True
         return False
+    return False
+
+
+def _escalation_recommends_local_shell(state: Any | None) -> bool:
+    """Check if recent escalation guidance recommends using local shell_exec."""
+    if state is None:
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    # Check recent escalation entries
+    escalation_history = scratchpad.get("escalation_history", [])
+    for entry in reversed(escalation_history[-3:]):
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("recommended_next_action") or {}
+        if isinstance(action, dict):
+            action_type = str(action.get("type", "")).lower()
+            reason = str(action.get("reason", "")).lower()
+            if action_type == "shell_exec" or "shell_exec" in reason:
+                return True
+        repair_plan = str(entry.get("repair_plan", "")).lower()
+        if "shell_exec" in repair_plan and "local" in repair_plan:
+            return True
+    # Also check working memory for escalation guidance
+    working_memory = getattr(state, "working_memory", None)
+    if working_memory is not None:
+        notes = str(getattr(working_memory, "notes", "") or "").lower()
+        if "shell_exec" in notes and "escalation" in notes:
+            return True
     return False
 
 

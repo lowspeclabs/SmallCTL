@@ -209,6 +209,17 @@ def _record_guard_event(
         "session_id": session_id,
         **payload,
     }
+    # Deduplicate: skip if identical to last event (same event, path, session, payload)
+    if events:
+        last = events[-1]
+        if (
+            last.get("event") == entry["event"]
+            and last.get("path") == entry["path"]
+            and last.get("session_id") == entry["session_id"]
+            and {k: v for k, v in last.items() if k not in ("event", "path", "session_id", "at")}
+            == {k: v for k, v in entry.items() if k not in ("event", "path", "session_id", "at")}
+        ):
+            return
     events.append(entry)
     if len(events) > 40:
         del events[: len(events) - 40]
@@ -230,6 +241,28 @@ def _next_required_read(path: str) -> dict[str, Any]:
             "Read the current staged content before attempting another chunk write.",
             "Confirm the exact missing section or lines from the read result before writing again.",
         ],
+    }
+
+
+def _forced_escape_action(path: str, session_id: str) -> dict[str, Any]:
+    return {
+        "strategy": "escape_write_dead_end",
+        "allowed_operations": ["full_file_rewrite", "finalize_and_verify", "human_handoff"],
+        "notes": [
+            "Do not retry the same chunk write again.",
+            "Either perform one complete file_write overwrite, finalize and verify the staged file, or ask_human for handoff.",
+        ],
+        "full_file_rewrite": {
+            "tool_name": "file_write",
+            "required_arguments": {
+                "path": path,
+                "write_session_id": session_id,
+                "section_name": "full_file",
+                "replace_strategy": "overwrite",
+            },
+        },
+        "finalize_and_verify": {"tool_name": "finalize_write_session"},
+        "human_handoff": {"tool_name": "ask_human"},
     }
 
 
@@ -323,6 +356,7 @@ def _hard_abort_chunked_write(
             "loop_guard_postmortem": postmortem,
             "loop_guard_trigger_kind": trigger_kind,
             "loop_guard_attempts": attempts,
+            "next_required_action": _forced_escape_action(resolved_path, session_id),
         },
     )
 
@@ -483,7 +517,7 @@ def maybe_block_chunked_write(
     prior_level = int(path_state.get("escalation_level", 0) or 0)
 
     if bool(path_state.get("pending_read_before_write")):
-        if prior_level >= 2:
+        if prior_level >= 2 or int(path_state.get("blocked_attempts", 0) or 0) >= 1:
             return _hard_abort_chunked_write(
                 state=state,
                 path_state=path_state,
@@ -538,7 +572,7 @@ def maybe_block_chunked_write(
         and section_name
         and section_name in checkpoints
     ):
-        if prior_level >= 2:
+        if prior_level >= 2 or int(path_state.get("blocked_attempts", 0) or 0) >= 1:
             return _hard_abort_chunked_write(
                 state=state,
                 path_state=path_state,

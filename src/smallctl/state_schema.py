@@ -65,6 +65,7 @@ class ChallengeProgressState:
     required_output_paths: list[str] = field(default_factory=list)
     last_code_change_step: int = 0
     last_code_change_paths: list[str] = field(default_factory=list)
+    last_verifier_artifact_paths: list[str] = field(default_factory=list)
     code_change_count: int = 0
     last_verifier_step: int = 0
     last_verifier_command: str = ""

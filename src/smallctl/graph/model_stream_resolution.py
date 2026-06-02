@@ -22,8 +22,132 @@ from .model_stream_fallback_recovery import (
 from .state import GraphRunState, PendingToolCall
 from .deps import GraphRuntimeDeps
 from .tool_call_parser import _detect_empty_file_write_payload
+from .write_recovery import (
+    build_synthetic_file_write_call,
+    can_safely_synthesize,
+    recover_write_intent,
+)
 
 _STREAM_CHUNK_ERROR_AUTO_RESUME_SIGNATURE = "_stream_chunk_error_auto_resume_signature"
+_EMPTY_WRITE_FAILURE_COUNT_KEY = "_empty_write_failure_count"
+_EMPTY_WRITE_FAILURE_PATH_KEY = "_empty_write_failure_last_path"
+_EMPTY_WRITE_STRATEGY_SWITCHED_KEY = "_empty_write_strategy_switched"
+
+
+def _track_empty_write_failure(harness: Any, path: str) -> int:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    last_path = scratchpad.get(_EMPTY_WRITE_FAILURE_PATH_KEY, "")
+    if last_path != path:
+        scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY] = 1
+        scratchpad[_EMPTY_WRITE_FAILURE_PATH_KEY] = path
+    else:
+        scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY] = scratchpad.get(_EMPTY_WRITE_FAILURE_COUNT_KEY, 0) + 1
+    return int(scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY])
+
+
+def _reset_empty_write_failure(harness: Any) -> None:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    scratchpad.pop(_EMPTY_WRITE_FAILURE_COUNT_KEY, None)
+    scratchpad.pop(_EMPTY_WRITE_FAILURE_PATH_KEY, None)
+
+
+def _try_synthesize_from_stream_text(
+    harness: Any,
+    stream: Any,
+    partial_tool_calls: list[dict[str, Any]],
+) -> StreamProcessingResult | None:
+    """Fix D: If the model streamed substantive assistant text before an empty tool call,
+    try to recover a file_write directly from that text without an expensive fallback chat."""
+    assistant_text = str(getattr(stream, "assistant_text", "") or "").strip()
+    if len(assistant_text) < 200:
+        return None
+    intent = recover_write_intent(
+        harness=harness,
+        pending=None,
+        assistant_text=assistant_text,
+        partial_tool_calls=partial_tool_calls,
+    )
+    if intent is None or not can_safely_synthesize(intent, harness=harness):
+        return None
+    synthetic_call = build_synthetic_file_write_call(intent)
+    harness._runlog(
+        "stream_text_synthesized_from_assistant_text",
+        "synthesized file_write directly from streamed assistant text",
+        target_path=intent.path,
+        content_chars=len(intent.content),
+        confidence=intent.confidence,
+    )
+    return StreamProcessingResult(
+        chunks=[],
+        stream=stream,
+        timeline=[],
+        usage=getattr(stream, "usage", {}) or {},
+        duration=0.0,
+        ttft=0.0,
+        halted=False,
+        halt_reason="",
+        halt_details={},
+    )
+
+
+def _maybe_inject_strategy_switch(harness: Any, path: str, count: int) -> None:
+    """Fix E: After 3 empty write failures, suggest shell_exec or subtask approach."""
+    if count < 3:
+        return
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    if scratchpad.get(_EMPTY_WRITE_STRATEGY_SWITCHED_KEY):
+        return
+    scratchpad[_EMPTY_WRITE_STRATEGY_SWITCHED_KEY] = True
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Empty write attempts for `{path}` have failed {count} times. "
+                "Switch strategy: use `shell_exec` with a heredoc to write the file, "
+                "or break the implementation into smaller sub-tasks (e.g. scaffold HTML structure first, "
+                "then add CSS, then add JS). Do not retry another empty `file_write`."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "empty_write_strategy_switch",
+                "target_path": path,
+                "failure_count": count,
+            },
+        )
+    )
+    harness._runlog(
+        "empty_write_strategy_switch",
+        "injected strategy switch after repeated empty write failures",
+        target_path=path,
+        failure_count=count,
+    )
+
+
+def _maybe_trigger_escalation_for_empty_writes(harness: Any, path: str, count: int) -> bool:
+    """Fix C: After 2 empty write failures, auto-escalate if enabled."""
+    if count < 2:
+        return False
+    config = getattr(harness, "config", None)
+    if not bool(getattr(config, "escalation_enabled", False)):
+        return False
+    if not bool(getattr(config, "escalation_auto_trigger", False)):
+        return False
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
+    seen = scratchpad.get("_escalation_auto_empty_write_fingerprints")
+    if not isinstance(seen, list):
+        seen = []
+    fingerprint = f"empty_write:{path}"
+    if fingerprint in seen:
+        return False
+    seen.append(fingerprint)
+    scratchpad["_escalation_auto_empty_write_fingerprints"] = seen[-20:]
+    from ..harness.escalation_service import EscalationService
+    harness.state.scratchpad["_tool_loop_suppression"] = {
+        "tool_name": "file_write",
+        "error": f"Empty file_write payload failed {count} times for {path}.",
+    }
+    # Run escalation asynchronously; caller must await
+    return True
 
 
 def _provider_chunk_data(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -377,6 +501,74 @@ async def resolve_model_stream_result(
             and _detect_empty_file_write_payload(harness, pending) is not None
         ]
         if write_calls_with_empty_payload:
+            # Determine the target path for failure tracking
+            empty_path = ""
+            for pending in write_calls_with_empty_payload:
+                path_val = str(pending.args.get("path") or "").strip()
+                if path_val:
+                    empty_path = path_val
+                    break
+            if not empty_path:
+                from ..task_targets import primary_task_target_path
+                empty_path = primary_task_target_path(harness) or ""
+            failure_count = _track_empty_write_failure(harness, empty_path)
+
+            # Fix D: If the model streamed substantive assistant text, try to synthesize
+            # a file_write directly from it before falling back to an expensive new chat.
+            synthesized = _try_synthesize_from_stream_text(
+                harness, stream, partial_tool_calls=stream.tool_calls
+            )
+            if synthesized is not None:
+                _reset_empty_write_failure(harness)
+                return synthesized
+
+            # Fix C: Escalate after 2 consecutive empty write failures
+            if failure_count >= 2:
+                if _maybe_trigger_escalation_for_empty_writes(harness, empty_path, failure_count):
+                    from ..harness.escalation_service import EscalationService
+                    try:
+                        result = await EscalationService(harness).run(
+                            reason=f"Empty file_write payload failed {failure_count} times for `{empty_path}`.",
+                            question="What is the smallest safe next evidence-gathering or repair step?",
+                            requested_output="next_action",
+                            risk_level="medium",
+                            source="auto",
+                        )
+                        if bool(result.get("success")):
+                            harness.state.append_message(
+                                ConversationMessage(
+                                    role="system",
+                                    content=(
+                                        "Escalation advisor returned bounded recovery advice for repeated empty writes. "
+                                        "Treat this as advice only; choose any next action through normal tool policy.\n"
+                                        f"{json.dumps(json_safe_value(result), ensure_ascii=True, sort_keys=True)}"
+                                    ),
+                                    metadata={
+                                        "is_recovery_nudge": True,
+                                        "recovery_kind": "escalation_advisory",
+                                        "source": "auto_empty_write",
+                                        "target_path": empty_path,
+                                        "escalation_id": result.get("escalation_id"),
+                                    },
+                                )
+                            )
+                            harness._runlog(
+                                "escalation_auto_empty_write_advisory",
+                                "injected escalation advisory after repeated empty write failures",
+                                target_path=empty_path,
+                                escalation_id=result.get("escalation_id"),
+                            )
+                    except Exception as exc:
+                        harness._runlog(
+                            "escalation_auto_empty_write_failed",
+                            "escalation service failed for empty writes",
+                            error=str(exc),
+                            target_path=empty_path,
+                        )
+
+            # Fix E: After 3 failures, suggest strategy switch (shell_exec / subtasks)
+            _maybe_inject_strategy_switch(harness, empty_path, failure_count)
+
             try:
                 should_fallback = _should_attempt_empty_payload_text_fallback(
                     harness,
@@ -413,6 +605,7 @@ async def resolve_model_stream_result(
                     )
                     fallback_result = None
                 if fallback_result is not None:
+                    _reset_empty_write_failure(harness)
                     return fallback_result
         if echo_to_stdout and not harness.thinking_visibility and stream.assistant_text:
             print(stream.assistant_text)

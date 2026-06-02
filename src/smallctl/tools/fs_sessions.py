@@ -65,6 +65,17 @@ def _chunk_section_completed(completed: set[str], label: str) -> bool:
     return any(_chunk_section_labels_match(item, label) for item in completed)
 
 
+def _section_matches_any_suggestion(session: Any, section_name: str) -> bool:
+    normalized_section = _normalize_chunk_section_label(section_name)
+    if not normalized_section:
+        return False
+    for suggestion in (getattr(session, "suggested_sections", []) or []):
+        normalized_suggestion = _normalize_chunk_section_label(str(suggestion or ""))
+        if normalized_suggestion and _chunk_section_labels_match(normalized_section, normalized_suggestion):
+            return True
+    return False
+
+
 def _infer_next_suggested_section(session: Any, current_section: str) -> str:
     suggestions = [
         str(item or "").strip()
@@ -171,14 +182,17 @@ def _looks_like_full_script_content(content: str, section_name: str) -> bool:
         "body",
         "main",
         "main_file",
+        "header",
     }
     if normalized_section not in likely_scaffold_sections:
         return False
     text = str(content or "")
     if len(text) < 300 and text.count("\n") < 12:
         return False
-    markers = 0
     lowered = text.lower()
+    if _looks_like_complete_html_document(text):
+        return True
+    markers = 0
     for token in ("\nclass ", "\ndef ", "\nasync def ", "\nif __name__", "\nunittest.", "\npytest", "\nfrom ", "\nimport "):
         if token in lowered:
             markers += 1
@@ -190,6 +204,19 @@ def _looks_like_full_script_content(content: str, section_name: str) -> bool:
     if top_level_defs >= 2:
         markers += 1
     return markers >= 3
+
+
+def _looks_like_complete_html_document(content: str) -> bool:
+    text = str(content or "")
+    if len(text) < 300 or text.count("\n") < 12:
+        return False
+    lowered = text.lower()
+    return (
+        "<html" in lowered
+        and "</html" in lowered
+        and ("<!doctype html" in lowered or "<body" in lowered)
+        and ("<script" in lowered or "</script" in lowered)
+    )
 
 
 def _append_unique_section(completed_sections: list[str], section_name: str) -> bool:
@@ -278,6 +305,38 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
             return True
     except OSError:
         pass
+
+    # Coding-task relaxation: allow patch if last action was running tests on this file
+    # (the model knows file content from test output and needs to fix without re-reading)
+    records = getattr(state, "tool_execution_records", None)
+    if isinstance(records, dict) and records:
+        for record in reversed(list(records.values())):
+            if not isinstance(record, dict):
+                continue
+            tool_name = str(record.get("tool_name") or "").strip()
+            if tool_name == "shell_exec":
+                args = record.get("args")
+                if isinstance(args, dict):
+                    command = str(args.get("command") or "").strip()
+                    if command and _shell_command_targets_path(command, path, getattr(state, "cwd", None)):
+                        # Allow patch after ANY test run, success or failure
+                        if "unittest" in command or "pytest" in command or "python3" in command:
+                            return True
+                continue
+            # Stop at the first file-related tool
+            if tool_name in {"file_read", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
+                break
+
+    # Auto-read enhancement: if the file exists and is readable, silently read it
+    # and record the read rather than blocking the patch. This avoids wasting a turn.
+    try:
+        if path.exists() and path.is_file():
+            _ = path.read_text(encoding="utf-8")
+            _record_repair_cycle_read(state, path)
+            return True
+    except (OSError, UnicodeDecodeError):
+        pass
+
     return _latest_path_evidence_allows_repair_patch(state, path)
 
 

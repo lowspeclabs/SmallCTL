@@ -152,19 +152,32 @@ class EscalationService:
             )
             if retry_result is not None:
                 return retry_result
+            # Fallback: if both original and retry produced invalid/empty JSON,
+            # return a safe default advisory instead of hard-failing.
             self._record_terminal_trace(
                 escalation_id=escalation_id,
                 trigger=decision.trigger,
                 model=config.model,
-                status="invalid_advisory",
+                status="invalid_advisory_fallback",
                 error=validation.error,
             )
-            return {
-                "success": False,
-                "status": "invalid_advisory",
+            fallback = {
+                "success": True,
+                "status": "advisory",
+                "verdict": "need_more_evidence",
+                "confidence": 0.5,
+                "failure_diagnosis": f"Escalation model returned invalid/empty response ({validation.error}).",
+                "recommended_next_action": {
+                    "type": "none",
+                    "reason": "Escalation advisor could not produce a valid response. Continue with current repair strategy.",
+                },
+                "repair_plan": "",
+                "risk_notes": ["escalation_response_invalid"],
+                "requires_human_approval": False,
                 "escalation_id": escalation_id,
-                "error": validation.error,
             }
+            self._record_state(escalation_id, fallback, decision.trigger, config.model)
+            return fallback
 
         response = validation.response or {}
         increment_metric(state, "escalation_invocations")

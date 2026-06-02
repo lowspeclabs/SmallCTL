@@ -19,6 +19,7 @@ from .shell_processes import cwd_get, cwd_set, env_get, env_set, process_kill, s
 from .shell_foreground import shell_exec_foreground, _command_uses_leading_sudo
 from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
 from .shell_support import (
+    _apt_deb822_preflight_guard,
     _build_argparse_missing_args_question,
     _build_shell_status_update,
     _detect_unsupported_shell_syntax,
@@ -31,6 +32,7 @@ from .shell_support import (
     _remote_installer_preflight_guard,
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
+    _shell_workspace_destructive_delete_guard,
     _shell_write_session_artifact_delete_guard,
     _shell_write_session_target_path_guard,
     _shell_workspace_relative_hint,
@@ -499,6 +501,9 @@ async def shell_exec(
     artifact_delete_guard = _shell_write_session_artifact_delete_guard(state, command)
     if artifact_delete_guard is not None:
         return artifact_delete_guard
+    workspace_delete_guard = _shell_workspace_destructive_delete_guard(state, command)
+    if workspace_delete_guard is not None:
+        return workspace_delete_guard
     write_session_guard = _shell_write_session_target_path_guard(state, command)
     if write_session_guard is not None:
         return write_session_guard
@@ -514,6 +519,9 @@ async def shell_exec(
     yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="shell_exec")
     if yes_pipe_guard is not None:
         return yes_pipe_guard
+    apt_guard = _apt_deb822_preflight_guard(command, tool_name="shell_exec")
+    if apt_guard is not None:
+        return apt_guard
     preflight_guard = _remote_installer_preflight_guard(
         command,
         host="localhost",

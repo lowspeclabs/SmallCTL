@@ -7,14 +7,25 @@ from typing import Any
 
 from .models.tool_result import ToolEnvelope
 
-_CODING_PATH_RE = re.compile(r"(?:^|\s|`)(?P<path>\./temp/[A-Za-z0-9_.\-/]+\.py)(?:`|\s|$)")
+_CODING_PATH_RE = re.compile(r"(?:^|\s|`)(?P<path>\./temp/[A-Za-z0-9_.\-/]+\.(?:py|html?|js|css))(?:`|\s|$)")
 _CODING_MARKERS = (
     "build a self-contained python script",
     "includes built-in unittest",
     "unittest cases",
     "./temp/",
 )
+_SYSADMIN_MARKERS = (
+    "ssh to the host",
+    "remote credentials",
+    "sysadmin task",
+    "ssh_exec",
+    "ssh_file_read",
+    "ssh_file_write",
+)
 _FILE_MUTATION_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
+_VERIFIER_SCAFFOLDING_RE = re.compile(
+    r"(?:^|/)temp/(?:verify_[A-Za-z0-9_.-]*|run_verification)\.py$|(?:^|/)run_verification\.py$"
+)
 
 
 def initialize_challenge_progress_from_task(state: Any, task: str) -> None:
@@ -24,7 +35,10 @@ def initialize_challenge_progress_from_task(state: Any, task: str) -> None:
     task_text = str(task or "")
     lower_task = task_text.lower()
     if not progress.task_category:
-        progress.task_category = "coding" if any(marker in lower_task for marker in _CODING_MARKERS) else ""
+        if any(marker in lower_task for marker in _SYSADMIN_MARKERS):
+            progress.task_category = "sysadmin"
+        elif any(marker in lower_task for marker in _CODING_MARKERS):
+            progress.task_category = "coding"
     if not progress.required_output_paths:
         paths = []
         for match in _CODING_PATH_RE.finditer(task_text):
@@ -33,7 +47,10 @@ def initialize_challenge_progress_from_task(state: Any, task: str) -> None:
                 paths.append(path)
         progress.required_output_paths = paths
     if not progress.phase:
-        progress.phase = "implement" if progress.task_category == "coding" else ""
+        if progress.task_category == "coding":
+            progress.phase = "implement"
+        elif progress.task_category == "sysadmin":
+            progress.phase = "explore"
         progress.phase_started_at_step = int(getattr(state, "step_count", 0) or 0)
 
 
@@ -53,6 +70,9 @@ def record_code_change(
     if not progress.task_category and _path_is_coding_output(path):
         progress.task_category = "coding"
     if progress.task_category != "coding":
+        return
+    if _path_is_verifier_scaffolding(path) and not _path_is_required_output(progress, path):
+        _record_verifier_artifact_path(progress, path)
         return
     step = int(getattr(state, "step_count", 0) or 0)
     progress.last_code_change_step = step
@@ -198,6 +218,7 @@ def challenge_progress_report(state: Any) -> dict[str, Any]:
         "code_change_count": progress.code_change_count,
         "last_code_change_step": progress.last_code_change_step,
         "last_code_change_paths": list(progress.last_code_change_paths),
+        "last_verifier_artifact_paths": list(getattr(progress, "last_verifier_artifact_paths", []) or []),
         "last_verifier_step": progress.last_verifier_step,
         "last_verifier_command": progress.last_verifier_command,
         "last_verifier_kind": progress.last_verifier_kind,
@@ -296,7 +317,34 @@ def _count_post_pass_nonterminal(state: Any, *, tool_name: str) -> None:
 
 def _path_is_coding_output(path: str) -> bool:
     normalized = str(path or "").strip()
-    return normalized.endswith(".py") and ("/temp/" in normalized or normalized.startswith("./temp/"))
+    return normalized.endswith((".py", ".html", ".htm", ".js", ".css")) and (
+        "/temp/" in normalized or normalized.startswith("./temp/")
+    )
+
+
+def _path_is_verifier_scaffolding(path: str) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return bool(_VERIFIER_SCAFFOLDING_RE.search(normalized))
+
+
+def _path_is_required_output(progress: Any, path: str) -> bool:
+    normalized = str(path or "").strip().lstrip("./")
+    return any(
+        normalized == str(required or "").strip().lstrip("./")
+        for required in getattr(progress, "required_output_paths", []) or []
+    )
+
+
+def _record_verifier_artifact_path(progress: Any, path: str) -> None:
+    normalized = str(path or "").strip()
+    if not normalized:
+        return
+    paths = list(getattr(progress, "last_verifier_artifact_paths", []) or [])
+    if normalized not in paths:
+        paths.append(normalized)
+    progress.last_verifier_artifact_paths = paths[-8:]
 
 
 def _command_mentions_required_output(progress: Any, command: str) -> bool:

@@ -10,6 +10,7 @@ from typing import Any
 from textual import events
 from textual.app import ScreenStackError
 from textual.css.query import NoMatches
+from textual.widgets import Static
 
 from ..harness import Harness
 from ..logging_utils import RunLogger
@@ -294,6 +295,11 @@ class SmallctlAppFlowMixin:
             await handle_sudo_password_prompt(self, event)
             return
 
+        if event.data.get("ui_kind") == "subtask_checklist":
+            self._update_sidebar_objective(event.content)
+            if getattr(self, "_model_bar_layout", "bottom") == "right":
+                return
+
         tool_name = str(event.data.get("tool_name") or event.content or "").strip()
         suppress_task_complete = tool_name == "task_complete" and not self._show_system_messages
 
@@ -334,6 +340,35 @@ class SmallctlAppFlowMixin:
         if console is None:
             return
         await console.append_event(event)
+
+    def _update_sidebar_objective(self, content: str) -> None:
+        try:
+            objective = self.query_one("#objective-sidebar", Static)
+        except (NoMatches, ScreenStackError, TypeError):
+            return
+        text = self._format_sidebar_objective(content)
+        if text:
+            objective.update(text)
+
+    @staticmethod
+    def _format_sidebar_objective(content: str) -> str:
+        lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        first = lines[0]
+        if first.startswith("Goal Objective: "):
+            first = first[16:].strip()
+        clipped = first if len(first) <= 220 else first[:219] + "~"
+        result = [f"[bold #93c5fd]Objective[/]", clipped]
+        task_lines = []
+        for line in lines[1:4]:
+            task = line.strip()
+            if task:
+                task_lines.append(task if len(task) <= 120 else task[:119] + "~")
+        if task_lines:
+            result.extend(["", "[bold #bfdbfe]Task[/]"])
+            result.extend(f"[#94a3b8]{task}[/]" for task in task_lines)
+        return "\n".join(result)
 
     def _on_run_log_row(self, row: dict[str, Any]) -> None:
         if not self._should_render_run_log_row(row):
@@ -441,32 +476,43 @@ class SmallctlAppFlowMixin:
         self._status_activity = state.activity
         self._api_error_count = state.api_errors
         try:
-            model_button = self.query_one(ModelSelectButton)
-            model_button.set_model(state.model)
-            model_button.set_busy(self.active_task is not None and not self.active_task.done())
-            try:
-                chat_button = self.query_one(ChatSelectButton)
-                chat_button.set_busy(self.active_task is not None and not self.active_task.done())
-            except NoMatches:
-                pass
-            self.query_one(StatusBar).set_state(
-                model=state.model,
-                phase=state.phase,
-                step=state.step,
-                mode=state.mode,
-                plan=state.plan,
-                active_step=state.active_step,
-                activity=state.activity,
-                contract_flow_ui=state.contract_flow_ui,
-                contract_phase=state.contract_phase,
-                acceptance_progress=state.acceptance_progress,
-                latest_verdict=state.latest_verdict,
-                token_usage=state.token_usage,
-                token_total=state.token_total,
-                token_limit=state.token_limit,
-                context_window=state.context_window,
-                api_errors=state.api_errors,
-            )
+            is_busy = self.active_task is not None and not self.active_task.done()
+            query = getattr(self, "query", None)
+            if callable(query):
+                model_buttons = list(query(ModelSelectButton))
+                chat_buttons = list(query(ChatSelectButton))
+                status_bars = list(query(StatusBar))
+            else:
+                model_buttons = [self.query_one(ModelSelectButton)]
+                try:
+                    chat_buttons = [self.query_one(ChatSelectButton)]
+                except NoMatches:
+                    chat_buttons = []
+                status_bars = [self.query_one(StatusBar)]
+            for model_button in model_buttons:
+                model_button.set_model(state.model)
+                model_button.set_busy(is_busy)
+            for chat_button in chat_buttons:
+                chat_button.set_busy(is_busy)
+            for status_bar in status_bars:
+                status_bar.set_state(
+                    model=state.model,
+                    phase=state.phase,
+                    step=state.step,
+                    mode=state.mode,
+                    plan=state.plan,
+                    active_step=state.active_step,
+                    activity=state.activity,
+                    contract_flow_ui=state.contract_flow_ui,
+                    contract_phase=state.contract_phase,
+                    acceptance_progress=state.acceptance_progress,
+                    latest_verdict=state.latest_verdict,
+                    token_usage=state.token_usage,
+                    token_total=state.token_total,
+                    token_limit=state.token_limit,
+                    context_window=state.context_window,
+                    api_errors=state.api_errors,
+                )
         except (NoMatches, ScreenStackError):
             return
 

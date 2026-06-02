@@ -74,6 +74,7 @@ def build_escalation_packet(
         },
         "reflexion_lessons": json_safe_value(list(getattr(state, "reflexion_memory", []) or [])[-5:]),
         "recent_tool_records": _recent_tool_records(getattr(state, "tool_execution_records", None)),
+        "read_files": _recent_file_reads(getattr(state, "tool_execution_records", None)),
         "artifacts": _artifact_summary(getattr(state, "artifacts", None)),
         "constraints": [
             "Advisor cannot execute tools or write files.",
@@ -126,6 +127,50 @@ def _recent_tool_records(records: Any) -> list[dict[str, Any]]:
     return summaries
 
 
+def _recent_file_reads(records: Any) -> list[dict[str, Any]]:
+    """Extract recent file_read / ssh_file_read contents for escalation.
+
+    Includes up to 3 successful file reads so the escalation advisor can
+    verify the small model's claims against the actual file content.
+    """
+    if isinstance(records, dict):
+        items = list(records.values())
+    elif isinstance(records, list):
+        items = records
+    else:
+        return []
+
+    reads: list[dict[str, Any]] = []
+    for record in reversed(items):
+        if not isinstance(record, dict):
+            continue
+        tool_name = str(record.get("tool_name") or "").strip()
+        if tool_name not in {"file_read", "ssh_file_read"}:
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        if not result.get("success"):
+            continue
+
+        args = record.get("args") or {}
+        path = str(args.get("path") or args.get("remote_path") or "").strip()
+        if not path:
+            continue
+
+        content = str(result.get("output") or "")
+        if len(content) > 2000:
+            content = content[:1990] + " [truncated]"
+        reads.append({
+            "path": path,
+            "content": content,
+            "read_at_step": record.get("step_count"),
+        })
+        if len(reads) >= 3:
+            break
+    return list(reversed(reads))
+
+
 def _artifact_summary(artifacts: Any) -> list[dict[str, Any]]:
     if not isinstance(artifacts, dict):
         return []
@@ -151,6 +196,14 @@ def _budget_packet(packet: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
     budgeted["reflexion_lessons"] = []
     budgeted["recent_tool_records"] = budgeted.get("recent_tool_records", [])[-4:]
     budgeted["failure_events"] = budgeted.get("failure_events", [])[-3:]
+    # Preserve read_files but trim content if needed; it is high-signal evidence.
+    read_files = budgeted.get("read_files", [])
+    if read_files:
+        budgeted["read_files"] = read_files[:2]
+        for entry in budgeted["read_files"]:
+            content = str(entry.get("content") or "")
+            if len(content) > 500:
+                entry["content"] = content[:490] + " [truncated]"
     tool_plan = dict(budgeted.get("tool_plan") or {})
     for key in ("observations", "last_solver_draft"):
         value = str(tool_plan.get(key) or "")

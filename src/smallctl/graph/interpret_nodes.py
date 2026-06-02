@@ -13,6 +13,7 @@ from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
 from ..phases import filter_phase_blocked_tools, is_phase_contract_active, phase_contract
 from ..prompts import build_planning_prompt, build_system_prompt
+from ..runtime_error_repair import current_reported_runtime_error
 from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
 from ..task_targets import primary_task_target_path
 from ..harness.tool_visibility import (
@@ -394,6 +395,31 @@ def _format_allowed_tool_summary(names: list[str], *, limit: int = 8) -> str:
     return f"Available now: {summary}"
 
 
+def _validation_handoff_hint_for_blocked_tool(pending: PendingToolCall, *, mode: str) -> str:
+    tool_name = str(pending.tool_name or "").strip()
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode != "planning" or tool_name not in {"run", "shell_exec"}:
+        return ""
+    command = str(
+        pending.args.get("command")
+        or pending.args.get("cmd")
+        or pending.args.get("args")
+        or pending.args.get("code")
+        or ""
+    ).strip()
+    if command:
+        return (
+            "Planning mode cannot execute shell commands. For phase verification, call "
+            f"`request_validation_execution(command={command!r})` instead; after approval the loop runtime will run it via `shell_exec`. "
+            "Do not promote the phase from static file reads alone."
+        )
+    return (
+        "Planning mode cannot execute shell commands and there is no tool named `run`. "
+        "For phase verification, identify the exact verifier/test command and call `request_validation_execution(command=...)`; "
+        "after approval the loop runtime will run it via `shell_exec`. Do not promote the phase from static file reads alone."
+    )
+
+
 def _build_hidden_tool_block_message(
     blocked_calls: list[PendingToolCall],
     *,
@@ -420,6 +446,9 @@ def _build_hidden_tool_block_message(
         )
         if artifact_id:
             recovery_hints.append(f"Use `artifact_read(artifact_id='{artifact_id}')` for the full fetched body.")
+        validation_hint = _validation_handoff_hint_for_blocked_tool(pending, mode=mode)
+        if validation_hint:
+            recovery_hints.append(validation_hint)
     blocked_summary = ", ".join(blocked_bits)
     message = (
         f"Registered but unavailable on this turn: {blocked_summary}. "
@@ -974,7 +1003,11 @@ async def interpret_model_output(
             if any(p.tool_name == "task_complete" for p in hidden_tool_calls):
                 block_count = int(harness.state.scratchpad.get("_task_complete_blocked_count", 0)) + 1
                 harness.state.scratchpad["_task_complete_blocked_count"] = block_count
-                if block_count >= 2 and _working_memory_signals_completion(harness):
+                if (
+                    block_count >= 2
+                    and _working_memory_signals_completion(harness)
+                    and current_reported_runtime_error(harness.state) is None
+                ):
                     completion_message = _extract_completion_message(harness, hidden_tool_calls)
                     harness._runlog(
                         "task_complete_blocked_force_finalize",

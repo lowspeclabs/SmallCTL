@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from smallctl.graph.state import GraphRunState, ToolExecutionRecord
+from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
+from smallctl.graph.tool_execution_recovery import _maybe_recover_missing_first_write_session
+from smallctl.graph.write_recovery import can_safely_synthesize, recover_write_intent
 from smallctl.graph.write_session_outcomes import (
     _find_stranded_write_session_record,
     _handle_write_session_outcome,
@@ -19,13 +21,15 @@ from smallctl.graph.write_session_recovery import (
 )
 from smallctl.harness.reflexion_service import ReflexionService
 from smallctl.harness.subtask_ledger_service import SubtaskLedgerService
+from smallctl.harness.tool_result_verification import _store_verifier_verdict
 from smallctl.models.tool_result import ToolEnvelope
-from smallctl.state import LoopState
+from smallctl.state import ExecutionPlan, LoopState
 from smallctl.tools.artifact import artifact_read
 from smallctl.tools.control import (
     _write_session_resume_action,
     finalize_write_session,
     task_complete,
+    task_fail,
 )
 from smallctl.tools.fs import file_write
 from smallctl.write_session_fsm import new_write_session, record_write_session_event
@@ -197,6 +201,155 @@ class TestWriteSessionSyntaxFailureRepairSource:
         assert state.subtask_ledger is not None
         assert "write_session_stall" in state.subtask_ledger.subtasks[0].failure_classes
         assert state.reflexion_memory[-1].failure_class == "write_session_stall"
+
+
+class TestMissingFirstWriteSessionRecovery:
+    def test_plan_output_path_does_not_downgrade_recovered_write_intent(self, tmp_path):
+        state = LoopState(cwd=str(tmp_path))
+        state.scratchpad["_task_target_paths"] = ["temp/tetris.html", "./temp/tetris-spec.md"]
+        state.active_plan = ExecutionPlan(
+            plan_id="plan-1",
+            goal="Implement Phase 3: Game Loop for Tetris TUI",
+            outputs=[
+                "./temp/tetris-main.py (entry point with game loop)",
+                "./temp/tetris-core.py (movement and collision)",
+            ],
+            approved=True,
+            status="approved",
+        )
+        harness = SimpleNamespace(
+            state=state,
+            config=SimpleNamespace(
+                enable_write_intent_recovery=True,
+                write_recovery_min_confidence="high",
+                write_recovery_allow_raw_text_targets=True,
+                enable_assistant_code_write_recovery=True,
+            ),
+        )
+        pending = PendingToolCall(
+            tool_name="file_write",
+            args={
+                "path": "./temp/tetris-core.py",
+                "content": "def main():\n    return 42\n",
+                "write_session_id": "A0004",
+            },
+            tool_call_id="tc-plan-output",
+        )
+
+        intent = recover_write_intent(harness=harness, pending=pending)
+
+        assert intent is not None
+        assert intent.confidence == "certain"
+        assert "conflicting_target_paths" not in intent.evidence
+        assert can_safely_synthesize(intent, harness=harness) is True
+
+    def test_missing_first_write_session_applies_payload_to_target(self, tmp_path):
+        target = tmp_path / "temp" / "tetris-main.py"
+        state = LoopState(cwd=str(tmp_path))
+        harness = SimpleNamespace(
+            state=state,
+            config=SimpleNamespace(),
+            _runlog=lambda *args, **kwargs: None,
+        )
+        graph_state = GraphRunState(
+            loop_state=state,
+            thread_id="t1",
+            run_mode="loop",
+        )
+        content = "#!/usr/bin/env python3\nprint('ok')\n"
+        record = ToolExecutionRecord(
+            operation_id="op-missing-session",
+            tool_name="file_write",
+            args={
+                "path": "temp/tetris-main.py",
+                "content": content,
+                "write_session_id": "invented-session",
+            },
+            tool_call_id="tc-missing-session",
+            result=ToolEnvelope(
+                success=False,
+                error="No active write session found for session ID `invented-session`.",
+                metadata={
+                    "error_kind": "missing_active_write_session",
+                    "write_session_id": "invented-session",
+                    "path": str(target),
+                },
+            ),
+        )
+        graph_state.last_tool_results.append(record)
+
+        recovered = asyncio.run(_maybe_recover_missing_first_write_session(graph_state, harness, record))
+
+        assert recovered is True
+        assert record.result.success is True
+        assert target.read_text(encoding="utf-8") == content
+        assert state.write_session is not None
+        assert state.write_session.status == "complete"
+        assert state.write_session.write_session_id == "invented-session"
+        assert graph_state.last_tool_results[0].result.success is True
+        assert not graph_state.pending_tool_calls
+
+    def test_missing_first_write_session_does_not_overwrite_existing_target_without_overwrite(self, tmp_path):
+        target = tmp_path / "temp" / "existing.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("original\n", encoding="utf-8")
+        state = LoopState(cwd=str(tmp_path))
+        harness = SimpleNamespace(
+            state=state,
+            config=SimpleNamespace(),
+            _runlog=lambda *args, **kwargs: None,
+        )
+        graph_state = GraphRunState(
+            loop_state=state,
+            thread_id="t1",
+            run_mode="loop",
+        )
+        record = ToolExecutionRecord(
+            operation_id="op-existing",
+            tool_name="file_write",
+            args={
+                "path": "temp/existing.py",
+                "content": "replacement\n",
+                "write_session_id": "invented-session",
+            },
+            tool_call_id="tc-existing",
+            result=ToolEnvelope(
+                success=False,
+                error="No active write session found for session ID `invented-session`.",
+                metadata={
+                    "error_kind": "missing_active_write_session",
+                    "write_session_id": "invented-session",
+                },
+            ),
+        )
+
+        recovered = asyncio.run(_maybe_recover_missing_first_write_session(graph_state, harness, record))
+
+        assert recovered is False
+        assert target.read_text(encoding="utf-8") == "original\n"
+        assert state.write_session is None
+
+
+class TestVerifierSemantics:
+    def test_file_existence_probe_missing_is_failure_despite_zero_exit(self):
+        state = LoopState(cwd="/tmp")
+        result = ToolEnvelope(
+            success=True,
+            output={"stdout": "MISSING\n", "stderr": "", "exit_code": 0},
+            metadata={},
+        )
+
+        verdict = _store_verifier_verdict(
+            state,
+            tool_name="shell_exec",
+            result=result,
+            arguments={"command": 'test -f temp/tetris-main.py && echo "EXISTS" || echo "MISSING"'},
+        )
+
+        assert verdict is not None
+        assert verdict["verdict"] == "fail"
+        assert verdict["failure_mode"] == "logic"
+        assert "MISSING" in verdict["key_stdout"]
 
 
 class TestStrandedWriteSessionRecordReplay:
@@ -530,6 +683,79 @@ class TestResumeActionAndTaskComplete:
         assert result["success"] is True
         assert result["output"]["status"] == "already_finalized"
         assert str(target) in result["output"]["message"]
+
+    def test_task_fail_auto_finalizes_stranded_session(self, tmp_path):
+        target = tmp_path / "app.py"
+        stage = tmp_path / ".smallctl" / "write_sessions" / "ws_fail_auto__app__stage.py"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("x = 1\n", encoding="utf-8")
+
+        state = LoopState(cwd=str(tmp_path))
+        session = new_write_session(
+            session_id="ws_fail_auto",
+            target_path=str(target),
+            intent="replace_file",
+        )
+        session.write_sections_completed = ["body"]
+        session.write_staging_path = str(stage)
+        state.write_session = session
+
+        harness = _FakeHarness(session=session, cwd=str(tmp_path))
+
+        result = asyncio.run(task_fail("blocked", state, harness))
+        assert result["success"] is True
+        assert result["output"]["status"] == "failed"
+        assert session.status == "complete"
+        assert target.read_text(encoding="utf-8") == "x = 1\n"
+
+    def test_task_fail_without_harness_abandons_session(self, tmp_path):
+        target = tmp_path / "app.py"
+        stage = tmp_path / ".smallctl" / "write_sessions" / "ws_fail_no_harness__app__stage.py"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("x = 1\n", encoding="utf-8")
+
+        state = LoopState(cwd=str(tmp_path))
+        session = new_write_session(
+            session_id="ws_fail_no_harness",
+            target_path=str(target),
+            intent="replace_file",
+        )
+        session.write_sections_completed = ["body"]
+        session.write_staging_path = str(stage)
+        state.write_session = session
+
+        result = asyncio.run(task_fail("blocked", state))
+        assert result["success"] is True
+        assert result["output"]["status"] == "failed"
+        # Without harness, session should be abandoned, not finalized
+        assert session.status != "complete"
+        assert not target.exists()
+
+    def test_task_fail_with_unready_session_does_not_finalize(self, tmp_path):
+        target = tmp_path / "app.py"
+        stage = tmp_path / ".smallctl" / "write_sessions" / "ws_fail_unready__app__stage.py"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("x = 1\n", encoding="utf-8")
+
+        state = LoopState(cwd=str(tmp_path))
+        session = new_write_session(
+            session_id="ws_fail_unready",
+            target_path=str(target),
+            intent="replace_file",
+        )
+        session.write_sections_completed = ["imports"]
+        session.write_next_section = "core"  # not ready
+        session.write_staging_path = str(stage)
+        state.write_session = session
+
+        harness = _FakeHarness(session=session, cwd=str(tmp_path))
+
+        result = asyncio.run(task_fail("blocked", state, harness))
+        assert result["success"] is True
+        assert result["output"]["status"] == "failed"
+        # Session should be abandoned, not finalized, because next_section is set
+        assert session.status != "complete"
+        assert not target.exists()
 
     def test_finalize_write_session_no_session(self):
         state = LoopState(cwd="/tmp")

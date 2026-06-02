@@ -329,6 +329,7 @@ def _coerce_challenge_progress_state(value: Any) -> ChallengeProgressState:
     payload["required_output_paths"] = _coerce_string_list(payload.get("required_output_paths"))
     payload["last_code_change_step"] = max(0, _coerce_int(payload.get("last_code_change_step"), default=0))
     payload["last_code_change_paths"] = _coerce_string_list(payload.get("last_code_change_paths"))
+    payload["last_verifier_artifact_paths"] = _coerce_string_list(payload.get("last_verifier_artifact_paths"))
     payload["code_change_count"] = max(0, _coerce_int(payload.get("code_change_count"), default=0))
     payload["last_verifier_step"] = max(0, _coerce_int(payload.get("last_verifier_step"), default=0))
     payload["last_verifier_command"] = str(payload.get("last_verifier_command", "") or "")

@@ -113,6 +113,8 @@ def parse_and_validate_escalation_response(text: str, *, harness: Any) -> Escala
 
 def _extract_json_text(text: str) -> str:
     raw = str(text or "").strip()
+    if not raw:
+        return ""
     match = _FENCE_RE.search(raw)
     if match:
         raw = match.group(1).strip()

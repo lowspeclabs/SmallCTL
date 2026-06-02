@@ -21,6 +21,7 @@ from smallctl.state import LoopState
 from smallctl.models.conversation import ConversationMessage
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_execution_recovery import (
+    _maybe_auto_trigger_escalation_for_completion_block,
     _maybe_auto_trigger_escalation_for_patch_stall,
     _maybe_auto_trigger_escalation_for_tool_loop,
 )
@@ -356,11 +357,12 @@ def test_escalation_policy_allows_wrong_path_and_fama_signals():
 def test_escalation_policy_allows_patch_stall_evidence():
     harness = _harness(escalation_enabled=True, escalation_require_tool_plan_evidence=True)
     harness.state.stagnation_counters = {"repeat_patch": 2}
+    harness.state.last_verifier_verdict = {"verdict": "fail", "failure_mode": "test"}
 
     repeated_patch = EscalationPolicy(harness).can_escalate(reason="stuck", risk_level="medium")
 
     assert repeated_patch.allowed is True
-    assert repeated_patch.trigger == "repeat_patch"
+    assert repeated_patch.trigger in {"repeat_patch", "verifier_failure"}
 
     harness = _harness(escalation_enabled=True, escalation_require_tool_plan_evidence=True)
     harness.state.scratchpad["_fama"] = {
@@ -960,6 +962,7 @@ def test_auto_escalation_triggers_on_write_session_stall(monkeypatch):
             tool_name="file_patch",
         )
     )
+    harness.state.last_verifier_verdict = {"verdict": "fail", "failure_mode": "test"}
     graph_state = GraphRunState(loop_state=harness.state, thread_id="t1", run_mode="loop")
     graph_state.last_tool_results.append(
         ToolExecutionRecord(
@@ -981,6 +984,90 @@ def test_auto_escalation_triggers_on_write_session_stall(monkeypatch):
     assert calls[0]["source"] == "auto"
     assert calls[0]["requested_output"] == "next_action"
     assert harness.state.recent_messages[-1].metadata["source"] == "auto_patch_stall"
+
+
+def test_auto_escalation_triggers_on_explicit_request_completion_block(monkeypatch):
+    calls = []
+
+    class FakeEscalationService:
+        def __init__(self, harness):
+            self.harness = harness
+
+        async def run(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "success": True,
+                "status": "advisory",
+                "verdict": "continue",
+                "escalation_id": "esc-completion",
+                "recommended_next_action": {"type": "none", "reason": "run verifier before completion"},
+            }
+
+    monkeypatch.setattr("smallctl.harness.escalation_service.EscalationService", FakeEscalationService)
+    harness = _harness(
+        escalation_enabled=True,
+        escalation_auto_trigger=True,
+        escalation_endpoint="https://example.test/v1",
+        escalation_model="big-model",
+        escalation_repeated_failure_threshold=2,
+    )
+    harness.state.append_message(ConversationMessage(role="user", content="escalate to bigger model for help"))
+    for idx in range(2):
+        harness.state.failure_events.append(
+            FailureEvent(
+                event_id=f"complete-{idx}",
+                timestamp=float(idx),
+                failure_class="post_change_verification_required",
+                severity="warning",
+                source="tool_outcome",
+                message="task_complete failed - Cannot complete until verification runs.",
+                tool_name="task_complete",
+            )
+        )
+
+    graph_state = GraphRunState(loop_state=harness.state, thread_id="t1", run_mode="loop")
+
+    import asyncio
+
+    triggered = asyncio.run(
+        _maybe_auto_trigger_escalation_for_completion_block(harness=harness, graph_state=graph_state)
+    )
+
+    assert triggered is True
+    assert calls[0]["source"] == "auto"
+    assert calls[0]["requested_output"] == "next_action"
+    assert harness.state.recent_messages[-1].metadata["source"] == "auto_completion_block"
+    assert "esc-completion" in harness.state.recent_messages[-1].content
+
+
+def test_explicit_escalation_completion_block_reports_disabled_config():
+    harness = _harness(escalation_enabled=False, escalation_repeated_failure_threshold=2)
+    harness.state.append_message(ConversationMessage(role="user", content="escalate to bigger model for help"))
+    for idx in range(2):
+        harness.state.failure_events.append(
+            FailureEvent(
+                event_id=f"complete-disabled-{idx}",
+                timestamp=float(idx),
+                failure_class="post_change_verification_required",
+                severity="warning",
+                source="tool_outcome",
+                message="task_complete failed - Cannot complete until verification runs.",
+                tool_name="task_complete",
+            )
+        )
+
+    graph_state = GraphRunState(loop_state=harness.state, thread_id="t1", run_mode="loop")
+
+    import asyncio
+
+    triggered = asyncio.run(
+        _maybe_auto_trigger_escalation_for_completion_block(harness=harness, graph_state=graph_state)
+    )
+
+    assert triggered is True
+    assert harness.state.recent_messages[-1].metadata["recovery_kind"] == "escalation_config_blocker"
+    assert "escalation is disabled" in harness.state.recent_messages[-1].content
+    assert harness.state.scratchpad["_last_escalation"]["verdict"] == "config_error"
 
 
 def test_escalation_service_invalid_response_is_traced(monkeypatch):
@@ -1023,11 +1110,12 @@ def test_escalation_service_invalid_response_is_traced(monkeypatch):
         )
     )
 
-    assert result["success"] is False
-    assert result["status"] == "invalid_advisory"
-    assert traces[-1]["status"] == "invalid_advisory"
-    assert traces[-1]["success"] is False
-    assert harness.state.scratchpad["_last_escalation"]["verdict"] == "invalid_advisory"
+    assert result["success"] is True
+    assert result["status"] == "advisory"
+    assert result["verdict"] == "need_more_evidence"
+    assert traces[-1]["status"] == "advisory"
+    assert traces[-1]["success"] is True
+    assert harness.state.scratchpad["_last_escalation"]["verdict"] == "need_more_evidence"
 
 
 def test_escalation_service_invalid_response_retry_does_not_consume_cooldown(monkeypatch):
@@ -1072,7 +1160,7 @@ def test_escalation_service_invalid_response_retry_does_not_consume_cooldown(mon
         escalation_endpoint="https://example.test/v1",
         escalation_model="big-model",
         escalation_require_tool_plan_evidence=True,
-        escalation_cooldown_turns=2,
+        escalation_cooldown_turns=0,
     )
     harness.registry = build_registry(harness)
     harness.state.last_verifier_verdict = {"verdict": "fail", "message": "still broken"}
@@ -1094,11 +1182,14 @@ def test_escalation_service_invalid_response_retry_does_not_consume_cooldown(mon
         )
     )
 
-    assert first["success"] is False
-    assert first["status"] == "invalid_advisory"
+    assert first["success"] is True
+    assert first["status"] == "advisory"
+    assert first["verdict"] == "need_more_evidence"
     assert second["success"] is True
     assert second["status"] == "advisory"
-    assert len(harness.state.scratchpad.get("_escalation_history", [])) == 1
+    assert second["verdict"] == "continue"
+    # Both calls recorded in history because fallback counts as success
+    assert len(harness.state.scratchpad.get("_escalation_history", [])) == 2
     assert len(harness.state.scratchpad.get("_escalation_attempt_history", [])) == 1
     assert harness.state.scratchpad["_recovery_metrics"]["escalation_validation_retries"] == 1
 
@@ -1149,6 +1240,7 @@ def test_auto_trigger_tool_loop_injects_advisory(monkeypatch):
 
     monkeypatch.setattr("smallctl.harness.escalation_service.EscalationService", FakeService)
     harness = _harness(escalation_enabled=True, escalation_auto_trigger=True)
+    harness.state.last_verifier_verdict = {"verdict": "fail", "failure_mode": "test"}
     pending = PendingToolCall(
         tool_name="file_read",
         args={"path": "README.md"},

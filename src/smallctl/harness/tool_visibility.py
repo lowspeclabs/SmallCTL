@@ -439,9 +439,16 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
     normalized_mode = _normalize_turn_mode(mode)
     from ..fama.runtime import expire_for_turn
     from ..fama.tool_policy import apply_fama_tool_exposure, fama_hidden_tools_for_exposure
+    from ..harness.task_classifier import task_is_local_coding_target
 
     expire_for_turn(harness, mode=normalized_mode)
     config = getattr(harness, "config", None)
+
+    task_text = ""
+    run_brief = getattr(harness.state, "run_brief", None)
+    if run_brief is not None:
+        task_text = str(getattr(run_brief, "original_task", "") or "")
+    is_local_coding = task_is_local_coding_target(task_text)
 
     if normalized_mode == "chat":
         chat_mode_tools = getattr(harness, "_chat_mode_tools", None)
@@ -452,20 +459,21 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
 
             schemas = list(chat_mode_tools_helper(harness))
         schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
-        hidden_tools = fama_hidden_tools_for_exposure(
-            schemas,
-            state=harness.state,
-            mode=normalized_mode,
-            config=config,
-        )
-        schemas = apply_fama_tool_exposure(
-            schemas,
-            state=harness.state,
-            mode=normalized_mode,
-            config=config,
-        )
-        if hidden_tools:
-            _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
+        if not is_local_coding:
+            hidden_tools = fama_hidden_tools_for_exposure(
+                schemas,
+                state=harness.state,
+                mode=normalized_mode,
+                config=config,
+            )
+            schemas = apply_fama_tool_exposure(
+                schemas,
+                state=harness.state,
+                mode=normalized_mode,
+                config=config,
+            )
+            if hidden_tools:
+                _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
         return {
             "schemas": schemas,
             "names": _tool_names(schemas),
@@ -509,20 +517,30 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         mode=normalized_mode,
     )
     schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
-    hidden_tools = fama_hidden_tools_for_exposure(
-        schemas,
-        state=harness.state,
-        mode=normalized_mode,
-        config=config,
-    )
-    schemas = apply_fama_tool_exposure(
-        schemas,
-        state=harness.state,
-        mode=normalized_mode,
-        config=config,
-    )
-    if hidden_tools:
-        _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
+
+    # Fix 2: Expose shell_exec in planning mode for local debug tasks
+    if normalized_mode == "planning" and is_local_coding:
+        shell_schema = _retry_tool_schema(harness, tool_name="shell_exec")
+        if shell_schema is not None:
+            existing_names = _tool_names(schemas)
+            if "shell_exec" not in existing_names:
+                schemas = list(schemas) + [shell_schema]
+
+    if not is_local_coding:
+        hidden_tools = fama_hidden_tools_for_exposure(
+            schemas,
+            state=harness.state,
+            mode=normalized_mode,
+            config=config,
+        )
+        schemas = apply_fama_tool_exposure(
+            schemas,
+            state=harness.state,
+            mode=normalized_mode,
+            config=config,
+        )
+        if hidden_tools:
+            _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
     return {
         "schemas": schemas,
         "names": _tool_names(schemas),
@@ -539,6 +557,26 @@ def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) 
         active = sorted(active_mitigation_names(harness.state))
     except Exception:
         active = []
+
+    signature = (tuple(sorted(hidden_tools)), tuple(active), mode)
+    batch_state = getattr(harness.state, "_fama_log_batch", None)
+    if batch_state is not None:
+        last_sig, count, last_logged = batch_state
+        if last_sig == signature:
+            harness.state._fama_log_batch = (signature, count + 1, last_logged)
+            return
+        if count > 1 and not last_logged:
+            runlog(
+                "fama_tool_exposure_applied",
+                f"FAMA tool exposure policy applied: count={count} (suppressed {count - 1} duplicates)",
+                hidden_tools=list(last_sig[0]),
+                active_mitigations=list(last_sig[1]),
+                mode=last_sig[2],
+                batched_count=count,
+            )
+            harness.state._fama_log_batch = (signature, 1, True)
+            return
+    harness.state._fama_log_batch = (signature, 1, False)
     runlog(
         "fama_tool_exposure_applied",
         "FAMA tool exposure policy applied",

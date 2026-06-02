@@ -190,15 +190,58 @@ def write_session_status_snapshot(
         "id": str(getattr(session, "write_session_id", "") or "").strip(),
         "mode": str(getattr(session, "write_session_mode", "") or "").strip() or "chunked_author",
         "next": next_section,
+        "checkpointed_sections": ",".join(write_session_checkpointed_sections(session)) or "-",
+        "next_legal_operation": write_session_next_legal_operation(session),
         "staged_hash": staging_hash or "missing",
         "finalized": "yes" if finalized else "no",
     }
 
 
 def format_write_session_status_block(snapshot: dict[str, str]) -> str:
-    ordered_keys = ("type", "id", "mode", "next", "staged_hash", "finalized")
+    ordered_keys = (
+        "type",
+        "id",
+        "mode",
+        "next",
+        "checkpointed_sections",
+        "next_legal_operation",
+        "staged_hash",
+        "finalized",
+    )
     parts = [f"{key}={snapshot.get(key, '')}" for key in ordered_keys]
     return "WRITE_SESSION_STATUS " + " ".join(parts)
+
+
+def write_session_checkpointed_sections(session: Any) -> list[str]:
+    sections: list[str] = []
+    for item in getattr(session, "write_sections_completed", []) or []:
+        section = str(item or "").strip()
+        if section and section not in sections:
+            sections.append(section)
+    return sections
+
+
+def write_session_next_legal_operation(session: Any) -> str:
+    status = str(getattr(session, "status", "") or "open").strip().lower() or "open"
+    if status == "complete":
+        return "none:complete"
+    next_section = str(getattr(session, "write_next_section", "") or "").strip()
+    if next_section:
+        return f"append_section:{next_section}"
+    if bool(getattr(session, "write_sections_completed", []) or []):
+        return "finalize"
+    suggested = list(getattr(session, "suggested_sections", []) or [])
+    first = str(suggested[0] if suggested else "").strip() or "full_file"
+    return f"append_section:{first}"
+
+
+def write_session_contract(session: Any) -> dict[str, Any]:
+    return {
+        "active_write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+        "target_path": str(getattr(session, "write_target_path", "") or "").strip(),
+        "checkpointed_sections": write_session_checkpointed_sections(session),
+        "next_legal_operation": write_session_next_legal_operation(session),
+    }
 
 
 def promote_write_session_target(

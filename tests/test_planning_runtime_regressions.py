@@ -10,9 +10,14 @@ from smallctl.graph.planning_outcomes import apply_planning_tool_outcomes
 from smallctl.graph.routing import LoopRoute
 from smallctl.graph.runtime_auto import AutoGraphRuntime
 from smallctl.graph.state import GraphRunState, ToolExecutionRecord
+from smallctl.graph.state import PendingToolCall
+from smallctl.graph.interpret_nodes import _build_hidden_tool_block_message
 from smallctl.harness import Harness
 from smallctl.models.tool_result import ToolEnvelope
+from smallctl.phase_contracts import phase_contract_completion_block
 from smallctl.state import LoopState
+from smallctl.tools import build_registry
+from smallctl.tools.planning import request_validation_execution
 
 
 def _plan_approval_interrupt() -> dict[str, object]:
@@ -61,6 +66,148 @@ def test_run_auto_with_events_resumes_pending_plan_approval_reply() -> None:
 
     assert result == {"status": "needs_human", "message": "resumed"}
     assert resume_calls == [("yes", None)]
+
+
+def test_request_validation_execution_does_not_require_plan(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(
+        request_validation_execution(
+            command="python ./temp/verify_phase2.py",
+            reason="confirm phase 2 before phase 3",
+            state=state,
+            harness=harness,
+        )
+    )
+
+    assert result["status"] == "needs_human"
+    assert state.pending_interrupt == {
+        "kind": "validation_execution_request",
+        "question": "Run validation command now? `python ./temp/verify_phase2.py`",
+        "command": "python ./temp/verify_phase2.py",
+        "reason": "confirm phase 2 before phase 3",
+        "response_mode": "yes/no/revise",
+    }
+    assert state.planner_resume_target_mode == "loop"
+
+
+def test_request_validation_execution_is_exposed_in_planning(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    harness = SimpleNamespace(state=state, log=logging.getLogger("test"))
+    registry = build_registry(harness, registry_profiles={"core"})
+
+    planning_tool_names = {
+        tool["function"]["name"]
+        for tool in registry.export_openai_tools(mode="planning", profiles={"core"})
+    }
+
+    assert "request_validation_execution" in planning_tool_names
+    assert "shell_exec" not in planning_tool_names
+
+
+def test_auto_runtime_validation_execution_reply_resumes_loop(tmp_path, monkeypatch) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.pending_interrupt = {
+        "kind": "validation_execution_request",
+        "question": "Run validation command now? `python ./temp/verify_phase2.py`",
+        "command": "python ./temp/verify_phase2.py",
+        "response_mode": "yes/no/revise",
+    }
+    resumes: list[str] = []
+    planning_resumes: list[str] = []
+
+    class _StubLoopRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            resumes.append(human_input)
+            return {"status": "resumed", "message": "loop resumed"}
+
+    class _StubPlanningRuntime:
+        async def resume(self, human_input: str) -> dict[str, object]:
+            planning_resumes.append(human_input)
+            return {"status": "wrong", "message": "planning resumed"}
+
+    monkeypatch.setattr(
+        "smallctl.graph.runtime.LoopGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubLoopRuntime()),
+    )
+    monkeypatch.setattr(
+        "smallctl.graph.runtime_specialized.PlanningGraphRuntime.from_harness",
+        staticmethod(lambda harness, event_handler=None: _StubPlanningRuntime()),
+    )
+
+    harness = SimpleNamespace(
+        state=state,
+        has_pending_interrupt=lambda: bool(state.pending_interrupt),
+        get_pending_interrupt=lambda: dict(state.pending_interrupt or {}),
+        decide_run_mode=lambda task: "planning",
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    result = asyncio.run(AutoGraphRuntime.from_harness(harness).run("yes"))
+
+    assert result == {"status": "resumed", "message": "loop resumed"}
+    assert resumes == ["yes"]
+    assert planning_resumes == []
+
+
+def test_blocked_run_in_planning_recommends_validation_handoff(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    harness = SimpleNamespace(state=state)
+    pending = PendingToolCall(
+        tool_name="run",
+        args={"command": "python ./temp/verify_phase4.py"},
+        tool_call_id="call-test",
+    )
+
+    message = _build_hidden_tool_block_message(
+        [pending],
+        allowed_names=["file_read", "request_validation_execution", "task_complete"],
+        harness=harness,
+        mode="planning",
+    )
+
+    assert "request_validation_execution" in message
+    assert "python ./temp/verify_phase4.py" in message
+    assert "Do not promote the phase from static file reads alone" in message
+
+
+def test_phase_contract_block_uses_validation_handoff_in_planning(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.planning_mode_enabled = True
+    state.scratchpad["_phase_contract"] = {
+        "version": 1,
+        "active_phase": "phase_4",
+        "phases": {
+            "phase_4": {
+                "title": "Phase 4: Polish",
+                "status": "active",
+                "expected_files": [],
+                "required_symbols": [],
+                "checks": [
+                    {
+                        "id": "phase4_behavior",
+                        "quality": "behavioral",
+                        "command": "python ./temp/verify_phase4.py",
+                    }
+                ],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+
+    block = phase_contract_completion_block(
+        state,
+        verifier_verdict=None,
+        verifier_quality=None,
+    )
+
+    assert block is not None
+    assert block["reason"] == "phase_contract_verifier_not_passing"
+    assert block["next_required_action"]["tool_name"] == "request_validation_execution"
+    assert block["next_required_action"]["required_arguments"] == {
+        "command": "python ./temp/verify_phase4.py"
+    }
 
 
 def test_auto_runtime_replaces_pending_interrupt_for_unrelated_new_task(tmp_path, monkeypatch) -> None:

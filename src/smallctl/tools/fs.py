@@ -199,6 +199,53 @@ async def file_write(
             "Repair cycle requires reading the target file before patching it again.",
             metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
+
+    # Fix 5: Guard against bare overwrites of existing files that should be patched.
+    # If the file exists, has content, and the new content is very different,
+    # require an explicit patch or overwrite flag to prevent accidental full rewrites.
+    # Skip the guard if a completed write session exists for this target (legitimate overwrite).
+    _has_completed_session = False
+    if state is not None:
+        _terminal_session = getattr(state, "write_session", None)
+        if (
+            _terminal_session is not None
+            and str(getattr(_terminal_session, "status", "") or "").strip().lower() == "complete"
+            and _same_target_path(str(getattr(_terminal_session, "write_target_path", "") or ""), path, cwd)
+        ):
+            _has_completed_session = True
+
+    if target.exists() and target.is_file() and target.stat().st_size > 0 and not write_session_id and not _has_completed_session:
+        try:
+            existing_content = target.read_text(encoding=encoding)
+            if existing_content.strip() and content.strip():
+                existing_lines = set(existing_content.strip().splitlines())
+                new_lines = set(content.strip().splitlines())
+                if existing_lines and new_lines:
+                    overlap = len(existing_lines & new_lines)
+                    similarity = overlap / max(len(existing_lines), len(new_lines))
+                    if similarity < 0.3:
+                        return fail(
+                            f"file_write to `{path}` was rejected because the new content is very "
+                            f"different from the existing file ({int(similarity * 100)}% line overlap). "
+                            f"This looks like an unintended full rewrite. Use `file_patch` to make "
+                            f"targeted changes, or if you truly intend to overwrite the entire file, "
+                            f"use `file_write` with `replace_strategy='overwrite'`.",
+                            metadata={
+                                "path": str(target),
+                                "error_kind": "patch_over_rewrite_guard",
+                                "line_overlap_pct": int(similarity * 100),
+                                "next_required_tool": {
+                                    "tool_name": "file_patch",
+                                    "notes": [
+                                        "Use file_patch with target_text and replacement_text for targeted changes.",
+                                        "Or use file_write with replace_strategy='overwrite' for intentional full rewrite.",
+                                    ],
+                                },
+                            },
+                        )
+        except Exception:
+            pass  # Best-effort guard; don't block if we can't read the file
+
     risk_decision = evaluate_risk_policy(
         state if state is not None else LoopState(cwd=str(Path.cwd())),
         tool_name="file_write",

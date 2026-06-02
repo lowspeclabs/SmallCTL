@@ -17,6 +17,7 @@ from .shell import create_process
 from .process_streams import read_stream_chunks
 from .shell_support import (
     InvalidInputLoopDetector,
+    _apt_deb822_preflight_guard,
     _expose_interactive_session_tools,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
@@ -1020,6 +1021,13 @@ async def run_ssh_command(
         foreground_guard["metadata"] = metadata
         return foreground_guard
 
+    apt_guard = _apt_deb822_preflight_guard(command, tool_name="ssh_exec")
+    if apt_guard is not None:
+        metadata = dict(apt_guard.get("metadata") or {})
+        metadata.update({"host": host, "user": user})
+        apt_guard["metadata"] = metadata
+        return apt_guard
+
     preflight_guard = None
     if stdin_data is None:
         preflight_guard = _remote_installer_preflight_guard(
@@ -1269,9 +1277,32 @@ async def run_ssh_command(
         return last_process_output, proc
 
     proc = None
+    retry_metadata: dict[str, Any] = {}
+    max_auth_retries = 3
+    auth_retry_count = 0
+
     try:
-        output, proc = await _run_ssh_process(full_cmd, stdin_data)
-        retry_metadata: dict[str, Any] = {}
+        for auth_attempt in range(max_auth_retries):
+            output, proc = await _run_ssh_process(full_cmd, stdin_data)
+            stderr_text = str(output.get("stderr") or "")
+            # Retry on auth failures with exponential backoff
+            if (
+                int(output.get("exit_code") or 0) != 0
+                and "permission denied" in stderr_text.lower()
+                and auth_attempt < max_auth_retries - 1
+            ):
+                auth_retry_count += 1
+                wait_sec = 2 ** auth_attempt
+                if harness and hasattr(harness, "emit"):
+                    await harness.emit(
+                        "ssh_auth_retry",
+                        f"SSH auth failed (attempt {auth_attempt + 1}/{max_auth_retries}), retrying in {wait_sec}s...",
+                        data={"attempt": auth_attempt + 1, "wait_sec": wait_sec},
+                    )
+                await asyncio.sleep(wait_sec)
+                continue
+            break
+
         if int(output.get("exit_code") or 0) != 0 and _ssh_accept_new_is_incompatible(str(output.get("stderr") or "")):
             strict_host_key_mode = "no"
             full_cmd, env_overrides = _build_ssh_command(
@@ -1295,6 +1326,9 @@ async def run_ssh_command(
                 "ssh_option_retry": "strict_host_key_checking_no",
                 "ssh_option_retry_reason": "accept_new_incompatible",
             }
+
+        if auth_retry_count > 0:
+            retry_metadata["ssh_auth_retries"] = auth_retry_count
 
         if invalid_input_loop is not None:
             return fail(

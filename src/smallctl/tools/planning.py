@@ -9,6 +9,7 @@ from ..state import ExecutionPlan, PlanInterrupt, PlanStep, LoopState
 from ..state_records import _coerce_step_output_spec, _coerce_step_verifier_spec
 from ..state_support import _coerce_int
 from .common import fail, needs_human, ok
+from .shell import shell_exec
 
 
 def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> PlanStep | None:
@@ -397,6 +398,82 @@ async def plan_request_execution(
             **artifact_info,
             **({"export_warning": export_warning} if export_warning else {}),
             **_format_plan_metadata(plan),
+        },
+    )
+
+
+def _is_safe_auto_approval_command(command: str) -> bool:
+    """Detect safe local commands that can be auto-approved in planning mode."""
+    normalized = " ".join(str(command or "").strip().lower().split())
+    if not normalized:
+        return False
+    # Block dangerous patterns
+    dangerous = ("rm ", "mv ", "dd ", "sudo ", "ssh ", "scp ", "wget ", "curl ", ">", "|", "&")
+    if any(d in normalized for d in dangerous):
+        return False
+    # Allow only specific safe Python debug/verifier patterns
+    safe_prefixes = (
+        "python3 -m py_compile ",
+        "python -m py_compile ",
+        "python3 -c ",
+        "python -c ",
+        "python3 -m pytest ",
+        "python -m pytest ",
+        "python3 -m unittest ",
+        "python -m unittest ",
+        "pytest ",
+    )
+    return any(normalized.startswith(p) for p in safe_prefixes)
+
+
+async def request_validation_execution(
+    *,
+    command: str,
+    reason: str = "",
+    question: str = "",
+    state: LoopState,
+    harness: Any,
+) -> dict:
+    validation_command = str(command or "").strip()
+    if not validation_command:
+        return {"success": False, "output": None, "error": "Validation command is required.", "metadata": {}}
+    validation_reason = str(reason or "").strip()
+    prompt = str(question or "").strip()
+    if not prompt:
+        prompt = f"Run validation command now? `{validation_command}`"
+
+    # Fix 3: Auto-approve safe local commands instead of always blocking on human approval
+    if _is_safe_auto_approval_command(validation_command):
+        result = await shell_exec(command=validation_command, state=state, harness=harness)
+        return ok(
+            {
+                "status": "auto_approved",
+                "command": validation_command,
+                "result": result,
+            },
+            metadata={
+                "kind": "validation_execution_auto_approved",
+                "command": validation_command,
+                "reason": validation_reason,
+            },
+        )
+
+    state.planner_resume_target_mode = "loop"
+    state.pending_interrupt = {
+        "kind": "validation_execution_request",
+        "question": prompt,
+        "command": validation_command,
+        "reason": validation_reason,
+        "response_mode": "yes/no/revise",
+    }
+    state.touch()
+    return needs_human(
+        prompt,
+        metadata={
+            "kind": "validation_execution_request",
+            "command": validation_command,
+            "reason": validation_reason,
+            "resume_target_mode": "loop",
         },
     )
 

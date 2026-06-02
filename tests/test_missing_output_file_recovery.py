@@ -8,12 +8,14 @@ from smallctl.graph.chat_progress import build_file_read_recovery_message
 from smallctl.graph.interpret_nodes import _working_memory_signals_completion
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_outcomes import (
+    _maybe_clear_missing_input_after_local_alias_read,
     _maybe_clear_missing_input_after_remote_readback,
     _maybe_emit_missing_requested_output_file_nudge,
 )
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
 from smallctl.tools.control import task_complete
+from smallctl.tools.fs_listing import file_read
 
 
 def test_missing_requested_output_file_read_recovery_points_to_file_write(tmp_path) -> None:
@@ -276,6 +278,68 @@ def test_missing_required_input_file_nudge_records_completion_blocker(tmp_path) 
     assert "missing_required_input_file_nudge" in runlog_events
 
 
+def test_missing_required_input_file_nudge_records_high_confidence_alias(tmp_path) -> None:
+    (tmp_path / "foginstall.txt").write_text("install notes", encoding="utf-8")
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "read fogxinstall.txt and install FOG"
+    state.working_memory.current_goal = state.run_brief.original_task
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-missing-input-alias", run_mode="chat")
+
+    missing = asyncio.run(file_read("fogxinstall.txt", cwd=str(tmp_path), state=state))
+    assert missing["success"] is False
+    assert missing["metadata"]["suggested_path"] == "foginstall.txt"
+    assert missing["metadata"]["suggestion_confidence"] == "high"
+
+    record = ToolExecutionRecord(
+        operation_id="op-file-read-missing-input",
+        tool_name="file_read",
+        args={"path": "fogxinstall.txt"},
+        tool_call_id="call-file-read-missing-input",
+        result=ToolEnvelope(
+            success=False,
+            error=missing["error"],
+            metadata=missing["metadata"],
+        ),
+    )
+
+    assert _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record) is True
+    assert state.scratchpad["_unresolved_missing_input_file"]["suggested_path"] == "foginstall.txt"
+
+
+def test_successful_local_alias_read_clears_missing_required_input_blocker(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.scratchpad["_unresolved_missing_input_file"] = {
+        "path": "fogxinstall.txt",
+        "suggested_path": "foginstall.txt",
+        "suggestion_confidence": "high",
+    }
+    state.scratchpad["_missing_input_file_nudged"] = "missing-input-file:fogxinstall.txt"
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-file-read-alias",
+        tool_name="file_read",
+        args={"path": "foginstall.txt"},
+        tool_call_id="call-file-read-alias",
+        result=ToolEnvelope(
+            success=True,
+            output="install notes",
+            metadata={"path": str(tmp_path / "foginstall.txt"), "complete_file": True},
+        ),
+    )
+
+    assert _maybe_clear_missing_input_after_local_alias_read(harness, record) is True
+
+    assert "_unresolved_missing_input_file" not in state.scratchpad
+    assert "_missing_input_file_nudged" not in state.scratchpad
+    assert state.scratchpad["_required_input_aliases"]["fogxinstall.txt"]["resolved_path"] == "foginstall.txt"
+    assert "missing_required_input_file_blocker_cleared_by_local_alias_read" in runlog_events
+
+
 def test_task_complete_blocks_unresolved_missing_required_input(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.scratchpad["_unresolved_missing_input_file"] = {"path": "fogxinstall.txt"}
@@ -286,6 +350,21 @@ def test_task_complete_blocks_unresolved_missing_required_input(tmp_path) -> Non
     assert result["success"] is False
     assert result["metadata"]["reason"] == "missing_required_input_file"
     assert "fogxinstall.txt" in result["error"]
+
+
+def test_task_complete_blocks_phase_begin_with_zero_mutations(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "read ./temp/tetris-spec.md; if phase 3 is implemented, begin phase 4"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 0
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(task_complete("Phase 3 is implemented; Phase 4 is active.", state, harness))
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "mutation_expected_but_no_code_changes"
+    assert "zero code changes" in result["error"]
 
 
 def test_force_finalize_completion_signal_ignores_missing_required_input(tmp_path) -> None:

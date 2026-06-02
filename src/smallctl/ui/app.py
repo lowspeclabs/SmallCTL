@@ -9,7 +9,7 @@ from textual.css.query import NoMatches
 from textual.containers import Container, Vertical, Horizontal
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import Button
+from textual.widgets import Button, Static
 
 from ..harness import Harness, HarnessConfig
 from ..logging_utils import RunLogger
@@ -44,6 +44,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         ("ctrl+alt+n", "new_conversation", "Harness: New Conversation"),
         ("ctrl+alt+s", "toggle_system_messages", "View: System Messages"),
         ("ctrl+alt+t", "toggle_tool_calls", "View: Tool Calls"),
+        ("ctrl+alt+b", "toggle_model_bar_layout", "View: Model Bar"),
         ("pageup", "scroll_page_up", "Scroll Up"),
         ("pagedown", "scroll_page_down", "Scroll Down"),
         ("ctrl+up", "scroll_up", "Scroll Up"),
@@ -81,15 +82,25 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._task_start_time: float | None = None
         self._activity_timer: Any | None = None
         self._shell_approval_session_default = bool(self.harness_config.shell_approval_session_default)
+        self._model_bar_layout = "bottom"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
-            with Container(id="console-wrap"):
-                yield ConsolePane(id="console")
+            with Horizontal(id="main-row"):
+                with Container(id="console-wrap"):
+                    yield ConsolePane(id="console")
+                with Vertical(id="model-sidebar", classes="hidden"):
+                    yield ModelSelectButton("n/a", id="model-button-sidebar")
+                    yield ChatSelectButton(id="chat-button-sidebar")
+                    yield Button("bar: right", id="model-bar-toggle-sidebar")
+                    yield StatusBar(model="n/a", phase="explore", step=0, id="status-sidebar", vertical=True)
+                    yield Static("Objective\nNo active objective\n\nTask\nNo active task", id="objective-sidebar")
+                    yield Button("Stop (Ctrl+K)", id="stop-button-sidebar", variant="error")
             with Horizontal(id="status-row"):
                 yield ModelSelectButton("n/a", id="model-button")
                 yield ChatSelectButton(id="chat-button")
                 yield StatusBar(model="n/a", phase="explore", step=0, id="status", show_model=False)
+                yield Button("bar: bottom", id="model-bar-toggle")
                 yield Button("Stop (Ctrl+K)", id="stop-button", variant="error")
             yield InputPane("", id="input")
 
@@ -110,8 +121,14 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
             "Toggle rendering of tool call and result events",
             self.action_toggle_tool_calls,
         )
+        yield SystemCommand(
+            "View: Model Bar",
+            "Toggle the model bar between bottom and right layouts",
+            self.action_toggle_model_bar_layout,
+        )
 
     async def on_mount(self) -> None:
+        self._apply_model_bar_layout()
         await self._create_harness()
         if self.harness is None:
             # Harness init failed; error already surfaced by _create_harness.

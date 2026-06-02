@@ -90,6 +90,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.thinking_end_tag = config.thinking_end_tag
     self.state.scratchpad["_model_name"] = config.model
     self.state.scratchpad["_model_is_small"] = self._is_small_model_name(config.model)
+    self.state.scratchpad["_max_repair_steps"] = int(getattr(config, "max_repair_steps", 3) or 3)
     self._backend_recovery_service = BackendRecoveryService(self)
     self._task_boundary_service = TaskBoundaryService(self)
     self._active_processes: set[asyncio.subprocess.Process] = set()

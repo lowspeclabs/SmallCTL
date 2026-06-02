@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+
 
 
 @dataclass
@@ -24,6 +24,72 @@ class LogReview:
     final_class: str | None = None
     verified: bool | None = None
     backend: bool = False
+    session_id: str | None = None
+    run_id: str | None = None
+    guard_event_summary: list[dict] = field(default_factory=list)
+
+
+def correlate_run_ids(run_log_path: Path, harness_log_dirs: list[Path]) -> dict[str, str]:
+    """Map challenge IDs from run log to nearest harness session IDs by timestamp."""
+    mapping: dict[str, str] = {}
+    if not run_log_path.exists():
+        return mapping
+
+    # Parse run log for challenge start times
+    challenge_times: list[tuple[str, float]] = []
+    for line in run_log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+            if entry.get("event") == "runner_status" and "challenge_id" in entry.get("data", {}):
+                ts = entry.get("timestamp", "")
+                if ts:
+                    # Parse ISO timestamp
+                    ts_clean = ts.replace("Z", "+00:00")
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(ts_clean)
+                    challenge_times.append((
+                        entry["data"]["challenge_id"],
+                        dt.timestamp()
+                    ))
+        except Exception:
+            continue
+
+    # Map each harness log dir to its session_id and mtime
+    harness_sessions: list[tuple[str, float]] = []
+    for log_dir in harness_log_dirs:
+        session_id = log_dir.name
+        try:
+            mtime = log_dir.stat().st_mtime
+            harness_sessions.append((session_id, mtime))
+        except Exception:
+            continue
+
+    # Match challenges to nearest harness session by time
+    for challenge_id, challenge_time in challenge_times:
+        best_session = None
+        best_delta = float("inf")
+        for session_id, session_time in harness_sessions:
+            delta = abs(session_time - challenge_time)
+            if delta < best_delta:
+                best_delta = delta
+                best_session = session_id
+        if best_session:
+            mapping[challenge_id] = best_session
+
+    return mapping
+
+
+def _build_guard_event_summary(guard_events: list[dict]) -> list[dict]:
+    """Return top 5 guard events by frequency."""
+    from collections import Counter
+    event_names = [e.get("event", "unknown") for e in guard_events]
+    counts = Counter(event_names)
+    return [
+        {"event": event, "count": count}
+        for event, count in counts.most_common(5)
+    ]
 
 
 _GUARD_NAME_PATTERNS = re.compile(
@@ -39,6 +105,15 @@ _ASK_HUMAN_TOOL_NAME = "ask_human"
 def review_logs(log_dir: Path) -> LogReview:
     """Scan smallctl JSONL logs for guards, errors, ask_human, and summary."""
     result = LogReview(log_dir=str(log_dir))
+
+    # Derive session_id / run_id from log directory name (e.g., "session-id-20240115-120000")
+    dir_name = log_dir.name
+    parts = dir_name.split("-", 1)
+    if len(parts) == 2 and parts[0]:
+        result.run_id = parts[0]
+        result.session_id = dir_name
+    else:
+        result.session_id = dir_name
 
     # Try task_summary.json first for high-level metadata
     summary_path = log_dir / "task_summary.json"
@@ -107,22 +182,27 @@ def review_logs(log_dir: Path) -> LogReview:
                 if event == "task_fail":
                     result.task_status = "failed"
                 if _is_guard_event(ev):
-                    result.guard_events.append({
+                    guard_entry = {
                         "event": event,
                         "message": ev.get("message", ""),
                         "timestamp": ev.get("timestamp", ""),
                         "data": data,
-                    })
+                    }
+                    # Deduplicate: skip if identical to last event
+                    if not result.guard_events or result.guard_events[-1] != guard_entry:
+                        result.guard_events.append(guard_entry)
                 if event == "tool_result_verdict" and isinstance(data, dict):
                     verdict = data.get("verdict")
                     if verdict not in (None, "continue", "ok"):
-                        result.guard_events.append({
+                        guard_entry = {
                             "event": "tool_result_verdict",
                             "message": ev.get("message", ""),
                             "verdict": verdict,
                             "timestamp": ev.get("timestamp", ""),
                             "data": data,
-                        })
+                        }
+                        if not result.guard_events or result.guard_events[-1] != guard_entry:
+                            result.guard_events.append(guard_entry)
             except Exception:
                 continue
     elif harness_log_path.exists():
@@ -222,4 +302,5 @@ def review_logs(log_dir: Path) -> LogReview:
         if any(q in text.lower() for q in ("what should i", "clarify", "unclear", "ambiguous", "do you want")):
             result.ambiguity_hints.append("(detected in model_output.log)")
 
+    result.guard_event_summary = _build_guard_event_summary(result.guard_events)
     return result

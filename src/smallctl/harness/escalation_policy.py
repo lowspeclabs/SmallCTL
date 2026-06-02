@@ -33,7 +33,7 @@ class EscalationPolicy:
         if max_per_task >= 0 and len(history) >= max_per_task:
             return self._block("max_per_task", "Escalation limit reached for this task.", evidence_count=len(history))
 
-        cooldown = _safe_int(getattr(config, "escalation_cooldown_turns", 2), 2)
+        cooldown = _safe_int(getattr(config, "escalation_cooldown_turns", 1), 1)
         if history:
             last_step = _safe_int(history[-1].get("step_count") if isinstance(history[-1], dict) else None, -999999)
             current_step = _safe_int(getattr(state, "step_count", 0), 0)
@@ -49,14 +49,17 @@ class EscalationPolicy:
             signals.append("explicit_escalation_prior_evidence")
             signals = _dedupe(signals)
         evidence_count = len(signals)
-        # In repair phase with no actionable progress, lower the evidence bar
-        # so small models can escalate before they spiral into read-only loops.
+        # In repair phase with no actionable progress AND an active verifier failure,
+        # lower the evidence bar so small models can escalate before they spiral.
         state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
         stagnation = getattr(state, "stagnation_counters", None)
         no_progress = int(stagnation.get("no_actionable_progress") or 0) if isinstance(stagnation, dict) else 0
-        repair_auto_evidence = state_phase == "repair" and no_progress >= 2
+        verifier = getattr(state, "last_verifier_verdict", None)
+        has_verifier_fail = isinstance(verifier, dict) and str(verifier.get("verdict") or "").strip().lower() in {"fail", "failed", "error"}
+        repair_auto_evidence = state_phase == "repair" and no_progress >= 2 and has_verifier_fail
 
-        if bool(getattr(config, "escalation_require_tool_plan_evidence", True)) and not repair_auto_evidence:
+        user_requested = _user_requested_escalation(state)
+        if bool(getattr(config, "escalation_require_tool_plan_evidence", True)) and not repair_auto_evidence and not user_requested:
             has_evidence = _has_meaningful_evidence(signals)
             if not has_evidence:
                 missing = sorted(_EVIDENCE_SIGNALS - set(signals))
@@ -67,7 +70,7 @@ class EscalationPolicy:
                     missing_signals=missing,
                 )
 
-        if not signals and not repair_auto_evidence:
+        if not signals and not repair_auto_evidence and not user_requested:
             missing = sorted(_EVIDENCE_SIGNALS)
             return self._block(
                 "not_stuck",
@@ -99,7 +102,7 @@ class EscalationPolicy:
 
     def _stuck_signals(self, state: Any, scratchpad: dict[str, Any]) -> list[str]:
         signals: list[str] = []
-        threshold = max(2, _safe_int(getattr(getattr(self.harness, "config", None), "escalation_repeated_failure_threshold", 2), 2))
+        threshold = max(3, _safe_int(getattr(getattr(self.harness, "config", None), "escalation_repeated_failure_threshold", 3), 3))
 
         failure_events = getattr(state, "failure_events", None)
         if isinstance(failure_events, list) and failure_events:
@@ -262,6 +265,28 @@ _NON_EVIDENCE_TOOLS = {
 def _explicit_escalation_request(reason: str) -> bool:
     lowered = str(reason or "").lower()
     return "escalat" in lowered or "bigger model" in lowered or "larger model" in lowered
+
+
+def _user_requested_escalation(state: Any) -> bool:
+    """Detect if the user explicitly asked for escalation in recent messages."""
+    for messages_attr in ("conversation_history", "transcript_messages", "recent_messages"):
+        messages = getattr(state, messages_attr, None)
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            if role != "user":
+                continue
+            content = str(message.get("content") or "").lower()
+            if any(marker in content for marker in (
+                "escalate", "bigger model", "larger model", "stronger model",
+                "call bigger model", "call larger model", "switch to bigger",
+                "switch to larger", "need bigger model", "need larger model",
+            )):
+                return True
+    return False
 
 
 def _has_prior_tool_evidence(state: Any) -> bool:

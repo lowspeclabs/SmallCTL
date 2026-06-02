@@ -101,14 +101,39 @@ class SmallctlAppActionsMixin:
             pass
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "stop-button":
+        if event.button.id in {"stop-button", "stop-button-sidebar"}:
             await self.action_cancel_task()
             return
-        if event.button.id == "model-button":
+        if event.button.id in {"model-button", "model-button-sidebar"}:
             await self.action_open_model_selector()
             return
-        if event.button.id == "chat-button":
+        if event.button.id in {"chat-button", "chat-button-sidebar"}:
             await self.action_open_chat_selector()
+            return
+        if event.button.id in {"model-bar-toggle", "model-bar-toggle-sidebar"}:
+            self.action_toggle_model_bar_layout()
+
+    def action_toggle_model_bar_layout(self) -> None:
+        self._model_bar_layout = "right" if self._model_bar_layout == "bottom" else "bottom"
+        self._apply_model_bar_layout()
+
+    def _apply_model_bar_layout(self) -> None:
+        right = self._model_bar_layout == "right"
+        for selector in ("#status-row", "#model-sidebar"):
+            try:
+                widget = self.query_one(selector)
+            except Exception:
+                continue
+            hidden = (selector == "#status-row" and right) or (selector == "#model-sidebar" and not right)
+            widget.set_class(hidden, "hidden")
+        for selector, label in (
+            ("#model-bar-toggle", "bar: bottom"),
+            ("#model-bar-toggle-sidebar", "bar: right"),
+        ):
+            try:
+                self.query_one(selector, Button).label = label
+            except Exception:
+                pass
 
     async def action_open_model_selector(self) -> None:
         if self.active_task and not self.active_task.done():

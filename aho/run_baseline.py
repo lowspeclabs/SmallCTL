@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .log_review import LogReview, review_logs
+from aho.log_review import LogReview, review_logs
+from aho.openrouter_proxy import start_proxy
 
 DEFAULT_CHALLENGES_PATH = Path(__file__).parent / "challenges.text"
 DEFAULT_SMALLCTL = Path(__file__).parent.parent / ".venv" / "bin" / "smallctl"
@@ -194,13 +195,69 @@ def build_task_prompt(challenge: dict, creds: dict | None = None, is_sysadmin: b
             f"Use these values directly in ssh_exec or ssh file tools; do not spend time searching for the challenge file."
         )
 
+    if is_sysadmin:
+        parts.append(
+            "\nHarness baseline evaluation rules: finish the requested task end to end. "
+            "Use the provided SSH target and password, write the requested local report artifact, "
+            "and summarize what changed. Call task_complete only after the required artifact exists and verification is done."
+        )
+    else:
+        parts.append(
+            "\nHarness baseline evaluation rules: finish the requested task end to end. "
+            "Create the requested Python script file, run it locally with shell_exec, run or add the embedded unittest suite, "
+            "patch/debug failures before finishing, and explicitly report the verification command and result. "
+            "Call task_complete only after the required artifact exists and verification is done."
+        )
+
+    # Explicit verifier requirement
+    if is_sysadmin:
+        parts.append(
+            "\nMANDATORY VERIFICATION STEP: Before calling task_complete, you MUST run a verification command "
+            "that proves the task is complete and correct. Verify the report file exists "
+            "and contains the required sections (e.g., use file_read or shell_exec with cat/grep to check content). "
+            "Only call task_complete after the verifier returns success."
+        )
+    else:
+        parts.append(
+            "\nMANDATORY VERIFICATION STEP: Before calling task_complete, you MUST run a verification command "
+            "that proves the task is complete and correct. Run the test suite one final time with shell_exec "
+            "and confirm all tests pass. Only call task_complete after the verifier returns success."
+        )
+
+    if is_sysadmin:
+        parts.append(
+            "\nWhen running verification or audit commands via SSH, remember that "
+            "commands like `grep`, `find`, `du`, or `ls` may legitimately return "
+            "non-zero exit codes (e.g., no matches found, empty directory, clean state). "
+            "If you need to verify a condition that may return no results, wrap the "
+            "command to ensure exit 0: use `grep ... || echo 'none'`, "
+            "`ls ... 2>/dev/null || echo 'missing'`, or `du ... 2>/dev/null || echo '0'`. "
+            "The verifier expects the command to succeed, so always ensure the final exit code is 0."
+        )
+        parts.append(
+            "\nBefore reading a remote file with ssh_file_read, first verify it exists "
+            "using ssh_exec with `test -f <path>` or `ls -la <path>`."
+        )
+        parts.append(
+            "\nUse 'systemctl' commands instead of 'service' on modern Debian/Ubuntu systems. "
+            "For example: systemctl status nginx instead of service nginx status."
+        )
+    else:
+        parts.append(
+            "\nRun the Python script locally using shell_exec. Do NOT use ssh_exec for coding tasks. "
+            "Use local file_write, file_read, and shell_exec only."
+        )
+
     parts.append(
-        "\nHarness baseline evaluation rules: finish the requested task end to end. "
-        "If this is a coding task, create the requested file, run it, run or add the embedded unittest suite, "
-        "patch/debug failures before finishing, and explicitly report the verification command and result. "
-        "If this is a sysadmin task, use the provided SSH target and password from aho/challanges.text, "
-        "write the requested local report artifact, and summarize what changed. "
-        "Call task_complete only after the required artifact exists and verification is done."
+        "\nWhen writing report files, use file_write with replace_strategy='overwrite' "
+        "instead of file_patch to avoid exact-match failures."
+    )
+
+    # Issue 5: Write recovery guidance
+    parts.append(
+        "\nIf the system suggests a write recovery, ACCEPT it. "
+        "The system may detect that your report file is missing required sections. "
+        "Re-read the file, identify what's missing, and append the missing content."
     )
 
     return "\n".join(parts)
@@ -259,6 +316,17 @@ def _stream_reader(pipe, lines: list[str]) -> None:
         pipe.close()
 
 
+def _create_starter_files(challenge: dict) -> None:
+    """Extract ./temp/*.py paths from challenge description and create empty starter files."""
+    description = challenge.get("description", "")
+    paths = re.findall(r'\.\/temp\/[^\s\'"]+\.py', description)
+    for path in paths:
+        p = Path(path)
+        if not p.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("# Starter file — implement your solution here\n", encoding="utf-8")
+
+
 def run_challenge(
     challenge: dict,
     smallctl: Path,
@@ -269,6 +337,9 @@ def run_challenge(
     total: int = 0,
 ) -> dict[str, Any]:
     """Run a single challenge via smallctl CLI with live status reporting. Returns result dict."""
+    os.makedirs("./temp", exist_ok=True)
+    if not is_sysadmin:
+        _create_starter_files(challenge)
     task = build_task_prompt(challenge, creds, is_sysadmin)
     cmd: list[str] = [str(smallctl), "--task", task]
 
@@ -282,6 +353,9 @@ def run_challenge(
         cmd += ["--api-key", args.api_key]
     if args.max_prompt_tokens is not None:
         cmd += ["--max-prompt-tokens", str(args.max_prompt_tokens)]
+    else:
+        # Force higher max-prompt-tokens to reduce context lane dropping
+        cmd += ["--max-prompt-tokens", "60000"]
     if args.context_limit is not None:
         cmd += ["--context-limit", str(args.context_limit)]
     if args.tool_profiles:
@@ -317,7 +391,7 @@ def run_challenge(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=str(Path(smallctl).parent.parent),
+            cwd=str(Path(__file__).parent.parent),
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
     except Exception as exc:
@@ -371,7 +445,7 @@ def run_challenge(
         elapsed = time.monotonic() - t0
         LOGGER.status(
             f"Challenge {current}/{total} TIMED OUT: {challenge['id']} after {elapsed:.1f}s",
-            challenge_id=challenge["id"],
+            challenge_id=challenge['id'],
             elapsed_sec=round(elapsed, 1),
         )
         stdout_thread.join(timeout=5)
@@ -382,7 +456,7 @@ def run_challenge(
         actual_log_dir = log_dirs.get("actual_log_dir")
         log_review = review_logs(actual_log_dir) if actual_log_dir else LogReview()
         return {
-            "challenge_id": challenge["id"],
+            "challenge_id": challenge['id'],
             "status": "timeout",
             "elapsed_sec": round(elapsed, 2),
             "stdout_preview": stdout[-2000:] if len(stdout) > 2000 else stdout,
@@ -393,6 +467,24 @@ def run_challenge(
             "actual_log_dir": str(actual_log_dir) if actual_log_dir else None,
             "log_review": log_review,
             "timed_out_pid": proc.pid if proc else None,
+            "category": "sysadmin" if is_sysadmin else "coding",
+        }
+    except Exception as exc:
+        stop_status.set()
+        elapsed = time.monotonic() - t0
+        LOGGER.error("challenge_crashed", str(exc), challenge_id=challenge['id'], elapsed_sec=round(elapsed, 1))
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+        return {
+            "challenge_id": challenge['id'],
+            "status": "crashed",
+            "elapsed_sec": round(elapsed, 2),
+            "stdout_preview": stdout[-2000:] if len(stdout) > 2000 else stdout,
+            "stderr_preview": stderr[-1000:] if len(stderr) > 1000 else stderr,
+            "returncode": -1,
+            "error": str(exc),
             "category": "sysadmin" if is_sysadmin else "coding",
         }
 
@@ -721,8 +813,9 @@ def smoke_test_backend(endpoint: str, model: str, api_key: str = "") -> bool:
                 LOGGER.error("smoke_test", "No choices in response")
                 return False
             choice = choices[0]
-            content = choice.get("message", {}).get("content", "")
-            reasoning = choice.get("message", {}).get("reasoning_content", "")
+            message = choice.get("message", {}) or {}
+            content = message.get("content") or ""
+            reasoning = message.get("reasoning_content") or ""
             if content.strip() or reasoning.strip():
                 preview = (content.strip() or reasoning.strip())[:60]
                 LOGGER.status(f"Smoke test PASSED — backend responded: {preview}")
@@ -740,6 +833,58 @@ def smoke_test_backend(endpoint: str, model: str, api_key: str = "") -> bool:
     except Exception as exc:
         LOGGER.error("smoke_test", f"{type(exc).__name__}: {exc}")
         return False
+
+
+def validate_environment(args, is_sysadmin: bool = False) -> tuple[bool, str]:
+    """Validate that required environment is ready."""
+    issues = []
+
+    # Check temp directory
+    temp_dir = Path("temp")
+    if not temp_dir.exists():
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            issues.append(f"Cannot create temp/ directory: {e}")
+    elif not os.access(temp_dir, os.W_OK):
+        issues.append("temp/ directory exists but is not writable")
+
+    # Check SSH for sysadmin challenges
+    if is_sysadmin:
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                 "root@192.168.1.89", "echo ok"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                err = result.stderr.strip()
+                hint = ""
+                if "host key verification failed" in err.lower() or "unknown host" in err.lower():
+                    hint = " (Hint: run `ssh-keyscan 192.168.1.89 >> ~/.ssh/known_hosts` to approve the host key)"
+                elif "connection refused" in err.lower() or "connection timed out" in err.lower():
+                    hint = " (Hint: verify the host is reachable and SSH is running)"
+                elif "permission denied" in err.lower():
+                    hint = " (Hint: verify password or key-based auth is configured)"
+                issues.append(f"SSH pre-flight failed: {err}{hint}")
+        except Exception as e:
+            issues.append(f"SSH pre-flight error: {e}")
+
+    # Check Python for coding challenges
+    if not is_sysadmin:
+        try:
+            result = subprocess.run(
+                ["python3", "--version"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                issues.append("python3 not available")
+        except Exception as e:
+            issues.append(f"Python check failed: {e}")
+
+    if issues:
+        return False, "; ".join(issues)
+    return True, ""
 
 
 def main() -> int:
@@ -765,7 +910,14 @@ def main() -> int:
     parser.add_argument("--start-at", type=int, default=1, help="Start at challenge N (1-indexed)")
     parser.add_argument("--skip-ambiguity-prompt", action="store_true", help="Do not pause for ambiguity clarification")
     parser.add_argument("--skip-smoke-test", action="store_true", help="Skip backend smoke test")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip environment preflight checks (SSH, Python, temp dir)")
     parser.add_argument("--yes", action="store_true", help="Skip interactive provider prompt and accept defaults")
+    parser.add_argument(
+        "--openrouter-ignore-providers",
+        nargs="+",
+        default=None,
+        help="Exclude specific OpenRouter providers (e.g. --openrouter-ignore-providers 'Io Net' Chutes Ambient SiliconFlow)",
+    )
     args = parser.parse_args()
 
     if not args.smallctl.exists():
@@ -779,7 +931,7 @@ def main() -> int:
     print("\n" + "=" * 50)
     print("AHO Baseline Challenge Runner")
     print("=" * 50)
-    print(f"Default provider settings:")
+    print("Default provider settings:")
     print(f"  Endpoint:        {args.endpoint}")
     print(f"  Model:           {args.model}")
     print(f"  Provider profile: {args.provider_profile}")
@@ -801,6 +953,22 @@ def main() -> int:
             print("\nUsing defaults.")
     print("=" * 50 + "\n")
 
+    # Start OpenRouter provider-filter proxy if requested
+    proxy_server = None
+    original_endpoint = args.endpoint
+    if args.openrouter_ignore_providers and "openrouter" in args.endpoint.lower():
+        import random
+        proxy_port = random.randint(10000, 65000)
+        proxy_server = start_proxy(proxy_port, args.openrouter_ignore_providers)
+        args.endpoint = f"http://127.0.0.1:{proxy_port}/api/v1"
+        LOGGER.info(
+            "openrouter_proxy_started",
+            f"Proxy filtering providers: {args.openrouter_ignore_providers}",
+            proxy_port=proxy_port,
+            original_endpoint=original_endpoint,
+            proxied_endpoint=args.endpoint,
+        )
+
     if not args.skip_smoke_test:
         backend_ok = smoke_test_backend(args.endpoint, args.model, args.api_key)
         if not backend_ok:
@@ -818,6 +986,16 @@ def main() -> int:
     raw = args.challenges.read_text(encoding="utf-8")
     sysadmin, coding, creds = parse_challenges(raw)
 
+    # Pre-clean known_hosts to avoid SSH host key mismatch failures
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    if known_hosts.exists():
+        for host in ("192.168.1.63", "192.168.1.89"):
+            subprocess.run(
+                ["ssh-keygen", "-f", str(known_hosts), "-R", host],
+                capture_output=True,
+                check=False,
+            )
+
     total_challenges = len(sysadmin) + len(coding)
     LOGGER.info("baseline_start", "Starting baseline run", total_challenges=total_challenges, sysadmin=len(sysadmin), coding=len(coding))
 
@@ -833,12 +1011,66 @@ def main() -> int:
             break
 
         is_sysadmin = challenge_counter <= len(sysadmin)
-        result = run_challenge(
-            ch, args.smallctl, args,
-            creds=creds, is_sysadmin=is_sysadmin,
-            current=challenge_counter, total=total_challenges,
-        )
-        all_results.append(result)
+        if not args.skip_preflight:
+            ok, msg = validate_environment(args, is_sysadmin)
+            if not ok:
+                LOGGER.error("preflight_failed", msg, challenge_id=ch['id'])
+                if not args.yes:
+                    try:
+                        print(f"\n[PREFLIGHT FAILED] {msg}")
+                        cont = input("Continue anyway? [y/N]: ").strip().lower()
+                        if cont not in ("y", "yes"):
+                            all_results.append({
+                                "challenge_id": ch['id'],
+                                "status": "preflight_failed",
+                                "reason": msg,
+                                "elapsed_sec": 0.0,
+                                "returncode": -1,
+                                "log_review": {},
+                                "category": "sysadmin" if is_sysadmin else "coding",
+                            })
+                            continue
+                    except (EOFError, KeyboardInterrupt):
+                        all_results.append({
+                            "challenge_id": ch['id'],
+                            "status": "preflight_failed",
+                            "reason": msg,
+                            "elapsed_sec": 0.0,
+                            "returncode": -1,
+                            "log_review": {},
+                            "category": "sysadmin" if is_sysadmin else "coding",
+                        })
+                        continue
+                else:
+                    all_results.append({
+                        "challenge_id": ch['id'],
+                        "status": "preflight_failed",
+                        "reason": msg,
+                        "elapsed_sec": 0.0,
+                        "returncode": -1,
+                        "log_review": {},
+                        "category": "sysadmin" if is_sysadmin else "coding",
+                    })
+                    continue
+
+        try:
+            result = run_challenge(
+                ch, args.smallctl, args,
+                creds=creds, is_sysadmin=is_sysadmin,
+                current=challenge_counter, total=total_challenges,
+            )
+            all_results.append(result)
+        except Exception as exc:
+            LOGGER.error("challenge_loop_exception", str(exc), challenge_id=ch['id'])
+            all_results.append({
+                "challenge_id": ch['id'],
+                "status": "crashed",
+                "reason": str(exc),
+                "elapsed_sec": 0.0,
+                "returncode": -1,
+                "log_review": {},
+                "category": "sysadmin" if is_sysadmin else "coding",
+            })
 
         overall_elapsed = time.monotonic() - overall_t0
         completed = sum(1 for r in all_results if r["status"] == "completed")
@@ -871,6 +1103,12 @@ def main() -> int:
     overall_elapsed = time.monotonic() - overall_t0
     LOGGER.info("baseline_complete", "All challenges finished", total_elapsed_sec=round(overall_elapsed, 1), challenges_run=len(all_results))
     generate_report(all_results, args.report)
+
+    # Shutdown OpenRouter proxy if started
+    if proxy_server is not None:
+        proxy_server.shutdown()
+        LOGGER.info("openrouter_proxy_stopped", "OpenRouter proxy shutdown")
+
     return 0
 
 

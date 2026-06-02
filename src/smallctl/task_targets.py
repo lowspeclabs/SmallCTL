@@ -29,6 +29,28 @@ def _normalize_candidate_path(value: str) -> str | None:
     return candidate
 
 
+def _is_implement_task(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(word in lowered for word in ("implement", "create", "build", "generate", "produce"))
+
+
+def _derive_output_target_from_spec(read_path: str) -> str | None:
+    """Heuristic: when task says 'read X-spec.md and implement it', derive likely output file."""
+    ext = PurePosixPath(read_path).suffix.lower()
+    if ext not in {".md", ".txt", ".text", ".rst"}:
+        return None
+    stem = PurePosixPath(read_path).stem
+    lowered = stem.lower()
+    for suffix in ("-spec", "_spec", ".spec", "-specification", "_specification"):
+        if lowered.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    parent = str(PurePosixPath(read_path).parent)
+    if parent and parent != ".":
+        return f"{parent}/{stem}.html"
+    return f"{stem}.html"
+
+
 def extract_task_target_paths(text: str) -> list[str]:
     if not text:
         return []
@@ -49,6 +71,18 @@ def extract_task_target_paths(text: str) -> list[str]:
 
     for match in _BARE_PATH_PATTERN.finditer(text):
         _remember(match.group(0))
+
+    # Fix A: If task says "read spec and implement", derive the output target
+    # from the spec path so the harness directs writes to the implementation file,
+    # not the spec itself.
+    if ordered and _is_implement_task(text):
+        for path in list(ordered):
+            derived = _derive_output_target_from_spec(path)
+            if derived and derived not in seen:
+                seen.add(derived)
+                # Insert derived target BEFORE the spec path so it is prioritized
+                idx = ordered.index(path)
+                ordered.insert(idx, derived)
 
     return ordered
 
@@ -131,6 +165,30 @@ def task_target_paths_from_harness(harness: Any) -> list[str]:
             return []
         return [session_target]
     return []
+
+
+def approved_plan_output_paths_from_harness(harness: Any) -> list[str]:
+    state = getattr(harness, "state", None)
+    plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
+    if plan is None or not bool(getattr(plan, "approved", False)):
+        return []
+
+    candidates: list[str] = []
+    candidates.extend(str(item or "") for item in (getattr(plan, "outputs", []) or []))
+    for step in getattr(plan, "iter_steps", lambda: [])() or []:
+        for output in getattr(step, "outputs_expected", []) or []:
+            candidates.append(str(getattr(output, "ref", "") or ""))
+            candidates.append(str(getattr(output, "description", "") or ""))
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for text in candidates:
+        for path in extract_task_target_paths(text):
+            if path in seen:
+                continue
+            seen.add(path)
+            ordered.append(path)
+    return ordered
 
 
 def primary_task_target_path(harness: Any) -> str | None:

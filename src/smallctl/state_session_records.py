@@ -387,7 +387,7 @@ def _coerce_pending_interrupt_payload(value: Any) -> dict[str, Any] | None:
         return None
     kind = value.get("kind")
     normalized["kind"] = str(kind) if kind is not None else "ask_human"
-    for key in ("question", "current_phase", "thread_id", "operation_id", "plan_id", "response_mode"):
+    for key in ("question", "current_phase", "thread_id", "operation_id", "plan_id", "response_mode", "command", "reason"):
         if key in value:
             normalized[key] = str(value.get(key, ""))
     if "approved" in value:

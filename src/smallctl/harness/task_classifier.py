@@ -373,8 +373,27 @@ def task_is_local_coding_target(task: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    has_coding_marker = any(m in lowered for m in ("build a self-contained python script", "unittest", "./temp/"))
     has_py_target = bool(re.search(r'\.\/?temp\/[^\s\'"]+\.py', text))
+    if not has_py_target:
+        return False
+    # Strong coding indicators that should override any SSH mentions in instructions
+    strong_coding_markers = (
+        "build a self-contained python script",
+        "build a self-contained python",
+        "python script at `./temp/",
+        "python script at ./temp/",
+        "embedded csv string",
+        "embedded markdown",
+        "embedded json",
+        "embedded sample list",
+        "unittest",
+    )
+    has_strong_coding = any(m in lowered for m in strong_coding_markers)
+    if has_strong_coding:
+        # Don't let SSH credential instructions in the prompt override a clear coding task
+        return True
+    # Fallback: old logic for weaker cases
+    has_coding_marker = any(m in lowered for m in ("unittest", "./temp/"))
     has_explicit_remote = has_remote_execution_target(text)
     return has_coding_marker and has_py_target and not has_explicit_remote
 
@@ -384,6 +403,8 @@ def classify_task_mode(task: str) -> str:
     if not text:
         return "chat"
     if _LOCAL_SHELL_OVERRIDE_RE.search(text):
+        return "local_execute"
+    if task_is_local_coding_target(text):
         return "local_execute"
     lowered = text.lower()
     if is_smalltalk(text):

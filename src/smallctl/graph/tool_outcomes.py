@@ -21,6 +21,10 @@ from .shell_outcomes import (
 )
 from .tool_execution_recovery import handle_failed_file_write_outcome
 from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_patch_stall
+from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_completion_block
+from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_verifier_stall
+from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_apt_sources_failure
+from .tool_execution_recovery import _maybe_confirm_apt_sources_tip
 from ..harness.tool_visibility import schedule_retry_tool_exposure
 from ..models.conversation import ConversationMessage
 from .tool_execution_recovery_helpers import (
@@ -68,6 +72,7 @@ async def apply_tool_outcomes(
     harness = deps.harness
     for record in graph_state.last_tool_results:
         _maybe_clear_missing_input_after_remote_readback(harness, record)
+        _maybe_clear_missing_input_after_local_alias_read(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
         if record.tool_name == "shell_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
@@ -81,6 +86,8 @@ async def apply_tool_outcomes(
             _maybe_emit_nginx_sites_enabled_nudge(harness, record)
             _maybe_emit_ground_truth_diffusion(harness, record)
             _maybe_schedule_web_search_for_repeated_error(graph_state, harness, record)
+
+        _maybe_confirm_apt_sources_tip(harness.state, record)
 
         if await maybe_apply_terminal_tool_outcome(graph_state, deps, record, chat_mode=False):
             return LoopRoute.FINALIZE
@@ -100,6 +107,18 @@ async def apply_tool_outcomes(
         _maybe_auto_complete_plan_step_for_mutation(harness, record)
 
     await _maybe_auto_trigger_escalation_for_patch_stall(
+        harness=harness,
+        graph_state=graph_state,
+    )
+    await _maybe_auto_trigger_escalation_for_completion_block(
+        harness=harness,
+        graph_state=graph_state,
+    )
+    await _maybe_auto_trigger_escalation_for_verifier_stall(
+        harness=harness,
+        graph_state=graph_state,
+    )
+    await _maybe_auto_trigger_escalation_for_apt_sources_failure(
         harness=harness,
         graph_state=graph_state,
     )
@@ -228,6 +247,12 @@ def _maybe_emit_missing_requested_output_file_nudge(
             "operation_id": str(record.operation_id or ""),
             "tool_call_id": str(record.tool_call_id or ""),
         }
+        metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+        suggested_path = str(metadata.get("suggested_path") or "").strip()
+        suggestion_confidence = str(metadata.get("suggestion_confidence") or "").strip().lower()
+        if suggested_path and suggestion_confidence == "high":
+            scratchpad["_unresolved_missing_input_file"]["suggested_path"] = suggested_path
+            scratchpad["_unresolved_missing_input_file"]["suggestion_confidence"] = suggestion_confidence
         harness.state.append_message(
             ConversationMessage(
                 role="system",
@@ -283,6 +308,55 @@ def _maybe_emit_missing_requested_output_file_nudge(
             path=raw_path,
             run_mode=graph_state.run_mode,
             retry_scheduled=retry_scheduled,
+        )
+    return True
+
+
+def _maybe_clear_missing_input_after_local_alias_read(
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "file_read" or not record.result.success:
+        return False
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    blocker = scratchpad.get("_unresolved_missing_input_file")
+    if not isinstance(blocker, dict):
+        return False
+    blocked_path = str(blocker.get("path") or "").strip()
+    suggested_path = str(blocker.get("suggested_path") or "").strip()
+    if not blocked_path or not suggested_path:
+        return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    read_paths = [
+        str(record.args.get("path") or "").strip(),
+        str(metadata.get("requested_path") or "").strip(),
+        str(metadata.get("path") or "").strip(),
+    ]
+    if not any(_paths_likely_same_output(suggested_path, path) for path in read_paths if path):
+        return False
+    alias = {
+        "resolved_path": suggested_path,
+        "reason": "near_match_file_read_succeeded",
+        "operation_id": str(record.operation_id or ""),
+        "tool_call_id": str(record.tool_call_id or ""),
+    }
+    scratchpad.setdefault("_required_input_aliases", {})[blocked_path] = alias
+    blocker["resolved_by_alias"] = alias
+    scratchpad["_resolved_missing_input_file"] = blocker
+    scratchpad.pop("_unresolved_missing_input_file", None)
+    scratchpad.pop("_missing_input_file_nudged", None)
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "missing_required_input_file_blocker_cleared_by_local_alias_read",
+            "cleared missing-input blocker after reading high-confidence suggested local path",
+            blocked_path=blocked_path,
+            suggested_path=suggested_path,
         )
     return True
 

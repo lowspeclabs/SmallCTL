@@ -233,7 +233,7 @@ async def handle_file_patch(
 
     if normalized_target_text and normalized_target_text == normalized_replacement_text:
         return fail(
-            "Patch target text and replacement text are identical; no file content would change.",
+            "No changes needed — text already matches",
             metadata={
                 "path": str(target),
                 "requested_path": path,
@@ -242,7 +242,6 @@ async def handle_file_patch(
                 "expected_occurrences": expected_occurrences,
                 "target_text_preview": _build_patch_text_preview(normalized_target_text),
                 "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
-                "suggested_tools": ["file_read", "ast_patch"],
             },
         )
 

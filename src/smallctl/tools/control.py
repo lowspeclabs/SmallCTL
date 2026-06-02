@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_completion_allowed
+from ..phase_contracts import phase_contract_completion_block, phase_contract_status
+from ..runtime_error_repair import (
+    runtime_error_ask_human_block,
+    runtime_error_completion_block,
+    runtime_error_task_fail_block,
+)
 from ..state import LoopState, clip_text_value
 from ..write_session_fsm import recent_write_session_events, record_write_session_event
 from .common import fail, ok
 from .fs_loop_guard import build_loop_guard_status
+from .fs_write_sessions import write_session_contract
 
 
 _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
@@ -780,6 +789,351 @@ def _plan_subtask_completion_block(
     }
 
 
+def _post_change_verification_block(state: LoopState) -> dict[str, Any] | None:
+    progress = getattr(state, "challenge_progress", None)
+    if progress is None:
+        return None
+    if int(getattr(progress, "code_change_count", 0) or 0) <= 0:
+        return None
+    if bool(getattr(progress, "verified_after_last_change", False)):
+        return None
+    paths = [str(path or "").strip() for path in getattr(progress, "last_code_change_paths", []) or [] if str(path or "").strip()]
+    html_paths = [path for path in paths if path.lower().endswith((".html", ".htm"))]
+    if html_paths:
+        target = html_paths[-1]
+        command = (
+            f"test -s {shlex.quote(target)} && python3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            f"s = Path({target!r}).read_text()\n"
+            "assert '<!DOCTYPE html' in s\n"
+            "assert '<canvas' in s\n"
+            "assert s.count('<script') == s.count('</script>')\n"
+            "assert '<small_model_thought>' not in s\n"
+            "print('OK')\n"
+            "PY"
+        )
+    else:
+        target = paths[-1] if paths else "the changed artifact"
+        command = _focused_verifier_command_for_path(target, state=state) or "run the smallest focused verifier for the changed artifact"
+    dependency_block = _missing_dependency_block(state)
+    notes = [
+        f"Verify `{target}` after the latest change before task_complete/final success.",
+        "task_complete, final_verify, and success are blocked while verified_after_last_change=false.",
+    ]
+    if dependency_block:
+        notes = [*dependency_block["notes"], *notes]
+    required_command = dependency_block["command"] if dependency_block else command
+    return {
+        "reason": dependency_block["reason"] if dependency_block else "post_change_verification_required",
+        "verified_after_last_change": False,
+        "last_code_change_paths": paths,
+        "next_required_action": {
+            "tool_name": "shell_exec",
+            "required_arguments": {"command": required_command} if required_command else {},
+            "notes": notes,
+        },
+    }
+
+
+def _focused_verifier_command_for_path(path: str, *, state: LoopState) -> str:
+    target = str(path or "").strip()
+    if not target.lower().endswith(".py"):
+        return ""
+    python = _python_for_path(target, state=state)
+    return f"{shlex.quote(python)} -m py_compile {shlex.quote(target)}"
+
+
+def _phase_promotion_gate_block(
+    state: LoopState,
+    *,
+    message: str,
+    verifier_verdict: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not _looks_like_phase_coding_task(state, message=message):
+        return None
+    verifier = verifier_verdict if isinstance(verifier_verdict, dict) else {}
+    verdict = str(verifier.get("verdict") or "").strip().lower()
+    command = str(verifier.get("command") or verifier.get("target") or "").strip()
+    failure_mode = str(verifier.get("failure_mode") or "").strip().lower()
+    notes = _verifier_notes_text(verifier)
+    verifier_quality = _verifier_quality(command)
+
+    if verdict != "pass":
+        if verdict or failure_mode or notes:
+            return _phase_gate_payload(
+                state,
+                verifier,
+                reason="phase_promotion_verifier_not_passing",
+                verifier_quality=verifier_quality,
+                notes=[
+                    "Phase promotion requires a passing behavioral verifier, not a failed or inconclusive latest check.",
+                    "Fix the first failing phase behavior, then rerun the focused smoke verifier.",
+                ],
+            )
+        return _phase_gate_payload(
+            state,
+            verifier,
+            reason="phase_promotion_verifier_missing",
+            verifier_quality=verifier_quality,
+            notes=[
+                "Phase promotion requires a passing behavioral verifier before task_complete.",
+                "Run a focused smoke verifier that imports the changed module and exercises the phase behavior.",
+            ],
+        )
+
+    if verifier_quality["score"] < 3 or _phase_verifier_is_inconclusive(verifier, command=command, failure_mode=failure_mode, notes=notes):
+        return _phase_gate_payload(
+            state,
+            verifier,
+            reason="phase_promotion_behavioral_verifier_required",
+            verifier_quality=verifier_quality,
+            notes=[
+                "The latest passing verifier is too weak for phase promotion.",
+                "Verifier quality must be at least `behavioral` for phase promotion.",
+                "Syntax checks, import-only checks, dependency setup, cleanup commands, and interactive-loop timeouts do not prove the phase behavior works.",
+                "Run a small behavioral smoke verifier that imports the code and asserts the phase-specific behavior without waiting on an interactive loop.",
+            ],
+        )
+    return None
+
+
+def _looks_like_phase_coding_task(state: LoopState, *, message: str) -> bool:
+    progress = getattr(state, "challenge_progress", None)
+    category = str(getattr(progress, "task_category", "") or "").strip().lower()
+    code_change_count = int(getattr(progress, "code_change_count", 0) or 0) if progress is not None else 0
+    run_brief = getattr(state, "run_brief", None)
+    text_parts = [
+        message,
+        str(getattr(run_brief, "original_task", "") or ""),
+        " ".join(str(item or "") for item in getattr(run_brief, "acceptance_criteria", []) or []),
+    ]
+    scratchpad = getattr(state, "scratchpad", {})
+    if isinstance(scratchpad, dict):
+        ledger = scratchpad.get("subtask_ledger")
+        if isinstance(ledger, dict):
+            active = ledger.get("active_subtask")
+            if isinstance(active, dict):
+                text_parts.extend([str(active.get("goal") or ""), str(active.get("title") or "")])
+    text = "\n".join(part for part in text_parts if part).lower()
+    phase_like = bool(re.search(r"\bphase\s*\d+\b|\bphase\b|\bmulti[- ]?phase\b", text))
+    return phase_like and (category == "coding" or code_change_count > 0)
+
+
+def _task_involves_interactive_program(state: LoopState) -> bool:
+    """Detect if the current task involves an interactive/GUI program like pygame."""
+    run_brief = getattr(state, "run_brief", None)
+    task_text = str(getattr(run_brief, "original_task", "") or "").lower()
+    working_memory = getattr(state, "working_memory", None)
+    goal_text = str(getattr(working_memory, "current_goal", "") or "").lower()
+    haystack = f"{task_text} {goal_text}"
+    interactive_markers = (
+        "pygame", "gui", "interactive", "game loop", "event loop",
+        "tkinter", "qt", "pyside", "kivy", "arcade", "curses",
+        "real-time", "realtime", "animation", "render loop",
+    )
+    return any(marker in haystack for marker in interactive_markers)
+
+
+def _mutation_expectation_block(state: LoopState, *, message: str) -> dict[str, Any] | None:
+    progress = getattr(state, "challenge_progress", None)
+    code_change_count = int(getattr(progress, "code_change_count", 0) or 0) if progress is not None else 0
+    if code_change_count > 0:
+        return None
+    if not _looks_like_phase_coding_task(state, message=message):
+        return None
+
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    text = "\n".join(
+        str(part or "")
+        for part in [
+            getattr(run_brief, "original_task", ""),
+            getattr(run_brief, "current_phase_objective", ""),
+            getattr(working_memory, "current_goal", ""),
+            message,
+        ]
+        if str(part or "").strip()
+    ).lower()
+    mutation_expected = bool(
+        re.search(r"\b(begin|implement|continue|advance|start)\b.{0,80}\bphase\s*\d+\b", text)
+        or re.search(r"\bphase\s*\d+\b.{0,80}\b(begin|implement|continue|advance|start)\b", text)
+    )
+    if not mutation_expected:
+        return None
+
+    completion_text = str(message or "").lower()
+    explicit_no_change = any(
+        marker in completion_text
+        for marker in (
+            "no change required",
+            "no code change required",
+            "diagnostic only",
+            "verification only",
+            "asked only to verify",
+            "user requested no changes",
+        )
+    )
+    if explicit_no_change:
+        return None
+
+    return {
+        "reason": "mutation_expected_but_no_code_changes",
+        "code_change_count": 0,
+        "next_required_action": {
+            "tool_names": ["file_patch", "file_write", "ast_patch", "ask_human", "task_fail"],
+            "notes": [
+                "The task asks to begin or implement a coding phase, but no code changes have been made.",
+                "Make the first concrete phase change, ask the user if the phase target is ambiguous, or fail if blocked.",
+                "Complete with zero changes only when the response explicitly proves no mutation was required.",
+            ],
+        },
+    }
+
+
+def _phase_verifier_is_weak(command: str) -> bool:
+    normalized = " ".join(str(command or "").strip().lower().split())
+    if not normalized:
+        return True
+    weak_patterns = (
+        " -m py_compile ",
+        " py_compile ",
+        " pip install ",
+        " python -m pip install ",
+        " python3 -m pip install ",
+        " python -m venv ",
+        " python3 -m venv ",
+        " rm -rf ",
+        " ls ",
+        " grep ",
+    )
+    padded = f" {normalized} "
+    return any(pattern in padded for pattern in weak_patterns)
+
+
+def _verifier_quality(command: str) -> dict[str, Any]:
+    normalized = " ".join(str(command or "").strip().lower().split())
+    if not normalized:
+        return {"score": 0, "label": "none"}
+    padded = f" {normalized} "
+    if any(pattern in padded for pattern in (" pip install ", " -m pip install ", " -m venv ", " rm -rf ", " ls ", " grep ")):
+        return {"score": 0, "label": "setup_or_probe"}
+    if " -m py_compile " in padded or " py_compile " in padded:
+        return {"score": 1, "label": "syntax"}
+    if any(pattern in padded for pattern in (" pytest ", " -m pytest ", " unittest ", " -m unittest ")):
+        return {"score": 3, "label": "behavioral"}
+    if " -c " in padded:
+        if "assert " in normalized or ".handle_" in normalized or ".spawn" in normalized or ".move" in normalized:
+            return {"score": 3, "label": "behavioral"}
+        if "import " in normalized:
+            return {"score": 2, "label": "import"}
+    if " --smoke" in padded or " smoke" in padded:
+        return {"score": 3, "label": "behavioral"}
+    if " selenium " in padded or " playwright " in padded:
+        return {"score": 5, "label": "e2e"}
+    if any(token in normalized for token in ("curl ", "http://", "https://")):
+        return {"score": 4, "label": "integration"}
+    return {"score": 2, "label": "execution"}
+
+
+def _phase_verifier_is_inconclusive(
+    verifier: dict[str, Any],
+    *,
+    command: str,
+    failure_mode: str,
+    notes: str,
+) -> bool:
+    haystack = "\n".join(
+        str(part or "")
+        for part in [
+            command,
+            failure_mode,
+            notes,
+            verifier.get("key_stdout"),
+            verifier.get("key_stderr"),
+        ]
+    ).lower()
+    return any(token in haystack for token in ("timed out", "timeout", "infinite_loop", "infinite loop"))
+
+
+def _verifier_notes_text(verifier: dict[str, Any]) -> str:
+    acceptance_delta = verifier.get("acceptance_delta") if isinstance(verifier, dict) else None
+    if not isinstance(acceptance_delta, dict):
+        return ""
+    notes = acceptance_delta.get("notes")
+    if isinstance(notes, list):
+        return "\n".join(str(note or "") for note in notes)
+    return str(notes or "")
+
+
+def _phase_gate_payload(
+    state: LoopState,
+    verifier: dict[str, Any],
+    *,
+    reason: str,
+    notes: list[str],
+    verifier_quality: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    planning_mode = bool(getattr(state, "planning_mode_enabled", False))
+    next_action: dict[str, Any] = {
+        "tool_name": "request_validation_execution" if planning_mode else "shell_exec",
+        "notes": notes,
+    }
+    if planning_mode:
+        next_action["notes"] = [
+            *notes,
+            "Planning mode cannot execute the verifier directly; request a validation handoff instead of calling `run` or `shell_exec`.",
+        ]
+    return {
+        "reason": reason,
+        "last_verifier_verdict": verifier or None,
+        "verifier_quality": verifier_quality or {"score": 0, "label": "none"},
+        "required_verifier_quality": {"score": 3, "label": "behavioral"},
+        "next_required_action": next_action,
+    }
+
+
+def _python_for_path(path: str, *, state: LoopState) -> str:
+    cwd = Path(str(getattr(state, "cwd", "") or "."))
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    venv_python = candidate.parent / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    return "python3"
+
+
+_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError:\s+No module named ['\"](?P<module>[^'\"]+)['\"]")
+
+
+def _missing_dependency_block(state: LoopState) -> dict[str, Any] | None:
+    verifier = getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verifier, dict):
+        return None
+    if str(verifier.get("verdict") or "").strip().lower() == "pass":
+        return None
+    text = "\n".join(
+        str(verifier.get(key) or "")
+        for key in ("key_stderr", "key_stdout")
+        if str(verifier.get(key) or "").strip()
+    )
+    match = _MISSING_MODULE_RE.search(text)
+    if not match:
+        return None
+    module = match.group("module").strip()
+    paths = [str(path or "").strip() for path in getattr(state.challenge_progress, "last_code_change_paths", []) or [] if str(path or "").strip()]
+    python = _python_for_path(paths[-1], state=state) if paths else "python3"
+    return {
+        "reason": "missing_runtime_dependency",
+        "module": module,
+        "command": f"{shlex.quote(python)} -m pip install {shlex.quote(module)}",
+        "notes": [
+            f"The latest verifier is blocked by missing Python module `{module}`.",
+            "Install the dependency in the verifier interpreter, then rerun the focused verifier instead of retrying task_complete.",
+        ],
+    }
+
+
 async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
     if state.plan_execution_mode and state.active_step_id:
         return fail(
@@ -791,6 +1145,50 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
             },
         )
     verifier_verdict = _normalized_verifier_verdict(state)
+    runtime_error_block = runtime_error_completion_block(state, verifier_verdict=verifier_verdict)
+    if runtime_error_block is not None:
+        return fail(
+            "Cannot complete the task until the reported runtime error is verified fixed.",
+            metadata={
+                **runtime_error_block,
+                "acceptance_checklist": state.acceptance_checklist(),
+            },
+        )
+    post_change_block = _post_change_verification_block(state)
+    if post_change_block is not None:
+        return fail(
+            "Cannot complete the task until the latest file change is verified.",
+            metadata={
+                **post_change_block,
+                "last_verifier_verdict": verifier_verdict,
+                "acceptance_checklist": state.acceptance_checklist(),
+            },
+        )
+
+    # Fix 4: Interactive programs (pygame, GUI, etc.) require behavioral verification,
+    # not just syntax checks like py_compile.
+    if _task_involves_interactive_program(state) and verifier_verdict:
+        verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip()
+        quality = _verifier_quality(verifier_command)
+        if int(quality.get("score") or 0) < 3:
+            return fail(
+                "Cannot complete an interactive/GUI program task with only a syntax or import verifier. "
+                "Run a behavioral verifier that exercises the game loop, event handling, or rendering.",
+                metadata={
+                    "reason": "interactive_program_requires_behavioral_verifier",
+                    "verifier_quality": quality,
+                    "required_quality": {"score": 3, "label": "behavioral"},
+                    "last_verifier_verdict": verifier_verdict,
+                    "acceptance_checklist": state.acceptance_checklist(),
+                    "next_required_action": {
+                        "tool_name": "shell_exec",
+                        "notes": [
+                            "Run a verifier that exercises the interactive/game behavior, not just syntax.",
+                            "Examples: run the game with a mock event, test a frame update, or verify output files.",
+                        ],
+                    },
+                },
+            )
     ledger_service = getattr(harness, "subtask_ledger", None)
     if ledger_service is not None:
         try:
@@ -826,6 +1224,16 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                     ],
                 },
                 "last_verifier_verdict": verifier_verdict,
+            },
+        )
+    mutation_block = _mutation_expectation_block(state, message=message)
+    if mutation_block is not None:
+        return fail(
+            "Cannot complete a phase implementation task with zero code changes.",
+            metadata={
+                **mutation_block,
+                "last_verifier_verdict": verifier_verdict,
+                "acceptance_checklist": state.acceptance_checklist(),
             },
         )
     session = state.write_session
@@ -946,6 +1354,33 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
             error,
             metadata={
                 "last_verifier_verdict": verifier_verdict,
+                "acceptance_checklist": state.acceptance_checklist(),
+            },
+        )
+    verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip() if isinstance(verifier_verdict, dict) else ""
+    phase_contract_block = phase_contract_completion_block(
+        state,
+        verifier_verdict=verifier_verdict,
+        verifier_quality=_verifier_quality(verifier_command),
+    )
+    if phase_contract_block is not None:
+        return fail(
+            "Cannot complete this phase until the active phase contract passes.",
+            metadata={
+                **phase_contract_block,
+                "acceptance_checklist": state.acceptance_checklist(),
+            },
+        )
+    phase_promotion_block = _phase_promotion_gate_block(
+        state,
+        message=message,
+        verifier_verdict=verifier_verdict,
+    )
+    if phase_promotion_block is not None:
+        return fail(
+            "Cannot complete this phase until a behavioral promotion gate passes.",
+            metadata={
+                **phase_promotion_block,
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
@@ -1071,6 +1506,171 @@ async def step_complete(message: str, state: LoopState, harness: Any) -> dict:
     )
 
 
+async def phase_contract_update(contract: dict[str, Any], state: LoopState, persist: bool = False) -> dict:
+    if not isinstance(contract, dict):
+        return fail(
+            "phase_contract_update requires a JSON object contract.",
+            metadata={"reason": "invalid_phase_contract"},
+        )
+    contract = _normalize_phase_contract_payload(contract)
+    validation_error = _phase_contract_validation_error(contract)
+    if validation_error:
+        return fail(
+            validation_error,
+            metadata={"reason": "invalid_phase_contract"},
+        )
+    normalized = dict(contract)
+    normalized.setdefault("version", 1)
+    state.scratchpad["_phase_contract"] = normalized
+    persisted_path = ""
+    if persist:
+        path = Path(str(getattr(state, "cwd", "") or ".")) / ".smallctl" / "phase_contract.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            persisted_path = str(path)
+        except OSError as exc:
+            return fail(
+                f"Unable to persist phase contract: {exc}",
+                metadata={"reason": "phase_contract_persist_failed", "path": str(path)},
+            )
+    verifier_verdict = _normalized_verifier_verdict(state)
+    verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip() if isinstance(verifier_verdict, dict) else ""
+    status = phase_contract_status(
+        state,
+        verifier_verdict=verifier_verdict,
+        verifier_quality=_verifier_quality(verifier_command),
+    )
+    state.touch()
+    return ok(
+        {
+            "status": "updated",
+            "persisted_path": persisted_path or None,
+            "phase_contract": status,
+        }
+    )
+
+
+def _normalize_phase_contract_payload(contract: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(contract)
+    phases = normalized.get("phases")
+    if not isinstance(phases, dict):
+        return normalized
+    normalized_phases: dict[Any, Any] = {}
+    for phase_id, raw_phase in phases.items():
+        if not isinstance(raw_phase, dict):
+            normalized_phases[phase_id] = raw_phase
+            continue
+        phase = dict(raw_phase)
+        if "title" not in phase and isinstance(phase.get("name"), str):
+            phase["title"] = phase.get("name")
+        promotion = phase.get("promotion")
+        if isinstance(promotion, str):
+            phase["promotion"] = _normalize_phase_promotion(promotion)
+        checks = phase.get("checks")
+        if isinstance(checks, list):
+            expected_files = [str(item or "").strip() for item in phase.get("expected_files") or [] if str(item or "").strip()]
+            phase["checks"] = [
+                _normalize_phase_check(check, index=index, expected_files=expected_files)
+                for index, check in enumerate(checks, start=1)
+            ]
+        normalized_phases[phase_id] = phase
+    normalized["phases"] = normalized_phases
+    return normalized
+
+
+def _normalize_phase_promotion(value: str) -> dict[str, Any]:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "all_checks_pass", "all_checks", "pass", "passed"}:
+        return {"required_quality": "behavioral"}
+    if normalized in {"syntax", "import", "execution", "behavioral", "integration", "e2e"}:
+        return {"required_quality": normalized}
+    return {"required_quality": "behavioral", "criteria": value}
+
+
+def _normalize_phase_check(check: Any, *, index: int, expected_files: list[str] | None = None) -> Any:
+    if not isinstance(check, str):
+        return check
+    command = _normalize_phase_check_command(check.strip(), expected_files=expected_files or [])
+    if not command:
+        return {"id": f"check_{index}", "quality": "none", "command": ""}
+    return {
+        "id": _phase_check_id_from_command(command, index=index),
+        "quality": _phase_check_quality_from_command(command),
+        "command": command,
+    }
+
+
+def _normalize_phase_check_command(command: str, *, expected_files: list[str]) -> str:
+    normalized = str(command or "").strip()
+    if not normalized or re.search(r"(?:^|&&|;)\s*cd\s+", normalized):
+        return normalized
+    for path in expected_files:
+        filename = Path(path).name
+        if not filename or "/" in filename:
+            continue
+        replacement = str(path).lstrip("./")
+        normalized = re.sub(
+            rf"(?<![\w./-]){re.escape(filename)}(?![\w./-])",
+            replacement,
+            normalized,
+        )
+    return normalized
+
+
+def _phase_check_id_from_command(command: str, *, index: int) -> str:
+    tokens = re.findall(r"[A-Za-z0-9_]+", command)
+    meaningful = [token.lower() for token in tokens if token.lower() not in {"cd", "python", "python3", "m"}]
+    stem = "_".join(meaningful[:4]).strip("_") or f"check_{index}"
+    return stem[:80]
+
+
+def _phase_check_quality_from_command(command: str) -> str:
+    normalized = " ".join(str(command or "").strip().lower().split())
+    padded = f" {normalized} "
+    if any(pattern in padded for pattern in (" pytest ", " -m pytest ", " unittest ", " -m unittest ")):
+        return "behavioral"
+    if " -m py_compile " in padded or " py_compile " in padded:
+        return "syntax"
+    if " -c " in padded:
+        if "assert " in normalized or ".move" in normalized or ".spawn" in normalized or ".handle_" in normalized:
+            return "behavioral"
+        if "import " in normalized:
+            return "import"
+    if re.search(r"(?:^|[\s/])test_[\w.-]+\.py\b", normalized):
+        return "behavioral"
+    if " --smoke" in padded or " smoke" in padded:
+        return "behavioral"
+    return "execution"
+
+
+def _phase_contract_validation_error(contract: dict[str, Any]) -> str:
+    phases = contract.get("phases")
+    if not isinstance(phases, dict) or not phases:
+        return "Phase contract must include a non-empty `phases` object."
+    active_phase = str(contract.get("active_phase") or "").strip()
+    active_count = 0
+    for phase_id, phase in phases.items():
+        if not str(phase_id or "").strip():
+            return "Phase contract phase IDs must be non-empty strings."
+        if not isinstance(phase, dict):
+            return f"Phase `{phase_id}` must be an object."
+        if str(phase.get("status") or "").strip().lower() == "active":
+            active_count += 1
+        for key in ("expected_files", "required_symbols", "checks"):
+            value = phase.get(key)
+            if value is not None and not isinstance(value, list):
+                return f"Phase `{phase_id}` field `{key}` must be a list when provided."
+        promotion = phase.get("promotion")
+        if promotion is not None and not isinstance(promotion, dict):
+            return f"Phase `{phase_id}` field `promotion` must be an object when provided."
+    if active_phase and active_phase not in phases:
+        return f"Active phase `{active_phase}` is not present in `phases`."
+    if not active_phase and active_count != 1:
+        return "Phase contract must set `active_phase` or mark exactly one phase as active."
+    return ""
+
+
 async def step_fail(message: str, state: LoopState, harness: Any) -> dict:
     if not state.plan_execution_mode or not state.active_step_id:
         return fail(
@@ -1111,15 +1711,45 @@ async def finalize_write_session(state: LoopState, harness: Any) -> dict:
     return fail(f"Unable to finalize write session: {detail}")
 
 
-async def task_fail(message: str, state: LoopState) -> dict:
+async def task_fail(message: str, state: LoopState, harness: Any | None = None) -> dict:
+    verifier_verdict = _normalized_verifier_verdict(state)
+    runtime_error_block = runtime_error_task_fail_block(
+        state,
+        message=message,
+        verifier_verdict=verifier_verdict,
+    )
+    if runtime_error_block is not None:
+        return fail(
+            "Cannot fail the task with an unsupported explanation while a reported runtime error is open.",
+            metadata=runtime_error_block,
+        )
     session = state.write_session
     if session is not None and str(session.status or "").strip().lower() != "complete":
-        record_write_session_event(
-            state,
-            event="session_abandoned",
-            session=session,
-            details={"reason": "task_fail"},
-        )
+        # P2: auto-finalize if the session is clearly ready but was never finalized.
+        #     This prevents stranded staged files when the model gives up after
+        #     writing all content but forgetting to finalize.
+        if harness is not None:
+            from ..graph.write_session_outcomes import _attempt_write_session_finalize
+            from ..tools.fs_sessions import _write_session_can_finalize
+
+            is_finalizable = (
+                not str(session.write_next_section or "").strip()
+                and session.write_sections_completed
+                and str(session.status or "open").strip().lower() in {"open", "verifying"}
+                and _write_session_can_finalize(session)
+            )
+            if is_finalizable:
+                finalized, _ = await _attempt_write_session_finalize(harness, session)
+                if finalized:
+                    session = state.write_session
+
+        if str(session.status or "").strip().lower() != "complete":
+            record_write_session_event(
+                state,
+                event="session_abandoned",
+                session=session,
+                details={"reason": "task_fail"},
+            )
     state.scratchpad["_task_failed"] = True
     state.scratchpad["_task_failed_message"] = message
     state.recent_errors.append(message)
@@ -1128,6 +1758,12 @@ async def task_fail(message: str, state: LoopState) -> dict:
 
 
 async def ask_human(question: str, state: LoopState) -> dict:
+    runtime_error_block = runtime_error_ask_human_block(state, question=question)
+    if runtime_error_block is not None:
+        return fail(
+            "Cannot ask the user to retry before repairing and verifying the reported runtime error.",
+            metadata=runtime_error_block,
+        )
     state.scratchpad["_ask_human"] = True
     state.scratchpad["_ask_human_question"] = question
     state.touch()
@@ -1181,6 +1817,12 @@ async def loop_status(state: LoopState) -> dict:
         progress_pct = 0.0
 
     verifier_verdict = _normalized_verifier_verdict(state)
+    verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip() if isinstance(verifier_verdict, dict) else ""
+    phase_contract_payload = phase_contract_status(
+        state,
+        verifier_verdict=verifier_verdict,
+        verifier_quality=_verifier_quality(verifier_command),
+    )
     acceptance_checklist = state.acceptance_checklist()
     contract_phase = state.contract_phase()
     write_session_failure = _write_session_schema_failure(state)
@@ -1193,6 +1835,9 @@ async def loop_status(state: LoopState) -> dict:
     if write_session_payload is not None and next_required_tool is not None:
         write_session_payload = dict(write_session_payload)
         write_session_payload["resume_action"] = next_required_tool
+    if write_session_payload is not None and state.write_session is not None:
+        write_session_payload = dict(write_session_payload)
+        write_session_payload["contract"] = write_session_contract(state.write_session)
 
     # Fix 3: Emit a persistent, top-level reminder while a session is open.
     # The model must include write_session_id on every file_write/file_patch/ast_patch call
@@ -1233,6 +1878,7 @@ async def loop_status(state: LoopState) -> dict:
             "acceptance_checklist": acceptance_checklist,
             "pending_acceptance_criteria": [item["criterion"] for item in acceptance_checklist if not item["satisfied"]],
             "subtask_ledger": _subtask_ledger_status(state),
+            "phase_contract": phase_contract_payload,
             "last_verifier_verdict": verifier_verdict,
             "last_failure_class": state.last_failure_class,
             "files_changed_this_cycle": state.files_changed_this_cycle,
@@ -1242,6 +1888,7 @@ async def loop_status(state: LoopState) -> dict:
             "write_session": write_session_payload,
             "write_session_warning": write_session_warning,
             "write_session_events": write_session_events,
+            "stderr_signature_circuit_breaker": state.scratchpad.get("_stderr_signature_circuit_breaker"),
             "loop_guard": build_loop_guard_status(state),
         }
     )

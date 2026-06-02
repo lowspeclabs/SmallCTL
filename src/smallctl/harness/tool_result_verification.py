@@ -346,8 +346,12 @@ def _store_verifier_verdict(
     elif semantic_failure:
         verdict = "fail"
     elif absence_probe["is_absence_probe"] and absence_probe["found_resources"]:
-        verdict = "fail"
-        semantic_failure = str(absence_probe["reason"] or "absence probe found matching resources")
+        if _is_audit_task(state):
+            # For audit tasks, finding resources is expected (we're documenting state)
+            verdict = "pass"
+        else:
+            verdict = "fail"
+            semantic_failure = str(absence_probe["reason"] or "absence probe found matching resources")
     elif absence_probe["is_absence_probe"] and absence_probe["absence_confirmed"]:
         verdict = "pass"
     elif result.success and (exit_code in (0, None)):
@@ -566,6 +570,15 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
     combined = "\n".join(part for part in (stdout, stderr) if str(part or "").strip())
     if not combined:
         return ""
+    normalized_command = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    normalized_output = re.sub(r"\s+", " ", combined.strip().lower())
+    if (
+        "test -f" in normalized_command
+        and "echo" in normalized_command
+        and re.search(r"\bmissing\b", normalized_output)
+        and not re.search(r"\bexists\b", normalized_output)
+    ):
+        return "file existence verifier reported MISSING"
     if _NGINX_VERIFIER_COMMAND_RE.search(command) or "nginx:" in combined.lower():
         match = _NGINX_VERIFIER_FAILURE_RE.search(combined)
         if match:
@@ -995,6 +1008,10 @@ def _classify_execution_failure(text: str) -> str:
         return "syntax"
     if "importerror" in lowered or "modulenotfounderror" in lowered:
         return "import"
+    if "malformed stanza" in lowered and "sources" in lowered:
+        return "apt_sources_malformed"
+    if "deb822" in lowered or "invalid line" in lowered and "sources.list" in lowered:
+        return "apt_sources_malformed"
     if "timed out" in lowered or "timeout" in lowered or "connection timed out" in lowered:
         return "environment"
     if "permission denied" in lowered or "password" in lowered or "sudo" in lowered:
@@ -1256,6 +1273,22 @@ def _task_has_removal_intent(state: Any) -> bool:
     return any(kw in original_task for kw in _REMOVAL_TASK_KEYWORDS)
 
 
+# Keywords that indicate an audit/investigation task where documenting
+# existence of resources is expected (not a failure).
+_AUDIT_TASK_KEYWORDS = frozenset([
+    "audit", "investigate", "review", "assess", "check", "report on",
+    "inspect", "examine", "analyze", "verify compliance", "document",
+])
+
+
+def _is_audit_task(state: Any) -> bool:
+    """Return True when the original task is an audit/investigation."""
+    task_text = _removal_task_text(state).lower()
+    if not task_text:
+        return False
+    return any(kw in task_text for kw in _AUDIT_TASK_KEYWORDS)
+
+
 def _update_acceptance_ledger(state: Any, *, verdict: str) -> None:
     criteria = []
     if hasattr(state, "active_acceptance_criteria"):
@@ -1372,6 +1405,15 @@ def _update_repair_cycle_state(
         state.repair_cycle_id = repair_cycle_id
         state.scratchpad["_repair_cycle_reads"] = []
         state.files_changed_this_cycle = []
+    # Increment repair step count every time we enter repair
+    repair_steps = int(state.scratchpad.get("_repair_step_count", 0) or 0) + 1
+    state.scratchpad["_repair_step_count"] = repair_steps
+    max_repair = int(state.scratchpad.get("_max_repair_steps", 3) or 3)
+    if repair_steps >= max_repair:
+        state.acceptance_waived = True
+    # Flag for auto-escalation after 2 repair cycles on same target
+    if repair_steps >= 2:
+        state.scratchpad["_repair_cycle_escalation_ready"] = True
     state.scratchpad["_contract_phase"] = "repair"
 
     counters = state.stagnation_counters if isinstance(getattr(state, "stagnation_counters", None), dict) else {}

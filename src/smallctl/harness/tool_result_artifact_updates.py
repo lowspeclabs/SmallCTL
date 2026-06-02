@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from .tool_result_verification import (
     _store_verifier_verdict,
     assess_remote_mutation_verification,
 )
+from .verifier_monitor import track_verifier_rejection
 from ..shell_utils import (
     file_read_cache_key as _file_read_cache_key,
     ssh_file_read_cache_key as _ssh_file_read_cache_key,
@@ -1203,7 +1205,23 @@ def _record_failed_verification_attempt(
     result: ToolEnvelope,
     arguments: dict[str, Any] | None,
 ) -> None:
-    if tool_name not in _SSH_FILE_VERIFIER_TOOLS or result.success:
+    if result.success:
+        return
+    if tool_name == "ssh_exec":
+        requirement = service.harness.state.scratchpad.get(_REMOTE_MUTATION_VERIFICATION_KEY)
+        if not isinstance(requirement, dict):
+            return
+        assessment = assess_remote_mutation_verification(
+            requirement=requirement,
+            tool_name=tool_name,
+            result=result,
+            arguments=arguments,
+        )
+        if not assessment.get("is_verifier_attempt"):
+            return
+        requirement["failed_verification_attempts"] = requirement.get("failed_verification_attempts", 0) + 1
+        return
+    if tool_name not in _SSH_FILE_VERIFIER_TOOLS:
         return
     requirement = service.harness.state.scratchpad.get(_REMOTE_MUTATION_VERIFICATION_KEY)
     if not isinstance(requirement, dict):
@@ -1249,10 +1267,6 @@ def _maybe_emit_bounded_region_trap_nudge(
     if not is_bounded_region_not_found:
         return
 
-    requirement = service.harness.state.scratchpad.get(_REMOTE_MUTATION_VERIFICATION_KEY)
-    if not isinstance(requirement, dict):
-        return
-
     path = ""
     host = ""
     if isinstance(result.metadata, dict):
@@ -1262,6 +1276,15 @@ def _maybe_emit_bounded_region_trap_nudge(
         path = str(arguments.get("path") or "").strip()
     if not host and isinstance(arguments, dict):
         host = str(arguments.get("host") or arguments.get("target") or "").strip().lower()
+
+    # First, check for the small-file anti-pattern: file is small and was recently read.
+    # In that case, suggest ssh_file_write instead of retrying bounds.
+    _maybe_emit_small_file_rewrite_nudge(service, path=path, host=host, arguments=arguments)
+
+    # Then, the original bounded-region trap nudge for ssh_exec mutations.
+    requirement = service.harness.state.scratchpad.get(_REMOTE_MUTATION_VERIFICATION_KEY)
+    if not isinstance(requirement, dict):
+        return
 
     requirement_host = str(requirement.get("host") or "").strip().lower()
     if requirement_host and host and host != requirement_host:
@@ -1296,6 +1319,112 @@ def _maybe_emit_bounded_region_trap_nudge(
             },
         )
     )
+
+
+def _maybe_emit_small_file_rewrite_nudge(
+    service: Any,
+    *,
+    path: str,
+    host: str,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """If a bounded replace failed on a small file that was recently read, nudge toward ssh_file_write."""
+    if not path:
+        return
+
+    # Check if we have a recent ssh_file_read on this exact path+host
+    recent_read_size = _recent_ssh_file_read_size(service, path=path, host=host)
+    if recent_read_size is None or recent_read_size == 0:
+        return
+
+    # Only nudge for small files (< 1KB)
+    SMALL_FILE_THRESHOLD = 1024
+    if recent_read_size >= SMALL_FILE_THRESHOLD:
+        return
+
+    # Check if replacement_text is large relative to file size
+    replacement_text = ""
+    if isinstance(arguments, dict):
+        replacement_text = str(arguments.get("replacement_text") or "").strip()
+    if not replacement_text:
+        return
+
+    # If replacement is >50% of the file, it's a rewrite masquerading as a patch
+    if len(replacement_text.encode("utf-8")) <= recent_read_size * 0.5:
+        return
+
+    scratchpad = service.harness.state.scratchpad
+    prior = scratchpad.get("_small_file_rewrite_nudges", [])
+    signature = f"{path}:{host}"
+    if isinstance(prior, list) and signature in prior:
+        return
+    scratchpad["_small_file_rewrite_nudges"] = dedupe_keep_tail(
+        ([str(item) for item in prior] if isinstance(prior, list) else []) + [signature],
+        limit=12,
+    )
+
+    service.harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"`ssh_file_replace_between` failed on `{path}`. "
+                f"This file is small (~{recent_read_size} bytes) and was recently read. "
+                "Because the replacement covers most of the file, use `ssh_file_write` to overwrite the entire file instead. "
+                "This avoids boundary-matching errors."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "small_file_prefer_rewrite",
+                "path": path,
+                "host": host,
+            },
+        )
+    )
+
+
+def _recent_ssh_file_read_size(service: Any, *, path: str, host: str) -> int | None:
+    """Look back through recent tool results for an ssh_file_read on the same path+host. Return its size in bytes."""
+    try:
+        from ...state import ConversationMessage
+    except Exception:
+        return None
+
+    messages = getattr(service.harness.state, "messages", [])
+    if not isinstance(messages, list):
+        return None
+
+    # Scan last ~20 messages for a recent ssh_file_read on this path+host
+    for msg in reversed(messages[-20:]):
+        if not isinstance(msg, ConversationMessage):
+            continue
+        if msg.role != "tool":
+            continue
+        tool_name = msg.metadata.get("tool_name") if isinstance(msg.metadata, dict) else None
+        if tool_name != "ssh_file_read":
+            continue
+        # Extract args from metadata if available
+        args = msg.metadata.get("arguments") if isinstance(msg.metadata, dict) else None
+        if not isinstance(args, dict):
+            # Fall back to parsing the message content for FILE READ STATUS
+            content = str(msg.content or "")
+            if f"path={path}" in content:
+                # Rough heuristic: use content length if we can't find exact size
+                return len(content.encode("utf-8"))
+            continue
+        read_path = str(args.get("path") or "").strip()
+        read_host = str(args.get("host") or args.get("target") or "").strip().lower()
+        if read_path == path and read_host == host:
+            # Try to get the file size from the artifact metadata or content length
+            artifact_id = msg.metadata.get("artifact_id") if isinstance(msg.metadata, dict) else None
+            if artifact_id:
+                artifact = service.harness.state.artifacts.get(artifact_id)
+                if artifact and isinstance(artifact, dict):
+                    size = artifact.get("size_bytes")
+                    if isinstance(size, int) and size > 0:
+                        return size
+            # Fallback: estimate from the message content itself
+            return len(str(msg.content or "").encode("utf-8"))
+    return None
 
 
 def _readback_content_satisfies_requirement(requirement: dict[str, Any], content: str) -> bool:
@@ -1639,6 +1768,42 @@ def _extract_and_pin_critical_errors(
         wm.known_fact_meta = aligned
 
 
+def _record_stderr_signature_circuit_breaker(service: Any, *, tool_name: str, result: ToolEnvelope) -> None:
+    if tool_name not in {"shell_exec", "ssh_exec"}:
+        return
+    stderr = ""
+    if isinstance(result.output, dict):
+        stderr = str(result.output.get("stderr") or "")
+    if not stderr and result.error:
+        stderr = str(result.error)
+    signature_line = ""
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped:
+            signature_line = re.sub(r"\s+", " ", stripped)[:240]
+            break
+    if not signature_line:
+        return
+    key = hashlib.sha1(signature_line.lower().encode("utf-8", errors="replace")).hexdigest()[:12]
+    state = service.harness.state
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    counts = scratchpad.setdefault("_stderr_signature_counts", {})
+    if not isinstance(counts, dict):
+        counts = {}
+        scratchpad["_stderr_signature_counts"] = counts
+    count = int(counts.get(key, 0) or 0) + 1
+    counts[key] = count
+    if count < 2:
+        return
+    scratchpad["_stderr_signature_circuit_breaker"] = {
+        "signature": signature_line,
+        "count": count,
+        "tool_name": tool_name,
+        "next_required_action": "Use a different repair strategy; do not retry the same command/fix against this stderr.",
+    }
+    state.recent_errors.append(f"stderr_signature_circuit_breaker: {signature_line}")
+
+
 def _update_subtask_ledger_from_verifier(service: Any, verifier_verdict: dict[str, Any] | None) -> None:
     if not isinstance(verifier_verdict, dict) or not verifier_verdict:
         return
@@ -1701,6 +1866,7 @@ def apply_artifact_success_outcome(
         )
     if tool_name in {"shell_exec", "ssh_exec"} and artifact_id:
         _consolidate_shell_attempt_family(state=service.harness.state, artifact_id=artifact_id, result=result)
+        _record_stderr_signature_circuit_breaker(service, tool_name=tool_name, result=result)
     if tool_name == "ssh_exec":
         _remember_session_ssh_target(
             service,
@@ -1718,6 +1884,15 @@ def apply_artifact_success_outcome(
             result=result,
             arguments=arguments,
         )
+        # Count failed ssh_exec verifier attempts so the requirement can be
+        # auto-disabled after repeated SSH failures (e.g. auth unavailable).
+        if not result.success:
+            _record_failed_verification_attempt(
+                service,
+                tool_name=tool_name,
+                result=result,
+                arguments=arguments,
+            )
         _record_remote_mutation_requirement(
             service,
             result=result,
@@ -1761,6 +1936,14 @@ def apply_artifact_success_outcome(
         result=result,
         arguments=arguments,
     )
+    loop_info = track_verifier_rejection(service.harness.state, verifier_verdict)
+    if loop_info.get("is_loop"):
+        service.harness._runlog(
+            "verifier_loop_detected",
+            "Verifier rejecting task_complete repeatedly",
+            rejection_count=loop_info["rejection_count"],
+            last_verdict=loop_info["verdict"],
+        )
     _update_subtask_ledger_from_verifier(service, verifier_verdict)
     if isinstance(verifier_verdict, dict):
         verdict_label = str(verifier_verdict.get("verdict") or "").strip().lower()

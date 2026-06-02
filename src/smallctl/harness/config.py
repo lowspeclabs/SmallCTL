@@ -34,7 +34,7 @@ class HarnessConfig:
     backend_healthcheck_timeout_sec: int = 5
     backend_restart_grace_sec: int = 20
     summarize_at_ratio: float = 0.8
-    recent_message_limit: int = 24
+    recent_message_limit: int = 32
     max_summary_items: int = 3
     max_artifact_snippets: int = 4
     artifact_snippet_token_limit: int = 400
@@ -124,6 +124,7 @@ class HarnessConfig:
     new_file_chunk_mode_line_estimate: int = 100
     allow_multi_section_turns_for_small_edits: bool = True
     failed_local_patch_limit: int = 2
+    max_repair_steps: int = 3
     enable_write_intent_recovery: bool = True
     enable_assistant_code_write_recovery: bool = True
     write_recovery_min_confidence: str = "high"

@@ -35,24 +35,32 @@ def _task_forces_chunk_mode(harness: Any, path: str) -> bool:
         return False
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
     forced_targets = scratchpad.get("_force_chunk_mode_targets")
-    if not isinstance(forced_targets, list) or not forced_targets:
-        return False
+    if isinstance(forced_targets, list) and forced_targets:
+        from ..tools.fs import _resolve
 
-    from ..tools.fs import _resolve
-
-    try:
-        candidate = _resolve(path, getattr(harness.state, "cwd", None))
-    except Exception:
-        candidate = None
-    for target in forced_targets:
         try:
-            forced_path = _resolve(str(target), getattr(harness.state, "cwd", None))
+            candidate = _resolve(path, getattr(harness.state, "cwd", None))
         except Exception:
-            forced_path = None
-        if candidate is not None and forced_path is not None and candidate == forced_path:
-            return True
-        if str(target).strip() == str(path).strip():
-            return True
+            candidate = None
+        for target in forced_targets:
+            try:
+                forced_path = _resolve(str(target), getattr(harness.state, "cwd", None))
+            except Exception:
+                forced_path = None
+            if candidate is not None and forced_path is not None and candidate == forced_path:
+                return True
+            if str(target).strip() == str(path).strip():
+                return True
+
+    # Small web artifacts are safer as one complete write; chunking is the loop
+    # failure surface for single-file HTML games and similar deliverables.
+    task_text = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
+    lowered_task = task_text.lower()
+    has_spec_hint = "spec" in lowered_task or "-spec" in lowered_task or "_spec" in lowered_task
+    is_web_file = Path(path).suffix.lower() in {".html", ".htm", ".css", ".js", ".jsx", ".ts", ".tsx"}
+    if has_spec_hint and is_web_file and "large" in lowered_task:
+        return True
+
     return False
 
 
@@ -184,6 +192,12 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     if not target:
         return None
 
+    from ..harness.task_classifier import task_is_local_coding_target
+
+    task_text = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
+    if task_is_local_coding_target(task_text):
+        return None
+
     existing = _active_write_session_for_target(harness, target)
     if existing is not None:
         return existing
@@ -275,6 +289,10 @@ def _should_enter_chunk_mode(harness: Any, pending: PendingToolCall) -> bool:
         return False
 
     path = str(pending.args.get("path") or "").strip()
+    if Path(path).suffix.lower() in {".html", ".htm"}:
+        content = str(pending.args.get("content", ""))
+        if len(content) < _write_policy_value(harness, "single_shot_small_artifact_chars", 20000):
+            return False
     if _task_forces_chunk_mode(harness, path):
         return True
 

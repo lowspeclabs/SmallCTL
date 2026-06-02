@@ -74,6 +74,31 @@ _FILE_WRITE_TOOLS = {
     "ssh_file_patch",
     "ssh_file_replace_between",
 }
+
+
+def _validation_handoff_hint_for_blocked_tool(pending: PendingToolCall, *, mode: str) -> str:
+    tool_name = str(pending.tool_name or "").strip()
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode != "planning" or tool_name not in {"run", "shell_exec"}:
+        return ""
+    command = str(
+        pending.args.get("command")
+        or pending.args.get("cmd")
+        or pending.args.get("args")
+        or pending.args.get("code")
+        or ""
+    ).strip()
+    if command:
+        return (
+            "Planning mode cannot execute shell commands. For phase verification, call "
+            f"`request_validation_execution(command={command!r})` instead; after approval the loop runtime will run it via `shell_exec`. "
+            "Do not promote the phase from static file reads alone."
+        )
+    return (
+        "Planning mode cannot execute shell commands and there is no tool named `run`. "
+        "For phase verification, identify the exact verifier/test command and call `request_validation_execution(command=...)`; "
+        "after approval the loop runtime will run it via `shell_exec`. Do not promote the phase from static file reads alone."
+    )
 _EXPLICIT_FILE_EDIT_TASK_RE = re.compile(
     r"\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix)\b.*\b(?:file|path|script|config|document)\b"
     r"|"
@@ -521,6 +546,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     error_message = f"Tool `{pending.tool_name}` is not available."
                 if hidden_reason_text:
                     error_message = f"{error_message} Reason: {hidden_reason_text}."
+                validation_hint = _validation_handoff_hint_for_blocked_tool(
+                    pending,
+                    mode=graph_state.run_mode,
+                )
+                if validation_hint:
+                    error_message = f"{error_message} {validation_hint}"
                 recovery_artifact_id = recent_hidden_tool_recovery_artifact_id(
                     harness.state,
                     tool_name=pending.tool_name,

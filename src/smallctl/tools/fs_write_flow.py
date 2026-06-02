@@ -17,8 +17,10 @@ from .fs_sessions import (
     _repair_cycle_session_id_failure,
     _same_target_path,
     _mark_repeat_patch,
+    _looks_like_complete_html_document,
     _looks_like_full_script_content,
     _record_file_change,
+    _section_matches_any_suggestion,
     _section_name_allows_full_file_finalization,
     _infer_next_suggested_section,
     _write_session_should_finalize,
@@ -31,6 +33,7 @@ from .fs_write_sessions import (
     _resolve,
     _write_text_file,
     format_write_session_status_block,
+    write_session_contract,
     write_session_status_snapshot,
 )
 from .fs_write_session_policy import (
@@ -184,6 +187,13 @@ def handle_file_write_session(
     normalized_section_name = _normalize_section_name(section_name, section_id)
     normalized_next_section = str(next_section_name or "").strip()
     strategy = _normalize_replace_strategy(replace_strategy)
+    if (
+        strategy == "overwrite"
+        and target.suffix.lower() in {".html", ".htm"}
+        and _looks_like_complete_html_document(content)
+    ):
+        normalized_section_name = "full_file"
+        normalized_next_section = ""
     staging_path = _ensure_write_session_files(session, target, cwd=cwd, encoding=encoding)
     staged_content = _read_text_file(staging_path, encoding=encoding)
     previous_sections = list(session.write_sections_completed)
@@ -193,6 +203,10 @@ def handle_file_write_session(
     session.write_last_attempt_ranges = previous_ranges
 
     current_range = previous_ranges.get(normalized_section_name)
+    full_staged_overwrite_requested = (
+        strategy == "overwrite" and _section_name_allows_full_file_finalization(normalized_section_name)
+    )
+    already_checkpointed_rewrite = normalized_section_name in previous_sections and not full_staged_overwrite_requested
     if current_range:
         updated_content, updated_ranges = _replace_known_section(
             staged_content,
@@ -202,6 +216,38 @@ def handle_file_write_session(
         )
         effective_strategy = "replace_section"
     elif strategy == "overwrite":
+        if previous_sections and not _section_name_allows_full_file_finalization(normalized_section_name):
+            return fail(
+                "Refusing to overwrite the entire staged file for a new chunk section after prior sections were recorded. "
+                "Use `file_write` without `replace_strategy='overwrite'` to append the next section, use the same section name "
+                "to replace a known section, or use `section_name='full_file'` with `replace_strategy='overwrite'` for an "
+                "intentional full-file replacement.",
+                metadata={
+                    "path": str(target),
+                    "staging_path": str(staging_path),
+                    "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                    "section_name": normalized_section_name,
+                    "replace_strategy": strategy,
+                    "error_kind": "chunked_write_overwrite_new_section_after_progress",
+                    "write_sections_completed": previous_sections,
+                    "write_next_section": str(getattr(session, "write_next_section", "") or "").strip(),
+                    "staged_only": True,
+                    "next_required_tool": {
+                        "tool_name": "file_write",
+                        "required_fields": ["path", "content", "write_session_id", "section_name"],
+                        "required_arguments": {
+                            "path": path,
+                            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
+                            "section_name": str(getattr(session, "write_next_section", "") or normalized_section_name).strip(),
+                        },
+                        "optional_fields": ["next_section_name", "replace_strategy"],
+                        "notes": [
+                            "Omit replace_strategy or use append for the next new chunk section.",
+                            "Use section_name='full_file' plus replace_strategy='overwrite' only for an intentional complete staged-file replacement.",
+                        ],
+                    },
+                },
+            )
         updated_content = content
         updated_ranges = {
             normalized_section_name: {"start": 0, "end": len(content)}
@@ -314,18 +360,30 @@ def handle_file_write_session(
         replace_strategy=strategy,
         content=content,
     )
-    if not normalized_next_section and not final_chunk:
+    if (
+        not normalized_next_section
+        and not final_chunk
+        and target.suffix.lower() in {".html", ".htm"}
+        and _looks_like_complete_html_document(updated_content)
+    ):
+        final_chunk = True
+    infer_next_section = not (
+        target.suffix.lower() in {".html", ".htm"}
+        and not _section_matches_any_suggestion(session, normalized_section_name)
+    )
+    if not normalized_next_section and not final_chunk and infer_next_section:
         inferred = _infer_next_suggested_section(session, normalized_section_name)
         if inferred:
             normalized_next_section = inferred
             inferred_next_section = True
-    final_chunk = _write_session_should_finalize(
-        session,
-        section_name=normalized_section_name,
-        next_section_name=normalized_next_section,
-        replace_strategy=strategy,
-        content=content,
-    )
+    if not final_chunk:
+        final_chunk = _write_session_should_finalize(
+            session,
+            section_name=normalized_section_name,
+            next_section_name=normalized_next_section,
+            replace_strategy=strategy,
+            content=content,
+        )
 
     append_overlap_ratio = 0.0
     if effective_strategy == "append" and staged_content and len(content) >= 0.5 * len(staged_content):
@@ -363,6 +421,40 @@ def handle_file_write_session(
                 },
             )
         return loop_guard_block
+
+    if already_checkpointed_rewrite:
+        contract = write_session_contract(session)
+        next_section = str(getattr(session, "write_next_section", "") or "").strip()
+        return fail(
+            f"Refusing to rewrite already-checkpointed section `{normalized_section_name}` in Write Session `{write_session_id}`. "
+            "Advance to the next legal operation, or explicitly request a full staged overwrite with "
+            "`section_name='full_file'` and `replace_strategy='overwrite'`.",
+            metadata={
+                "path": str(target),
+                "staging_path": str(staging_path),
+                "error_kind": "chunked_write_already_checkpointed_section",
+                "write_session_contract": contract,
+                "active_write_session_id": contract["active_write_session_id"],
+                "checkpointed_sections": contract["checkpointed_sections"],
+                "next_legal_operation": contract["next_legal_operation"],
+                "section_name": normalized_section_name,
+                "write_sections_completed": previous_sections,
+                "staged_only": True,
+                "next_required_tool": {
+                    "tool_name": "file_write" if next_section else "finalize_write_session",
+                    "required_fields": ["path", "content", "write_session_id", "section_name"] if next_section else [],
+                    "required_arguments": (
+                        {"path": path, "write_session_id": write_session_id, "section_name": next_section}
+                        if next_section
+                        else {}
+                    ),
+                    "notes": [
+                        "Do not rewrite checkpointed sections.",
+                        "Use section_name='full_file' with replace_strategy='overwrite' only for an intentional full staged overwrite.",
+                    ],
+                },
+            },
+        )
 
     try:
         _write_text_file(staging_path, updated_content, encoding=encoding)
@@ -445,6 +537,10 @@ def handle_file_write_session(
             "write_next_section": normalized_next_section,
             "write_sections_completed": session.write_sections_completed,
             "write_section_ranges": session.write_section_ranges,
+            "write_session_contract": write_session_contract(session),
+            "active_write_session_id": write_session_id,
+            "checkpointed_sections": list(session.write_sections_completed),
+            "next_legal_operation": write_session_contract(session)["next_legal_operation"],
             "write_session_staged_hash": session.write_last_staged_hash,
             "write_session_status_block": status_block,
             "write_session_finalized": False,

@@ -249,6 +249,36 @@ def test_system_prompt_web_research_prefers_result_id_and_real_answer() -> None:
     assert "do not finish with only 'found N results'" in prompt
 
 
+def test_system_prompt_guides_phase_contract_update_for_phased_coding() -> None:
+    state = _make_state()
+    state.scratchpad["_model_name"] = "qwen3:4b"
+    state.run_brief.original_task = "read temp/tetris-spec.md and implement phase 3"
+
+    prompt = build_system_prompt(
+        state,
+        "execute",
+        available_tool_names=["file_read", "phase_contract_update", "task_complete"],
+    )
+
+    assert "PHASED CODING CONTRACT" in prompt
+    assert "call `phase_contract_update`" in prompt
+    assert "Promotion requires a behavioral verifier" in prompt
+    assert "py_compile" in prompt
+
+
+def test_system_prompt_omits_phase_contract_guidance_for_simple_task() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "write a small hello world script"
+
+    prompt = build_system_prompt(
+        state,
+        "execute",
+        available_tool_names=["file_write", "task_complete"],
+    )
+
+    assert "PHASED CODING CONTRACT" not in prompt
+
+
 def test_loop_status_surfaces_subtask_ledger() -> None:
     state = _make_state()
     state.subtask_ledger = SubtaskLedger(
@@ -2906,6 +2936,99 @@ def test_shell_exec_blocks_active_write_session_artifact_delete(tmp_path: Path) 
     assert stage.exists()
 
 
+def test_shell_exec_blocks_recently_touched_directory_delete(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    package_dir = tmp_path / "temp" / "generated_pkg"
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("broken export\n", encoding="utf-8")
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.last_code_change_paths = [str(init_file)]
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"rm -rf {package_dir}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "workspace_destructive_delete_blocked"
+    assert result["metadata"]["blocked_targets"][0]["reasons"] == ["contains_protected_working_set_path"]
+    assert package_dir.exists()
+    assert init_file.exists()
+
+
+def test_shell_exec_allows_cache_only_delete(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    cache_dir = tmp_path / "temp" / "__pycache__"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "module.cpython-312.pyc").write_bytes(b"cache")
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"rm -rf {cache_dir}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is True
+    assert not cache_dir.exists()
+
+
+def test_shell_exec_blocks_mixed_cache_and_protected_delete(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    cache_dir = tmp_path / "temp" / "__pycache__"
+    package_dir = tmp_path / "temp" / "generated_pkg"
+    cache_dir.mkdir(parents=True)
+    package_dir.mkdir(parents=True)
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("broken export\n", encoding="utf-8")
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.last_code_change_paths = [str(init_file)]
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"rm -rf {cache_dir} {package_dir}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "workspace_destructive_delete_blocked"
+    assert str(cache_dir.resolve()) in result["metadata"]["allowed_targets"]
+    assert package_dir.exists()
+    assert init_file.exists()
+
+
+def test_shell_exec_allows_exact_user_requested_delete(tmp_path: Path) -> None:
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target_dir = tmp_path / "temp" / "obsolete_pkg"
+    target_dir.mkdir(parents=True)
+    (target_dir / "__init__.py").write_text("obsolete\n", encoding="utf-8")
+    state.run_brief.original_task = "Delete obsolete_pkg and clean up the generated package."
+
+    result = asyncio.run(
+        shell.shell_exec(
+            command=f"rm -rf {target_dir}",
+            state=state,
+            harness=None,
+        )
+    )
+
+    assert result["success"] is True
+    assert not target_dir.exists()
+
+
 def test_shell_workspace_relative_retry_hint_targets_root_temp_paths() -> None:
     state = _make_state()
     harness = SimpleNamespace(state=state)
@@ -3242,6 +3365,13 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     assert "acceptance: 1/2" in text
     assert "verdict: pass | pytest | exit 0" in text
 
+    bar.__dict__["_vertical"] = True
+    vertical_text = StatusBar._build_status_text(bar)
+    assert "[bold #93c5fd]Model[/]" in vertical_text
+    assert "[bold #93c5fd]Run[/]" in vertical_text
+    assert "[bold #93c5fd]Usage[/]" in vertical_text
+    assert "\n" in vertical_text
+
 
 def test_system_prompt_surfaces_repair_focus() -> None:
     state = _make_state()
@@ -3394,6 +3524,413 @@ def test_task_complete_still_blocks_non_diagnostic_failing_verifier() -> None:
 
     assert blocked["success"] is False
     assert "latest verifier verdict is still failing" in blocked["error"]
+
+
+def test_task_complete_missing_module_blocker_recommends_dependency_install(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "snake.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("import pygame\n", encoding="utf-8")
+    venv_python = target.parent / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.last_code_change_paths = ["temp/snake.py"]
+    state.challenge_progress.verified_after_last_change = False
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "cd temp && python3 -c \"import snake\"",
+        "command": "cd temp && python3 -c \"import snake\"",
+        "exit_code": 1,
+        "key_stderr": "ModuleNotFoundError: No module named 'pygame'",
+        "verdict": "fail",
+        "failure_mode": "import",
+    }
+
+    blocked = asyncio.run(control.task_complete("done", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "missing_runtime_dependency"
+    action = blocked["metadata"]["next_required_action"]
+    assert "pygame" in action["required_arguments"]["command"]
+    assert str(venv_python) in action["required_arguments"]["command"]
+    assert "missing Python module `pygame`" in "\n".join(action["notes"])
+
+
+def test_task_complete_post_change_verification_block_without_dependency_does_not_crash(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris-main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('ok')\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.last_code_change_paths = ["temp/tetris-main.py"]
+    state.challenge_progress.verified_after_last_change = False
+
+    blocked = asyncio.run(control.task_complete("done", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "post_change_verification_required"
+    action = blocked["metadata"]["next_required_action"]
+    assert action["tool_name"] == "shell_exec"
+    assert action["required_arguments"]["command"] == "python3 -m py_compile temp/tetris-main.py"
+
+
+def test_task_complete_blocks_phase_promotion_on_syntax_only_verifier() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "implement phase 3 of the tetris game"
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = True
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -m py_compile temp/tetris_main.py",
+        "command": "python3 -m py_compile temp/tetris_main.py",
+        "exit_code": 0,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "pass",
+        "acceptance_delta": {"status": "satisfied", "notes": ["execution succeeded"]},
+    }
+
+    blocked = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "phase_promotion_behavioral_verifier_required"
+    assert blocked["metadata"]["verifier_quality"] == {"score": 1, "label": "syntax"}
+    assert blocked["metadata"]["required_verifier_quality"] == {"score": 3, "label": "behavioral"}
+    notes = "\n".join(blocked["metadata"]["next_required_action"]["notes"])
+    assert "behavioral smoke verifier" in notes
+
+
+def test_task_complete_blocks_phase_promotion_on_import_only_verifier() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "implement phase 2 of the tetris game"
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = True
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -c \"import tetris_main\"",
+        "command": "python3 -c \"import tetris_main\"",
+        "exit_code": 0,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "pass",
+        "acceptance_delta": {"status": "satisfied", "notes": ["execution succeeded"]},
+    }
+
+    blocked = asyncio.run(control.task_complete("Phase 2 complete", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "phase_promotion_behavioral_verifier_required"
+    assert blocked["metadata"]["verifier_quality"] == {"score": 2, "label": "import"}
+
+
+def test_task_complete_blocks_phase_promotion_on_timeout_verifier_even_if_waived() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "continue with phase 3 implementation"
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = True
+    state.acceptance_waived = True
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "cd temp && .venv/bin/python tetris_main.py",
+        "command": "cd temp && .venv/bin/python tetris_main.py",
+        "exit_code": None,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "fail",
+        "failure_mode": "environment",
+        "acceptance_delta": {"status": "blocked", "notes": ["Command timed out after 30s"]},
+    }
+
+    blocked = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "phase_promotion_verifier_not_passing"
+    assert blocked["metadata"]["required_verifier_quality"] == {"score": 3, "label": "behavioral"}
+
+
+def test_task_complete_allows_phase_promotion_with_behavioral_verifier() -> None:
+    state = _make_state()
+    state.run_brief.original_task = "implement phase 3 of the tetris game"
+    state.challenge_progress.task_category = "coding"
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = True
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -c \"import tetris_main as t; e=t.GameEngine(); assert e.spawn_piece(); e.handle_key_event(t.pygame.K_LEFT)\"",
+        "command": "python3 -c \"import tetris_main as t; e=t.GameEngine(); assert e.spawn_piece(); e.handle_key_event(t.pygame.K_LEFT)\"",
+        "exit_code": 0,
+        "key_stdout": "",
+        "key_stderr": "",
+        "verdict": "pass",
+        "acceptance_delta": {"status": "satisfied", "notes": ["execution succeeded"]},
+    }
+
+    allowed = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert allowed["success"] is True
+    assert allowed["output"]["status"] == "complete"
+
+
+def test_task_complete_blocks_active_phase_contract_missing_symbol(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris_main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GameEngine:\n    pass\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.scratchpad["_phase_contract"] = {
+        "version": 1,
+        "active_phase": "phase_3",
+        "phases": {
+            "phase_3": {
+                "title": "Game Loop",
+                "status": "active",
+                "expected_files": ["temp/tetris_main.py"],
+                "required_symbols": ["GameEngine", "GamePiece.move"],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -c \"import tetris_main as t; assert True\"",
+        "command": "python3 -c \"import tetris_main as t; assert True\"",
+        "exit_code": 0,
+        "verdict": "pass",
+    }
+
+    blocked = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "phase_contract_missing_required_symbols"
+    contract = blocked["metadata"]["phase_contract"]
+    assert contract["missing_symbols"] == ["GamePiece.move"]
+
+
+def test_task_complete_blocks_active_phase_contract_low_quality_verifier(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris_main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GamePiece:\n    def move(self):\n        pass\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.scratchpad["_phase_contract"] = {
+        "version": 1,
+        "active_phase": "phase_3",
+        "phases": {
+            "phase_3": {
+                "title": "Game Loop",
+                "status": "active",
+                "expected_files": ["temp/tetris_main.py"],
+                "required_symbols": ["GamePiece.move"],
+                "checks": [
+                    {
+                        "id": "spawn_input_smoke",
+                        "quality": "behavioral",
+                        "command": "python3 -c \"import tetris_main as t; p=t.GamePiece(); assert hasattr(p, 'move'); p.move()\"",
+                    }
+                ],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -m py_compile temp/tetris_main.py",
+        "command": "python3 -m py_compile temp/tetris_main.py",
+        "exit_code": 0,
+        "verdict": "pass",
+    }
+
+    blocked = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert blocked["success"] is False
+    assert blocked["metadata"]["reason"] == "phase_contract_verifier_quality_too_low"
+    assert blocked["metadata"]["phase_contract"]["verifier_quality"] == {"score": 1, "label": "syntax"}
+    action = blocked["metadata"]["next_required_action"]
+    assert action["check_id"] == "spawn_input_smoke"
+    assert "p.move()" in action["required_arguments"]["command"]
+
+
+def test_task_complete_allows_active_phase_contract_behavioral_verifier(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris_main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GamePiece:\n    def move(self):\n        pass\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.scratchpad["_phase_contract"] = {
+        "version": 1,
+        "active_phase": "phase_3",
+        "phases": {
+            "phase_3": {
+                "title": "Game Loop",
+                "status": "active",
+                "expected_files": ["temp/tetris_main.py"],
+                "required_symbols": ["GamePiece.move"],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+    state.last_verifier_verdict = {
+        "tool": "shell_exec",
+        "target": "python3 -c \"import tetris_main as t; p=t.GamePiece(); assert hasattr(p, 'move'); p.move()\"",
+        "command": "python3 -c \"import tetris_main as t; p=t.GamePiece(); assert hasattr(p, 'move'); p.move()\"",
+        "exit_code": 0,
+        "verdict": "pass",
+    }
+
+    allowed = asyncio.run(control.task_complete("Phase 3 complete", state=state, harness=None))
+
+    assert allowed["success"] is True
+
+
+def test_loop_status_exposes_phase_contract_status(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris_main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GameEngine:\n    pass\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.scratchpad["_phase_contract"] = {
+        "version": 1,
+        "active_phase": "phase_3",
+        "phases": {
+            "phase_3": {
+                "title": "Game Loop",
+                "status": "active",
+                "expected_files": ["temp/tetris_main.py"],
+                "required_symbols": ["GameEngine"],
+                "checks": [
+                    {
+                        "id": "engine_smoke",
+                        "quality": "behavioral",
+                        "command": "python3 -c \"import tetris_main as t; assert t.GameEngine\"",
+                    }
+                ],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+
+    status = asyncio.run(control.loop_status(state))
+
+    assert status["success"] is True
+    assert status["output"]["phase_contract"]["active_phase"] == "phase_3"
+    assert status["output"]["phase_contract"]["status"] == "blocked"
+    assert status["output"]["phase_contract"]["reason"] == "phase_contract_verifier_not_passing"
+    assert status["output"]["phase_contract"]["suggested_verifier"]["id"] == "engine_smoke"
+
+
+def test_loop_status_infers_phase_contract_from_spec(tmp_path: Path) -> None:
+    temp = tmp_path / "temp"
+    temp.mkdir(parents=True)
+    (temp / "tetris-spec.md").write_text(
+        "# Tetris Plan\n\n"
+        "## Phase 1: Foundation\n"
+        "## Phase 2: Core Mechanics\n"
+        "## Phase 3: Game Loop\n"
+        "Expected file: ./temp/tetris_main.py\n",
+        encoding="utf-8",
+    )
+    (temp / "tetris_main.py").write_text("class GameEngine:\n    pass\n", encoding="utf-8")
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    state.run_brief.original_task = "read ./temp/tetris-spec.md and implement phase 3"
+
+    status = asyncio.run(control.loop_status(state))
+
+    contract = status["output"]["phase_contract"]
+    assert contract["active_phase"] == "phase_3"
+    assert contract["title"] == "Phase 3: Game Loop"
+    assert contract["expected_files"] == ["temp/tetris_main.py"]
+    assert contract["suggested_verifier"]["id"] == "tetris_main_behavior_smoke"
+    assert "PYTHONPATH=temp" in contract["suggested_verifier"]["command"]
+
+
+def test_phase_contract_update_persists_and_exposes_status(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris_main.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GameEngine:\n    pass\n", encoding="utf-8")
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    contract = {
+        "version": 1,
+        "active_phase": "phase_3",
+        "phases": {
+            "phase_3": {
+                "title": "Game Loop",
+                "status": "active",
+                "expected_files": ["temp/tetris_main.py"],
+                "required_symbols": ["GameEngine"],
+                "promotion": {"required_quality": "behavioral"},
+            }
+        },
+    }
+
+    result = asyncio.run(control.phase_contract_update(contract=contract, state=state))
+
+    assert result["success"] is True
+    assert state.scratchpad["_phase_contract"]["active_phase"] == "phase_3"
+    persisted = tmp_path / ".smallctl" / "phase_contract.json"
+    assert persisted.exists()
+    assert json.loads(persisted.read_text(encoding="utf-8"))["active_phase"] == "phase_3"
+    assert result["output"]["phase_contract"]["active_phase"] == "phase_3"
+
+
+def test_phase_contract_update_normalizes_model_shaped_contract(tmp_path: Path) -> None:
+    target = tmp_path / "temp" / "tetris-main.py"
+    test_file = tmp_path / "temp" / "test_phase3.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("class GameState:\n    pass\n", encoding="utf-8")
+    test_file.write_text("print('ok')\n", encoding="utf-8")
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    contract = {
+        "version": 1,
+        "active_phase": "Phase_3",
+        "phases": {
+            "Phase_3": {
+                "name": "Tetris Game Loop with Drop Timer, Score, Level & States",
+                "expected_files": ["temp/tetris-main.py", "temp/test_phase3.py"],
+                "required_symbols": ["GameState"],
+                "checks": ["python3 -m py_compile tetris-main.py", "python3 test_phase3.py"],
+                "promotion": "all_checks_pass",
+            }
+        },
+    }
+
+    result = asyncio.run(control.phase_contract_update(contract=contract, state=state, persist=False))
+
+    assert result["success"] is True
+    normalized = state.scratchpad["_phase_contract"]["phases"]["Phase_3"]
+    assert normalized["title"] == "Tetris Game Loop with Drop Timer, Score, Level & States"
+    assert normalized["promotion"] == {"required_quality": "behavioral"}
+    assert normalized["checks"][0]["quality"] == "syntax"
+    assert normalized["checks"][0]["command"] == "python3 -m py_compile temp/tetris-main.py"
+    assert normalized["checks"][1]["quality"] == "behavioral"
+    assert result["output"]["phase_contract"]["suggested_verifier"]["command"] == "python3 temp/test_phase3.py"
+
+
+def test_phase_contract_update_rejects_invalid_contract() -> None:
+    state = _make_state()
+
+    result = asyncio.run(control.phase_contract_update(contract={"active_phase": "phase_1"}, state=state, persist=False))
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "invalid_phase_contract"
+    assert "phases" in result["error"]
 
 
 def test_task_complete_surfaces_approval_required_verifier_blocker() -> None:
@@ -4185,29 +4722,13 @@ def test_missing_first_write_session_recovered_and_original_payload_replayed(tmp
     assert isinstance(state.write_session, WriteSession)
     assert state.write_session.write_session_id == "3dde23b4"
     assert state.write_session.write_target_path == str(target)
-    assert len(graph_state.pending_tool_calls) == 1
-    pending = graph_state.pending_tool_calls[0]
-    assert pending.tool_name == "file_write"
-    assert pending.args["content"] == content
-    assert pending.args["write_session_id"] == "3dde23b4"
-    assert pending.args["section_name"] == "imports"
+    assert graph_state.pending_tool_calls == []
+    assert state.write_session.status == "complete"
+    assert target.read_text(encoding="utf-8") == content
     assert any(
         event == "missing_first_write_session_recovered"
         for event, _message, _data in runlog_events
     )
-
-    replay_result = asyncio.run(
-        fs.file_write(
-            cwd=str(tmp_path),
-            state=state,
-            **pending.args,
-        )
-    )
-
-    assert replay_result["success"] is True
-    assert state.write_session.write_staging_path
-    assert Path(state.write_session.write_staging_path).read_text(encoding="utf-8") == content
-    assert not target.exists()
 
 
 def test_patch_existing_first_choice_failure_rebinds_mismatched_write_session(tmp_path: Path) -> None:

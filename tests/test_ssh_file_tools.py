@@ -1573,3 +1573,86 @@ def test_replace_between_missing_start_includes_recovery_metadata() -> None:
     assert metadata["end_text_found"] is True
     assert "start_text_best_match" in metadata
     assert "end_text was found but start_text was not found" in metadata["ambiguity_hint"]
+
+
+def test_ssh_exec_verifier_failure_increments_failed_attempts() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.63",
+        "user": "root",
+        "guessed_paths": ["/var/www/html/index.html"],
+    }
+
+    tool_result_artifact_updates._record_failed_verification_attempt(
+        service,
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=False,
+            output={"stdout": "", "stderr": "Permission denied", "exit_code": 1},
+        ),
+        arguments={
+            "host": "192.168.1.63",
+            "command": "cat /var/www/html/index.html",
+        },
+    )
+
+    req = state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY]
+    assert req["failed_verification_attempts"] == 1
+
+
+def test_ssh_exec_verifier_failure_ignores_non_verifier_commands() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.63",
+        "user": "root",
+        "guessed_paths": ["/var/www/html/index.html"],
+    }
+
+    tool_result_artifact_updates._record_failed_verification_attempt(
+        service,
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=False,
+            output={"stdout": "", "stderr": "Permission denied", "exit_code": 1},
+        ),
+        arguments={
+            "host": "192.168.1.63",
+            "command": "whoami",
+        },
+    )
+
+    req = state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY]
+    assert req.get("failed_verification_attempts", 0) == 0
+
+
+def test_three_ssh_exec_verifier_failures_disable_remote_verifier() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY] = {
+        "host": "192.168.1.63",
+        "user": "root",
+        "guessed_paths": ["/var/www/html/index.html"],
+    }
+
+    for _ in range(3):
+        tool_result_artifact_updates._record_failed_verification_attempt(
+            service,
+            tool_name="ssh_exec",
+            result=ToolEnvelope(
+                success=False,
+                output={"stdout": "", "stderr": "Permission denied", "exit_code": 1},
+            ),
+            arguments={
+                "host": "192.168.1.63",
+                "command": "cat /var/www/html/index.html",
+            },
+        )
+
+    # After 3 failures, task_complete should no longer be blocked
+    result = asyncio.run(task_complete("done", state=state, harness=None))
+    assert result["success"] is True

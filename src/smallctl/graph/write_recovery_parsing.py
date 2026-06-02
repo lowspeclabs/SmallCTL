@@ -4,7 +4,11 @@ import json
 import re
 from typing import Any
 
-from ..task_targets import extract_task_target_paths, task_target_paths_from_harness
+from ..task_targets import (
+    approved_plan_output_paths_from_harness,
+    extract_task_target_paths,
+    task_target_paths_from_harness,
+)
 from .state import PendingToolCall
 
 _WRITE_TOOLS = {"file_write", "file_append"}
@@ -259,15 +263,19 @@ def _extract_inline_tool_content(text: str, *, target_path: str) -> tuple[str, l
 
 
 def _has_conflicting_paths(*, harness: Any, assistant_text: str, chosen_path: str) -> bool:
-    candidates = _ordered_unique(
-        task_target_paths_from_harness(harness) + _extract_inline_tool_paths(str(assistant_text or ""))
-    )
+    cwd = getattr(getattr(harness, "state", None), "cwd", None)
+    approved_outputs = approved_plan_output_paths_from_harness(harness)
+    chosen_is_approved_output = any(_same_path(output, chosen_path, cwd) for output in approved_outputs)
+
+    task_candidates = task_target_paths_from_harness(harness)
+    inline_candidates = _extract_inline_tool_paths(str(assistant_text or ""))
+    candidates = _ordered_unique(([] if chosen_is_approved_output else task_candidates) + inline_candidates)
     if not candidates:
         return False
     for candidate in candidates:
         if candidate == chosen_path:
             continue
-        if _same_path(candidate, chosen_path, getattr(getattr(harness, "state", None), "cwd", None)):
+        if _same_path(candidate, chosen_path, cwd):
             continue
         return True
     return False

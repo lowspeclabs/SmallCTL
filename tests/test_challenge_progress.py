@@ -61,6 +61,63 @@ def test_code_change_resets_verified_after_last_change() -> None:
     assert state.challenge_progress.redundant_verifier_count == 0
 
 
+def test_verifier_scaffolding_write_does_not_reset_verified_after_last_change() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."
+
+    record_code_change(state, tool_name="file_write", path="./temp/example.py")
+    record_verifier_result(
+        state,
+        tool_name="shell_exec",
+        command="python3 ./temp/example.py",
+        verifier_kind="run_target",
+        verdict="pass",
+        exit_code=0,
+    )
+    assert state.challenge_progress.verified_after_last_change is True
+
+    record_code_change(state, tool_name="file_write", path="./temp/verify_phase2.py")
+
+    assert state.challenge_progress.verified_after_last_change is True
+    assert state.challenge_progress.code_change_count == 1
+    assert state.challenge_progress.last_code_change_paths == ["./temp/example.py"]
+    assert state.challenge_progress.last_verifier_artifact_paths == ["./temp/verify_phase2.py"]
+
+
+def test_root_run_verification_write_is_tracked_as_verifier_scaffolding() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."
+
+    record_code_change(state, tool_name="file_write", path="./temp/example.py")
+    record_verifier_result(
+        state,
+        tool_name="shell_exec",
+        command="python3 ./temp/example.py",
+        verifier_kind="run_target",
+        verdict="pass",
+        exit_code=0,
+    )
+
+    record_code_change(state, tool_name="file_patch", path="/tmp/project/run_verification.py")
+
+    assert state.challenge_progress.verified_after_last_change is True
+    assert state.challenge_progress.code_change_count == 1
+    assert state.challenge_progress.last_verifier_artifact_paths == [
+        "/tmp/project/run_verification.py"
+    ]
+
+
+def test_required_verify_named_output_still_counts_as_code_change() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/verify_phase2.py`."
+
+    record_code_change(state, tool_name="file_write", path="./temp/verify_phase2.py")
+
+    assert state.challenge_progress.code_change_count == 1
+    assert state.challenge_progress.last_code_change_paths == ["./temp/verify_phase2.py"]
+    assert state.challenge_progress.last_verifier_artifact_paths == []
+
+
 def test_coding_no_change_loop_blocks_after_twenty_steps() -> None:
     state = LoopState()
     state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."

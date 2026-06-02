@@ -113,6 +113,19 @@ def _inject_recovery_metrics(result: dict[str, Any], state: Any) -> None:
         result["recovery_metrics"] = dict(metrics)
 
 
+def _run_metric_flags(state: Any, challenge_progress: dict[str, Any]) -> dict[str, Any]:
+    task_text = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
+    no_op = task_text in {"hi", "hello", "hey", "thanks", "thank you"} and int(getattr(state, "step_count", 0) or 0) <= 1
+    code_changes = int(challenge_progress.get("code_change_count", 0) or 0) if challenge_progress else 0
+    deliverable_verified = bool(challenge_progress.get("verified_after_last_change")) if challenge_progress else False
+    diagnostic_only = code_changes <= 0 and not deliverable_verified and not no_op
+    return {
+        "no_op": no_op,
+        "deliverable_verified": deliverable_verified,
+        "diagnostic_only": diagnostic_only,
+    }
+
+
 def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     status = str((result or {}).get("status") or "").strip().lower()
     task_summary = None
@@ -146,6 +159,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     challenge_progress = challenge_progress_report(self.state)
     if challenge_progress:
         result["challenge_progress"] = challenge_progress
+    result.update(_run_metric_flags(self.state, challenge_progress))
     _inject_recovery_metrics(result, self.state)
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
@@ -192,6 +206,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "latest_task_summary_path": task_summary_path,
                 "stall_classification": stall_classification,
                 "error_type": error_type,
+                **_run_metric_flags(self.state, challenge_progress),
             }
             if challenge_progress:
                 summary_payload["challenge_progress"] = challenge_progress
@@ -502,7 +517,38 @@ def _task_mentions_remote_web_continuation(state: Any, task: str) -> bool:
     return any(hint in text for hint in web_hints)
 
 
+def _looks_like_soft_resteer(current_task: str, last_task: str) -> bool:
+    """Detect if the current task is a soft resteer (continuation) of the previous task."""
+    current = str(current_task or "").strip().lower()
+    last = str(last_task or "").strip().lower()
+    if not current or not last:
+        return False
+    if current == last:
+        return True
+    current_words = set(current.split())
+    last_words = set(last.split())
+    if not current_words or not last_words:
+        return False
+    overlap = len(current_words & last_words)
+    similarity = overlap / max(len(current_words), len(last_words))
+    return similarity >= 0.6
+
+
 def _activate_tool_profiles(self: Any, task: str) -> None:
+    # Fix 6: Freeze tool profiles on soft resteers to prevent tool whiplash
+    existing_profiles = list(getattr(self.state, "active_tool_profiles", []) or [])
+    last_task = str(self.state.scratchpad.get("_last_task_text") or "").strip()
+    if existing_profiles and _looks_like_soft_resteer(task, last_task):
+        self.state.scratchpad["_last_task_text"] = task
+        self._runlog(
+            "tool_profiles",
+            "preserved tool profiles on soft resteer",
+            task=task,
+            profiles=existing_profiles,
+            source="soft_resteer",
+        )
+        return
+
     if self._configured_tool_profiles:
         profiles = set(self._configured_tool_profiles)
     else:

@@ -79,6 +79,18 @@ def apply_server_context_limit(
         observed_n_keep=observed_n_keep if overflow_detected else None,
         provider_profile=getattr(harness, "provider_profile", None),
     )
+
+    # Boost context budget for local coding tasks to reduce lane dropping
+    from ..harness.task_classifier import task_is_local_coding_target
+    task_text = ""
+    run_brief = getattr(harness.state, "run_brief", None)
+    if run_brief is not None:
+        task_text = str(getattr(run_brief, "original_task", "") or "")
+    if task_is_local_coding_target(task_text) and harness.server_context_limit is not None:
+        local_coding_budget = int(harness.server_context_limit * 0.9)
+        if effective_max_prompt_tokens is None or effective_max_prompt_tokens < local_coding_budget:
+            effective_max_prompt_tokens = local_coding_budget
+
     if effective_max_prompt_tokens is not None:
         harness.context_policy.max_prompt_tokens = effective_max_prompt_tokens
     preserved_configured_budget = (

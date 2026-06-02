@@ -14,6 +14,7 @@ from ..models.tool_result import ToolEnvelope
 from ..phases import PHASES, filter_phase_blocked_tools, is_phase_contract_active, phase_contract, normalize_phase
 from ..state import ExecutionPlan, PlanStep, json_safe_value
 from ..normalization import coerce_int as _coerce_int_value
+from ..runtime_error_repair import maybe_record_reported_runtime_error
 from ..task_targets import primary_task_target_path
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.fs_loop_guard import clear_loop_guard_outline_requirement
@@ -218,6 +219,7 @@ async def initialize_loop_run(
             )
 
     harness.state.append_message(ConversationMessage(role="user", content=task))
+    maybe_record_reported_runtime_error(harness.state, task)
     harness._log_conversation_state("user_message")
     await harness._emit(
         deps.event_handler,
@@ -289,6 +291,19 @@ async def resume_loop_run(
     interrupted_guidance = ""
     outline_resume_hint = ""
     outline_resume_path = ""
+    validation_resume_hint = ""
+    if str(pending.get("kind") or "").strip() == "validation_execution_request":
+        validation_command = str(pending.get("command") or "").strip()
+        validation_reason = str(pending.get("reason") or "").strip()
+        if validation_command:
+            validation_resume_hint = (
+                "VALIDATION EXECUTION APPROVED: Run the requested validation command now using "
+                f"`shell_exec`: `{validation_command}`. "
+                "After it finishes, use the stdout/stderr/exit code as phase-validation evidence before proceeding. "
+                "Do not call a tool named `run`; the local command execution tool is `shell_exec`."
+            )
+            if validation_reason:
+                validation_resume_hint += f" Validation reason: {validation_reason}."
     if continue_like and str(pending.get("kind") or "").strip() == "repeated_tool_loop_resume":
         interrupted_tool_name = str(pending.get("tool_name") or "").strip()
         interrupted_args = pending.get("arguments")
@@ -379,6 +394,7 @@ async def resume_loop_run(
             },
         )
     )
+    maybe_record_reported_runtime_error(harness.state, human_input)
     if interrupted_pending is not None:
         _record_tool_attempt(harness, interrupted_pending)
         goal_recap = build_goal_recap(harness)
@@ -441,6 +457,25 @@ async def resume_loop_run(
             "chunked_write_loop_guard_outline_resume",
             "cleared loop guard outline mode after human confirmation",
             path=outline_resume_path,
+        )
+    elif validation_resume_hint:
+        harness.state.planning_mode_enabled = False
+        harness.state.current_phase = "execute"
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=validation_resume_hint,
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "validation_execution_request_resume",
+                    "command": str(pending.get("command") or "").strip(),
+                },
+            )
+        )
+        harness._runlog(
+            "validation_execution_request_resume",
+            "approved validation execution handoff to loop runtime",
+            command=str(pending.get("command") or "").strip(),
         )
     harness._log_conversation_state("resume_user_message")
     await harness._emit(
@@ -609,9 +644,9 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     harness.state.step_count += 1
 
-    # Hard step-budget safety net for small models: if we've burned >12 steps
+    # Hard step-budget safety net for small models: if we've burned >40 steps
     # without convergence, force a synthesize-and-exit directive.
-    if harness.state.step_count > 12:
+    if harness.state.step_count > 40:
         model_name = str(
             getattr(harness.state, "scratchpad", {}).get("_model_name")
             or getattr(getattr(harness, "client", None), "model", "")

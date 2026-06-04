@@ -9,6 +9,7 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..state import json_safe_value
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
+from .tool_loop_guards import _tool_call_fingerprint
 
 _INTERACTIVE_SCRIPT_PROMPT_MARKERS = (
     "(y/n)",
@@ -289,6 +290,36 @@ def _maybe_emit_repair_recovery_nudge(
         stagnation_counters=json_safe_value(counters),
     )
     return True
+
+
+def shell_exec_success_record_for_pending(graph_state: GraphRunState, pending: PendingToolCall) -> ToolExecutionRecord | None:
+    if pending.tool_name != "shell_exec":
+        return None
+    pending_fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
+    for record in reversed(list(getattr(graph_state, "last_tool_results", []) or [])):
+        if not isinstance(record, ToolExecutionRecord):
+            continue
+        if record.tool_name != "shell_exec" or not record.result.success:
+            continue
+        if _tool_call_fingerprint(record.tool_name, record.args) == pending_fingerprint:
+            return record
+    return None
+
+
+def current_verifier_already_passed(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "shell_exec":
+        return False
+    command = str(pending.args.get("command") or "").strip()
+    if not command:
+        return False
+    state = getattr(harness, "state", None)
+    verifier_fn = getattr(state, "current_verifier_verdict", None)
+    verifier = verifier_fn() if callable(verifier_fn) else getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verifier, dict):
+        return False
+    verdict = str(verifier.get("verdict") or verifier.get("status") or "").strip().lower()
+    verifier_command = str(verifier.get("command") or verifier.get("target") or "").strip()
+    return verdict == "pass" and verifier_command == command
 
 
 def _maybe_schedule_repair_loop_status_autocontinue(

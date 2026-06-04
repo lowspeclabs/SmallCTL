@@ -119,7 +119,7 @@ def _approved_plan_matches_interrupt(self: Any, interrupt: dict[str, Any]) -> bo
     if state is None:
         return False
     for plan in (getattr(state, "active_plan", None), getattr(state, "draft_plan", None)):
-        if plan is None or getattr(plan, "approved", False) is not True:
+        if plan is None or not bool(getattr(plan, "approved", False)):
             continue
         if not plan_id or str(getattr(plan, "plan_id", "") or "").strip() == plan_id:
             return True

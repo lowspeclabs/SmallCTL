@@ -1,0 +1,448 @@
+
+==================================================
+AHO Baseline Challenge Runner
+==================================================
+Default provider settings:
+  Endpoint:        https://openrouter.ai/api/v1
+  Model:           qwen/qwen3.6-27b
+  Provider profile: openrouter
+
+Non-interactive mode (--yes): accepting defaults.
+==================================================
+
+[SMOKE TEST] Skipped (--skip-smoke-test)
+[2026-05-27T10:44:17.259375+00:00] [INFO] baseline_start: Starting baseline run | total_challenges=40, sysadmin=20, coding=20
+[2026-05-27T10:44:17.913883+00:00] [STATUS] runner_status: Starting challenge 1/40: challenge-01 (Easy — `/etc/hosts` review and safe edit) — timeout=300s | challenge_id=challenge-01, category=sysadmin, timeout_sec=300
+[2026-05-27T10:44:47.916642+00:00] [STATUS] runner_status: Challenge 1/40 still running: challenge-01 — elapsed 30.0s | challenge_id=challenge-01, elapsed_sec=30.0, pid=1062677
+[2026-05-27T10:45:17.917044+00:00] [STATUS] runner_status: Challenge 1/40 still running: challenge-01 — elapsed 60.0s | challenge_id=challenge-01, elapsed_sec=60.0, pid=1062677
+[2026-05-27T10:45:48.206640+00:00] [STATUS] runner_status: Challenge 1/40 still running: challenge-01 — elapsed 90.3s | challenge_id=challenge-01, elapsed_sec=90.3, pid=1062677
+[2026-05-27T10:45:55.033977+00:00] [STATUS] runner_status: Challenge 1/40 finished: challenge-01 — status=completed, elapsed=97.1s, returncode=0 | challenge_id=challenge-01, status=completed, elapsed_sec=97.09, returncode=0, ask_human_count=0, guard_event_count=22, tool_failure_count=0
+[2026-05-27T10:45:55.034187+00:00] [STATUS] runner_status: Overall progress: 1/40 done — 1 completed, 0 failed — total elapsed 97.8s | completed=1, failed=0, total_elapsed_sec=97.8, challenges_run=1
+[2026-05-27T10:45:55.675251+00:00] [STATUS] runner_status: Starting challenge 2/40: challenge-02 (Easy — DNS resolver audit) — timeout=300s | challenge_id=challenge-02, category=sysadmin, timeout_sec=300
+[2026-05-27T10:46:25.676810+00:00] [STATUS] runner_status: Challenge 2/40 still running: challenge-02 — elapsed 30.0s | challenge_id=challenge-02, elapsed_sec=30.0, pid=1063521
+[2026-05-27T10:46:55.677164+00:00] [STATUS] runner_status: Challenge 2/40 still running: challenge-02 — elapsed 60.0s | challenge_id=challenge-02, elapsed_sec=60.0, pid=1063521
+[2026-05-27T10:47:09.708881+00:00] [STATUS] runner_status: Challenge 2/40 finished: challenge-02 — status=completed, elapsed=74.0s, returncode=0 | challenge_id=challenge-02, status=completed, elapsed_sec=74.02, returncode=0, ask_human_count=0, guard_event_count=20, tool_failure_count=0
+[2026-05-27T10:47:09.709073+00:00] [STATUS] runner_status: Overall progress: 2/40 done — 2 completed, 0 failed — total elapsed 172.4s | completed=2, failed=0, total_elapsed_sec=172.4, challenges_run=2
+[2026-05-27T10:47:10.316895+00:00] [STATUS] runner_status: Starting challenge 3/40: challenge-03 (Easy — `/tmp` and `/var/tmp` cleanup review) — timeout=300s | challenge_id=challenge-03, category=sysadmin, timeout_sec=300
+[2026-05-27T10:47:40.318426+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 30.0s | challenge_id=challenge-03, elapsed_sec=30.0, pid=1064106
+[2026-05-27T10:48:10.319062+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 60.0s | challenge_id=challenge-03, elapsed_sec=60.0, pid=1064106
+[2026-05-27T10:48:40.319805+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 90.0s | challenge_id=challenge-03, elapsed_sec=90.0, pid=1064106
+[2026-05-27T10:49:10.320278+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 120.0s | challenge_id=challenge-03, elapsed_sec=120.0, pid=1064106
+[2026-05-27T10:49:40.320830+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 150.0s | challenge_id=challenge-03, elapsed_sec=150.0, pid=1064106
+[2026-05-27T10:50:10.321398+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 180.0s | challenge_id=challenge-03, elapsed_sec=180.0, pid=1064106
+[2026-05-27T10:50:40.322024+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 210.0s | challenge_id=challenge-03, elapsed_sec=210.0, pid=1064106
+[2026-05-27T10:51:10.322397+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 240.0s | challenge_id=challenge-03, elapsed_sec=240.0, pid=1064106
+[2026-05-27T10:51:40.322841+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 270.0s | challenge_id=challenge-03, elapsed_sec=270.0, pid=1064106
+[2026-05-27T10:52:10.334481+00:00] [STATUS] runner_status: Challenge 3/40 TIMED OUT: challenge-03 after 300.0s | challenge_id=challenge-03, elapsed_sec=300.0
+[2026-05-27T10:52:10.420340+00:00] [STATUS] runner_status: Overall progress: 3/40 done — 2 completed, 1 failed — total elapsed 473.2s | completed=2, failed=1, total_elapsed_sec=473.2, challenges_run=3
+[2026-05-27T10:52:11.086402+00:00] [STATUS] runner_status: Starting challenge 4/40: challenge-04 (Easy — Logrotate configuration check) — timeout=300s | challenge_id=challenge-04, category=sysadmin, timeout_sec=300
+[2026-05-27T10:52:41.087978+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 30.0s | challenge_id=challenge-04, elapsed_sec=30.0, pid=1066415
+[2026-05-27T10:53:11.589980+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 60.5s | challenge_id=challenge-04, elapsed_sec=60.5, pid=1066415
+[2026-05-27T10:53:41.590378+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 90.5s | challenge_id=challenge-04, elapsed_sec=90.5, pid=1066415
+[2026-05-27T10:54:11.590768+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 120.5s | challenge_id=challenge-04, elapsed_sec=120.5, pid=1066415
+[2026-05-27T10:54:41.591112+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 150.5s | challenge_id=challenge-04, elapsed_sec=150.5, pid=1066415
+[2026-05-27T10:55:11.591507+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 180.5s | challenge_id=challenge-04, elapsed_sec=180.5, pid=1066415
+[2026-05-27T10:55:41.591866+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 210.5s | challenge_id=challenge-04, elapsed_sec=210.5, pid=1066415
+[2026-05-27T10:56:11.592315+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 240.5s | challenge_id=challenge-04, elapsed_sec=240.5, pid=1066415
+[2026-05-27T10:56:41.592896+00:00] [STATUS] runner_status: Challenge 4/40 still running: challenge-04 — elapsed 270.5s | challenge_id=challenge-04, elapsed_sec=270.5, pid=1066415
+[2026-05-27T10:57:11.103543+00:00] [STATUS] runner_status: Challenge 4/40 TIMED OUT: challenge-04 after 300.0s | challenge_id=challenge-04, elapsed_sec=300.0
+[2026-05-27T10:57:11.147318+00:00] [STATUS] runner_status: Overall progress: 4/40 done — 2 completed, 2 failed — total elapsed 773.9s | completed=2, failed=2, total_elapsed_sec=773.9, challenges_run=4
+[2026-05-27T10:57:11.755585+00:00] [STATUS] runner_status: Starting challenge 5/40: challenge-05 (Easy-Medium — Sudo and privilege audit) — timeout=300s | challenge_id=challenge-05, category=sysadmin, timeout_sec=300
+[2026-05-27T10:57:41.757117+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 30.0s | challenge_id=challenge-05, elapsed_sec=30.0, pid=1068735
+[2026-05-27T10:58:11.757634+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 60.0s | challenge_id=challenge-05, elapsed_sec=60.0, pid=1068735
+[2026-05-27T10:58:41.758184+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 90.0s | challenge_id=challenge-05, elapsed_sec=90.0, pid=1068735
+[2026-05-27T10:59:11.759720+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 120.0s | challenge_id=challenge-05, elapsed_sec=120.0, pid=1068735
+[2026-05-27T10:59:41.760151+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 150.0s | challenge_id=challenge-05, elapsed_sec=150.0, pid=1068735
+[2026-05-27T11:00:11.760505+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 180.0s | challenge_id=challenge-05, elapsed_sec=180.0, pid=1068735
+[2026-05-27T11:00:41.760834+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 210.0s | challenge_id=challenge-05, elapsed_sec=210.0, pid=1068735
+[2026-05-27T11:01:11.761247+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 240.0s | challenge_id=challenge-05, elapsed_sec=240.0, pid=1068735
+[2026-05-27T11:01:41.761609+00:00] [STATUS] runner_status: Challenge 5/40 still running: challenge-05 — elapsed 270.0s | challenge_id=challenge-05, elapsed_sec=270.0, pid=1068735
+[2026-05-27T11:02:11.772730+00:00] [STATUS] runner_status: Challenge 5/40 TIMED OUT: challenge-05 after 300.0s | challenge_id=challenge-05, elapsed_sec=300.0
+[2026-05-27T11:02:11.814170+00:00] [STATUS] runner_status: Overall progress: 5/40 done — 2 completed, 3 failed — total elapsed 1074.6s | completed=2, failed=3, total_elapsed_sec=1074.6, challenges_run=5
+[2026-05-27T11:02:12.431663+00:00] [STATUS] runner_status: Starting challenge 6/40: challenge-06 (Easy-Medium — Package cache cleanup and verification) — timeout=300s | challenge_id=challenge-06, category=sysadmin, timeout_sec=300
+[2026-05-27T11:02:42.433169+00:00] [STATUS] runner_status: Challenge 6/40 still running: challenge-06 — elapsed 30.0s | challenge_id=challenge-06, elapsed_sec=30.0, pid=1070963
+[2026-05-27T11:03:12.433630+00:00] [STATUS] runner_status: Challenge 6/40 still running: challenge-06 — elapsed 60.0s | challenge_id=challenge-06, elapsed_sec=60.0, pid=1070963
+[2026-05-27T11:03:42.433935+00:00] [STATUS] runner_status: Challenge 6/40 still running: challenge-06 — elapsed 90.0s | challenge_id=challenge-06, elapsed_sec=90.0, pid=1070963
+[2026-05-27T11:03:45.974841+00:00] [STATUS] runner_status: Challenge 6/40 finished: challenge-06 — status=completed, elapsed=93.5s, returncode=0 | challenge_id=challenge-06, status=completed, elapsed_sec=93.53, returncode=0, ask_human_count=0, guard_event_count=62, tool_failure_count=1
+[2026-05-27T11:03:45.975029+00:00] [STATUS] runner_status: Overall progress: 6/40 done — 3 completed, 3 failed — total elapsed 1168.7s | completed=3, failed=3, total_elapsed_sec=1168.7, challenges_run=6
+[2026-05-27T11:03:46.587256+00:00] [STATUS] runner_status: Starting challenge 7/40: challenge-07 (Easy-Medium — Service enablement review) — timeout=300s | challenge_id=challenge-07, category=sysadmin, timeout_sec=300
+[2026-05-27T11:04:16.588751+00:00] [STATUS] runner_status: Challenge 7/40 still running: challenge-07 — elapsed 30.0s | challenge_id=challenge-07, elapsed_sec=30.0, pid=1071722
+[2026-05-27T11:04:46.589057+00:00] [STATUS] runner_status: Challenge 7/40 still running: challenge-07 — elapsed 60.0s | challenge_id=challenge-07, elapsed_sec=60.0, pid=1071722
+[2026-05-27T11:05:16.589420+00:00] [STATUS] runner_status: Challenge 7/40 still running: challenge-07 — elapsed 90.0s | challenge_id=challenge-07, elapsed_sec=90.0, pid=1071722
+[2026-05-27T11:05:46.589991+00:00] [STATUS] runner_status: Challenge 7/40 still running: challenge-07 — elapsed 120.0s | challenge_id=challenge-07, elapsed_sec=120.0, pid=1071722
+[2026-05-27T11:05:48.101372+00:00] [STATUS] runner_status: Challenge 7/40 finished: challenge-07 — status=completed, elapsed=121.5s, returncode=0 | challenge_id=challenge-07, status=completed, elapsed_sec=121.5, returncode=0, ask_human_count=0, guard_event_count=35, tool_failure_count=0
+[2026-05-27T11:05:48.101643+00:00] [STATUS] runner_status: Overall progress: 7/40 done — 4 completed, 3 failed — total elapsed 1290.8s | completed=4, failed=3, total_elapsed_sec=1290.8, challenges_run=7
+[2026-05-27T11:05:48.705071+00:00] [STATUS] runner_status: Starting challenge 8/40: challenge-08 (Medium — File permission and ownership audit) — timeout=600s | challenge_id=challenge-08, category=sysadmin, timeout_sec=600
+[2026-05-27T11:06:18.706485+00:00] [STATUS] runner_status: Challenge 8/40 still running: challenge-08 — elapsed 30.0s | challenge_id=challenge-08, elapsed_sec=30.0, pid=1072694
+[2026-05-27T11:06:48.706930+00:00] [STATUS] runner_status: Challenge 8/40 still running: challenge-08 — elapsed 60.0s | challenge_id=challenge-08, elapsed_sec=60.0, pid=1072694
+[2026-05-27T11:07:18.707317+00:00] [STATUS] runner_status: Challenge 8/40 still running: challenge-08 — elapsed 90.0s | challenge_id=challenge-08, elapsed_sec=90.0, pid=1072694
+[2026-05-27T11:07:48.707795+00:00] [STATUS] runner_status: Challenge 8/40 still running: challenge-08 — elapsed 120.0s | challenge_id=challenge-08, elapsed_sec=120.0, pid=1072694
+[2026-05-27T11:08:18.708443+00:00] [STATUS] runner_status: Challenge 8/40 still running: challenge-08 — elapsed 150.0s | challenge_id=challenge-08, elapsed_sec=150.0, pid=1072694
+[2026-05-27T11:08:42.399015+00:00] [STATUS] runner_status: Challenge 8/40 finished: challenge-08 — status=completed, elapsed=173.7s, returncode=0 | challenge_id=challenge-08, status=completed, elapsed_sec=173.67, returncode=0, ask_human_count=0, guard_event_count=101, tool_failure_count=2
+[2026-05-27T11:08:42.399247+00:00] [STATUS] runner_status: Overall progress: 8/40 done — 5 completed, 3 failed — total elapsed 1465.1s | completed=5, failed=3, total_elapsed_sec=1465.1, challenges_run=8
+[2026-05-27T11:08:43.012484+00:00] [STATUS] runner_status: Starting challenge 9/40: challenge-09 (Medium — Broken symlink and stale path audit) — timeout=600s | challenge_id=challenge-09, category=sysadmin, timeout_sec=600
+[2026-05-27T11:09:13.013980+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 30.0s | challenge_id=challenge-09, elapsed_sec=30.0, pid=1073950
+[2026-05-27T11:09:43.014349+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 60.0s | challenge_id=challenge-09, elapsed_sec=60.0, pid=1073950
+[2026-05-27T11:10:13.014677+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 90.0s | challenge_id=challenge-09, elapsed_sec=90.0, pid=1073950
+[2026-05-27T11:10:43.015026+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 120.0s | challenge_id=challenge-09, elapsed_sec=120.0, pid=1073950
+[2026-05-27T11:11:13.015401+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 150.0s | challenge_id=challenge-09, elapsed_sec=150.0, pid=1073950
+[2026-05-27T11:11:43.015761+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 180.0s | challenge_id=challenge-09, elapsed_sec=180.0, pid=1073950
+[2026-05-27T11:12:13.016117+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 210.0s | challenge_id=challenge-09, elapsed_sec=210.0, pid=1073950
+[2026-05-27T11:12:43.016445+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 240.0s | challenge_id=challenge-09, elapsed_sec=240.0, pid=1073950
+[2026-05-27T11:13:13.016826+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 270.0s | challenge_id=challenge-09, elapsed_sec=270.0, pid=1073950
+[2026-05-27T11:13:43.017166+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 300.0s | challenge_id=challenge-09, elapsed_sec=300.0, pid=1073950
+[2026-05-27T11:14:13.017522+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 330.0s | challenge_id=challenge-09, elapsed_sec=330.0, pid=1073950
+[2026-05-27T11:14:43.018046+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 360.0s | challenge_id=challenge-09, elapsed_sec=360.0, pid=1073950
+[2026-05-27T11:15:13.018538+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 390.0s | challenge_id=challenge-09, elapsed_sec=390.0, pid=1073950
+[2026-05-27T11:15:43.018972+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 420.0s | challenge_id=challenge-09, elapsed_sec=420.0, pid=1073950
+[2026-05-27T11:16:13.019396+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 450.0s | challenge_id=challenge-09, elapsed_sec=450.0, pid=1073950
+[2026-05-27T11:16:43.019916+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 480.0s | challenge_id=challenge-09, elapsed_sec=480.0, pid=1073950
+[2026-05-27T11:17:13.020317+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 510.0s | challenge_id=challenge-09, elapsed_sec=510.0, pid=1073950
+[2026-05-27T11:17:43.020718+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 540.0s | challenge_id=challenge-09, elapsed_sec=540.0, pid=1073950
+[2026-05-27T11:18:13.021061+00:00] [STATUS] runner_status: Challenge 9/40 still running: challenge-09 — elapsed 570.0s | challenge_id=challenge-09, elapsed_sec=570.0, pid=1073950
+[2026-05-27T11:18:43.045650+00:00] [STATUS] runner_status: Challenge 9/40 TIMED OUT: challenge-09 after 600.0s | challenge_id=challenge-09, elapsed_sec=600.0
+[2026-05-27T11:18:43.221952+00:00] [STATUS] runner_status: Overall progress: 9/40 done — 5 completed, 4 failed — total elapsed 2066.0s | completed=5, failed=4, total_elapsed_sec=2066.0, challenges_run=9
+[2026-05-27T11:18:43.843633+00:00] [STATUS] runner_status: Starting challenge 10/40: challenge-10 (Medium — Interface and routing change investigation) — timeout=600s | challenge_id=challenge-10, category=sysadmin, timeout_sec=600
+[2026-05-27T11:19:13.845249+00:00] [STATUS] runner_status: Challenge 10/40 still running: challenge-10 — elapsed 30.0s | challenge_id=challenge-10, elapsed_sec=30.0, pid=1078313
+[2026-05-27T11:19:43.845618+00:00] [STATUS] runner_status: Challenge 10/40 still running: challenge-10 — elapsed 60.0s | challenge_id=challenge-10, elapsed_sec=60.0, pid=1078313
+[2026-05-27T11:20:13.882609+00:00] [STATUS] runner_status: Challenge 10/40 still running: challenge-10 — elapsed 90.0s | challenge_id=challenge-10, elapsed_sec=90.0, pid=1078313
+[2026-05-27T11:20:43.882938+00:00] [STATUS] runner_status: Challenge 10/40 still running: challenge-10 — elapsed 120.0s | challenge_id=challenge-10, elapsed_sec=120.0, pid=1078313
+[2026-05-27T11:21:13.883296+00:00] [STATUS] runner_status: Challenge 10/40 still running: challenge-10 — elapsed 150.0s | challenge_id=challenge-10, elapsed_sec=150.0, pid=1078313
+[2026-05-27T11:21:38.913858+00:00] [STATUS] runner_status: Challenge 10/40 finished: challenge-10 — status=completed, elapsed=175.0s, returncode=0 | challenge_id=challenge-10, status=completed, elapsed_sec=175.04, returncode=0, ask_human_count=0, guard_event_count=42, tool_failure_count=0
+[2026-05-27T11:21:38.914075+00:00] [STATUS] runner_status: Overall progress: 10/40 done — 6 completed, 4 failed — total elapsed 2241.7s | completed=6, failed=4, total_elapsed_sec=2241.7, challenges_run=10
+[2026-05-27T11:21:39.520123+00:00] [STATUS] runner_status: Starting challenge 11/40: challenge-11 (Medium — Repository configuration repair) — timeout=600s | challenge_id=challenge-11, category=sysadmin, timeout_sec=600
+[2026-05-27T11:22:09.521647+00:00] [STATUS] runner_status: Challenge 11/40 still running: challenge-11 — elapsed 30.0s | challenge_id=challenge-11, elapsed_sec=30.0, pid=1079722
+[2026-05-27T11:22:39.522154+00:00] [STATUS] runner_status: Challenge 11/40 still running: challenge-11 — elapsed 60.0s | challenge_id=challenge-11, elapsed_sec=60.0, pid=1079722
+[2026-05-27T11:23:09.522772+00:00] [STATUS] runner_status: Challenge 11/40 still running: challenge-11 — elapsed 90.0s | challenge_id=challenge-11, elapsed_sec=90.0, pid=1079722
+[2026-05-27T11:23:10.607878+00:00] [STATUS] runner_status: Challenge 11/40 finished: challenge-11 — status=completed, elapsed=91.1s, returncode=0 | challenge_id=challenge-11, status=completed, elapsed_sec=91.05, returncode=0, ask_human_count=0, guard_event_count=37, tool_failure_count=0
+[2026-05-27T11:23:10.608167+00:00] [STATUS] runner_status: Overall progress: 11/40 done — 7 completed, 4 failed — total elapsed 2333.3s | completed=7, failed=4, total_elapsed_sec=2333.3, challenges_run=11
+[2026-05-27T11:23:11.224494+00:00] [STATUS] runner_status: Starting challenge 12/40: challenge-12 (Medium — Journal error trend analysis) — timeout=600s | challenge_id=challenge-12, category=sysadmin, timeout_sec=600
+[2026-05-27T11:23:41.226099+00:00] [STATUS] runner_status: Challenge 12/40 still running: challenge-12 — elapsed 30.0s | challenge_id=challenge-12, elapsed_sec=30.0, pid=1080459
+[2026-05-27T11:24:11.226683+00:00] [STATUS] runner_status: Challenge 12/40 still running: challenge-12 — elapsed 60.0s | challenge_id=challenge-12, elapsed_sec=60.0, pid=1080459
+[2026-05-27T11:24:41.227064+00:00] [STATUS] runner_status: Challenge 12/40 still running: challenge-12 — elapsed 90.0s | challenge_id=challenge-12, elapsed_sec=90.0, pid=1080459
+[2026-05-27T11:25:11.227379+00:00] [STATUS] runner_status: Challenge 12/40 still running: challenge-12 — elapsed 120.0s | challenge_id=challenge-12, elapsed_sec=120.0, pid=1080459
+[2026-05-27T11:25:35.439572+00:00] [STATUS] runner_status: Challenge 12/40 finished: challenge-12 — status=completed, elapsed=144.2s, returncode=0 | challenge_id=challenge-12, status=completed, elapsed_sec=144.18, returncode=0, ask_human_count=0, guard_event_count=95, tool_failure_count=1
+[2026-05-27T11:25:35.439842+00:00] [STATUS] runner_status: Overall progress: 12/40 done — 8 completed, 4 failed — total elapsed 2478.2s | completed=8, failed=4, total_elapsed_sec=2478.2, challenges_run=12
+[2026-05-27T11:25:36.188125+00:00] [STATUS] runner_status: Starting challenge 13/40: challenge-13 (Medium-Hard — Web/service config syntax validation) — timeout=600s | challenge_id=challenge-13, category=sysadmin, timeout_sec=600
+[2026-05-27T11:26:06.189659+00:00] [STATUS] runner_status: Challenge 13/40 still running: challenge-13 — elapsed 30.0s | challenge_id=challenge-13, elapsed_sec=30.0, pid=1081670
+[2026-05-27T11:26:36.190019+00:00] [STATUS] runner_status: Challenge 13/40 still running: challenge-13 — elapsed 60.0s | challenge_id=challenge-13, elapsed_sec=60.0, pid=1081670
+[2026-05-27T11:27:06.190403+00:00] [STATUS] runner_status: Challenge 13/40 still running: challenge-13 — elapsed 90.0s | challenge_id=challenge-13, elapsed_sec=90.0, pid=1081670
+[2026-05-27T11:27:07.444950+00:00] [STATUS] runner_status: Challenge 13/40 finished: challenge-13 — status=completed, elapsed=91.2s, returncode=0 | challenge_id=challenge-13, status=completed, elapsed_sec=91.24, returncode=0, ask_human_count=0, guard_event_count=45, tool_failure_count=0
+[2026-05-27T11:27:07.445163+00:00] [STATUS] runner_status: Overall progress: 13/40 done — 9 completed, 4 failed — total elapsed 2570.2s | completed=9, failed=4, total_elapsed_sec=2570.2, challenges_run=13
+[2026-05-27T11:27:08.074812+00:00] [STATUS] runner_status: Starting challenge 14/40: challenge-14 (Medium-Hard — Port conflict RCA) — timeout=600s | challenge_id=challenge-14, category=sysadmin, timeout_sec=600
+[2026-05-27T11:27:38.076240+00:00] [STATUS] runner_status: Challenge 14/40 still running: challenge-14 — elapsed 30.0s | challenge_id=challenge-14, elapsed_sec=30.0, pid=1082403
+[2026-05-27T11:28:08.076603+00:00] [STATUS] runner_status: Challenge 14/40 still running: challenge-14 — elapsed 60.0s | challenge_id=challenge-14, elapsed_sec=60.0, pid=1082403
+[2026-05-27T11:28:38.076944+00:00] [STATUS] runner_status: Challenge 14/40 still running: challenge-14 — elapsed 90.0s | challenge_id=challenge-14, elapsed_sec=90.0, pid=1082403
+[2026-05-27T11:29:08.077299+00:00] [STATUS] runner_status: Challenge 14/40 still running: challenge-14 — elapsed 120.0s | challenge_id=challenge-14, elapsed_sec=120.0, pid=1082403
+[2026-05-27T11:29:38.077700+00:00] [STATUS] runner_status: Challenge 14/40 still running: challenge-14 — elapsed 150.0s | challenge_id=challenge-14, elapsed_sec=150.0, pid=1082403
+[2026-05-27T11:30:05.280401+00:00] [STATUS] runner_status: Challenge 14/40 finished: challenge-14 — status=completed, elapsed=177.2s, returncode=0 | challenge_id=challenge-14, status=completed, elapsed_sec=177.17, returncode=0, ask_human_count=0, guard_event_count=51, tool_failure_count=0
+[2026-05-27T11:30:05.280780+00:00] [STATUS] runner_status: Overall progress: 14/40 done — 10 completed, 4 failed — total elapsed 2748.0s | completed=10, failed=4, total_elapsed_sec=2748.0, challenges_run=14
+[2026-05-27T11:30:05.842390+00:00] [STATUS] runner_status: Starting challenge 15/40: challenge-15 (Medium-Hard — Package dependency inspection before removal) — timeout=600s | challenge_id=challenge-15, category=sysadmin, timeout_sec=600
+[2026-05-27T11:30:35.844121+00:00] [STATUS] runner_status: Challenge 15/40 still running: challenge-15 — elapsed 30.0s | challenge_id=challenge-15, elapsed_sec=30.0, pid=1083783
+[2026-05-27T11:31:05.844690+00:00] [STATUS] runner_status: Challenge 15/40 still running: challenge-15 — elapsed 60.0s | challenge_id=challenge-15, elapsed_sec=60.0, pid=1083783
+[2026-05-27T11:31:35.845217+00:00] [STATUS] runner_status: Challenge 15/40 still running: challenge-15 — elapsed 90.0s | challenge_id=challenge-15, elapsed_sec=90.0, pid=1083783
+[2026-05-27T11:32:05.845623+00:00] [STATUS] runner_status: Challenge 15/40 still running: challenge-15 — elapsed 120.0s | challenge_id=challenge-15, elapsed_sec=120.0, pid=1083783
+[2026-05-27T11:32:19.220844+00:00] [STATUS] runner_status: Challenge 15/40 finished: challenge-15 — status=completed, elapsed=133.4s, returncode=0 | challenge_id=challenge-15, status=completed, elapsed_sec=133.36, returncode=0, ask_human_count=0, guard_event_count=90, tool_failure_count=1
+[2026-05-27T11:32:19.221160+00:00] [STATUS] runner_status: Overall progress: 15/40 done — 11 completed, 4 failed — total elapsed 2882.0s | completed=11, failed=4, total_elapsed_sec=2882.0, challenges_run=15
+[2026-05-27T11:32:19.821734+00:00] [STATUS] runner_status: Starting challenge 16/40: challenge-16 (Hard — Boot-time config and startup delay RCA) — timeout=1200s | challenge_id=challenge-16, category=sysadmin, timeout_sec=1200
+[2026-05-27T11:32:49.823283+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 30.0s | challenge_id=challenge-16, elapsed_sec=30.0, pid=1084834
+[2026-05-27T11:33:19.823635+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 60.0s | challenge_id=challenge-16, elapsed_sec=60.0, pid=1084834
+[2026-05-27T11:33:49.824115+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 90.0s | challenge_id=challenge-16, elapsed_sec=90.0, pid=1084834
+[2026-05-27T11:34:19.824487+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 120.0s | challenge_id=challenge-16, elapsed_sec=120.0, pid=1084834
+[2026-05-27T11:34:49.824897+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 150.0s | challenge_id=challenge-16, elapsed_sec=150.0, pid=1084834
+[2026-05-27T11:35:19.825299+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 180.0s | challenge_id=challenge-16, elapsed_sec=180.0, pid=1084834
+[2026-05-27T11:35:49.825688+00:00] [STATUS] runner_status: Challenge 16/40 still running: challenge-16 — elapsed 210.0s | challenge_id=challenge-16, elapsed_sec=210.0, pid=1084834
+[2026-05-27T11:35:55.789917+00:00] [STATUS] runner_status: Challenge 16/40 finished: challenge-16 — status=completed, elapsed=215.9s, returncode=0 | challenge_id=challenge-16, status=completed, elapsed_sec=215.93, returncode=0, ask_human_count=0, guard_event_count=56, tool_failure_count=0
+[2026-05-27T11:35:55.790172+00:00] [STATUS] runner_status: Overall progress: 16/40 done — 12 completed, 4 failed — total elapsed 3098.5s | completed=12, failed=4, total_elapsed_sec=3098.5, challenges_run=16
+[2026-05-27T11:35:56.397592+00:00] [STATUS] runner_status: Starting challenge 17/40: challenge-17 (Hard — Storage inode exhaustion investigation) — timeout=1200s | challenge_id=challenge-17, category=sysadmin, timeout_sec=1200
+[2026-05-27T11:36:26.399102+00:00] [STATUS] runner_status: Challenge 17/40 still running: challenge-17 — elapsed 30.0s | challenge_id=challenge-17, elapsed_sec=30.0, pid=1086530
+[2026-05-27T11:36:56.399432+00:00] [STATUS] runner_status: Challenge 17/40 still running: challenge-17 — elapsed 60.0s | challenge_id=challenge-17, elapsed_sec=60.0, pid=1086530
+[2026-05-27T11:37:26.399825+00:00] [STATUS] runner_status: Challenge 17/40 still running: challenge-17 — elapsed 90.0s | challenge_id=challenge-17, elapsed_sec=90.0, pid=1086530
+[2026-05-27T11:37:56.400184+00:00] [STATUS] runner_status: Challenge 17/40 still running: challenge-17 — elapsed 120.0s | challenge_id=challenge-17, elapsed_sec=120.0, pid=1086530
+[2026-05-27T11:38:26.400540+00:00] [STATUS] runner_status: Challenge 17/40 still running: challenge-17 — elapsed 150.0s | challenge_id=challenge-17, elapsed_sec=150.0, pid=1086530
+[2026-05-27T11:38:50.357710+00:00] [STATUS] runner_status: Challenge 17/40 finished: challenge-17 — status=completed, elapsed=173.9s, returncode=0 | challenge_id=challenge-17, status=completed, elapsed_sec=173.94, returncode=0, ask_human_count=0, guard_event_count=33, tool_failure_count=0
+[2026-05-27T11:38:50.357910+00:00] [STATUS] runner_status: Overall progress: 17/40 done — 13 completed, 4 failed — total elapsed 3273.1s | completed=13, failed=4, total_elapsed_sec=3273.1, challenges_run=17
+[2026-05-27T11:38:50.979415+00:00] [STATUS] runner_status: Starting challenge 18/40: challenge-18 (Hard — Configuration drift audit) — timeout=1200s | challenge_id=challenge-18, category=sysadmin, timeout_sec=1200
+[2026-05-27T11:39:21.385511+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 30.0s | challenge_id=challenge-18, elapsed_sec=30.0, pid=1087801
+[2026-05-27T11:39:51.385926+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 60.0s | challenge_id=challenge-18, elapsed_sec=60.0, pid=1087801
+[2026-05-27T11:40:21.386317+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 90.0s | challenge_id=challenge-18, elapsed_sec=90.0, pid=1087801
+[2026-05-27T11:40:51.386708+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 120.0s | challenge_id=challenge-18, elapsed_sec=120.0, pid=1087801
+[2026-05-27T11:41:21.387082+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 150.0s | challenge_id=challenge-18, elapsed_sec=150.0, pid=1087801
+[2026-05-27T11:41:51.387448+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 180.0s | challenge_id=challenge-18, elapsed_sec=180.0, pid=1087801
+[2026-05-27T11:42:21.387823+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 210.0s | challenge_id=challenge-18, elapsed_sec=210.0, pid=1087801
+[2026-05-27T11:42:51.388134+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 240.0s | challenge_id=challenge-18, elapsed_sec=240.0, pid=1087801
+[2026-05-27T11:43:21.388457+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 270.0s | challenge_id=challenge-18, elapsed_sec=270.0, pid=1087801
+[2026-05-27T11:43:51.388837+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 300.0s | challenge_id=challenge-18, elapsed_sec=300.0, pid=1087801
+[2026-05-27T11:44:21.389268+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 330.0s | challenge_id=challenge-18, elapsed_sec=330.0, pid=1087801
+[2026-05-27T11:44:51.389862+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 360.0s | challenge_id=challenge-18, elapsed_sec=360.0, pid=1087801
+[2026-05-27T11:45:21.390331+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 390.0s | challenge_id=challenge-18, elapsed_sec=390.0, pid=1087801
+[2026-05-27T11:45:51.390912+00:00] [STATUS] runner_status: Challenge 18/40 still running: challenge-18 — elapsed 420.0s | challenge_id=challenge-18, elapsed_sec=420.0, pid=1087801
+[2026-05-27T11:45:56.925816+00:00] [STATUS] runner_status: Challenge 18/40 finished: challenge-18 — status=completed, elapsed=425.5s, returncode=0 | challenge_id=challenge-18, status=completed, elapsed_sec=425.49, returncode=0, ask_human_count=0, guard_event_count=117, tool_failure_count=1
+[2026-05-27T11:45:56.926182+00:00] [STATUS] runner_status: Overall progress: 18/40 done — 14 completed, 4 failed — total elapsed 3699.7s | completed=14, failed=4, total_elapsed_sec=3699.7, challenges_run=18
+[2026-05-27T11:45:57.535628+00:00] [STATUS] runner_status: Starting challenge 19/40: challenge-19 (Hard — Package install/remove change impact RCA) — timeout=1200s | challenge_id=challenge-19, category=sysadmin, timeout_sec=1200
+[2026-05-27T11:46:27.537303+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 30.0s | challenge_id=challenge-19, elapsed_sec=30.0, pid=1091014
+[2026-05-27T11:46:57.729902+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 60.2s | challenge_id=challenge-19, elapsed_sec=60.2, pid=1091014
+[2026-05-27T11:47:27.730243+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 90.2s | challenge_id=challenge-19, elapsed_sec=90.2, pid=1091014
+[2026-05-27T11:47:57.730602+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 120.2s | challenge_id=challenge-19, elapsed_sec=120.2, pid=1091014
+[2026-05-27T11:48:27.730983+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 150.2s | challenge_id=challenge-19, elapsed_sec=150.2, pid=1091014
+[2026-05-27T11:48:58.060852+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 180.5s | challenge_id=challenge-19, elapsed_sec=180.5, pid=1091014
+[2026-05-27T11:49:28.061193+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 210.5s | challenge_id=challenge-19, elapsed_sec=210.5, pid=1091014
+[2026-05-27T11:49:58.061523+00:00] [STATUS] runner_status: Challenge 19/40 still running: challenge-19 — elapsed 240.5s | challenge_id=challenge-19, elapsed_sec=240.5, pid=1091014
+[2026-05-27T11:50:13.789747+00:00] [STATUS] runner_status: Challenge 19/40 finished: challenge-19 — status=completed, elapsed=256.2s, returncode=0 | challenge_id=challenge-19, status=completed, elapsed_sec=256.23, returncode=0, ask_human_count=0, guard_event_count=36, tool_failure_count=0
+[2026-05-27T11:50:13.790019+00:00] [STATUS] runner_status: Overall progress: 19/40 done — 15 completed, 4 failed — total elapsed 3956.5s | completed=15, failed=4, total_elapsed_sec=3956.5, challenges_run=19
+[2026-05-27T11:50:14.412702+00:00] [STATUS] runner_status: Starting challenge 20/40: challenge-20 (Hardest — Cross-domain incident triage) — timeout=1200s | challenge_id=challenge-20, category=sysadmin, timeout_sec=1200
+[2026-05-27T11:50:44.414034+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 30.0s | challenge_id=challenge-20, elapsed_sec=30.0, pid=1092872
+[2026-05-27T11:51:14.414438+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 60.0s | challenge_id=challenge-20, elapsed_sec=60.0, pid=1092872
+[2026-05-27T11:51:44.414850+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 90.0s | challenge_id=challenge-20, elapsed_sec=90.0, pid=1092872
+[2026-05-27T11:52:14.415324+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 120.0s | challenge_id=challenge-20, elapsed_sec=120.0, pid=1092872
+[2026-05-27T11:52:44.415937+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 150.0s | challenge_id=challenge-20, elapsed_sec=150.0, pid=1092872
+[2026-05-27T11:53:14.416424+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 180.0s | challenge_id=challenge-20, elapsed_sec=180.0, pid=1092872
+[2026-05-27T11:53:44.416923+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 210.0s | challenge_id=challenge-20, elapsed_sec=210.0, pid=1092872
+[2026-05-27T11:54:14.417299+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 240.0s | challenge_id=challenge-20, elapsed_sec=240.0, pid=1092872
+[2026-05-27T11:54:44.417688+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 270.0s | challenge_id=challenge-20, elapsed_sec=270.0, pid=1092872
+[2026-05-27T11:55:14.418125+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 300.0s | challenge_id=challenge-20, elapsed_sec=300.0, pid=1092872
+[2026-05-27T11:55:44.418712+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 330.0s | challenge_id=challenge-20, elapsed_sec=330.0, pid=1092872
+[2026-05-27T11:56:14.419232+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 360.0s | challenge_id=challenge-20, elapsed_sec=360.0, pid=1092872
+[2026-05-27T11:56:44.419646+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 390.0s | challenge_id=challenge-20, elapsed_sec=390.0, pid=1092872
+[2026-05-27T11:57:14.420634+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 420.0s | challenge_id=challenge-20, elapsed_sec=420.0, pid=1092872
+[2026-05-27T11:57:44.421085+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 450.0s | challenge_id=challenge-20, elapsed_sec=450.0, pid=1092872
+[2026-05-27T11:58:14.421458+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 480.0s | challenge_id=challenge-20, elapsed_sec=480.0, pid=1092872
+[2026-05-27T11:58:44.421878+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 510.0s | challenge_id=challenge-20, elapsed_sec=510.0, pid=1092872
+[2026-05-27T11:59:14.422294+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 540.0s | challenge_id=challenge-20, elapsed_sec=540.0, pid=1092872
+[2026-05-27T11:59:44.422682+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 570.0s | challenge_id=challenge-20, elapsed_sec=570.0, pid=1092872
+[2026-05-27T12:00:14.423032+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 600.0s | challenge_id=challenge-20, elapsed_sec=600.0, pid=1092872
+[2026-05-27T12:00:44.423421+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 630.0s | challenge_id=challenge-20, elapsed_sec=630.0, pid=1092872
+[2026-05-27T12:01:14.423797+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 660.0s | challenge_id=challenge-20, elapsed_sec=660.0, pid=1092872
+[2026-05-27T12:01:44.424238+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 690.0s | challenge_id=challenge-20, elapsed_sec=690.0, pid=1092872
+[2026-05-27T12:02:14.424784+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 720.0s | challenge_id=challenge-20, elapsed_sec=720.0, pid=1092872
+[2026-05-27T12:02:44.425231+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 750.0s | challenge_id=challenge-20, elapsed_sec=750.0, pid=1092872
+[2026-05-27T12:03:14.425836+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 780.0s | challenge_id=challenge-20, elapsed_sec=780.0, pid=1092872
+[2026-05-27T12:03:44.426506+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 810.0s | challenge_id=challenge-20, elapsed_sec=810.0, pid=1092872
+[2026-05-27T12:04:14.426954+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 840.0s | challenge_id=challenge-20, elapsed_sec=840.0, pid=1092872
+[2026-05-27T12:04:44.427315+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 870.0s | challenge_id=challenge-20, elapsed_sec=870.0, pid=1092872
+[2026-05-27T12:05:14.427734+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 900.0s | challenge_id=challenge-20, elapsed_sec=900.0, pid=1092872
+[2026-05-27T12:05:44.428148+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 930.0s | challenge_id=challenge-20, elapsed_sec=930.0, pid=1092872
+[2026-05-27T12:06:14.428551+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 960.0s | challenge_id=challenge-20, elapsed_sec=960.0, pid=1092872
+[2026-05-27T12:06:44.428921+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 990.0s | challenge_id=challenge-20, elapsed_sec=990.0, pid=1092872
+[2026-05-27T12:07:14.429323+00:00] [STATUS] runner_status: Challenge 20/40 still running: challenge-20 — elapsed 1020.0s | challenge_id=challenge-20, elapsed_sec=1020.0, pid=1092872
+[2026-05-27T12:07:39.437051+00:00] [STATUS] runner_status: Challenge 20/40 finished: challenge-20 — status=completed, elapsed=1044.9s, returncode=0 | challenge_id=challenge-20, status=completed, elapsed_sec=1044.87, returncode=0, ask_human_count=0, guard_event_count=666, tool_failure_count=2
+[2026-05-27T12:07:39.437493+00:00] [STATUS] runner_status: Overall progress: 20/40 done — 16 completed, 4 failed — total elapsed 5002.2s | completed=16, failed=4, total_elapsed_sec=5002.2, challenges_run=20
+[2026-05-27T12:07:39.440352+00:00] [STATUS] runner_status: Starting challenge 21/40: challenge-01 (Easy) — timeout=300s | challenge_id=challenge-01, category=coding, timeout_sec=300
+[2026-05-27T12:08:09.441639+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 30.0s | challenge_id=challenge-01, elapsed_sec=30.0, pid=1100489
+[2026-05-27T12:08:39.442000+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 60.0s | challenge_id=challenge-01, elapsed_sec=60.0, pid=1100489
+[2026-05-27T12:09:09.442416+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 90.0s | challenge_id=challenge-01, elapsed_sec=90.0, pid=1100489
+[2026-05-27T12:09:39.442799+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 120.0s | challenge_id=challenge-01, elapsed_sec=120.0, pid=1100489
+[2026-05-27T12:10:09.443131+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 150.0s | challenge_id=challenge-01, elapsed_sec=150.0, pid=1100489
+[2026-05-27T12:10:39.443463+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 180.0s | challenge_id=challenge-01, elapsed_sec=180.0, pid=1100489
+[2026-05-27T12:11:09.443812+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 210.0s | challenge_id=challenge-01, elapsed_sec=210.0, pid=1100489
+[2026-05-27T12:11:39.444147+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 240.0s | challenge_id=challenge-01, elapsed_sec=240.0, pid=1100489
+[2026-05-27T12:12:09.444492+00:00] [STATUS] runner_status: Challenge 21/40 still running: challenge-01 — elapsed 270.0s | challenge_id=challenge-01, elapsed_sec=270.0, pid=1100489
+[2026-05-27T12:12:39.457169+00:00] [STATUS] runner_status: Challenge 21/40 TIMED OUT: challenge-01 after 300.0s | challenge_id=challenge-01, elapsed_sec=300.0
+[2026-05-27T12:12:39.472866+00:00] [STATUS] runner_status: Overall progress: 21/40 done — 16 completed, 5 failed — total elapsed 5302.2s | completed=16, failed=5, total_elapsed_sec=5302.2, challenges_run=21
+[2026-05-27T12:12:39.474916+00:00] [STATUS] runner_status: Starting challenge 22/40: challenge-02 (Easy) — timeout=300s | challenge_id=challenge-02, category=coding, timeout_sec=300
+[2026-05-27T12:13:09.476159+00:00] [STATUS] runner_status: Challenge 22/40 still running: challenge-02 — elapsed 30.0s | challenge_id=challenge-02, elapsed_sec=30.0, pid=1102653
+[2026-05-27T12:13:39.476530+00:00] [STATUS] runner_status: Challenge 22/40 still running: challenge-02 — elapsed 60.0s | challenge_id=challenge-02, elapsed_sec=60.0, pid=1102653
+[2026-05-27T12:14:09.476920+00:00] [STATUS] runner_status: Challenge 22/40 still running: challenge-02 — elapsed 90.0s | challenge_id=challenge-02, elapsed_sec=90.0, pid=1102653
+[2026-05-27T12:14:39.477310+00:00] [STATUS] runner_status: Challenge 22/40 still running: challenge-02 — elapsed 120.0s | challenge_id=challenge-02, elapsed_sec=120.0, pid=1102653
+[2026-05-27T12:14:45.476756+00:00] [STATUS] runner_status: Challenge 22/40 finished: challenge-02 — status=completed, elapsed=126.0s, returncode=0 | challenge_id=challenge-02, status=completed, elapsed_sec=125.98, returncode=0, ask_human_count=0, guard_event_count=46, tool_failure_count=2
+[2026-05-27T12:14:45.476976+00:00] [STATUS] runner_status: Overall progress: 22/40 done — 17 completed, 5 failed — total elapsed 5428.2s | completed=17, failed=5, total_elapsed_sec=5428.2, challenges_run=22
+[2026-05-27T12:14:45.479084+00:00] [STATUS] runner_status: Starting challenge 23/40: challenge-03 (Easy) — timeout=300s | challenge_id=challenge-03, category=coding, timeout_sec=300
+[2026-05-27T12:15:15.480173+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 30.0s | challenge_id=challenge-03, elapsed_sec=30.0, pid=1103550
+[2026-05-27T12:15:45.480544+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 60.0s | challenge_id=challenge-03, elapsed_sec=60.0, pid=1103550
+[2026-05-27T12:16:15.480906+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 90.0s | challenge_id=challenge-03, elapsed_sec=90.0, pid=1103550
+[2026-05-27T12:16:45.481270+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 120.0s | challenge_id=challenge-03, elapsed_sec=120.0, pid=1103550
+[2026-05-27T12:17:15.481639+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 150.0s | challenge_id=challenge-03, elapsed_sec=150.0, pid=1103550
+[2026-05-27T12:17:45.482094+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 180.0s | challenge_id=challenge-03, elapsed_sec=180.0, pid=1103550
+[2026-05-27T12:18:15.482580+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 210.0s | challenge_id=challenge-03, elapsed_sec=210.0, pid=1103550
+[2026-05-27T12:18:45.483120+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 240.0s | challenge_id=challenge-03, elapsed_sec=240.0, pid=1103550
+[2026-05-27T12:19:15.483710+00:00] [STATUS] runner_status: Challenge 23/40 still running: challenge-03 — elapsed 270.0s | challenge_id=challenge-03, elapsed_sec=270.0, pid=1103550
+[2026-05-27T12:19:45.495811+00:00] [STATUS] runner_status: Challenge 23/40 TIMED OUT: challenge-03 after 300.0s | challenge_id=challenge-03, elapsed_sec=300.0
+[2026-05-27T12:19:45.521876+00:00] [STATUS] runner_status: Overall progress: 23/40 done — 17 completed, 6 failed — total elapsed 5728.3s | completed=17, failed=6, total_elapsed_sec=5728.3, challenges_run=23
+[2026-05-27T12:19:45.524276+00:00] [STATUS] runner_status: Starting challenge 24/40: challenge-04 (Easy) — timeout=300s | challenge_id=challenge-04, category=coding, timeout_sec=300
+[2026-05-27T12:20:15.525626+00:00] [STATUS] runner_status: Challenge 24/40 still running: challenge-04 — elapsed 30.0s | challenge_id=challenge-04, elapsed_sec=30.0, pid=1105751
+[2026-05-27T12:20:45.526013+00:00] [STATUS] runner_status: Challenge 24/40 still running: challenge-04 — elapsed 60.0s | challenge_id=challenge-04, elapsed_sec=60.0, pid=1105751
+[2026-05-27T12:21:15.526405+00:00] [STATUS] runner_status: Challenge 24/40 still running: challenge-04 — elapsed 90.0s | challenge_id=challenge-04, elapsed_sec=90.0, pid=1105751
+[2026-05-27T12:21:29.543588+00:00] [STATUS] runner_status: Challenge 24/40 finished: challenge-04 — status=completed, elapsed=104.0s, returncode=0 | challenge_id=challenge-04, status=completed, elapsed_sec=104.01, returncode=0, ask_human_count=0, guard_event_count=8, tool_failure_count=0
+[2026-05-27T12:21:29.543847+00:00] [STATUS] runner_status: Overall progress: 24/40 done — 18 completed, 6 failed — total elapsed 5832.3s | completed=18, failed=6, total_elapsed_sec=5832.3, challenges_run=24
+[2026-05-27T12:21:29.545999+00:00] [STATUS] runner_status: Starting challenge 25/40: challenge-05 (Easy-Medium) — timeout=300s | challenge_id=challenge-05, category=coding, timeout_sec=300
+[2026-05-27T12:21:59.558153+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 30.0s | challenge_id=challenge-05, elapsed_sec=30.0, pid=1106615
+[2026-05-27T12:22:29.558528+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 60.0s | challenge_id=challenge-05, elapsed_sec=60.0, pid=1106615
+[2026-05-27T12:22:59.558951+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 90.0s | challenge_id=challenge-05, elapsed_sec=90.0, pid=1106615
+[2026-05-27T12:23:29.559353+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 120.0s | challenge_id=challenge-05, elapsed_sec=120.0, pid=1106615
+[2026-05-27T12:23:59.559783+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 150.0s | challenge_id=challenge-05, elapsed_sec=150.0, pid=1106615
+[2026-05-27T12:24:29.560201+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 180.0s | challenge_id=challenge-05, elapsed_sec=180.0, pid=1106615
+[2026-05-27T12:24:59.560582+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 210.0s | challenge_id=challenge-05, elapsed_sec=210.0, pid=1106615
+[2026-05-27T12:25:29.560970+00:00] [STATUS] runner_status: Challenge 25/40 still running: challenge-05 — elapsed 240.0s | challenge_id=challenge-05, elapsed_sec=240.0, pid=1106615
+[2026-05-27T12:25:40.191115+00:00] [STATUS] runner_status: Challenge 25/40 finished: challenge-05 — status=completed, elapsed=250.6s, returncode=0 | challenge_id=challenge-05, status=completed, elapsed_sec=250.61, returncode=0, ask_human_count=0, guard_event_count=46, tool_failure_count=2
+[2026-05-27T12:25:40.191361+00:00] [STATUS] runner_status: Overall progress: 25/40 done — 19 completed, 6 failed — total elapsed 6082.9s | completed=19, failed=6, total_elapsed_sec=6082.9, challenges_run=25
+[2026-05-27T12:25:40.193545+00:00] [STATUS] runner_status: Starting challenge 26/40: challenge-06 (Easy-Medium) — timeout=300s | challenge_id=challenge-06, category=coding, timeout_sec=300
+[2026-05-27T12:26:10.194781+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 30.0s | challenge_id=challenge-06, elapsed_sec=30.0, pid=1108634
+[2026-05-27T12:26:40.195487+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 60.0s | challenge_id=challenge-06, elapsed_sec=60.0, pid=1108634
+[2026-05-27T12:27:10.196267+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 90.0s | challenge_id=challenge-06, elapsed_sec=90.0, pid=1108634
+[2026-05-27T12:27:40.196709+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 120.0s | challenge_id=challenge-06, elapsed_sec=120.0, pid=1108634
+[2026-05-27T12:28:10.197129+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 150.0s | challenge_id=challenge-06, elapsed_sec=150.0, pid=1108634
+[2026-05-27T12:28:40.197616+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 180.0s | challenge_id=challenge-06, elapsed_sec=180.0, pid=1108634
+[2026-05-27T12:29:10.198037+00:00] [STATUS] runner_status: Challenge 26/40 still running: challenge-06 — elapsed 210.0s | challenge_id=challenge-06, elapsed_sec=210.0, pid=1108634
+[2026-05-27T12:29:21.771203+00:00] [STATUS] runner_status: Challenge 26/40 finished: challenge-06 — status=completed, elapsed=221.6s, returncode=0 | challenge_id=challenge-06, status=completed, elapsed_sec=221.56, returncode=0, ask_human_count=0, guard_event_count=20, tool_failure_count=1
+[2026-05-27T12:29:21.771729+00:00] [STATUS] runner_status: Overall progress: 26/40 done — 20 completed, 6 failed — total elapsed 6304.5s | completed=20, failed=6, total_elapsed_sec=6304.5, challenges_run=26
+[2026-05-27T12:29:21.774363+00:00] [STATUS] runner_status: Starting challenge 27/40: challenge-07 (Easy-Medium) — timeout=300s | challenge_id=challenge-07, category=coding, timeout_sec=300
+[2026-05-27T12:29:51.775818+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 30.0s | challenge_id=challenge-07, elapsed_sec=30.0, pid=1110225
+[2026-05-27T12:30:21.776586+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 60.0s | challenge_id=challenge-07, elapsed_sec=60.0, pid=1110225
+[2026-05-27T12:30:51.777135+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 90.0s | challenge_id=challenge-07, elapsed_sec=90.0, pid=1110225
+[2026-05-27T12:31:21.777549+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 120.0s | challenge_id=challenge-07, elapsed_sec=120.0, pid=1110225
+[2026-05-27T12:31:51.777957+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 150.0s | challenge_id=challenge-07, elapsed_sec=150.0, pid=1110225
+[2026-05-27T12:32:21.778306+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 180.0s | challenge_id=challenge-07, elapsed_sec=180.0, pid=1110225
+[2026-05-27T12:32:51.778756+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 210.0s | challenge_id=challenge-07, elapsed_sec=210.0, pid=1110225
+[2026-05-27T12:33:21.779171+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 240.0s | challenge_id=challenge-07, elapsed_sec=240.0, pid=1110225
+[2026-05-27T12:33:51.779475+00:00] [STATUS] runner_status: Challenge 27/40 still running: challenge-07 — elapsed 270.0s | challenge_id=challenge-07, elapsed_sec=270.0, pid=1110225
+[2026-05-27T12:34:21.791470+00:00] [STATUS] runner_status: Challenge 27/40 TIMED OUT: challenge-07 after 300.0s | challenge_id=challenge-07, elapsed_sec=300.0
+[2026-05-27T12:34:21.809926+00:00] [STATUS] runner_status: Overall progress: 27/40 done — 20 completed, 7 failed — total elapsed 6604.6s | completed=20, failed=7, total_elapsed_sec=6604.6, challenges_run=27
+[2026-05-27T12:34:21.812362+00:00] [STATUS] runner_status: Starting challenge 28/40: challenge-08 (Medium) — timeout=600s | challenge_id=challenge-08, category=coding, timeout_sec=600
+[2026-05-27T12:34:51.813769+00:00] [STATUS] runner_status: Challenge 28/40 still running: challenge-08 — elapsed 30.0s | challenge_id=challenge-08, elapsed_sec=30.0, pid=1112410
+[2026-05-27T12:35:12.265987+00:00] [STATUS] runner_status: Challenge 28/40 finished: challenge-08 — status=completed, elapsed=50.4s, returncode=0 | challenge_id=challenge-08, status=completed, elapsed_sec=50.45, returncode=0, ask_human_count=0, guard_event_count=8, tool_failure_count=0
+[2026-05-27T12:35:12.266230+00:00] [STATUS] runner_status: Overall progress: 28/40 done — 21 completed, 7 failed — total elapsed 6655.0s | completed=21, failed=7, total_elapsed_sec=6655.0, challenges_run=28
+[2026-05-27T12:35:12.269678+00:00] [STATUS] runner_status: Starting challenge 29/40: challenge-09 (Medium) — timeout=600s | challenge_id=challenge-09, category=coding, timeout_sec=600
+[2026-05-27T12:35:42.271137+00:00] [STATUS] runner_status: Challenge 29/40 still running: challenge-09 — elapsed 30.0s | challenge_id=challenge-09, elapsed_sec=30.0, pid=1112884
+[2026-05-27T12:35:49.935401+00:00] [STATUS] runner_status: Challenge 29/40 finished: challenge-09 — status=completed, elapsed=37.7s, returncode=0 | challenge_id=challenge-09, status=completed, elapsed_sec=37.66, returncode=0, ask_human_count=0, guard_event_count=8, tool_failure_count=0
+[2026-05-27T12:35:49.935656+00:00] [STATUS] runner_status: Overall progress: 29/40 done — 22 completed, 7 failed — total elapsed 6692.7s | completed=22, failed=7, total_elapsed_sec=6692.7, challenges_run=29
+[2026-05-27T12:35:49.937719+00:00] [STATUS] runner_status: Starting challenge 30/40: challenge-10 (Medium) — timeout=600s | challenge_id=challenge-10, category=coding, timeout_sec=600
+[2026-05-27T12:36:19.939019+00:00] [STATUS] runner_status: Challenge 30/40 still running: challenge-10 — elapsed 30.0s | challenge_id=challenge-10, elapsed_sec=30.0, pid=1113199
+[2026-05-27T12:36:49.939672+00:00] [STATUS] runner_status: Challenge 30/40 still running: challenge-10 — elapsed 60.0s | challenge_id=challenge-10, elapsed_sec=60.0, pid=1113199
+[2026-05-27T12:37:19.940120+00:00] [STATUS] runner_status: Challenge 30/40 still running: challenge-10 — elapsed 90.0s | challenge_id=challenge-10, elapsed_sec=90.0, pid=1113199
+[2026-05-27T12:37:49.940651+00:00] [STATUS] runner_status: Challenge 30/40 still running: challenge-10 — elapsed 120.0s | challenge_id=challenge-10, elapsed_sec=120.0, pid=1113199
+[2026-05-27T12:38:03.483434+00:00] [STATUS] runner_status: Challenge 30/40 finished: challenge-10 — status=completed, elapsed=133.5s, returncode=0 | challenge_id=challenge-10, status=completed, elapsed_sec=133.54, returncode=0, ask_human_count=0, guard_event_count=9, tool_failure_count=0
+[2026-05-27T12:38:03.483977+00:00] [STATUS] runner_status: Overall progress: 30/40 done — 23 completed, 7 failed — total elapsed 6826.2s | completed=23, failed=7, total_elapsed_sec=6826.2, challenges_run=30
+[2026-05-27T12:38:03.486536+00:00] [STATUS] runner_status: Starting challenge 31/40: challenge-11 (Medium) — timeout=600s | challenge_id=challenge-11, category=coding, timeout_sec=600
+[2026-05-27T12:38:33.488177+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 30.0s | challenge_id=challenge-11, elapsed_sec=30.0, pid=1114243
+[2026-05-27T12:39:03.488517+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 60.0s | challenge_id=challenge-11, elapsed_sec=60.0, pid=1114243
+[2026-05-27T12:39:33.488883+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 90.0s | challenge_id=challenge-11, elapsed_sec=90.0, pid=1114243
+[2026-05-27T12:40:03.489307+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 120.0s | challenge_id=challenge-11, elapsed_sec=120.0, pid=1114243
+[2026-05-27T12:40:33.489722+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 150.0s | challenge_id=challenge-11, elapsed_sec=150.0, pid=1114243
+[2026-05-27T12:41:03.490107+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 180.0s | challenge_id=challenge-11, elapsed_sec=180.0, pid=1114243
+[2026-05-27T12:41:33.490627+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 210.0s | challenge_id=challenge-11, elapsed_sec=210.0, pid=1114243
+[2026-05-27T12:42:03.491018+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 240.0s | challenge_id=challenge-11, elapsed_sec=240.0, pid=1114243
+[2026-05-27T12:42:33.491355+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 270.0s | challenge_id=challenge-11, elapsed_sec=270.0, pid=1114243
+[2026-05-27T12:43:03.491742+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 300.0s | challenge_id=challenge-11, elapsed_sec=300.0, pid=1114243
+[2026-05-27T12:43:33.492108+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 330.0s | challenge_id=challenge-11, elapsed_sec=330.0, pid=1114243
+[2026-05-27T12:44:03.492458+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 360.0s | challenge_id=challenge-11, elapsed_sec=360.0, pid=1114243
+[2026-05-27T12:44:33.492834+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 390.0s | challenge_id=challenge-11, elapsed_sec=390.0, pid=1114243
+[2026-05-27T12:45:03.493218+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 420.0s | challenge_id=challenge-11, elapsed_sec=420.0, pid=1114243
+[2026-05-27T12:45:33.493611+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 450.0s | challenge_id=challenge-11, elapsed_sec=450.0, pid=1114243
+[2026-05-27T12:46:03.493969+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 480.0s | challenge_id=challenge-11, elapsed_sec=480.0, pid=1114243
+[2026-05-27T12:46:33.494334+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 510.0s | challenge_id=challenge-11, elapsed_sec=510.0, pid=1114243
+[2026-05-27T12:47:03.494730+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 540.0s | challenge_id=challenge-11, elapsed_sec=540.0, pid=1114243
+[2026-05-27T12:47:33.495142+00:00] [STATUS] runner_status: Challenge 31/40 still running: challenge-11 — elapsed 570.0s | challenge_id=challenge-11, elapsed_sec=570.0, pid=1114243
+[2026-05-27T12:48:03.519854+00:00] [STATUS] runner_status: Challenge 31/40 TIMED OUT: challenge-11 after 600.0s | challenge_id=challenge-11, elapsed_sec=600.0
+[2026-05-27T12:48:03.556903+00:00] [STATUS] runner_status: Overall progress: 31/40 done — 23 completed, 8 failed — total elapsed 7426.3s | completed=23, failed=8, total_elapsed_sec=7426.3, challenges_run=31
+[2026-05-27T12:48:03.559482+00:00] [STATUS] runner_status: Starting challenge 32/40: challenge-12 (Medium) — timeout=600s | challenge_id=challenge-12, category=coding, timeout_sec=600
+[2026-05-27T12:48:33.560691+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 30.0s | challenge_id=challenge-12, elapsed_sec=30.0, pid=1118749
+[2026-05-27T12:49:03.561072+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 60.0s | challenge_id=challenge-12, elapsed_sec=60.0, pid=1118749
+[2026-05-27T12:49:33.561613+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 90.0s | challenge_id=challenge-12, elapsed_sec=90.0, pid=1118749
+[2026-05-27T12:50:03.562072+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 120.0s | challenge_id=challenge-12, elapsed_sec=120.0, pid=1118749
+[2026-05-27T12:50:33.562490+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 150.0s | challenge_id=challenge-12, elapsed_sec=150.0, pid=1118749
+[2026-05-27T12:51:03.562885+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 180.0s | challenge_id=challenge-12, elapsed_sec=180.0, pid=1118749
+[2026-05-27T12:51:33.563234+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 210.0s | challenge_id=challenge-12, elapsed_sec=210.0, pid=1118749
+[2026-05-27T12:52:03.563684+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 240.0s | challenge_id=challenge-12, elapsed_sec=240.0, pid=1118749
+[2026-05-27T12:52:33.564146+00:00] [STATUS] runner_status: Challenge 32/40 still running: challenge-12 — elapsed 270.0s | challenge_id=challenge-12, elapsed_sec=270.0, pid=1118749
+[2026-05-27T12:52:54.845454+00:00] [STATUS] runner_status: Challenge 32/40 finished: challenge-12 — status=completed, elapsed=291.2s, returncode=0 | challenge_id=challenge-12, status=completed, elapsed_sec=291.24, returncode=0, ask_human_count=0, guard_event_count=122, tool_failure_count=1
+[2026-05-27T12:52:54.845868+00:00] [STATUS] runner_status: Overall progress: 32/40 done — 24 completed, 8 failed — total elapsed 7717.6s | completed=24, failed=8, total_elapsed_sec=7717.6, challenges_run=32
+[2026-05-27T12:52:54.847965+00:00] [STATUS] runner_status: Starting challenge 33/40: challenge-13 (Medium-Hard) — timeout=600s | challenge_id=challenge-13, category=coding, timeout_sec=600
+[2026-05-27T12:53:24.849353+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 30.0s | challenge_id=challenge-13, elapsed_sec=30.0, pid=1120865
+[2026-05-27T12:53:54.849938+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 60.0s | challenge_id=challenge-13, elapsed_sec=60.0, pid=1120865
+[2026-05-27T12:54:24.850722+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 90.0s | challenge_id=challenge-13, elapsed_sec=90.0, pid=1120865
+[2026-05-27T12:54:54.851266+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 120.0s | challenge_id=challenge-13, elapsed_sec=120.0, pid=1120865
+[2026-05-27T12:55:24.851678+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 150.0s | challenge_id=challenge-13, elapsed_sec=150.0, pid=1120865
+[2026-05-27T12:55:54.852066+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 180.0s | challenge_id=challenge-13, elapsed_sec=180.0, pid=1120865
+[2026-05-27T12:56:24.852439+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 210.0s | challenge_id=challenge-13, elapsed_sec=210.0, pid=1120865
+[2026-05-27T12:56:54.852838+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 240.0s | challenge_id=challenge-13, elapsed_sec=240.0, pid=1120865
+[2026-05-27T12:57:24.853202+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 270.0s | challenge_id=challenge-13, elapsed_sec=270.0, pid=1120865
+[2026-05-27T12:57:54.853587+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 300.0s | challenge_id=challenge-13, elapsed_sec=300.0, pid=1120865
+[2026-05-27T12:58:24.853949+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 330.0s | challenge_id=challenge-13, elapsed_sec=330.0, pid=1120865
+[2026-05-27T12:58:54.854292+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 360.0s | challenge_id=challenge-13, elapsed_sec=360.0, pid=1120865
+[2026-05-27T12:59:24.854684+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 390.0s | challenge_id=challenge-13, elapsed_sec=390.0, pid=1120865
+[2026-05-27T12:59:54.855060+00:00] [STATUS] runner_status: Challenge 33/40 still running: challenge-13 — elapsed 420.0s | challenge_id=challenge-13, elapsed_sec=420.0, pid=1120865
+[2026-05-27T13:00:13.939718+00:00] [STATUS] runner_status: Challenge 33/40 finished: challenge-13 — status=completed, elapsed=439.1s, returncode=0 | challenge_id=challenge-13, status=completed, elapsed_sec=439.06, returncode=0, ask_human_count=0, guard_event_count=56, tool_failure_count=3
+[2026-05-27T13:00:13.940163+00:00] [STATUS] runner_status: Overall progress: 33/40 done — 25 completed, 8 failed — total elapsed 8156.7s | completed=25, failed=8, total_elapsed_sec=8156.7, challenges_run=33
+[2026-05-27T13:00:13.942540+00:00] [STATUS] runner_status: Starting challenge 34/40: challenge-14 (Medium-Hard) — timeout=600s | challenge_id=challenge-14, category=coding, timeout_sec=600
+[2026-05-27T13:00:43.943795+00:00] [STATUS] runner_status: Challenge 34/40 still running: challenge-14 — elapsed 30.0s | challenge_id=challenge-14, elapsed_sec=30.0, pid=1124045
+[2026-05-27T13:01:13.944203+00:00] [STATUS] runner_status: Challenge 34/40 still running: challenge-14 — elapsed 60.0s | challenge_id=challenge-14, elapsed_sec=60.0, pid=1124045
+[2026-05-27T13:01:29.550023+00:00] [STATUS] runner_status: Challenge 34/40 finished: challenge-14 — status=completed, elapsed=75.6s, returncode=0 | challenge_id=challenge-14, status=completed, elapsed_sec=75.6, returncode=0, ask_human_count=0, guard_event_count=10, tool_failure_count=0
+[2026-05-27T13:01:29.550277+00:00] [STATUS] runner_status: Overall progress: 34/40 done — 26 completed, 8 failed — total elapsed 8232.3s | completed=26, failed=8, total_elapsed_sec=8232.3, challenges_run=34
+[2026-05-27T13:01:29.552419+00:00] [STATUS] runner_status: Starting challenge 35/40: challenge-15 (Medium-Hard) — timeout=600s | challenge_id=challenge-15, category=coding, timeout_sec=600
+[2026-05-27T13:01:59.553644+00:00] [STATUS] runner_status: Challenge 35/40 still running: challenge-15 — elapsed 30.0s | challenge_id=challenge-15, elapsed_sec=30.0, pid=1124683
+[2026-05-27T13:02:29.554067+00:00] [STATUS] runner_status: Challenge 35/40 still running: challenge-15 — elapsed 60.0s | challenge_id=challenge-15, elapsed_sec=60.0, pid=1124683
+[2026-05-27T13:02:59.554605+00:00] [STATUS] runner_status: Challenge 35/40 still running: challenge-15 — elapsed 90.0s | challenge_id=challenge-15, elapsed_sec=90.0, pid=1124683
+[2026-05-27T13:03:01.338143+00:00] [STATUS] runner_status: Challenge 35/40 finished: challenge-15 — status=completed, elapsed=91.8s, returncode=0 | challenge_id=challenge-15, status=completed, elapsed_sec=91.78, returncode=0, ask_human_count=0, guard_event_count=10, tool_failure_count=0
+[2026-05-27T13:03:01.338404+00:00] [STATUS] runner_status: Overall progress: 35/40 done — 27 completed, 8 failed — total elapsed 8324.1s | completed=27, failed=8, total_elapsed_sec=8324.1, challenges_run=35
+[2026-05-27T13:03:01.340739+00:00] [STATUS] runner_status: Starting challenge 36/40: challenge-16 (Hard) — timeout=1200s | challenge_id=challenge-16, category=coding, timeout_sec=1200
+[2026-05-27T13:03:31.341905+00:00] [STATUS] runner_status: Challenge 36/40 still running: challenge-16 — elapsed 30.0s | challenge_id=challenge-16, elapsed_sec=30.0, pid=1125343
+[2026-05-27T13:04:01.342647+00:00] [STATUS] runner_status: Challenge 36/40 still running: challenge-16 — elapsed 60.0s | challenge_id=challenge-16, elapsed_sec=60.0, pid=1125343
+[2026-05-27T13:04:10.565488+00:00] [STATUS] runner_status: Challenge 36/40 finished: challenge-16 — status=completed, elapsed=69.2s, returncode=0 | challenge_id=challenge-16, status=completed, elapsed_sec=69.2, returncode=0, ask_human_count=0, guard_event_count=11, tool_failure_count=0
+[2026-05-27T13:04:10.566753+00:00] [STATUS] runner_status: Overall progress: 36/40 done — 28 completed, 8 failed — total elapsed 8393.3s | completed=28, failed=8, total_elapsed_sec=8393.3, challenges_run=36
+[2026-05-27T13:04:10.569948+00:00] [STATUS] runner_status: Starting challenge 37/40: challenge-17 (Hard) — timeout=1200s | challenge_id=challenge-17, category=coding, timeout_sec=1200
+[2026-05-27T13:04:40.571644+00:00] [STATUS] runner_status: Challenge 37/40 still running: challenge-17 — elapsed 30.0s | challenge_id=challenge-17, elapsed_sec=30.0, pid=1125840
+[2026-05-27T13:05:10.572025+00:00] [STATUS] runner_status: Challenge 37/40 still running: challenge-17 — elapsed 60.0s | challenge_id=challenge-17, elapsed_sec=60.0, pid=1125840
+[2026-05-27T13:05:38.603447+00:00] [STATUS] runner_status: Challenge 37/40 finished: challenge-17 — status=completed, elapsed=88.0s, returncode=0 | challenge_id=challenge-17, status=completed, elapsed_sec=88.02, returncode=0, ask_human_count=0, guard_event_count=10, tool_failure_count=0
+[2026-05-27T13:05:38.603708+00:00] [STATUS] runner_status: Overall progress: 37/40 done — 29 completed, 8 failed — total elapsed 8481.3s | completed=29, failed=8, total_elapsed_sec=8481.3, challenges_run=37
+[2026-05-27T13:05:38.605744+00:00] [STATUS] runner_status: Starting challenge 38/40: challenge-18 (Hard) — timeout=1200s | challenge_id=challenge-18, category=coding, timeout_sec=1200
+[2026-05-27T13:06:08.606935+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 30.0s | challenge_id=challenge-18, elapsed_sec=30.0, pid=1126529
+[2026-05-27T13:06:38.607372+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 60.0s | challenge_id=challenge-18, elapsed_sec=60.0, pid=1126529
+[2026-05-27T13:07:08.607798+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 90.0s | challenge_id=challenge-18, elapsed_sec=90.0, pid=1126529
+[2026-05-27T13:07:38.608216+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 120.0s | challenge_id=challenge-18, elapsed_sec=120.0, pid=1126529
+[2026-05-27T13:08:08.608609+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 150.0s | challenge_id=challenge-18, elapsed_sec=150.0, pid=1126529
+[2026-05-27T13:08:38.609006+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 180.0s | challenge_id=challenge-18, elapsed_sec=180.0, pid=1126529
+[2026-05-27T13:09:08.609398+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 210.0s | challenge_id=challenge-18, elapsed_sec=210.0, pid=1126529
+[2026-05-27T13:09:38.609818+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 240.0s | challenge_id=challenge-18, elapsed_sec=240.0, pid=1126529
+[2026-05-27T13:10:08.610177+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 270.0s | challenge_id=challenge-18, elapsed_sec=270.0, pid=1126529
+[2026-05-27T13:10:38.610573+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 300.0s | challenge_id=challenge-18, elapsed_sec=300.0, pid=1126529
+[2026-05-27T13:11:08.611025+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 330.0s | challenge_id=challenge-18, elapsed_sec=330.0, pid=1126529
+[2026-05-27T13:11:38.611582+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 360.0s | challenge_id=challenge-18, elapsed_sec=360.0, pid=1126529
+[2026-05-27T13:12:08.612075+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 390.0s | challenge_id=challenge-18, elapsed_sec=390.0, pid=1126529
+[2026-05-27T13:12:38.612791+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 420.0s | challenge_id=challenge-18, elapsed_sec=420.0, pid=1126529
+[2026-05-27T13:13:08.613595+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 450.0s | challenge_id=challenge-18, elapsed_sec=450.0, pid=1126529
+[2026-05-27T13:13:38.613977+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 480.0s | challenge_id=challenge-18, elapsed_sec=480.0, pid=1126529
+[2026-05-27T13:14:08.614365+00:00] [STATUS] runner_status: Challenge 38/40 still running: challenge-18 — elapsed 510.0s | challenge_id=challenge-18, elapsed_sec=510.0, pid=1126529
+[2026-05-27T13:14:12.683622+00:00] [STATUS] runner_status: Challenge 38/40 finished: challenge-18 — status=completed, elapsed=514.1s, returncode=0 | challenge_id=challenge-18, status=completed, elapsed_sec=514.06, returncode=0, ask_human_count=0, guard_event_count=48, tool_failure_count=1
+[2026-05-27T13:14:12.684050+00:00] [STATUS] runner_status: Overall progress: 38/40 done — 30 completed, 8 failed — total elapsed 8995.4s | completed=30, failed=8, total_elapsed_sec=8995.4, challenges_run=38
+[2026-05-27T13:14:12.686387+00:00] [STATUS] runner_status: Starting challenge 39/40: challenge-19 (Hard) — timeout=1200s | challenge_id=challenge-19, category=coding, timeout_sec=1200
+[2026-05-27T13:14:42.687757+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 30.0s | challenge_id=challenge-19, elapsed_sec=30.0, pid=1130198
+[2026-05-27T13:15:12.688109+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 60.0s | challenge_id=challenge-19, elapsed_sec=60.0, pid=1130198
+[2026-05-27T13:15:42.688526+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 90.0s | challenge_id=challenge-19, elapsed_sec=90.0, pid=1130198
+[2026-05-27T13:16:12.688958+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 120.0s | challenge_id=challenge-19, elapsed_sec=120.0, pid=1130198
+[2026-05-27T13:16:42.689497+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 150.0s | challenge_id=challenge-19, elapsed_sec=150.0, pid=1130198
+[2026-05-27T13:17:12.689905+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 180.0s | challenge_id=challenge-19, elapsed_sec=180.0, pid=1130198
+[2026-05-27T13:17:42.690296+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 210.0s | challenge_id=challenge-19, elapsed_sec=210.0, pid=1130198
+[2026-05-27T13:18:12.690644+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 240.0s | challenge_id=challenge-19, elapsed_sec=240.0, pid=1130198
+[2026-05-27T13:18:42.691007+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 270.0s | challenge_id=challenge-19, elapsed_sec=270.0, pid=1130198
+[2026-05-27T13:19:12.691377+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 300.0s | challenge_id=challenge-19, elapsed_sec=300.0, pid=1130198
+[2026-05-27T13:19:42.691717+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 330.0s | challenge_id=challenge-19, elapsed_sec=330.0, pid=1130198
+[2026-05-27T13:20:12.692055+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 360.0s | challenge_id=challenge-19, elapsed_sec=360.0, pid=1130198
+[2026-05-27T13:20:42.692403+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 390.0s | challenge_id=challenge-19, elapsed_sec=390.0, pid=1130198
+[2026-05-27T13:21:12.692813+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 420.0s | challenge_id=challenge-19, elapsed_sec=420.0, pid=1130198
+[2026-05-27T13:21:42.693236+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 450.0s | challenge_id=challenge-19, elapsed_sec=450.0, pid=1130198
+[2026-05-27T13:22:12.693660+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 480.0s | challenge_id=challenge-19, elapsed_sec=480.0, pid=1130198
+[2026-05-27T13:22:42.694675+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 510.0s | challenge_id=challenge-19, elapsed_sec=510.0, pid=1130198
+[2026-05-27T13:23:12.695823+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 540.0s | challenge_id=challenge-19, elapsed_sec=540.0, pid=1130198
+[2026-05-27T13:23:42.696578+00:00] [STATUS] runner_status: Challenge 39/40 still running: challenge-19 — elapsed 570.0s | challenge_id=challenge-19, elapsed_sec=570.0, pid=1130198
+[2026-05-27T13:24:03.666321+00:00] [STATUS] runner_status: Challenge 39/40 finished: challenge-19 — status=completed, elapsed=590.9s, returncode=0 | challenge_id=challenge-19, status=completed, elapsed_sec=590.87, returncode=0, ask_human_count=0, guard_event_count=157, tool_failure_count=4
+[2026-05-27T13:24:03.666909+00:00] [STATUS] runner_status: Overall progress: 39/40 done — 31 completed, 8 failed — total elapsed 9586.4s | completed=31, failed=8, total_elapsed_sec=9586.4, challenges_run=39
+[2026-05-27T13:24:03.669431+00:00] [STATUS] runner_status: Starting challenge 40/40: challenge-20 (Hardest) — timeout=1200s | challenge_id=challenge-20, category=coding, timeout_sec=1200
+[2026-05-27T13:24:33.671637+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 30.0s | challenge_id=challenge-20, elapsed_sec=30.0, pid=1134690
+[2026-05-27T13:25:03.672068+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 60.0s | challenge_id=challenge-20, elapsed_sec=60.0, pid=1134690
+[2026-05-27T13:25:33.672512+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 90.0s | challenge_id=challenge-20, elapsed_sec=90.0, pid=1134690
+[2026-05-27T13:26:03.673369+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 120.0s | challenge_id=challenge-20, elapsed_sec=120.0, pid=1134690
+[2026-05-27T13:26:33.673905+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 150.0s | challenge_id=challenge-20, elapsed_sec=150.0, pid=1134690
+[2026-05-27T13:27:03.674636+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 180.0s | challenge_id=challenge-20, elapsed_sec=180.0, pid=1134690
+[2026-05-27T13:27:33.675023+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 210.0s | challenge_id=challenge-20, elapsed_sec=210.0, pid=1134690
+[2026-05-27T13:28:03.675649+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 240.0s | challenge_id=challenge-20, elapsed_sec=240.0, pid=1134690
+[2026-05-27T13:28:33.676470+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 270.0s | challenge_id=challenge-20, elapsed_sec=270.0, pid=1134690
+[2026-05-27T13:29:03.678673+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 300.0s | challenge_id=challenge-20, elapsed_sec=300.0, pid=1134690
+[2026-05-27T13:29:33.679088+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 330.0s | challenge_id=challenge-20, elapsed_sec=330.0, pid=1134690
+[2026-05-27T13:30:03.679821+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 360.0s | challenge_id=challenge-20, elapsed_sec=360.0, pid=1134690
+[2026-05-27T13:30:33.680480+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 390.0s | challenge_id=challenge-20, elapsed_sec=390.0, pid=1134690
+[2026-05-27T13:31:03.681547+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 420.0s | challenge_id=challenge-20, elapsed_sec=420.0, pid=1134690
+[2026-05-27T13:31:33.682329+00:00] [STATUS] runner_status: Challenge 40/40 still running: challenge-20 — elapsed 450.0s | challenge_id=challenge-20, elapsed_sec=450.0, pid=1134690
+[2026-05-27T13:31:56.297480+00:00] [STATUS] runner_status: Challenge 40/40 finished: challenge-20 — status=completed, elapsed=472.6s, returncode=0 | challenge_id=challenge-20, status=completed, elapsed_sec=472.56, returncode=0, ask_human_count=0, guard_event_count=54, tool_failure_count=2
+[2026-05-27T13:31:56.298864+00:00] [STATUS] runner_status: Overall progress: 40/40 done — 32 completed, 8 failed — total elapsed 10059.0s | completed=32, failed=8, total_elapsed_sec=10059.0, challenges_run=40
+[2026-05-27T13:31:56.299028+00:00] [INFO] baseline_complete: All challenges finished | total_elapsed_sec=10059.0, challenges_run=40
+[2026-05-27T13:31:56.309082+00:00] [STATUS] runner_status: Report saved to 27-b-baseline.md

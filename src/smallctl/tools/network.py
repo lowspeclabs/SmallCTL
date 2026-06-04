@@ -14,7 +14,29 @@ from .common import fail, ok
 from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .shell import create_process
+from .installer_preflight import run_installer_preflight_probes
+from .process_lifecycle import stop_process, truncate_output, unregister_process
 from .process_streams import read_stream_chunks
+from .ssh_parsing import (
+    is_shell_redirection_token as _is_shell_redirection_token,
+    join_remote_shell_tokens as _join_remote_shell_tokens,
+    normalize_ssh_arguments as _normalize_ssh_arguments,
+    normalize_ssh_target as _normalize_ssh_target,
+    normalize_optional_ssh_string as _normalize_optional_ssh_string,
+    parse_int_option as _parse_int_option,
+    parse_ssh_exec_args_from_shell_command as _parse_ssh_exec_args_from_shell_command,
+    shell_join as _shell_join,
+    shell_tokens_with_spans as _shell_tokens_with_spans,
+    split_ssh_option_value as _split_ssh_option_value,
+    strip_redundant_root_sudo as _strip_redundant_root_sudo,
+)
+
+# Public re-exports for downstream callers
+normalize_ssh_arguments = _normalize_ssh_arguments
+normalize_ssh_target = _normalize_ssh_target
+parse_ssh_exec_args_from_shell_command = _parse_ssh_exec_args_from_shell_command
+shell_join = _shell_join
+
 from .shell_support import (
     InvalidInputLoopDetector,
     _apt_deb822_preflight_guard,
@@ -32,46 +54,6 @@ if TYPE_CHECKING:
     from ..state import LoopState
 
 
-_IGNORABLE_SSH_FLAGS = {
-    "-4",
-    "-6",
-    "-A",
-    "-a",
-    "-C",
-    "-f",
-    "-G",
-    "-g",
-    "-K",
-    "-k",
-    "-M",
-    "-N",
-    "-n",
-    "-q",
-    "-s",
-    "-T",
-    "-t",
-    "-tt",
-    "-v",
-    "-vv",
-    "-vvv",
-    "-X",
-    "-x",
-    "-Y",
-    "-y",
-}
-_SAFE_SSH_OPTION_KEYS = {
-    "BatchMode",
-    "ConnectTimeout",
-    "IdentityFile",
-    "NumberOfPasswordPrompts",
-    "PasswordAuthentication",
-    "Port",
-    "PreferredAuthentications",
-    "PubkeyAuthentication",
-    "StrictHostKeyChecking",
-    "User",
-}
-_LOCAL_SHELL_CONTROL_TOKENS = {"|", "||", "&&", ";", ";&", ";;&"}
 _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS = (
     "not found",
     "could not be found",
@@ -92,294 +74,15 @@ _SSH_TRANSPORT_FAILURE_MARKERS = (
     "network is unreachable",
 )
 _INTERACTIVE_PROMPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("yes_no", re.compile(r"(?P<question>[^\n\r]{0,240}?\((?:y/n|y/N|Y/n|Y/N|yes/no|yes/NO)\))\s*$", re.IGNORECASE)),
-    ("choice", re.compile(r"(?P<question>[^\n\r]{0,240}?(?:choice|selection|option)\s*:)\s*$", re.IGNORECASE)),
-    ("enter", re.compile(r"(?P<question>[^\n\r]{0,240}?(?:press|hit)\s+(?:enter|return)[^\n\r]*)\s*$", re.IGNORECASE)),
-    ("password", re.compile(r"(?P<question>[^\n\r]{0,240}password\s*:)\s*$", re.IGNORECASE)),
+    ("choice", re.compile(r"Choice:\s*\[(?P<choices>[^\]]+)\]", re.IGNORECASE)),
+    ("yes_no", re.compile(r"(?P<question>[^\n\r]{0,120}\?)\s*\(?(?P<default>[yYnN])/?[yYnN]\)?", re.IGNORECASE)),
     ("free_text", re.compile(r"(?P<question>[^\n\r]{0,240}:\s*)$", re.IGNORECASE)),
 )
 _SSH_INTERACTIVE_SESSIONS: dict[str, dict[str, Any]] = {}
-_ROOT_SUDO_PREFIX_RE = re.compile(
-    r"^\s*sudo(?:\s+-(?:n|E|H|S))*\s+(?:(?:-i|-s)\s+)?(?:--\s+)?(?P<command>.+?)\s*$",
-    re.DOTALL,
-)
-_ROOT_SUDO_SEGMENT_RE = re.compile(
-    r"(?P<prefix>^|(?:&&|\|\||;|\|)\s*)sudo(?:\s+-(?:n|E|H|S))*\s+(?:(?:-i|-s)\s+)?(?:--\s+)?",
-)
-
-
-def _strip_redundant_root_sudo(command: str, user: str | None) -> tuple[str, bool]:
-    if str(user or "").strip().lower() != "root":
-        return command, False
-    text = str(command or "").strip()
-    if not text.startswith("sudo"):
-        return command, False
-    match = _ROOT_SUDO_PREFIX_RE.match(text)
-    if not match:
-        return command, False
-    stripped = str(match.group("command") or "").strip()
-    stripped = _ROOT_SUDO_SEGMENT_RE.sub(lambda match: str(match.group("prefix") or ""), stripped)
-    return stripped, bool(stripped and stripped != text)
-
-
 _SSH_ACCEPT_NEW_INCOMPATIBLE_MARKERS = (
     "keyword stricthostkeychecking extra arguments at end of line",
     "bad configuration option",
 )
-
-
-def _shell_join(args: list[str]) -> str:
-    return " ".join(shlex.quote(arg) for arg in args)
-
-
-def _normalize_optional_ssh_string(value: Any) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def normalize_ssh_target(*, host: str, user: str | None = None) -> tuple[str, str | None]:
-    host_text = str(host or "").strip()
-    user_text = _normalize_optional_ssh_string(user)
-    if not host_text:
-        return "", user_text
-    if host_text.count("@") > 1:
-        raise ValueError("SSH target must contain at most one `@` separator.")
-    if "@" not in host_text:
-        return host_text, user_text
-
-    embedded_user, bare_host = host_text.rsplit("@", 1)
-    embedded_user = embedded_user.strip()
-    bare_host = bare_host.strip()
-    if not embedded_user or not bare_host:
-        raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
-    if user_text is not None and user_text != embedded_user:
-        raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
-    return bare_host, embedded_user
-
-
-def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(arguments, dict):
-        return {}
-
-    normalized = dict(arguments)
-    target_text = _normalize_optional_ssh_string(normalized.pop("target", None))
-    explicit_host = _normalize_optional_ssh_string(normalized.get("host"))
-    if target_text:
-        if explicit_host and explicit_host != target_text:
-            raise ValueError("Conflicting SSH targets provided via `target` and `host`.")
-        normalized["host"] = target_text
-    alias_user = _normalize_optional_ssh_string(normalized.pop("username", None))
-    explicit_user = _normalize_optional_ssh_string(normalized.get("user"))
-    if alias_user:
-        if explicit_user and explicit_user != alias_user:
-            raise ValueError("Conflicting SSH usernames provided via `user` and `username`.")
-        normalized["user"] = alias_user
-        explicit_user = alias_user
-    elif explicit_user is None:
-        normalized.pop("user", None)
-    else:
-        normalized["user"] = explicit_user
-
-    host_text = _normalize_optional_ssh_string(normalized.get("host")) or ""
-    host_text, user_text = normalize_ssh_target(host=host_text, user=explicit_user)
-    if not host_text:
-        raise ValueError("SSH target requires either `target` or `host`.")
-    normalized["host"] = host_text
-    if user_text:
-        normalized["user"] = user_text
-    else:
-        normalized.pop("user", None)
-    return normalized
-
-
-def _split_ssh_option_value(option: str) -> tuple[str, str | None]:
-    cleaned = str(option or "").strip()
-    if "=" in cleaned:
-        key, value = cleaned.split("=", 1)
-        return key.strip(), value.strip() or None
-    parts = cleaned.split(None, 1)
-    if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip() or None
-    return cleaned, None
-
-
-def _parse_int_option(value: str | None) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def _shell_tokens_with_spans(command: str) -> list[tuple[str, int, int]]:
-    lexer = shlex.shlex(command, posix=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    tokens: list[tuple[str, int, int]] = []
-    while True:
-        start = lexer.instream.tell()
-        token = lexer.get_token()
-        end = lexer.instream.tell()
-        if token == lexer.eof:
-            break
-        tokens.append((token, start, end))
-    return tokens
-
-
-def _is_shell_redirection_token(token: str) -> bool:
-    stripped = str(token or "").strip()
-    if not stripped:
-        return False
-    return (
-        stripped.startswith((">", "<"))
-        or stripped.startswith(("1>", "1<", "2>", "2<"))
-        or stripped.startswith((">>", "<<", "&>", ">&", "<&"))
-        or stripped.endswith((">&1", ">&2", "<&0", "<&1", "<&2"))
-    )
-
-
-def _join_remote_shell_tokens(
-    command: str,
-    tokens: list[tuple[str, int, int]],
-) -> str:
-    return " ".join(
-        (
-            token
-            if _is_shell_redirection_token(token)
-            else (
-                token
-                if idx == 0 and command[start:end].lstrip().startswith(("'", '"'))
-                else shlex.quote(token)
-            )
-        )
-        for idx, (token, start, end) in enumerate(tokens)
-    )
-
-
-def parse_ssh_exec_args_from_shell_command(command: str) -> dict[str, Any] | None:
-    command_text = str(command or "").strip()
-    if not command_text:
-        return None
-
-    try:
-        token_spans = _shell_tokens_with_spans(command_text)
-    except ValueError:
-        return None
-    tokens = [token for token, _start, _end in token_spans]
-    if not tokens:
-        return None
-
-    parsed: dict[str, Any] = {}
-    target: str | None = None
-    index = 0
-
-    if tokens[index] == "sshpass":
-        index += 1
-        password: str | None = None
-        while index < len(tokens):
-            token = tokens[index]
-            if token == "ssh":
-                break
-            if token == "-p":
-                index += 1
-                if index >= len(tokens):
-                    return None
-                password = tokens[index]
-            elif token.startswith("-p") and len(token) > 2:
-                password = token[2:]
-            else:
-                # Only rewrite the simple sshpass form we can preserve safely.
-                return None
-            index += 1
-        if index >= len(tokens) or tokens[index] != "ssh" or not password:
-            return None
-        parsed["password"] = password
-
-    if tokens[index] != "ssh":
-        return None
-    index += 1
-
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            index += 1
-            if index >= len(tokens):
-                return None
-            target = tokens[index]
-            index += 1
-            break
-        if not token.startswith("-"):
-            target = token
-            index += 1
-            break
-
-        option_name = token
-        option_value: str | None = None
-        if token in {"-i", "-l", "-o", "-p"}:
-            index += 1
-            if index >= len(tokens):
-                return None
-            option_value = tokens[index]
-        elif token.startswith("-i") and len(token) > 2:
-            option_name = "-i"
-            option_value = token[2:]
-        elif token.startswith("-l") and len(token) > 2:
-            option_name = "-l"
-            option_value = token[2:]
-        elif token.startswith("-o") and len(token) > 2:
-            option_name = "-o"
-            option_value = token[2:]
-        elif token.startswith("-p") and len(token) > 2:
-            option_name = "-p"
-            option_value = token[2:]
-        elif token in _IGNORABLE_SSH_FLAGS:
-            index += 1
-            continue
-        else:
-            return None
-
-        if option_name == "-i":
-            parsed["identity_file"] = option_value
-        elif option_name == "-l":
-            parsed["user"] = option_value
-        elif option_name == "-p":
-            port_value = _parse_int_option(option_value)
-            if port_value is None:
-                return None
-            parsed["port"] = port_value
-        elif option_name == "-o":
-            key, value = _split_ssh_option_value(option_value or "")
-            if key not in _SAFE_SSH_OPTION_KEYS:
-                return None
-            if key == "IdentityFile":
-                parsed["identity_file"] = value
-            elif key == "Port":
-                port_value = _parse_int_option(value)
-                if port_value is None:
-                    return None
-                parsed["port"] = port_value
-            elif key == "User":
-                parsed["user"] = value
-        index += 1
-
-    if not target:
-        return None
-
-    remote_tokens = token_spans[index:]
-    if not remote_tokens:
-        parsed["host"] = target
-        parsed["command"] = "whoami"
-        return normalize_ssh_arguments(parsed)
-    if any(token in _LOCAL_SHELL_CONTROL_TOKENS for token, _start, _end in remote_tokens):
-        return None
-
-    parsed["host"] = target
-    parsed["command"] = _join_remote_shell_tokens(command_text, remote_tokens)
-    return normalize_ssh_arguments(parsed)
-
 
 def _build_ssh_command(
     *,
@@ -477,6 +180,27 @@ def _interactive_session_snapshot(session_id: str, session: dict[str, Any], *, m
         "user": session.get("user"),
         "command": session.get("command"),
     }
+
+
+async def _cleanup_interactive_session(
+    session_id: str,
+    session: dict[str, Any],
+    *,
+    harness: Any = None,
+    terminate: bool = False,
+) -> None:
+    _SSH_INTERACTIVE_SESSIONS.pop(str(session_id or "").strip(), None)
+    proc = session.get("proc")
+    if terminate:
+        await stop_process(proc, harness=harness, timeout=2.0)
+    else:
+        unregister_process(harness, proc)
+    tasks = [task for task in session.get("tasks", []) if hasattr(task, "cancel") and hasattr(task, "done")]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _ssh_accept_new_is_incompatible(stderr: str) -> bool:
@@ -679,6 +403,7 @@ async def ssh_session_start(
     # ssh_session_start is the designated tool for interactive installers;
     # do not block it with the remote-installer preflight guard.
 
+    proc = None
     try:
         full_cmd, env_overrides = _build_ssh_command(
             host=host,
@@ -716,6 +441,7 @@ async def ssh_session_start(
         "command": command,
         "started_at": time.time(),
         "timeout_sec": max(1, int(timeout_sec or 900)),
+        "harness": harness,
     }
     _SSH_INTERACTIVE_SESSIONS[session_id] = session
 
@@ -753,7 +479,10 @@ async def ssh_session_read(
     if not isinstance(session, dict):
         return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
     await asyncio.sleep(max(0.0, min(float(wait_sec or 0), 30.0)))
-    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+    snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+    if snapshot.get("status") == "exited":
+        await _cleanup_interactive_session(session_id, session, harness=session.get("harness"), terminate=False)
+    return ok(snapshot, metadata={"interactive_session": True})
 
 
 async def ssh_session_send(
@@ -768,9 +497,11 @@ async def ssh_session_send(
         return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
     proc = session.get("proc")
     if getattr(proc, "returncode", None) is not None:
+        snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+        await _cleanup_interactive_session(session_id, session, harness=session.get("harness"), terminate=False)
         return fail(
             "SSH interactive session has already exited.",
-            metadata=_interactive_session_snapshot(session_id, session, max_chars=max_chars),
+            metadata=snapshot,
         )
     stdin = getattr(proc, "stdin", None)
     if stdin is None:
@@ -787,23 +518,12 @@ async def ssh_session_close(
     terminate: bool = True,
     max_chars: int = 6000,
 ) -> dict[str, Any]:
-    session = _SSH_INTERACTIVE_SESSIONS.pop(str(session_id or "").strip(), None)
+    session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
     if not isinstance(session, dict):
         return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
-    proc = session.get("proc")
-    if terminate and getattr(proc, "returncode", None) is None:
-        try:
-            proc.terminate()
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-    for task in session.get("tasks", []):
-        if hasattr(task, "cancel"):
-            task.cancel()
-    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+    snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+    await _cleanup_interactive_session(session_id, session, harness=session.get("harness"), terminate=terminate)
+    return ok(snapshot, metadata={"interactive_session": True})
 
 
 async def _run_remote_installer_preflight_probes(
@@ -818,129 +538,39 @@ async def _run_remote_installer_preflight_probes(
     harness: Any = None,
 ) -> dict[str, Any]:
     """Run automated SSH probes to discover installer environment state."""
-    cwd, script_path = _remote_installer_cwd_and_script(command)
-    probes: dict[str, Any] = {
-        "host": host,
-        "user": user,
-        "cwd": cwd,
-        "script_path": script_path,
-        "script_exists": False,
-        "script_executable": False,
-        "repo_clean": False,
-        "noninteractive_flags": [],
-        "preseed_files": [],
-        "help_output": "",
-        "is_interactive": True,
-        "recommended_approach": "",
-    }
 
-    if not script_path or script_path == "make install":
-        probes["recommended_approach"] = (
-            "Unable to identify a specific install script for probing. "
-            "Verify the correct installer path and retry."
-        )
-        return probes
-
-    probe_script_parts = [
-        'echo "__PREFLIGHT_PWD__"',
-        "pwd",
-        'echo "__PREFLIGHT_GIT_TOPLEVEL__"',
-        f"cd {shlex.quote(cwd or '.')} && git rev-parse --show-toplevel 2>/dev/null || echo 'NO_GIT'",
-        'echo "__PREFLIGHT_GIT_STATUS__"',
-        f"cd {shlex.quote(cwd or '.')} && git status --short 2>/dev/null || echo 'NO_GIT'",
-        'echo "__PREFLIGHT_SCRIPT__"',
-        f"test -x {shlex.quote(script_path)} && echo 'EXECUTABLE' || (test -f {shlex.quote(script_path)} && echo 'EXISTS') || echo 'MISSING'",
-        'echo "__PREFLIGHT_HELP__"',
-        f"{shlex.quote(script_path)} --help 2>&1 || echo 'NO_HELP'",
-    ]
-
-    if cwd:
-        probe_script_parts.append('echo "__PREFLIGHT_PRESEED__"')
-        probe_script_parts.append(
-            f"test -f {shlex.quote(cwd.rstrip('/') + '/.fogsettings')} && echo 'FOG_PRESEED' || true"
-        )
-
-    probe_script_parts.append('echo "__PREFLIGHT_DONE__"')
-    probe_command = "bash -c " + shlex.quote("; ".join(probe_script_parts))
-
-    try:
-        full_cmd, env_overrides = _build_ssh_command(
+    def _build_probe_command(probe_script: str) -> str:
+        full_cmd, _env_overrides = _build_ssh_command(
             host=host,
-            command=probe_command,
+            command=probe_script,
             user=user,
             port=port,
             identity_file=identity_file,
             password=password,
         )
-        proc = await create_process(
-            command=full_cmd,
-            cwd=state.cwd if state else ".",
-            env_overrides=env_overrides,
-            harness=harness,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        return full_cmd
+
+    probes = await run_installer_preflight_probes(
+        command=command,
+        state=state,
+        create_process=create_process,
+        harness=harness,
+        host=host,
+        user=user or "",
+        build_probe_command=_build_probe_command,
+    )
+    # SSH-specific wording
+    if probes.get("noninteractive_flags"):
+        probes["recommended_approach"] = (
+            f"This installer supports non-interactive mode. "
+            f"Retry with `ssh_exec` and the flag `{probes['noninteractive_flags'][0]}`."
         )
-        stdout_data: list[str] = []
-        stderr_data: list[str] = []
-        await asyncio.wait_for(
-            asyncio.gather(
-                read_stream_chunks(proc.stdout, stdout_data, chunk_size=4096),
-                read_stream_chunks(proc.stderr, stderr_data, chunk_size=4096),
-                proc.wait(),
-            ),
-            timeout=30,
+    elif not probes.get("probe_error"):
+        probes["recommended_approach"] = (
+            "This appears to be an interactive installer. "
+            "Use `ssh_session_start` to run it with a pseudo-terminal, "
+            "then answer prompts with `ssh_session_send`."
         )
-        combined = "".join(stdout_data) + "".join(stderr_data)
-
-        if "__PREFLIGHT_SCRIPT__" in combined:
-            script_section = combined.split("__PREFLIGHT_SCRIPT__")[1].split("__PREFLIGHT_")[0]
-            if "EXECUTABLE" in script_section:
-                probes["script_exists"] = True
-                probes["script_executable"] = True
-            elif "EXISTS" in script_section:
-                probes["script_exists"] = True
-
-        if "__PREFLIGHT_GIT_STATUS__" in combined:
-            git_section = combined.split("__PREFLIGHT_GIT_STATUS__")[1].split("__PREFLIGHT_")[0]
-            probes["repo_clean"] = (
-                "NO_GIT" in git_section
-                or not git_section.strip()
-                or "nothing to commit" in git_section
-            )
-
-        if "__PREFLIGHT_HELP__" in combined:
-            help_section = combined.split("__PREFLIGHT_HELP__")[1].split("__PREFLIGHT_")[0]
-            probes["help_output"] = help_section[:2000]
-            help_lower = help_section.lower()
-            known_flags = [
-                "--autoaccept", "-y", "--yes", "--quiet",
-                "--non-interactive", "--unattended", "--batch", "-n",
-            ]
-            probes["noninteractive_flags"] = [f for f in known_flags if f in help_lower]
-
-        if "__PREFLIGHT_PRESEED__" in combined:
-            preseed_section = combined.split("__PREFLIGHT_PRESEED__")[1].split("__PREFLIGHT_")[0]
-            if "FOG_PRESEED" in preseed_section:
-                probes["preseed_files"].append(".fogsettings")
-
-        probes["is_interactive"] = len(probes["noninteractive_flags"]) == 0
-
-        if probes["noninteractive_flags"]:
-            probes["recommended_approach"] = (
-                f"This installer supports non-interactive mode. "
-                f"Retry with `ssh_exec` and the flag `{probes['noninteractive_flags'][0]}`."
-            )
-        else:
-            probes["recommended_approach"] = (
-                "This appears to be an interactive installer. "
-                "Use `ssh_session_start` to run it with a pseudo-terminal, "
-                "then answer prompts with `ssh_session_send`."
-            )
-    except asyncio.TimeoutError:
-        probes["probe_error"] = "Preflight probes timed out after 30s"
-    except Exception as exc:
-        probes["probe_error"] = str(exc)
-
     return probes
 
 
@@ -1189,13 +819,8 @@ async def run_ssh_command(
         exit_code: int | None,
         elapsed: float,
     ) -> dict[str, Any]:
-        max_final_result = 256 * 1024
-        final_stdout = stdout
-        final_stderr = stderr
-        if len(final_stdout) > max_final_result:
-            final_stdout = final_stdout[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
-        if len(final_stderr) > max_final_result:
-            final_stderr = final_stderr[:max_final_result] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
+        final_stdout = truncate_output(stdout)
+        final_stderr = truncate_output(stderr)
         return {
             "stdout": final_stdout,
             "stderr": final_stderr,
@@ -1273,6 +898,7 @@ async def run_ssh_command(
                 elapsed=elapsed,
             )
             await stream_emitter.flush()
+            unregister_process(harness, proc)
 
         return last_process_output, proc
 
@@ -1406,23 +1032,7 @@ async def run_ssh_command(
         return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
 
     except asyncio.TimeoutError:
-        if proc and proc.returncode is None:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-        if proc is not None:
-            for pipe in (proc.stdout, proc.stderr, proc.stdin):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
+        await stop_process(proc, harness=harness, timeout=2.0)
         output = last_process_output if isinstance(last_process_output, dict) else {}
         combined_output = f"{output.get('stdout', '')}{output.get('stderr', '')}"
         detected_prompt = _detect_interactive_prompt(combined_output)
@@ -1464,12 +1074,4 @@ async def run_ssh_command(
             metadata=execution_debug_metadata,
         )
     finally:
-        if proc is not None:
-            for pipe in (getattr(proc, "stdout", None), getattr(proc, "stderr", None), getattr(proc, "stdin", None)):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
-        if harness and proc and hasattr(harness, "_active_processes"):
-            harness._active_processes.discard(proc)
+        unregister_process(harness, proc)

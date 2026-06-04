@@ -7,6 +7,7 @@ from typing import Any
 
 from ..state import LoopState
 from .common import fail, ok
+from .process_lifecycle import unregister_process
 
 
 def _find_active_process_by_pid(harness: Any, pid: int) -> Any | None:
@@ -58,11 +59,7 @@ async def shell_job_status(job_id: str, state: LoopState, harness: Any = None) -
         record["exit_code"] = returncode
         state.background_processes[job_id] = record
         state.touch()
-        if harness is not None and hasattr(harness, "_active_processes"):
-            try:
-                harness._active_processes.discard(proc)
-            except Exception:
-                pass
+        unregister_process(harness, proc)
         return ok(
             {
                 "job_id": job_id,

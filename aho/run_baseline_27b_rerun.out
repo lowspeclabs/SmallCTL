@@ -1,0 +1,29 @@
+
+==================================================
+AHO Baseline Challenge Runner
+==================================================
+Default provider settings:
+  Endpoint:        https://openrouter.ai/api/v1
+  Model:           qwen/qwen3.6-27b
+  Provider profile: openrouter
+
+Non-interactive mode (--yes): accepting defaults.
+==================================================
+
+[SMOKE TEST] Skipped (--skip-smoke-test)
+[2026-05-27T14:16:02.958672+00:00] [INFO] baseline_start: Starting baseline run | total_challenges=40, sysadmin=20, coding=20
+[2026-05-27T14:16:03.589542+00:00] [STATUS] runner_status: Starting challenge 1/40: challenge-01 (Easy — `/etc/hosts` review and safe edit) — timeout=300s | challenge_id=challenge-01, category=sysadmin, timeout_sec=300
+[2026-05-27T14:16:33.591660+00:00] [STATUS] runner_status: Challenge 1/40 still running: challenge-01 — elapsed 30.0s | challenge_id=challenge-01, elapsed_sec=30.0, pid=1158668
+[2026-05-27T14:16:34.411810+00:00] [STATUS] runner_status: Challenge 1/40 finished: challenge-01 — status=completed, elapsed=30.8s, returncode=0 | challenge_id=challenge-01, status=completed, elapsed_sec=30.81, returncode=0, ask_human_count=0, guard_event_count=18, tool_failure_count=0
+[2026-05-27T14:16:34.412022+00:00] [STATUS] runner_status: Overall progress: 1/40 done — 1 completed, 0 failed — total elapsed 31.5s | completed=1, failed=0, total_elapsed_sec=31.5, challenges_run=1
+[2026-05-27T14:16:35.033687+00:00] [STATUS] runner_status: Starting challenge 2/40: challenge-02 (Easy — DNS resolver audit) — timeout=300s | challenge_id=challenge-02, category=sysadmin, timeout_sec=300
+[2026-05-27T14:17:05.035138+00:00] [STATUS] runner_status: Challenge 2/40 still running: challenge-02 — elapsed 30.0s | challenge_id=challenge-02, elapsed_sec=30.0, pid=1158950
+[2026-05-27T14:17:35.035512+00:00] [STATUS] runner_status: Challenge 2/40 still running: challenge-02 — elapsed 60.0s | challenge_id=challenge-02, elapsed_sec=60.0, pid=1158950
+[2026-05-27T14:17:49.953105+00:00] [STATUS] runner_status: Challenge 2/40 finished: challenge-02 — status=completed, elapsed=74.9s, returncode=0 | challenge_id=challenge-02, status=completed, elapsed_sec=74.91, returncode=0, ask_human_count=0, guard_event_count=27, tool_failure_count=0
+[2026-05-27T14:17:49.953318+00:00] [STATUS] runner_status: Overall progress: 2/40 done — 2 completed, 0 failed — total elapsed 107.0s | completed=2, failed=0, total_elapsed_sec=107.0, challenges_run=2
+[2026-05-27T14:17:50.595373+00:00] [STATUS] runner_status: Starting challenge 3/40: challenge-03 (Easy — `/tmp` and `/var/tmp` cleanup review) — timeout=300s | challenge_id=challenge-03, category=sysadmin, timeout_sec=300
+[2026-05-27T14:18:20.749094+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 30.0s | challenge_id=challenge-03, elapsed_sec=30.0, pid=1159508
+[2026-05-27T14:18:50.749655+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 60.0s | challenge_id=challenge-03, elapsed_sec=60.0, pid=1159508
+[2026-05-27T14:19:20.750313+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 90.0s | challenge_id=challenge-03, elapsed_sec=90.0, pid=1159508
+[2026-05-27T14:19:50.751709+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 120.0s | challenge_id=challenge-03, elapsed_sec=120.0, pid=1159508
+[2026-05-27T14:20:20.752346+00:00] [STATUS] runner_status: Challenge 3/40 still running: challenge-03 — elapsed 150.0s | challenge_id=challenge-03, elapsed_sec=150.0, pid=1159508

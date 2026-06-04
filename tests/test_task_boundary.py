@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from smallctl.context import ContextPolicy, PromptAssembler
 from smallctl.harness.conversation_logging import record_assistant_message
-from smallctl.harness.task_boundary import _collapse_task_chain
+from smallctl.harness.task_boundary_support import collapse_task_chain as _collapse_task_chain
 from smallctl.context.retrieval import build_retrieval_query
 from smallctl.harness import Harness
 from smallctl.models.conversation import ConversationMessage

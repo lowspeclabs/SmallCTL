@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from smallctl.graph.progress_guard import (
-    _is_ssh_exec_read_command,
+    _is_shell_read_command,
     _ssh_exec_has_novel_remote_observation,
     _ssh_exec_read_is_new,
     _record_ssh_exec_observation,
@@ -13,15 +13,15 @@ from smallctl.graph.progress_guard import (
 from smallctl.state import LoopState
 
 
-def test_is_ssh_exec_read_command_detects_cat_and_ls() -> None:
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "cat /var/www/html/index.html"})) is True
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "ls -la /var/www/html/"})) is True
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "grep -r foo /etc/"})) is True
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "apt list --upgradable 2>/dev/null | grep '/' | wc -l"})) is True
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "sed -i 's/old/new/' /etc/nginx.conf"})) is False
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null"})) is False
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": "systemctl restart nginx"})) is False
-    assert _is_ssh_exec_read_command(SimpleNamespace(args={"command": ""})) is False
+def test_is_shell_read_command_detects_cat_and_ls() -> None:
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "cat /var/www/html/index.html"})) is True
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "ls -la /var/www/html/"})) is True
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "grep -r foo /etc/"})) is True
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "apt list --upgradable 2>/dev/null | grep '/' | wc -l"})) is True
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "sed -i 's/old/new/' /etc/nginx.conf"})) is False
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null"})) is False
+    assert _is_shell_read_command(SimpleNamespace(args={"command": "systemctl restart nginx"})) is False
+    assert _is_shell_read_command(SimpleNamespace(args={"command": ""})) is False
 
 
 def test_ssh_exec_read_is_new_detects_repeats() -> None:

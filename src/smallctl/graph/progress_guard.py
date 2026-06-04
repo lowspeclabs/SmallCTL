@@ -16,47 +16,52 @@ from .tool_loop_guard_progress import (
     _requested_file_read_range,
     _tool_attempt_history,
 )
+from .progress_guard_constants import (
+    _COMPLETION_CONFABULATION_PATTERNS,
+    _DETERMINISTIC_READ_FAILURES_KEY,
+    _FAILED_MUTATION_REPAIR_PROGRESS_BUDGET,
+    _FAILED_MUTATION_REPAIR_PROGRESS_KEY,
+    _LAST_FAILED_VERIFIER_KEY,
+    _MUTATION_TOOLS,
+    _PATCH_META_TOOLS,
+    _PATCH_TARGET_NOT_FOUND_COUNTS_KEY,
+    _PATCH_TARGET_NOT_FOUND_SUPPRESS_AFTER,
+    _READ_TOOLS,
+    _STALE_VERIFIER_KEY,
+)
+from .progress_guard_coverage import (
+    artifact_coverage_entry as _artifact_coverage_entry,
+    artifact_coverage_map as _artifact_coverage_map,
+    artifact_read_effective_span as _artifact_read_effective_span,
+    artifact_read_is_continuation_page as _artifact_read_is_continuation_page,
+    artifact_read_is_past_eof as _artifact_read_is_past_eof,
+    artifact_read_result_is_new_range as _artifact_read_result_is_new_range,
+    coverage_is_complete as _coverage_is_complete,
+    file_read_result_is_new_range as _file_read_result_is_new_range,
+    next_unread_artifact_line as _next_unread_artifact_line,
+    normalize_line_ranges as _normalize_line_ranges,
+    record_artifact_read_coverage as _record_artifact_read_coverage,
+    record_progress_read as _record_progress_read,
+    span_adds_unseen_lines as _span_adds_unseen_lines,
+    ssh_exec_read_is_new as _ssh_exec_read_is_new,
+    ssh_file_read_is_past_eof as _ssh_file_read_is_past_eof,
+    ssh_file_read_result_is_new_range as _ssh_file_read_result_is_new_range,
+)
+from .progress_guard_ssh import (
+    record_ssh_exec_observation as _record_ssh_exec_observation,
+    ssh_exec_has_novel_partial_output as _ssh_exec_has_novel_partial_output,
+    ssh_exec_has_novel_remote_observation as _ssh_exec_has_novel_remote_observation,
+    ssh_exec_observation_entries as _ssh_exec_observation_entries,
+    ssh_exec_output_fingerprint as _ssh_exec_output_fingerprint,
+    ssh_exec_remote_paths as _ssh_exec_remote_paths,
+)
+from .verifier_utils import (
+    _command_looks_like_verifier,
+    _summarize_verifier_failure,
+    _verifier_output_text,
+)
 
-_MUTATION_TOOLS = {
-    "ssh_file_write",
-    "ssh_file_patch",
-    "ssh_file_replace_between",
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-}
-
-_READ_TOOLS = {
-    "artifact_read",
-    "ssh_file_read",
-    "file_read",
-}
-_PATCH_META_TOOLS = {
-    "artifact_grep",
-    "artifact_print",
-    "log_note",
-    "memory_update",
-}
-_REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
-_ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
-_DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
-_FAILED_MUTATION_REPAIR_PROGRESS_KEY = "_failed_mutation_repair_progress"
-_FAILED_MUTATION_REPAIR_PROGRESS_BUDGET = 3
-_PATCH_TARGET_NOT_FOUND_COUNTS_KEY = "_patch_target_not_found_counts"
-_PATCH_TARGET_NOT_FOUND_SUPPRESS_AFTER = 2
-_STALE_VERIFIER_KEY = "_last_verifier_stale_after_mutation"
-_LAST_FAILED_VERIFIER_KEY = "_last_failed_verifier"
-
-def _is_ssh_exec_read_command(record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    command = str(args.get("command") or "").strip()
-    if not command:
-        return False
-    return _is_read_only_shell_evidence_action(command)
-
-
-def _is_shell_exec_read_command(record: Any) -> bool:
+def _is_shell_read_command(record: Any) -> bool:
     args = record.args if isinstance(getattr(record, "args", None), dict) else {}
     command = str(args.get("command") or "").strip()
     if not command:
@@ -166,13 +171,13 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
             if _file_read_result_is_new_range(harness, record):
                 return True
         if record.tool_name == "ssh_exec" and record.result.success:
-            if _is_ssh_exec_read_command(record):
+            if _is_shell_read_command(record):
                 if _ssh_exec_read_is_new(harness, record):
                     return True
             else:
                 return True
         if record.tool_name == "shell_exec" and record.result.success:
-            if not _is_shell_exec_read_command(record):
+            if not _is_shell_read_command(record):
                 return True
 
     # 6. Any other successful non-read, non-mutation, non-exec tool
@@ -455,95 +460,6 @@ def _failed_mutation_fingerprint(record: Any, path: str) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()[:16]
-
-
-def _command_looks_like_verifier(command: str) -> bool:
-    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
-    if not normalized:
-        return False
-    verifier_markers = (
-        "pytest",
-        "unittest",
-        " npm test",
-        "npm run test",
-        "pnpm test",
-        "yarn test",
-        "go test",
-        "cargo test",
-        "cargo clippy",
-        "ruff",
-        "mypy",
-        "eslint",
-        "vitest",
-        "jest",
-        "py_compile",
-    )
-    padded = f" {normalized}"
-    return any(marker in padded for marker in verifier_markers)
-
-
-def _verifier_output_text(record: Any) -> str:
-    result = getattr(record, "result", None)
-    chunks: list[str] = []
-    output = getattr(result, "output", None)
-    if isinstance(output, dict):
-        for key in ("stderr", "stdout"):
-            value = str(output.get(key) or "").strip()
-            if value:
-                chunks.append(value)
-    elif output is not None:
-        value = str(output or "").strip()
-        if value:
-            chunks.append(value)
-    metadata = getattr(result, "metadata", {}) if result is not None else {}
-    if isinstance(metadata, dict):
-        meta_output = metadata.get("output")
-        if isinstance(meta_output, dict):
-            for key in ("stderr", "stdout"):
-                value = str(meta_output.get(key) or "").strip()
-                if value:
-                    chunks.append(value)
-    error = str(getattr(result, "error", "") or "").strip()
-    if error:
-        chunks.append(error)
-    return "\n".join(chunks)
-
-
-def _summarize_verifier_failure(text: str) -> list[str]:
-    lines = [line.rstrip() for line in str(text or "").splitlines()]
-    summary: list[str] = []
-    patterns = (
-        "ERROR:",
-        "FAIL:",
-        "AttributeError:",
-        "AssertionError:",
-        "SyntaxError:",
-        "TypeError:",
-        "NameError:",
-        "FAILED",
-    )
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("File ") and len(summary) < 6:
-            summary.append(stripped)
-            continue
-        if any(marker in stripped for marker in patterns):
-            summary.append(stripped)
-        if len(summary) >= 8:
-            break
-    if summary:
-        return summary
-    for line in lines:
-        stripped = line.strip()
-        if stripped:
-            summary.append(stripped)
-        if len(summary) >= 4:
-            break
-    return summary
-
-
 def _mark_verifier_stale_after_mutation(state: Any, record: Any) -> None:
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):
@@ -564,526 +480,6 @@ def _mark_verifier_stale_after_mutation(state: Any, record: Any) -> None:
         "paths": paths,
         "prior_verdict": json_safe_value(verifier),
     }
-
-
-def _artifact_read_result_is_new_range(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    artifact_id = _requested_artifact_read_target(args)
-    if not artifact_id:
-        return False
-    span = _artifact_read_effective_span(record)
-    if span is not None:
-        span_artifact_id, start_line, end_line, _total_lines, eof_overread = span
-        if eof_overread:
-            return False
-        artifact_id = span_artifact_id
-        coverage = _artifact_coverage_entry(harness, artifact_id)
-        if coverage is not None:
-            return _span_adds_unseen_lines(
-                start_line=start_line,
-                end_line=end_line,
-                ranges=coverage.get("ranges", []),
-            )
-    candidate_range = _requested_file_read_range(args)
-    state = getattr(harness, "state", None)
-    if state is None:
-        return True
-    history = getattr(state, "scratchpad", {}).get("_progress_read_history", [])
-    if not isinstance(history, list):
-        return True
-    for item in reversed(history[-12:]):
-        if str(item.get("tool_name", "")) != "artifact_read":
-            continue
-        if str(item.get("artifact_id", "")) != artifact_id:
-            continue
-        prior_range = (_coerce_int_or_none(item.get("start_line")), _coerce_int_or_none(item.get("end_line")))
-        if prior_range == candidate_range:
-            return False
-    return True
-
-
-def _ssh_file_read_result_is_new_range(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    path = str(args.get("path") or "").strip()
-    if not path:
-        return False
-    candidate_range = _requested_file_read_range(args)
-    state = getattr(harness, "state", None)
-    if state is None:
-        return True
-    history = getattr(state, "scratchpad", {}).get("_progress_read_history", [])
-    if not isinstance(history, list):
-        return True
-    for item in reversed(history[-12:]):
-        if str(item.get("tool_name", "")) != "ssh_file_read":
-            continue
-        if str(item.get("path", "")) != path:
-            continue
-        prior_range = (_coerce_int_or_none(item.get("start_line")), _coerce_int_or_none(item.get("end_line")))
-        if prior_range == candidate_range:
-            return False
-    return True
-
-
-def _file_read_result_is_new_range(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    path = str(args.get("path") or "").strip()
-    if not path:
-        return False
-    candidate_range = _requested_file_read_range(args)
-    state = getattr(harness, "state", None)
-    if state is None:
-        return True
-    history = getattr(state, "scratchpad", {}).get("_progress_read_history", [])
-    if not isinstance(history, list):
-        return True
-    for item in reversed(history[-12:]):
-        if str(item.get("tool_name", "")) != "file_read":
-            continue
-        if str(item.get("path", "")) != path:
-            continue
-        prior_range = (_coerce_int_or_none(item.get("start_line")), _coerce_int_or_none(item.get("end_line")))
-        if prior_range == candidate_range:
-            return False
-    return True
-
-
-def _ssh_exec_read_is_new(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    command = str(args.get("command") or "").strip()
-    if not command:
-        return False
-    normalized_command = re.sub(r"\s+", " ", command.lower())
-    state = getattr(harness, "state", None)
-    if state is None:
-        return True
-    history = getattr(state, "scratchpad", {}).get("_progress_read_history", [])
-    if not isinstance(history, list):
-        return True
-    for item in reversed(history[-12:]):
-        if str(item.get("tool_name", "")) != "ssh_exec":
-            continue
-        prior_command = str(item.get("command", "") or "").strip()
-        if re.sub(r"\s+", " ", prior_command.lower()) == normalized_command:
-            return False
-    return True
-
-
-def _record_progress_read(harness: Any, record: Any) -> None:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    state = getattr(harness, "state", None)
-    if state is None:
-        return
-    scratchpad = getattr(state, "scratchpad", {})
-    if not isinstance(scratchpad, dict):
-        return
-    history = scratchpad.setdefault("_progress_read_history", [])
-    if not isinstance(history, list):
-        return
-    entry: dict[str, Any] = {"tool_name": record.tool_name}
-    if record.tool_name == "artifact_read":
-        entry["artifact_id"] = _requested_artifact_read_target(args)
-    elif record.tool_name == "ssh_file_read":
-        entry["path"] = str(args.get("path") or "").strip()
-    elif record.tool_name == "file_read":
-        entry["path"] = str(args.get("path") or "").strip()
-    elif record.tool_name == "ssh_exec":
-        entry["command"] = str(args.get("command") or "").strip()
-    result = getattr(record, "result", None)
-    metadata = getattr(result, "metadata", {}) if result is not None else {}
-    if isinstance(metadata, dict):
-        if metadata.get("path") and not entry.get("path"):
-            entry["path"] = str(metadata.get("path") or "").strip()
-        entry["source_path"] = str(metadata.get("source_path") or "").strip()
-        entry["read_from_staging"] = bool(metadata.get("read_from_staging") or metadata.get("staged_only"))
-        entry["complete_file"] = bool(metadata.get("complete_file"))
-        entry["file_content_truncated"] = bool(metadata.get("truncated"))
-        entry["total_lines"] = metadata.get("total_lines")
-        entry["line_start"] = metadata.get("line_start")
-        entry["line_end"] = metadata.get("line_end")
-    start_line, end_line = _requested_file_read_range(args)
-    if start_line is not None:
-        entry["start_line"] = start_line
-    if end_line is not None:
-        entry["end_line"] = end_line
-    history.append(entry)
-    if len(history) > 24:
-        del history[: len(history) - 24]
-    if record.tool_name == "artifact_read":
-        _record_artifact_read_coverage(harness, record)
-
-
-def _artifact_read_effective_span(record: Any) -> tuple[str, int, int, int | None, bool] | None:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-
-    artifact_id = str(
-        metadata.get("artifact_id")
-        or metadata.get("source_artifact_id")
-        or _requested_artifact_read_target(args)
-        or ""
-    ).strip()
-    if not artifact_id:
-        return None
-
-    requested_start, requested_end = _requested_file_read_range(args)
-    start_line = _coerce_int_or_none(
-        metadata.get("line_start", metadata.get("requested_start_line", requested_start))
-    )
-    end_line = _coerce_int_or_none(
-        metadata.get("line_end", metadata.get("requested_end_line", requested_end))
-    )
-    total_lines = _coerce_int_or_none(metadata.get("total_lines", metadata.get("artifact_total_lines")))
-    eof_overread = bool(metadata.get("eof_overread"))
-
-    if start_line is None:
-        return None
-    if end_line is None and total_lines is not None and not bool(metadata.get("truncated")):
-        end_line = total_lines
-    if end_line is None:
-        return None
-    if total_lines is not None:
-        end_line = min(end_line, total_lines)
-    if start_line < 1 or end_line < start_line:
-        return None
-    return artifact_id, start_line, end_line, total_lines, eof_overread
-
-
-def _artifact_coverage_map(harness: Any) -> dict[str, dict[str, Any]]:
-    state = getattr(harness, "state", None)
-    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
-    if not isinstance(scratchpad, dict):
-        return {}
-    coverage = scratchpad.setdefault(_ARTIFACT_COVERAGE_SCRATCHPAD_KEY, {})
-    if not isinstance(coverage, dict):
-        coverage = {}
-        scratchpad[_ARTIFACT_COVERAGE_SCRATCHPAD_KEY] = coverage
-    return coverage
-
-
-def _artifact_coverage_entry(harness: Any, artifact_id: str) -> dict[str, Any] | None:
-    coverage = _artifact_coverage_map(harness)
-    entry = coverage.get(str(artifact_id or "").strip())
-    return entry if isinstance(entry, dict) else None
-
-
-def _span_adds_unseen_lines(*, start_line: int, end_line: int, ranges: Any) -> bool:
-    normalized_ranges = _normalize_line_ranges(ranges)
-    if not normalized_ranges:
-        return True
-
-    cursor = start_line
-    for prior_start, prior_end in normalized_ranges:
-        if prior_end < cursor:
-            continue
-        if prior_start > cursor:
-            return True
-        cursor = max(cursor, prior_end + 1)
-        if cursor > end_line:
-            return False
-    return cursor <= end_line
-
-
-def _normalize_line_ranges(ranges: Any) -> list[tuple[int, int]]:
-    normalized: list[tuple[int, int]] = []
-    if not isinstance(ranges, list):
-        return normalized
-    for item in ranges:
-        if isinstance(item, dict):
-            start_line = _coerce_int_or_none(item.get("start_line"))
-            end_line = _coerce_int_or_none(item.get("end_line"))
-        elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            start_line = _coerce_int_or_none(item[0])
-            end_line = _coerce_int_or_none(item[1])
-        else:
-            continue
-        if start_line is None or end_line is None or start_line < 1 or end_line < start_line:
-            continue
-        normalized.append((start_line, end_line))
-    normalized.sort()
-    merged: list[tuple[int, int]] = []
-    for start_line, end_line in normalized:
-        if not merged or start_line > merged[-1][1] + 1:
-            merged.append((start_line, end_line))
-            continue
-        prior_start, prior_end = merged[-1]
-        merged[-1] = (prior_start, max(prior_end, end_line))
-    return merged
-
-
-def _record_artifact_read_coverage(harness: Any, record: Any) -> None:
-    span = _artifact_read_effective_span(record)
-    if span is None:
-        return
-    artifact_id, start_line, end_line, total_lines, eof_overread = span
-    coverage = _artifact_coverage_map(harness)
-    entry = coverage.setdefault(artifact_id, {"ranges": []})
-    if not isinstance(entry, dict):
-        entry = {"ranges": []}
-        coverage[artifact_id] = entry
-    if total_lines is not None:
-        entry["total_lines"] = total_lines
-    state = getattr(harness, "state", None)
-    if state is not None:
-        entry["last_read_step"] = int(getattr(state, "step_count", 0) or 0)
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if isinstance(metadata, dict):
-        entry["truncated"] = bool(metadata.get("truncated"))
-    output = getattr(getattr(record, "result", None), "output", "")
-    if isinstance(output, str) and output:
-        entry["preview"] = output[:1200]
-    if eof_overread:
-        entry["eof_overread"] = True
-        return
-    ranges = _normalize_line_ranges(entry.get("ranges", []))
-    ranges.append((start_line, end_line))
-    entry["ranges"] = [
-        {"start_line": merged_start, "end_line": merged_end}
-        for merged_start, merged_end in _normalize_line_ranges(ranges)
-    ]
-    total = _coerce_int_or_none(entry.get("total_lines"))
-    if total is not None and total > 0:
-        entry["complete"] = _coverage_is_complete(ranges=entry["ranges"], total_lines=total)
-
-
-def _coverage_is_complete(*, ranges: Any, total_lines: int) -> bool:
-    if total_lines < 1:
-        return False
-    normalized_ranges = _normalize_line_ranges(ranges)
-    return bool(normalized_ranges and normalized_ranges[0][0] <= 1 and normalized_ranges[0][1] >= total_lines)
-
-
-def _next_unread_artifact_line(harness: Any, artifact_id: str) -> int | None:
-    entry = _artifact_coverage_entry(harness, artifact_id)
-    if entry is None:
-        return 1
-    total_lines = _coerce_int_or_none(entry.get("total_lines"))
-    cursor = 1
-    for start_line, end_line in _normalize_line_ranges(entry.get("ranges", [])):
-        if start_line > cursor:
-            return cursor
-        cursor = max(cursor, end_line + 1)
-    if total_lines is not None and cursor > total_lines:
-        return None
-    return cursor
-
-
-def _ssh_exec_remote_paths(record: Any) -> list[str]:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    command = str(args.get("command") or "").strip()
-    if not command:
-        return []
-    paths: list[str] = []
-    for match in _REMOTE_PATH_RE.finditer(command):
-        path = match.group(0)
-        if path not in paths:
-            paths.append(path)
-    return paths[:8]
-
-
-def _ssh_exec_output_fingerprint(record: Any) -> str:
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    output = metadata.get("output")
-    if not isinstance(output, dict):
-        output = {}
-    text = "\n".join(
-        str(output.get(key) or "").strip()
-        for key in ("stdout", "stderr")
-        if str(output.get(key) or "").strip()
-    )
-    normalized = re.sub(r"\s+", " ", text).strip()
-    if not normalized:
-        return ""
-    return hashlib.sha256(normalized[:4096].encode("utf-8", errors="replace")).hexdigest()[:16]
-
-
-def _ssh_exec_observation_entries(harness: Any) -> list[dict[str, Any]]:
-    state = getattr(harness, "state", None)
-    if state is None:
-        return []
-    scratchpad = getattr(state, "scratchpad", {})
-    history = scratchpad.get("_progress_ssh_observation_history", [])
-    return history if isinstance(history, list) else []
-
-
-def _ssh_exec_has_novel_partial_output(harness: Any, record: Any) -> bool:
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    if not bool(metadata.get("output_received")):
-        return False
-    fingerprint = _ssh_exec_output_fingerprint(record)
-    if not fingerprint:
-        return False
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    host = str(args.get("host") or metadata.get("host") or "").strip().lower()
-    command = str(args.get("command") or metadata.get("command") or "").strip()
-    if not host or not command:
-        return False
-    for item in _ssh_exec_observation_entries(harness):
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("host") or "").strip().lower() != host:
-            continue
-        if str(item.get("command") or "").strip() != command:
-            continue
-        if str(item.get("output_fingerprint") or "").strip() == fingerprint:
-            return False
-    return True
-
-
-def _ssh_exec_has_novel_remote_observation(harness: Any, record: Any) -> bool:
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    host = str(args.get("host") or metadata.get("host") or "").strip().lower()
-    failure_class = str(metadata.get("ssh_error_class") or metadata.get("failure_kind") or "").strip()
-    auth_mode = str(metadata.get("ssh_auth_mode") or "").strip()
-    reached_remote_host = (
-        bool(getattr(record.result, "success", False))
-        or bool(metadata.get("ssh_transport_succeeded"))
-        or str(metadata.get("failure_kind") or "").strip() == "remote_command"
-    )
-    prior_entries = _ssh_exec_observation_entries(harness)
-    if not host:
-        return False
-
-    if failure_class:
-        if not any(
-            str(item.get("host") or "").strip().lower() == host
-            and str(item.get("failure_class") or "").strip() == failure_class
-            for item in prior_entries
-            if isinstance(item, dict)
-        ):
-            return True
-
-    for path in _ssh_exec_remote_paths(record):
-        if not any(
-            str(item.get("host") or "").strip().lower() == host
-            and path in (item.get("paths") or [])
-            for item in prior_entries
-            if isinstance(item, dict)
-        ):
-            return True
-
-    if reached_remote_host and auth_mode:
-        if not any(
-            str(item.get("host") or "").strip().lower() == host
-            and bool(item.get("reached_remote_host"))
-            and str(item.get("auth_mode") or "").strip() == auth_mode
-            for item in prior_entries
-            if isinstance(item, dict)
-        ):
-            return True
-
-    return False
-
-
-def _record_ssh_exec_observation(harness: Any, record: Any) -> None:
-    state = getattr(harness, "state", None)
-    if state is None:
-        return
-    scratchpad = getattr(state, "scratchpad", {})
-    if not isinstance(scratchpad, dict):
-        return
-    history = scratchpad.setdefault("_progress_ssh_observation_history", [])
-    if not isinstance(history, list):
-        return
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    history.append(
-        {
-            "host": str(args.get("host") or metadata.get("host") or "").strip().lower(),
-            "command": str(args.get("command") or metadata.get("command") or "").strip(),
-            "failure_class": str(metadata.get("ssh_error_class") or metadata.get("failure_kind") or "").strip(),
-            "paths": _ssh_exec_remote_paths(record),
-            "auth_mode": str(metadata.get("ssh_auth_mode") or "").strip(),
-            "output_fingerprint": _ssh_exec_output_fingerprint(record),
-            "reached_remote_host": (
-                bool(getattr(record.result, "success", False))
-                or bool(metadata.get("ssh_transport_succeeded"))
-                or str(metadata.get("failure_kind") or "").strip() == "remote_command"
-            ),
-        }
-    )
-    if len(history) > 32:
-        del history[: len(history) - 32]
-
-
-def _artifact_read_is_past_eof(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    artifact_id = _requested_artifact_read_target(args)
-    if not artifact_id:
-        return False
-    start_line, _end_line = _requested_file_read_range(args)
-    if start_line is None or start_line <= 0:
-        return False
-    state = getattr(harness, "state", None)
-    if state is None:
-        return False
-    artifacts = getattr(state, "artifacts", {})
-    if not isinstance(artifacts, dict):
-        return False
-    artifact = artifacts.get(artifact_id)
-    if artifact is None:
-        return False
-    total_lines = None
-    metadata = getattr(artifact, "metadata", {})
-    if isinstance(metadata, dict):
-        raw_total = metadata.get("total_lines") or metadata.get("artifact_total_lines")
-        total_lines = _coerce_int_or_none(raw_total)
-    if total_lines is None:
-        content_path = str(getattr(artifact, "content_path", "") or "").strip()
-        if content_path:
-            try:
-                from pathlib import Path
-                total_lines = len(Path(content_path).read_text(encoding="utf-8").splitlines())
-            except OSError:
-                total_lines = None
-    if total_lines is not None and start_line > total_lines:
-        return True
-    return False
-
-
-def _artifact_read_is_continuation_page(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    artifact_id = _requested_artifact_read_target(args)
-    if not artifact_id:
-        return False
-    start_line, end_line = _requested_file_read_range(args)
-    if start_line is None or start_line <= 1:
-        return False
-    coverage = _artifact_coverage_entry(harness, artifact_id)
-    if coverage is None:
-        return False
-    normalized = _normalize_line_ranges(coverage.get("ranges", []))
-    if not normalized or normalized[-1][1] < start_line - 1:
-        return False
-    # Only count as a continuation page if it extends beyond prior coverage
-    if end_line is not None and end_line <= normalized[-1][1]:
-        return False
-    return True
-
-
-def _ssh_file_read_is_past_eof(harness: Any, record: Any) -> bool:
-    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
-    start_line, _end_line = _requested_file_read_range(args)
-    if start_line is None or start_line <= 0:
-        return False
-    metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    total_lines = _coerce_int_or_none(metadata.get("total_lines"))
-    if total_lines is not None and start_line > total_lines:
-        return True
-    return False
 
 
 def _extract_args_from_fingerprint(fingerprint: str) -> dict[str, Any] | None:
@@ -1170,11 +566,19 @@ def _maybe_inject_verifier_success_nudge(state: Any, graph_state: Any) -> None:
         # Check if verifier targets a recently mutated file
         if not any(str(path).strip() in command for path in changed_paths):
             continue
-        # Avoid duplicate nudges for the same command
+        # Avoid duplicate nudges for the same verifier context across restored sessions.
         scratchpad = getattr(state, "scratchpad", {})
         if not isinstance(scratchpad, dict):
             scratchpad = {}
-        nudge_key = f"_verifier_nudge_{hash(command) & 0xFFFFFFFF}"
+        nudge_context = json.dumps(
+            {
+                "command": re.sub(r"\s+", " ", command).strip(),
+                "changed_paths": sorted(changed_paths),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        nudge_key = f"_verifier_nudge_{hashlib.sha256(nudge_context.encode('utf-8')).hexdigest()[:16]}"
         if scratchpad.get(nudge_key):
             continue
         scratchpad[nudge_key] = True
@@ -1249,7 +653,7 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
         if record.tool_name in {"artifact_read", "ssh_file_read", "file_read"} and record.result.success:
             _record_progress_read(harness, record)
         _record_deterministic_read_failure(harness, record)
-        if record.tool_name == "ssh_exec" and record.result.success and _is_ssh_exec_read_command(record):
+        if record.tool_name == "ssh_exec" and record.result.success and _is_shell_read_command(record):
             _record_progress_read(harness, record)
         if record.tool_name == "ssh_exec":
             _record_ssh_exec_observation(harness, record)
@@ -1436,19 +840,6 @@ def _check_progress_stagnation(harness: Any, graph_state: Any) -> str | None:
         f"Progress stagnation guard tripped: no actionable progress made in {cycle_count} steps. "
         "The model is repeating analysis or read-only operations without moving the task forward."
     )
-
-
-_COMPLETION_CONFABULATION_PATTERNS = [
-    re.compile(r"already\s+(performed|completed|done|finished)", re.IGNORECASE),
-    re.compile(r"was\s+already\s+(performed|completed|done|finished)", re.IGNORECASE),
-    re.compile(r"previous\s+task_complete", re.IGNORECASE),
-    re.compile(r"prior\s+task_complete", re.IGNORECASE),
-    re.compile(r"redesign\s+was\s+already", re.IGNORECASE),
-    re.compile(r"successful\s+redesign\s+was", re.IGNORECASE),
-    re.compile(r"task\s+is\s+already\s+complete", re.IGNORECASE),
-    re.compile(r"work\s+is\s+already\s+done", re.IGNORECASE),
-    re.compile(r"already\s+succeeded\s+in", re.IGNORECASE),
-]
 
 
 def _check_completion_confabulation(harness: Any, graph_state: Any) -> str | None:

@@ -14,43 +14,8 @@ from .state_memory import (
 )
 from .state_schema import ExperienceMemory, MemoryEntry
 from .state_support import clip_string_list, normalize_intent_label
-
-
-_READ_ONLY_TOOLS = frozenset({"ssh_file_read", "file_read", "web_search", "artifact_read", "artifact_print", "find"})
-
-_MUTATING_COMMAND_RE = re.compile(
-    r"\b(start|restart|stop|enable|disable|rm\b|mv\b|cp\b|sed\s+-i|tee\b|>>>?\s*/|cat\s*>\s*/|install\s+-m|truncate\b|chmod\s+\d|chown\s+\S+:\S+)\b",
-    re.IGNORECASE,
-)
-_PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
-_OPTIMISTIC_STATEMENT_RE = re.compile(
-    r"(?<![@\w])(pass(?:ed|es|ing)?|verified|success(?:ful(?:ly)?)?|fixed|resolved)(?![@\w])",
-    re.IGNORECASE,
-)
-
-
-def _is_read_only_artifact(artifact: Any) -> bool:
-    if artifact is None:
-        return False
-    tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
-    if tool_name in _READ_ONLY_TOOLS:
-        return True
-    if tool_name in {"ssh_exec", "shell_exec"}:
-        metadata = getattr(artifact, "metadata", {}) or {}
-        if isinstance(metadata, dict):
-            command = str(metadata.get("command") or "").strip()
-            if command and not _MUTATING_COMMAND_RE.search(command):
-                return True
-    return False
-
-
-def _extract_path_tokens(text: str) -> list[str]:
-    paths: list[str] = []
-    for match in _PATH_TOKEN_RE.finditer(str(text or "")):
-        path = match.group(0).strip().strip("`'\".,:;")
-        if path and path not in paths:
-            paths.append(path)
-    return paths
+from .state_flow_failure_semantics import artifact_has_failure_semantics, evidence_has_failure_semantics
+from .state_flow_utils import extract_path_tokens, is_read_only_artifact, normalize_paths, text_matches_any_path
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -68,8 +33,10 @@ def _coerce_datetime(value: Any) -> datetime | None:
 
 
 class LoopStateFlowMixin:
+    _normalize_paths = staticmethod(normalize_paths)
+
     @staticmethod
-    def _normalize_paths(paths: list[str] | None) -> list[str]:
+    def _text_matches_any_path(text: str, paths: list[str]) -> bool:
         normalized: list[str] = []
         for path in paths or []:
             text = str(path or "").strip()
@@ -82,20 +49,7 @@ class LoopStateFlowMixin:
                 deduped.append(path)
         return deduped
 
-    @staticmethod
-    def _text_matches_any_path(text: str, paths: list[str]) -> bool:
-        lowered = str(text or "").strip().lower()
-        if not lowered:
-            return False
-        for path in paths:
-            if not path:
-                continue
-            if path in lowered or lowered.endswith(path):
-                return True
-            basename = Path(path).name
-            if basename and basename in lowered:
-                return True
-        return False
+    _text_matches_any_path = staticmethod(text_matches_any_path)
 
     @staticmethod
     def _invalidate_memory_entry(entry: MemoryEntry) -> None:
@@ -108,6 +62,7 @@ class LoopStateFlowMixin:
 
     @staticmethod
     def _is_optimistic_statement(value: str) -> bool:
+        from .state_flow_utils import _OPTIMISTIC_STATEMENT_RE
         return bool(_OPTIMISTIC_STATEMENT_RE.search(str(value or "")))
 
     def _lane_staleness_index(self, key: str) -> dict[str, dict[str, Any]]:
@@ -553,7 +508,7 @@ class LoopStateFlowMixin:
     def _verifier_failure_paths(self, detail_payload: dict[str, Any]) -> list[str]:
         candidates: list[str] = []
         for key in ("command", "target"):
-            candidates.extend(_extract_path_tokens(str(detail_payload.get(key) or "")))
+            candidates.extend(extract_path_tokens(str(detail_payload.get(key) or "")))
         for path in self._normalize_paths(candidates):
             if path not in candidates:
                 candidates.append(path)
@@ -563,7 +518,7 @@ class LoopStateFlowMixin:
         failure_paths = self._verifier_failure_paths(detail_payload)
         if not failure_paths:
             return True
-        text_paths = _extract_path_tokens(text)
+        text_paths = extract_path_tokens(text)
         if text_paths:
             return any(self._text_matches_any_path(path, failure_paths) for path in text_paths)
         return any(self._text_matches_any_path(text, [path]) for path in failure_paths)
@@ -583,59 +538,8 @@ class LoopStateFlowMixin:
         to_phase = str(detail_payload.get("to_phase") or "").strip().lower()
         return {from_phase, to_phase} == {"execute", "repair"}
 
-    @staticmethod
-    def _evidence_has_failure_semantics(evidence: Any) -> bool:
-        if getattr(evidence, "negative", False):
-            return True
-        metadata = getattr(evidence, "metadata", {}) or {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if metadata.get("success") is False:
-            return True
-        exit_code = metadata.get("exit_code")
-        if exit_code is not None and int(exit_code) != 0:
-            return True
-        if metadata.get("failure_mode"):
-            return True
-        if str(metadata.get("verifier_verdict") or "").strip().lower() == "fail":
-            return True
-        if metadata.get("stderr"):
-            return True
-        statement = str(getattr(evidence, "statement", "") or "").lower()
-        if any(marker in statement for marker in ("error:", "failed", "failure", "missing", "does not exist", "not found", "verifier_failed")):
-            return True
-        tool_name = str(getattr(evidence, "tool_name", "") or "").strip().lower()
-        if tool_name in {"shell_exec", "ssh_exec"}:
-            command = str(metadata.get("command") or "").lower()
-            if any(marker in command for marker in ("grep ", "rg ", "find ", "findstr ", "journalctl", "tail ", "head ", "cat ", "ls ", "dmesg", "systemctl status")):
-                return True
-        return False
-
-    @staticmethod
-    def _artifact_has_failure_semantics(artifact: Any) -> bool:
-        metadata = getattr(artifact, "metadata", {}) or {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if metadata.get("success") is False:
-            return True
-        exit_code = metadata.get("exit_code")
-        if exit_code is not None and int(exit_code) != 0:
-            return True
-        if metadata.get("failure_mode"):
-            return True
-        if str(metadata.get("verifier_verdict") or "").strip().lower() == "fail":
-            return True
-        if metadata.get("stderr"):
-            return True
-        summary = str(getattr(artifact, "summary", "") or "").lower()
-        if any(marker in summary for marker in ("error:", "failed", "failure", "missing", "does not exist", "not found", "verifier_failed")):
-            return True
-        tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
-        if tool_name in {"shell_exec", "ssh_exec"}:
-            command = str(metadata.get("command") or "").lower()
-            if any(marker in command for marker in ("grep ", "rg ", "find ", "findstr ", "journalctl", "tail ", "head ", "cat ", "ls ", "dmesg", "systemctl status")):
-                return True
-        return False
+    _evidence_has_failure_semantics = staticmethod(evidence_has_failure_semantics)
+    _artifact_has_failure_semantics = staticmethod(artifact_has_failure_semantics)
 
     def _build_repair_continuity_capsule(self, detail_payload: dict[str, Any]) -> dict[str, Any]:
         capsule: dict[str, Any] = {
@@ -879,7 +783,7 @@ class LoopStateFlowMixin:
                 metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip()
                 should_mark_stale = bool(metadata_phase and metadata_phase != str(self.current_phase or "").strip())
                 if should_mark_stale and (
-                    _is_read_only_artifact(artifact)
+                    is_read_only_artifact(artifact)
                     or self._is_recent_context_step(metadata.get("created_at_step"))
                 ):
                     should_mark_stale = False

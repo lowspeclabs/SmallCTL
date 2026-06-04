@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..context.policy import estimate_text_tokens
 from ..interrupt_replies import is_interrupt_response, is_plan_approval_reply
 from ..remote_scope import handoff_supports_remote_continuation, task_matches_remote_continuation
 from ..models.conversation import ConversationMessage
@@ -41,621 +40,89 @@ from .task_transactions import (
     FollowupSignals,
     classify_followup_transaction,
 )
-
-_SYSTEM_FOLLOW_UP_SPLIT_RE = re.compile(r"\nFollow-up:\s*", re.IGNORECASE)
-_INLINE_CONTINUE_TASK_PREFIX_RE = re.compile(
-    r"^\s*Continue current task:\s*(?P<body>.+?)\s*$",
-    re.IGNORECASE | re.DOTALL,
+from .task_boundary_support import (
+    base_task_from_task_chain,
+    blocks_inherited_target,
+    canonicalize_inline_task_wrapper,
+    clean_option_title,
+    collapse_task_chain,
+    coerce_remote_target,
+    extract_action_options_from_text,
+    format_remote_target,
+    is_remote_followup_wrapper,
+    merge_action_options,
+    merge_remote_targets,
+    normalize_remote_host,
+    normalize_task_text,
+    parse_inline_task_wrapper,
 )
-_CONTINUE_DIRECTIVE_RE = re.compile(
-    r"^\s*(?:continue|cntinue|conitnue|continune|cotinue|keep\s+going|resume|proceed|go\s+on|carry\s+on)\b"
-    r"(?P<suffix>\s*[,;:.-]\s*|\s+(?:and|by|with|to|then|next)\s+).+",
-    re.IGNORECASE | re.DOTALL,
+from .task_boundary_helpers import (
+    extract_remote_absolute_paths,
+    guard_trip_preserves_artifact,
+    guard_trip_repeated_tool,
+    normalize_target_path,
+    ordinal_followup_index,
+    remote_target_matches_known_target,
+    strip_ordinal_prefix,
+    target_paths_overlap,
 )
-_CONTINUATION_ACTION_LEAD_RE = re.compile(
-    r"^\s*(?:yes|yep|yeah|ok|okay|sure|go\s+ahead|do\s+it|please\s+do|start|begin|run|do|use|try)\b",
-    re.IGNORECASE,
+from .task_boundary_semantic_tail import (
+    message_is_semantic_tail_candidate,
+    semantic_recent_tail_messages,
 )
-_WEB_RESEARCH_DIRECTIVE_RE = re.compile(
-    r"\b(?:"
-    r"web\s*search|websearch|search\s+(?:the\s+)?web|internet\s+search|"
-    r"web\s+lookup|look\s+(?:it\s+)?up|browse|research"
-    r")\b",
-    re.IGNORECASE,
+from .task_boundary_constants import (
+    _ACTION_CONFIRMATION_PROMPTS,
+    _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT,
+    _CONTEXTUAL_REFERENCE_RE,
+    _CONTINUATION_ACTION_LEAD_RE,
+    _CONTINUE_DIRECTIVE_RE,
+    _CORRECTIVE_RESTEER_RE,
+    _CORRECTIVE_TOOL_NAMES,
+    _FOLLOWUP_ACTION_RE,
+    _FOLLOWUP_FILLERS,
+    _GENERIC_EDIT_LEAD_RE,
+    _GENERIC_TARGET_RE,
+    _GUARD_FAILURE_RE,
+    _GUARD_RECOVERY_NUDGE_RE,
+    _INLINE_NUMBERED_OPTION_RE,
+    _INLINE_USER_WRAP_MARKER_RE,
+    _IPV4_HOST_RE,
+    _MARKDOWN_OPTION_RE,
+    _NUMBERED_OPTION_RE,
+    _ORDINAL_FOLLOWUP_RE,
+    _ORDINAL_PREFIX_RE,
+    _ORDINAL_WORDS,
+    _ORDINAL_WORD_FOLLOWUP_RE,
+    _OPTION_ACTION_WORDS,
+    _QUALITY_FOLLOWUP_RE,
+    _QUALITY_TARGET_RE,
+    _REMOTE_ABSOLUTE_PATH_RE,
+    _REMOTE_CLARIFICATION_PHRASES,
+    _REMOTE_CORRECTIVE_CLEANUP_PHRASES,
+    _REMOTE_DEPLOYMENT_CONTEXT_TARGETS,
+    _REMOTE_DIAGNOSTIC_HINTS,
+    _REMOTE_DIAGNOSTIC_QUESTION_RE,
+    _REMOTE_DIAGNOSTIC_TARGETS,
+    _REMOTE_LIVE_CORRECTION_HINTS,
+    _REMOTE_LIVE_CORRECTION_PHRASES,
+    _REMOTE_OPERATIONAL_TARGETS,
+    _REMOTE_OPERATIONAL_VERBS,
+    _REMOTE_PERMISSION_FOLLOWUP_RE,
+    _REMOTE_RESIDUE_MARKERS,
+    _REMOTE_SCRIPT_HINT_RE,
+    _REMOTE_SITE_MUTATION_ACTION_RE,
+    _REMOTE_SITE_MUTATION_TARGET_RE,
+    _RESEARCH_CONTEXT_RE,
+    _RETRY_FOLLOWUP_RE,
+    _SEMANTIC_RECENT_TAIL_TOKEN_CAP,
+    _SEQUENTIAL_REMOTE_FOLLOWUP_RE,
+    _TARGET_LANGUAGE_RE,
+    _TARGET_NEGATION_RE,
+    _TARGET_REPLACEMENT_RE,
+    _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS,
+    _USER_AT_HOST_RE,
+    _WEB_RESEARCH_DIRECTIVE_RE,
 )
-_RESEARCH_CONTEXT_RE = re.compile(
-    r"\b(?:research|web|internet|online|search|look\s+up|lookup|summary|summarize|summarise|main\s+plot|plot\s+points)\b",
-    re.IGNORECASE,
-)
-_INLINE_USER_WRAP_MARKER_RE = re.compile(
-    r"\.\s*User\s+(?P<kind>follow-up|correction):\s*",
-    re.IGNORECASE,
-)
-_FOLLOWUP_FILLERS = {"please", "pls", "now", "again", "just", "then", "more", "further"}
-_NUMBERED_OPTION_RE = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
-_INLINE_NUMBERED_OPTION_RE = re.compile(r"(?:^|\s)(\d+)[.)]\s+(.+?)(?=(?:\s+\d+[.)]\s+)|$)")
-_MARKDOWN_OPTION_RE = re.compile(
-    r"^\s*(?:\*\*)?(?:option|proposal)\s+(\d+)\s*(?:[-—–:]|\*\*)\s*(.*?)(?:\*\*)?\s*$",
-    re.IGNORECASE,
-)
-_ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
-_OPTION_ACTION_WORDS = re.compile(
-    r"\b(stream|streaming|md5|hash|patch|edit|modify|fix|update|implement|add|replace|refactor|test|skip|handle|read|write|calculate)\b",
-    re.IGNORECASE,
-)
-_TARGET_NEGATION_RE = re.compile(r"\b(?:instead\s+of|rather\s+than|without|avoid|do\s+not|don't|dont)\b", re.IGNORECASE)
-_TARGET_REPLACEMENT_RE = re.compile(
-    r"\b(?:in|as|using|with)\s+(?:rust|go|typescript|javascript|python|bash|shell)\b",
-    re.IGNORECASE,
-)
-_TARGET_LANGUAGE_RE = re.compile(r"\b(?:rust|go|typescript|javascript|python|bash|shell)\b", re.IGNORECASE)
-_ORDINAL_FOLLOWUP_RE = re.compile(
-    r"\b(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:option\s+|proposal\s+|#)?(\d+)\b"
-    r"|"
-    r"\b(?:option|proposal)\s+#?(\d+)\b",
-    re.IGNORECASE,
-)
-_ORDINAL_WORD_FOLLOWUP_RE = re.compile(
-    r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:the\s+)?(?P<word>first|second|third|fourth|fifth)\s+(?:one|option|proposal)?\b"
-    r"|"
-    r"^\s*(?:option|proposal)\s+(?P<option_word>first|second|third|fourth|fifth)\b",
-    re.IGNORECASE,
-)
-_ORDINAL_PREFIX_RE = re.compile(
-    r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:option\s+|proposal\s+|#)?\d+[.)]?\s*[,;:]?\s*",
-    re.IGNORECASE,
-)
-_SEQUENTIAL_REMOTE_FOLLOWUP_RE = re.compile(
-    r"\b(?:now|next|then|proceed|continue|move)\s+(?:to|on|with|do|edit|modify|fix|update|implement|patch|write)\b|"
-    r"\b(?:do|edit|modify|fix|update|implement|patch|write)\s+(?:next|now|then)\b",
-    re.IGNORECASE,
-)
-_GENERIC_EDIT_LEAD_RE = re.compile(
-    r"^\s*(?:patch|edit|modify|fix|update|implement|apply)\b[^,.;:]*[,;:]\s*",
-    re.IGNORECASE,
-)
-_GENERIC_TARGET_RE = re.compile(r"\b(?:script|file|module|code|python\s+file)\b", re.IGNORECASE)
-_FOLLOWUP_ACTION_RE = re.compile(
-    r"\b(?:add|apply|change|choose|decide|decision|edit|fix|implement|make|modify|patch|replace|resolve|update|write)\b",
-    re.IGNORECASE,
-)
-_CONTEXTUAL_REFERENCE_RE = re.compile(
-    r"\b(?:"
-    r"this|that|it|same\s+(?:file|script|module|code)|"
-    r"the\s+(?:file|script|module|code|change|fix|patch)|"
-    r"loop(?:ing)?|stuck|repetitive|repeat(?:ing|ed)?|"
-    r"you(?:'ve| have)\s+read\s+(?:the\s+)?(?:file\s+)?enough|"
-    r"read\s+(?:the\s+)?(?:file\s+)?enough"
-    r")\b",
-    re.IGNORECASE,
-)
-_QUALITY_FOLLOWUP_RE = re.compile(
-    r"\b(?:"
-    r"still|inconsistent|inconsistency|wrong|off|broken|"
-    r"not\s+(?:fixed|right|consistent|working)|"
-    r"does(?:n't| not)\s+(?:look|match|work)|"
-    r"mismatch(?:ed)?|regress(?:ed|ion)?"
-    r")\b",
-    re.IGNORECASE,
-)
-_QUALITY_TARGET_RE = re.compile(
-    r"\b(?:css|code|file|files|layout|module|page|pages|script|site|style|styles|theme|theming|ui)\b",
-    re.IGNORECASE,
-)
-_GUARD_RECOVERY_NUDGE_RE = re.compile(
-    r"\b(?:loop(?:ing)?|stuck|repetitive|repeat(?:ing|ed)?|decide|decision|choose|resolve)\b",
-    re.IGNORECASE,
-)
-_GUARD_FAILURE_RE = re.compile(
-    r"\b(?:guard\s+tripped|loop\s+detected|repeated\s+tool|stagnation|stuck\s+in\s+(?:a\s+)?loop|max_consecutive_errors)\b",
-    re.IGNORECASE,
-)
-_RETRY_FOLLOWUP_RE = re.compile(
-    r"\b(?:try\s+again|retry|rerun|run\s+it\s+again|attempt\s+again|give\s+it\s+another\s+try)\b",
-    re.IGNORECASE,
-)
-_CORRECTIVE_TOOL_NAMES = (
-    "file_patch",
-    "ast_patch",
-    "file_write",
-    "file_append",
-    "shell_exec",
-    "ssh_exec",
-    "task_complete",
-)
-_CORRECTIVE_RESTEER_RE = re.compile(
-    r"\b(?:use|try|call|prefer|switch\s+to|move\s+to)\s+`?"
-    r"(?:file_patch|ast_patch|file_write|file_append|shell_exec|ssh_exec|task_complete)"
-    r"`?\b(?:\s+(?:instead|now|next))?"
-    r"|"
-    r"\b(?:not|don't|dont)\s+`?"
-    r"(?:file_patch|ast_patch|file_write|file_append|shell_exec|ssh_exec|task_complete)"
-    r"`?\b.*\b(?:use|try|call|prefer|switch\s+to|move\s+to)\s+`?"
-    r"(?:file_patch|ast_patch|file_write|file_append|shell_exec|ssh_exec|task_complete)"
-    r"`?\b",
-    re.IGNORECASE,
-)
-_TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS = (
-    "_tool_attempt_history",
-    "_repeat_guard_one_shot_fingerprints",
-    "_artifact_read_recovery_nudged",
-    "_artifact_read_recovery_query",
-    "_artifact_read_synthesis_nudged",
-    "_artifact_summary_exit_nudged",
-    "_artifact_evidence_unavailable_nudged",
-    "_file_read_recovery_nudged",
-    "_plan_artifact_read_suppressed",
-    "_chunk_write_loop_guard",
-    "_chunk_write_loop_guard_config",
-    "_chunk_write_loop_guard_read_scheduled",
-    "_durable_autocontinue_recoveries",
-)
-_ACTION_CONFIRMATION_PROMPTS = (
-    "would you like me to",
-    "do you want me to",
-    "should i",
-    "shall i",
-    "want me to",
-    "ready for me to",
-)
-_AFFIRMATIVE_REMOTE_CONTINUATION_TEXT = "proceed with the approved remote execution steps now"
-_IPV4_HOST_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-_USER_AT_HOST_RE = re.compile(
-    r"\b(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+|\d{1,3}(?:\.\d{1,3}){3})\b",
-    re.IGNORECASE,
-)
-_REMOTE_OPERATIONAL_VERBS = (
-    "boot",
-    "bring up",
-    "create",
-    "install",
-    "configure",
-    "deploy",
-    "provision",
-    "restart",
-    "start",
-    "stop",
-    "enable",
-    "disable",
-    "launch",
-    "pull",
-    "push",
-    "run",
-    "spin",
-    "spin up",
-    "switch",
-    "switch to",
-    "try",
-    "upgrade",
-    "update",
-    "use",
-    "setup",
-    "set up",
-)
-_REMOTE_OPERATIONAL_TARGETS = (
-    "app",
-    "application",
-    "container",
-    "docker",
-    "compose",
-    "deployment",
-    "image",
-    "service",
-    "stack",
-    "daemon",
-    "systemd",
-    "startup",
-    "server",
-    "host",
-    "remote",
-    "package",
-    "packages",
-    "apt",
-    "apt-get",
-    "yum",
-    "dnf",
-    "apk",
-    "pacman",
-    "brew",
-    "nginx",
-    "apache",
-    "postgres",
-    "postgresql",
-    "mysql",
-    "mariadb",
-    "redis",
-    "tracker",
-    "vikunja",
-)
-_REMOTE_DEPLOYMENT_CONTEXT_TARGETS = (
-    "container",
-    "docker",
-    "compose",
-    "image",
-    "service",
-    "deployment",
-    "app",
-    "application",
-    "package",
-    "stack",
-    "tracker",
-)
-_REMOTE_CLARIFICATION_PHRASES = (
-    "does not have to be",
-    "doesn't have to be",
-    "does not need to be",
-    "doesn't need to be",
-    "do not have to be",
-    "dont have to be",
-    "not have to be",
-    "not need to be",
-    "will do",
-    "any app",
-    "any application",
-    "any image",
-    "any container",
-    "any service",
-    "exactly",
-    "exact name",
-    "exact image",
-    "called exactly",
-)
-_REMOTE_LIVE_CORRECTION_PHRASES = (
-    "actually use ssh",
-    "check again",
-    "check it again",
-    "do it live",
-    "redo the remote action",
-    "do not rely on past records",
-    "don't rely on past records",
-    "dont rely on past records",
-    "do not rely on prior records",
-    "don't rely on prior records",
-    "re-run on the host",
-    "rerun on the host",
-    "run it live",
-    "redo it live",
-    "fresh ssh",
-    "fresh run",
-    "verify again",
-)
-_REMOTE_LIVE_CORRECTION_HINTS = (
-    "actually",
-    "again",
-    "fresh",
-    "live",
-    "redo",
-    "rerun",
-    "re-run",
-    "retry",
-    "retest",
-    "verify",
-)
-_REMOTE_DIAGNOSTIC_TARGETS = (
-    "404",
-    "500",
-    "502",
-    "503",
-    "apache",
-    "config",
-    "configuration",
-    "document root",
-    "docroot",
-    "error",
-    "htaccess",
-    "live",
-    "nginx",
-    "not live",
-    "page",
-    "pages",
-    "rewrite",
-    "route",
-    "routing",
-    "serve",
-    "serving",
-    "server block",
-    "site",
-    "site structure",
-    "vhost",
-)
-_REMOTE_DIAGNOSTIC_HINTS = (
-    "404 error",
-    "500 error",
-    "502 error",
-    "503 error",
-    "been update",
-    "been updated",
-    "does have",
-    "error",
-    "installed",
-    "is live",
-    "missing",
-    "not live",
-    "not serving",
-    "serving",
-    "updated",
-)
-_REMOTE_DIAGNOSTIC_QUESTION_RE = re.compile(
-    r"^(?:has|have|is|are|does|do|did|why|what|which|where|when|can|could|would)\b",
-    re.IGNORECASE,
-)
-_REMOTE_ABSOLUTE_PATH_RE = re.compile(
-    r"(?<![\w/])/(?:(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+(?:\.[A-Za-z0-9._-]+)?)"
-)
-_REMOTE_RESIDUE_MARKERS = (
-    "htmleof",
-    "wrote `htmleof`",
-    "wc -l <",
-    "written $(",
-    "here-doc",
-    "heredoc",
-    "<< '",
-    "<< \"",
-)
-_REMOTE_CORRECTIVE_CLEANUP_PHRASES = (
-    "please fix",
-    "fix this",
-    "remove this",
-    "clean this up",
-    "clean it up",
-    "trim this",
-    "remove this from the bottom of the page",
-    "remove this from the end of the page",
-    "very bottom of the page",
-    "very end of the page",
-    "bottom of the page",
-    "end of the page",
-    "stuck to the very bottom",
-    "stuck to the bottom",
-    "trailing text",
-    "trailing shell echo",
-)
-_REMOTE_SITE_MUTATION_ACTION_RE = re.compile(
-    r"\b(?:"
-    r"add|adjust|change|delete|drop|fix|make|modify|remove|replace|restyle|strip|"
-    r"swap|turn|update"
-    r")\b",
-    re.IGNORECASE,
-)
-_REMOTE_SITE_MUTATION_TARGET_RE = re.compile(
-    r"\b(?:"
-    r"animation|animations|brand|branded|branding|button|buttons|card|cards|"
-    r"color|colors|copy|css|design|font|fonts|footer|header|html|layout|"
-    r"logo|logos|page|pages|palette|site|style|styles|styling|text|theme|"
-    r"theming|ui|website"
-    r")\b",
-    re.IGNORECASE,
-)
-_REMOTE_PERMISSION_FOLLOWUP_RE = re.compile(
-    r"\b(?:perm|perms|permission|chmod|owner|mode|right\s+perms)\b",
-    re.IGNORECASE,
-)
-_REMOTE_SCRIPT_HINT_RE = re.compile(
-    r"\b(?:script|js|javascript|jave\s+script|java\s+script)\b",
-    re.IGNORECASE,
-)
-_SEMANTIC_RECENT_TAIL_TOKEN_CAP = 320
-
-
-def _normalize_task_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
-
-
-def _collapse_task_chain(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    parts = [part.strip() for part in _SYSTEM_FOLLOW_UP_SPLIT_RE.split(text) if part.strip()]
-    candidate = parts[-1] if parts else text
-    inline = _canonicalize_inline_task_wrapper(candidate)
-    return inline if inline else candidate
-
-
-def _base_task_from_task_chain(value: Any) -> str:
-    text = _collapse_task_chain(value)
-    parsed = _parse_inline_task_wrapper(text)
-    if parsed is None:
-        return text
-    base = str(parsed.get("base") or "").strip()
-    return base or text
-
-
-def _is_remote_followup_wrapper(value: Any) -> bool:
-    return _normalize_task_text(_collapse_task_chain(value)).startswith("continue remote task over ssh")
-
-
-def _canonicalize_inline_task_wrapper(value: Any) -> str:
-    parsed = _parse_inline_task_wrapper(value)
-    if parsed is None:
-        return ""
-    base = str(parsed.get("base") or "").strip()
-    latest_suffix_text = str(parsed.get("latest_suffix_text") or "").strip()
-    latest_suffix_kind = str(parsed.get("latest_suffix_kind") or "").strip().lower()
-    if not base:
-        return str(value or "").strip()
-    if not latest_suffix_text:
-        return f"Continue current task: {base}"
-
-    label = "User correction" if latest_suffix_kind == "correction" else "User follow-up"
-    return f"Continue current task: {base}. {label}: {latest_suffix_text}"
-
-
-def _parse_inline_task_wrapper(value: Any) -> dict[str, str] | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    current = text
-    saw_wrapper = False
-    latest_suffix_kind = ""
-    latest_suffix_text = ""
-    while True:
-        match = _INLINE_CONTINUE_TASK_PREFIX_RE.match(current)
-        if match is None:
-            break
-        saw_wrapper = True
-        body = str(match.group("body") or "").strip()
-        if not body:
-            break
-        suffix_markers = list(_INLINE_USER_WRAP_MARKER_RE.finditer(body))
-        if suffix_markers:
-            suffix = suffix_markers[-1]
-            suffix_text = body[suffix.end() :].strip()
-            suffix_kind = str(suffix.group("kind") or "").strip().lower()
-            if suffix_text:
-                latest_suffix_text = suffix_text
-                latest_suffix_kind = suffix_kind
-            current = body[: suffix.start()].strip().rstrip(".")
-            if not current:
-                break
-            continue
-        current = body
-        break
-
-    if not saw_wrapper:
-        return None
-
-    base = current.strip()
-    return {
-        "base": base or text,
-        "latest_suffix_kind": latest_suffix_kind,
-        "latest_suffix_text": latest_suffix_text,
-    }
-
-
-def _clean_option_title(value: str) -> str:
-    title = str(value or "").strip()
-    if not title:
-        return ""
-    bold = re.match(r"^\*\*(.+?)\*\*(?:\s*[-:]\s*(.*))?$", title)
-    if bold:
-        head = str(bold.group(1) or "").strip()
-        tail = str(bold.group(2) or "").strip()
-        return f"{head} - {tail}" if tail else head
-    return title
-
-
-def _extract_action_options_from_text(text: str, inherited_paths: list[str]) -> list[dict[str, Any]]:
-    options: list[dict[str, Any]] = []
-    seen: set[tuple[int, str]] = set()
-    def _append_option(index: int, raw_title: str) -> None:
-        title = _clean_option_title(raw_title)
-        if not title or not _OPTION_ACTION_WORDS.search(title):
-            return
-        key = (index, title.lower())
-        if key in seen:
-            return
-        seen.add(key)
-        paths = extract_task_target_paths(title) or inherited_paths
-        options.append(
-            {
-                "index": index,
-                "title": title,
-                "target_paths": list(paths),
-            }
-        )
-
-    for line in str(text or "").splitlines():
-        match = _NUMBERED_OPTION_RE.match(line)
-        if not match:
-            match = _MARKDOWN_OPTION_RE.match(line)
-        if not match:
-            continue
-        _append_option(int(match.group(1)), str(match.group(2) or ""))
-    if options:
-        return options
-    flattened = re.sub(r"\s+", " ", str(text or "").strip())
-    for match in _INLINE_NUMBERED_OPTION_RE.finditer(flattened):
-        try:
-            index = int(match.group(1))
-        except (TypeError, ValueError):
-            continue
-        _append_option(index, str(match.group(2) or ""))
-    return options
-
-
-def _merge_action_options(
-    existing: list[dict[str, Any]],
-    extracted: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    seen: set[tuple[int, str]] = set()
-    for option in [*existing, *extracted]:
-        if not isinstance(option, dict):
-            continue
-        title = str(option.get("title") or "").strip()
-        try:
-            index = int(option.get("index") or 0)
-        except (TypeError, ValueError):
-            index = 0
-        if not title or index <= 0:
-            continue
-        key = (index, title.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        target_paths = option.get("target_paths")
-        if isinstance(target_paths, list):
-            cleaned_paths = [str(path).strip() for path in target_paths if str(path).strip()]
-        else:
-            cleaned_paths = []
-        merged.append({"index": index, "title": title, "target_paths": cleaned_paths})
-    return merged
-
-
-def _blocks_inherited_target(suffix: str, inherited_paths: list[str]) -> bool:
-    text = str(suffix or "").strip().lower()
-    if not text or not inherited_paths:
-        return False
-    path_names = {str(path).strip().lower() for path in inherited_paths if str(path).strip()}
-    path_basenames = {Path(path).name.lower() for path in path_names if path}
-    mentions_inherited_path = any(path in text for path in path_names | path_basenames)
-    mentions_generic_code_target = bool(re.search(r"\b(?:python\s+file|script|file|module|code)\b", text))
-    if _TARGET_NEGATION_RE.search(text) and (mentions_inherited_path or mentions_generic_code_target):
-        return True
-    if _TARGET_NEGATION_RE.search(text) and (_TARGET_REPLACEMENT_RE.search(text) or _TARGET_LANGUAGE_RE.search(text)):
-        return True
-    return False
-
-
-def _normalize_remote_host(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def _coerce_remote_target(value: Any) -> dict[str, str] | None:
-    if not isinstance(value, dict):
-        return None
-    host = _normalize_remote_host(value.get("host"))
-    if not host:
-        return None
-    user = str(value.get("user") or "").strip()
-    return {"host": host, "user": user}
-
-
-def _merge_remote_targets(targets: list[dict[str, str]]) -> list[dict[str, str]]:
-    merged: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for target in targets:
-        normalized = _coerce_remote_target(target)
-        if normalized is None:
-            continue
-        key = (normalized["host"], normalized["user"].lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(normalized)
-    return merged
-
-
-def _format_remote_target(target: dict[str, Any]) -> str:
-    host = _normalize_remote_host(target.get("host"))
-    user = str(target.get("user") or "").strip()
-    if not host:
-        return ""
-    return f"{user}@{host}" if user else host
 
 
 class TaskBoundaryService:
@@ -877,56 +344,18 @@ class TaskBoundaryService:
 
     @staticmethod
     def _guard_trip_preserves_artifact(artifact: Any) -> bool:
-        if artifact is None:
-            return False
-        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
-        if tool_name in {"web_fetch", "web_search", "artifact_read", "artifact_print"}:
-            return False
-        metadata = getattr(artifact, "metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if metadata.get("success") is True:
-            return True
-        exit_code = metadata.get("exit_code")
-        if exit_code is not None:
-            try:
-                return int(exit_code) == 0
-            except (TypeError, ValueError):
-                return False
-        verdict = str(metadata.get("verifier_verdict") or "").strip().lower()
-        return verdict == "pass"
+        return guard_trip_preserves_artifact(artifact)
 
     @staticmethod
     def _guard_trip_repeated_tool(reason: str) -> str:
-        text = str(reason or "")
-        match = re.search(r"repeated tool call loop \((?P<tool>[a-zA-Z0-9_]+) repeated", text)
-        if match:
-            return match.group("tool")
-        match = re.search(r"Last repeated action:\s*`?(?P<tool>[a-zA-Z0-9_]+)`?", text)
-        if match:
-            return match.group("tool")
-        return ""
+        return guard_trip_repeated_tool(reason)
 
     @staticmethod
     def _normalize_target_path(value: Any) -> str:
-        text = str(value or "").strip().strip("`")
-        if not text:
-            return ""
-        text = text.replace("\\", "/")
-        while text.startswith("./"):
-            text = text[2:]
-        return text.rstrip("/").lower()
+        return normalize_target_path(value)
 
     def _target_paths_overlap(self, left: list[str], right: list[str]) -> bool:
-        left_norm = {self._normalize_target_path(path) for path in left if self._normalize_target_path(path)}
-        right_norm = {self._normalize_target_path(path) for path in right if self._normalize_target_path(path)}
-        if not left_norm or not right_norm:
-            return False
-        if left_norm & right_norm:
-            return True
-        left_names = {Path(path).name.lower() for path in left_norm if path}
-        right_names = {Path(path).name.lower() for path in right_norm if path}
-        return bool(left_names & right_names)
+        return target_paths_overlap(left, right)
 
     def _known_target_paths(self) -> list[str]:
         paths: list[str] = []
@@ -945,19 +374,7 @@ class TaskBoundaryService:
         return dedupe_keep_tail(paths, limit=12)
 
     def _extract_remote_absolute_paths(self, *texts: Any) -> list[str]:
-        collected: list[str] = []
-        seen: set[str] = set()
-        for text_value in texts:
-            text = str(text_value or "")
-            if not text:
-                continue
-            for match in _REMOTE_ABSOLUTE_PATH_RE.finditer(text):
-                normalized = self._normalize_target_path(match.group(0))
-                if not normalized or not normalized.startswith("/") or normalized in seen:
-                    continue
-                seen.add(normalized)
-                collected.append(normalized)
-        return collected
+        return extract_remote_absolute_paths(*texts)
 
     def _recent_remote_target_paths(self, *, handoff: dict[str, Any] | None = None) -> list[str]:
         candidates: list[str] = []
@@ -997,11 +414,11 @@ class TaskBoundaryService:
         for key, value in targets.items():
             if not isinstance(value, dict):
                 continue
-            host = _normalize_remote_host(value.get("host") or key)
+            host = normalize_remote_host(value.get("host") or key)
             if not host:
                 continue
             collected.append({"host": host, "user": str(value.get("user") or "").strip()})
-        return _merge_remote_targets(collected)
+        return merge_remote_targets(collected)
 
     def _confirmed_session_ssh_targets(self) -> list[dict[str, str]]:
         scratchpad = getattr(self.harness.state, "scratchpad", {})
@@ -1012,11 +429,11 @@ class TaskBoundaryService:
         for key, value in targets.items():
             if not isinstance(value, dict) or not bool(value.get("confirmed")):
                 continue
-            host = _normalize_remote_host(value.get("host") or key)
+            host = normalize_remote_host(value.get("host") or key)
             if not host:
                 continue
             collected.append({"host": host, "user": str(value.get("user") or "").strip()})
-        return _merge_remote_targets(collected)
+        return merge_remote_targets(collected)
 
     def _remote_targets_from_texts(self, *texts: Any) -> list[dict[str, str]]:
         collected: list[dict[str, str]] = []
@@ -1026,42 +443,30 @@ class TaskBoundaryService:
                 continue
             seen_hosts: set[str] = set()
             for match in _USER_AT_HOST_RE.finditer(text):
-                host = _normalize_remote_host(match.group("host"))
+                host = normalize_remote_host(match.group("host"))
                 if not host:
                     continue
                 seen_hosts.add(host)
                 collected.append({"host": host, "user": str(match.group("user") or "").strip()})
             for match in _IPV4_HOST_RE.finditer(text):
-                host = _normalize_remote_host(match.group(0))
+                host = normalize_remote_host(match.group(0))
                 if not host or host in seen_hosts:
                     continue
                 seen_hosts.add(host)
                 collected.append({"host": host, "user": ""})
-        return _merge_remote_targets(collected)
+        return merge_remote_targets(collected)
 
     @staticmethod
     def _remote_target_matches_known_target(
         candidate: dict[str, Any],
         known_targets: list[dict[str, str]],
     ) -> bool:
-        candidate_host = _normalize_remote_host(candidate.get("host"))
-        candidate_user = str(candidate.get("user") or "").strip().lower()
-        if not candidate_host:
-            return False
-        for known in known_targets:
-            known_host = _normalize_remote_host(known.get("host"))
-            if known_host != candidate_host:
-                continue
-            known_user = str(known.get("user") or "").strip().lower()
-            if candidate_user and known_user and candidate_user != known_user:
-                continue
-            return True
-        return False
+        return remote_target_matches_known_target(candidate, known_targets)
 
     def _handoff_remote_targets(self, handoff: dict[str, Any]) -> list[dict[str, str]]:
         stored_targets = handoff.get("ssh_targets")
         if isinstance(stored_targets, list):
-            coerced = _merge_remote_targets(stored_targets)
+            coerced = merge_remote_targets(stored_targets)
             if coerced:
                 return coerced
 
@@ -1083,7 +488,7 @@ class TaskBoundaryService:
                     enriched.append(session_target)
                 else:
                     enriched.append(target)
-            return _merge_remote_targets(enriched)
+            return merge_remote_targets(enriched)
 
         if str(handoff.get("task_mode") or "").strip() == "remote_execute":
             session_targets = self._session_ssh_targets()
@@ -1427,7 +832,7 @@ class TaskBoundaryService:
         ):
             return None
         if explicit_targets:
-            known_targets = _merge_remote_targets(chosen_targets + session_targets)
+            known_targets = merge_remote_targets(chosen_targets + session_targets)
             if not known_targets:
                 return None
             if not all(
@@ -1435,7 +840,7 @@ class TaskBoundaryService:
                 for target in explicit_targets
             ):
                 return None
-        session_labels = [_format_remote_target(target) for target in session_targets]
+        session_labels = [ format_remote_target(target) for target in session_targets]
         session_labels = [label for label in session_labels if label]
 
         recent_remote_paths = self._recent_remote_target_paths(handoff=handoff)
@@ -1445,7 +850,7 @@ class TaskBoundaryService:
 
         if len(chosen_targets) == 1:
             target = chosen_targets[0]
-            label = _format_remote_target(target)
+            label =  format_remote_target(target)
             effective_task = f"Continue remote task over SSH on {label}{active_path_hint}. User follow-up: {text}"
             return {
                 "effective_task": effective_task,
@@ -1458,7 +863,7 @@ class TaskBoundaryService:
 
         if len(session_targets) == 1:
             target = session_targets[0]
-            label = _format_remote_target(target)
+            label =  format_remote_target(target)
             effective_task = f"Continue remote task over SSH on {label}{active_path_hint}. User follow-up: {text}"
             return {
                 "effective_task": effective_task,
@@ -1504,9 +909,9 @@ class TaskBoundaryService:
         self.harness.state.scratchpad["_resolved_remote_followup"] = {
             "raw_task": str(raw_task or "").strip(),
             "effective_task": str(resolution.get("effective_task") or "").strip(),
-            "mission_task": _collapse_task_chain(resolution.get("mission_task") or ""),
+            "mission_task": collapse_task_chain(resolution.get("mission_task") or ""),
             "target_status": str(resolution.get("target_status") or "").strip(),
-            "host": _normalize_remote_host(resolution.get("host")),
+            "host": normalize_remote_host(resolution.get("host")),
             "user": str(resolution.get("user") or "").strip(),
             "active_sessions": list(resolution.get("active_sessions") or []),
         }
@@ -1529,7 +934,7 @@ class TaskBoundaryService:
         mission_task = self._current_or_handoff_continuity_task()
         chosen_targets = self._handoff_remote_targets(handoff)
         session_targets = self._session_ssh_targets()
-        session_labels = [_format_remote_target(target) for target in session_targets]
+        session_labels = [ format_remote_target(target) for target in session_targets]
         session_labels = [label for label in session_labels if label]
 
         followup_text = (
@@ -1538,12 +943,12 @@ class TaskBoundaryService:
             else _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT
         )
         plan = self.harness.state.active_plan or self.harness.state.draft_plan
-        plan_goal = _collapse_task_chain(getattr(plan, "goal", "") or "")
+        plan_goal = collapse_task_chain(getattr(plan, "goal", "") or "")
         if plan_goal:
             mission_task = plan_goal
         if len(chosen_targets) == 1:
             target = chosen_targets[0]
-            label = _format_remote_target(target)
+            label =  format_remote_target(target)
             return {
                 "effective_task": f"Continue remote task over SSH on {label}. User follow-up: {followup_text}",
                 "mission_task": mission_task,
@@ -1555,7 +960,7 @@ class TaskBoundaryService:
 
         if len(session_targets) == 1:
             target = session_targets[0]
-            label = _format_remote_target(target)
+            label =  format_remote_target(target)
             return {
                 "effective_task": f"Continue remote task over SSH on {label}. User follow-up: {followup_text}",
                 "mission_task": mission_task,
@@ -1942,15 +1347,15 @@ class TaskBoundaryService:
         if is_plan_approval_reply(raw_task or task) and self._has_plan_execution_approval_context():
             return
 
-        previous_task = _collapse_task_chain(
+        previous_task = collapse_task_chain(
             self.harness.state.run_brief.original_task
             or self.harness.state.scratchpad.get("_last_task_text")
             or ""
         )
         if not previous_task:
             return
-        new_task = _collapse_task_chain(task)
-        if not new_task or _normalize_task_text(new_task) == _normalize_task_text(previous_task):
+        new_task = collapse_task_chain(task)
+        if not new_task or normalize_task_text(new_task) == normalize_task_text(previous_task):
             return
         has_task_local_context = self.has_task_local_context()
         if has_task_local_context:
@@ -2220,7 +1625,7 @@ class TaskBoundaryService:
 
     def _approved_plan_followup_text(self) -> str:
         plan = self.harness.state.active_plan or self.harness.state.draft_plan
-        goal = _collapse_task_chain(getattr(plan, "goal", "") or "")
+        goal = collapse_task_chain(getattr(plan, "goal", "") or "")
         if not goal:
             return _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT
         plan_id = str(getattr(plan, "plan_id", "") or "").strip()
@@ -2228,7 +1633,7 @@ class TaskBoundaryService:
         if plan_id:
             lead = f"{lead} {plan_id}"
         parts = [f"{lead}: {goal}"]
-        summary = _collapse_task_chain(getattr(plan, "summary", "") or "")
+        summary = collapse_task_chain(getattr(plan, "summary", "") or "")
         if summary:
             parts.append(f"summary: {summary}")
         target_paths = self._extract_remote_absolute_paths(
@@ -2344,7 +1749,7 @@ class TaskBoundaryService:
 
     def _current_or_handoff_task(self) -> str:
         handoff = self.last_task_handoff()
-        return _base_task_from_task_chain(
+        return base_task_from_task_chain(
             self.harness.state.working_memory.current_goal
             or handoff.get("current_goal")
             or handoff.get("effective_task")
@@ -2355,7 +1760,7 @@ class TaskBoundaryService:
 
     def _current_or_handoff_continuity_task(self) -> str:
         handoff = self.last_task_handoff()
-        return _collapse_task_chain(
+        return collapse_task_chain(
             self.harness.state.working_memory.current_goal
             or handoff.get("current_goal")
             or self.harness.state.run_brief.original_task
@@ -2368,12 +1773,12 @@ class TaskBoundaryService:
         resolved_remote = self.harness.state.scratchpad.get("_resolved_remote_followup")
         if not isinstance(resolved_remote, dict):
             return ""
-        if _normalize_task_text(resolved_remote.get("raw_task")) != _normalize_task_text(raw_task):
+        if normalize_task_text(resolved_remote.get("raw_task")) != normalize_task_text(raw_task):
             return ""
-        mission_task = _collapse_task_chain(resolved_remote.get("mission_task") or "")
+        mission_task = collapse_task_chain(resolved_remote.get("mission_task") or "")
         if mission_task:
             return mission_task
-        return self._current_or_handoff_continuity_task() or _collapse_task_chain(
+        return self._current_or_handoff_continuity_task() or collapse_task_chain(
             self.harness.state.scratchpad.get("_task_boundary_previous_task") or ""
         )
 
@@ -2576,7 +1981,7 @@ class TaskBoundaryService:
         raw_task: str,
         effective_task: str,
     ) -> None:
-        previous_task = self._current_or_handoff_continuity_task() or _collapse_task_chain(
+        previous_task = self._current_or_handoff_continuity_task() or collapse_task_chain(
             self.harness.state.run_brief.original_task
             or self.harness.state.scratchpad.get("_last_task_text")
             or ""
@@ -2653,23 +2058,10 @@ class TaskBoundaryService:
         return self._recent_assistant_requested_action_confirmation()
 
     def _ordinal_followup_index(self, task: str) -> int | None:
-        text = str(task or "").strip().lower()
-        if not text:
-            return None
-        match = _ORDINAL_FOLLOWUP_RE.search(text)
-        if match:
-            try:
-                return int(match.group(1) or match.group(2))
-            except (TypeError, ValueError):
-                return None
-        word_match = _ORDINAL_WORD_FOLLOWUP_RE.search(text)
-        if word_match:
-            word = str(word_match.group("word") or word_match.group("option_word") or "")
-            return _ORDINAL_WORDS.get(word)
-        return None
+        return ordinal_followup_index(task)
 
     def _selected_action_option(self, task: str, handoff: dict[str, Any]) -> dict[str, Any] | None:
-        index = self._ordinal_followup_index(task)
+        index = ordinal_followup_index(task)
         if index is None:
             return None
         options = handoff.get("action_options")
@@ -2687,82 +2079,13 @@ class TaskBoundaryService:
         return None
 
     def _message_is_semantic_tail_candidate(self, message: Any) -> bool:
-        role = str(getattr(message, "role", "") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            return False
-        metadata = getattr(message, "metadata", None)
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if metadata.get("hidden_from_prompt") or metadata.get("is_recovery_nudge"):
-            return False
-        text = str(getattr(message, "content", "") or "").strip()
-        if not text:
-            return False
-        return True
+        return message_is_semantic_tail_candidate(message)
 
     def _semantic_recent_tail_messages(self, *, token_cap: int) -> list[Any]:
-        candidates = [
-            message
-            for message in self.harness.state.recent_messages
-            if self._message_is_semantic_tail_candidate(message)
-        ]
-        if not candidates:
-            return []
-
-        selected: list[Any] = []
-        last_assistant_index = max(
-            (index for index, message in enumerate(candidates) if str(getattr(message, "role", "")).lower() == "assistant"),
-            default=-1,
-        )
-        if last_assistant_index >= 0:
-            assistant_message = candidates[last_assistant_index]
-            user_index = max(
-                (
-                    index
-                    for index in range(last_assistant_index - 1, -1, -1)
-                    if str(getattr(candidates[index], "role", "")).lower() == "user"
-                ),
-                default=-1,
-            )
-            if user_index >= 0:
-                selected.append(candidates[user_index])
-            selected.append(assistant_message)
-        else:
-            user_index = max(
-                (index for index, message in enumerate(candidates) if str(getattr(message, "role", "")).lower() == "user"),
-                default=-1,
-            )
-            if user_index >= 0:
-                selected.append(candidates[user_index])
-
-        if not selected:
-            return []
-
-        total_tokens = sum(
-            estimate_text_tokens(str(getattr(message, "content", "") or ""))
-            for message in selected
-        )
-        if total_tokens <= token_cap:
-            return selected
-
-        if len(selected) == 2:
-            user_message, assistant_message = selected
-            assistant_tokens = estimate_text_tokens(str(getattr(assistant_message, "content", "") or ""))
-            if assistant_tokens <= token_cap:
-                return [assistant_message]
-            user_tokens = estimate_text_tokens(str(getattr(user_message, "content", "") or ""))
-            if user_tokens <= token_cap:
-                return [user_message]
-
-        return [selected[-1]]
+        return semantic_recent_tail_messages(self.harness.state.recent_messages, token_cap=token_cap)
 
     def _strip_ordinal_prefix(self, task: str) -> str:
-        text = str(task or "").strip()
-        if not text:
-            return ""
-        text = _ORDINAL_PREFIX_RE.sub("", text, count=1)
-        text = _GENERIC_EDIT_LEAD_RE.sub("", text, count=1)
-        return text.strip()
+        return strip_ordinal_prefix(task)
 
     def _resolve_option_target_paths(
         self,
@@ -2786,7 +2109,7 @@ class TaskBoundaryService:
                 "suffix": suffix,
             }
 
-        if _blocks_inherited_target(suffix, list(inherited_paths)):
+        if blocks_inherited_target(suffix, list(inherited_paths)):
             return {
                 "target_paths": [],
                 "target_inheritance": "blocked_by_user_constraint",
@@ -2896,7 +2219,7 @@ class TaskBoundaryService:
             return raw_task
 
         continuity_candidate = self._current_or_handoff_continuity_task()
-        candidate = _base_task_from_task_chain(
+        candidate = base_task_from_task_chain(
             handoff.get("current_goal")
             or handoff.get("effective_task")
             or self.harness.state.run_brief.original_task
@@ -2929,11 +2252,11 @@ class TaskBoundaryService:
         return candidate
 
     def store_task_handoff(self, *, raw_task: str, effective_task: str) -> None:
-        effective = _collapse_task_chain(effective_task)
+        effective = collapse_task_chain(effective_task)
         if not effective:
             return
         target_paths = extract_task_target_paths(effective)
-        current_goal = _collapse_task_chain(self.harness.state.working_memory.current_goal or effective)
+        current_goal = collapse_task_chain(self.harness.state.working_memory.current_goal or effective)
         task_mode = classify_task_mode(effective)
         active_scope = self._active_task_scope_payload()
         active_task_id = str(active_scope.get("task_id") or "").strip() if active_scope else ""
@@ -2954,7 +2277,7 @@ class TaskBoundaryService:
             )
         previous = self.last_task_handoff()
         previous_paths = previous.get("target_paths") if isinstance(previous.get("target_paths"), list) else []
-        same_task = _normalize_task_text(previous.get("effective_task")) == _normalize_task_text(effective)
+        same_task = normalize_task_text(previous.get("effective_task")) == normalize_task_text(effective)
         same_target = bool(set(previous_paths) & set(target_paths))
         existing_options = previous.get("action_options") if (same_task or same_target) else []
         if not isinstance(existing_options, list):
@@ -3154,25 +2477,25 @@ class TaskBoundaryService:
         inherited_paths = handoff.get("target_paths")
         if not isinstance(inherited_paths, list):
             inherited_paths = []
-        extracted_options = _extract_action_options_from_text(assistant_text, list(inherited_paths))
+        extracted_options = extract_action_options_from_text(assistant_text, list(inherited_paths))
         if not extracted_options:
             return
         existing_options = handoff.get("action_options")
         if not isinstance(existing_options, list):
             existing_options = []
-        handoff["action_options"] = _merge_action_options(existing_options, extracted_options)
+        handoff["action_options"] = merge_action_options(existing_options, extracted_options)
         handoff["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.harness.state.scratchpad["_last_task_handoff"] = handoff
 
     def initialize_run_brief(self, task: str, *, raw_task: str | None = None) -> None:
-        effective_task = _collapse_task_chain(task)
+        effective_task = collapse_task_chain(task)
         source_task = str(raw_task or effective_task).strip()
         continue_like = self._is_contextual_followup(source_task)
         remote_mission_task = self._remote_followup_mission_task(source_task)
-        previous_task = _collapse_task_chain(
+        previous_task = collapse_task_chain(
             self.harness.state.scratchpad.pop("_task_boundary_previous_task", "") or ""
         )
-        existing_task = _collapse_task_chain(self.harness.state.run_brief.original_task or "")
+        existing_task = collapse_task_chain(self.harness.state.run_brief.original_task or "")
         if remote_mission_task and "execute approved plan" in effective_task.lower():
             canonical_task = remote_mission_task
         else:
@@ -3184,7 +2507,7 @@ class TaskBoundaryService:
             self.harness.state.scratchpad.get("_resolved_remote_followup"), dict
         )
         task_mode_source = canonical_task
-        if resolved_remote_followup and _is_remote_followup_wrapper(effective_task):
+        if resolved_remote_followup and is_remote_followup_wrapper(effective_task):
             self.harness.state.task_mode = "remote_execute"
         else:
             self.harness.state.task_mode = classify_task_mode(task_mode_source)
@@ -3203,21 +2526,21 @@ class TaskBoundaryService:
         elif not existing_phase_objective:
             self.harness.state.run_brief.current_phase_objective = self.harness.state.current_phase
 
-        existing_goal = _collapse_task_chain(self.harness.state.working_memory.current_goal or "")
+        existing_goal = collapse_task_chain(self.harness.state.working_memory.current_goal or "")
         plan = self.harness.state.active_plan or self.harness.state.draft_plan
-        plan_goal = _collapse_task_chain(getattr(plan, "goal", "") or "")
+        plan_goal = collapse_task_chain(getattr(plan, "goal", "") or "")
         if self._is_corrective_resteer_followup(source_task) and existing_goal:
             next_goal = existing_goal
         elif remote_mission_task:
-            if _is_remote_followup_wrapper(effective_task):
+            if is_remote_followup_wrapper(effective_task):
                 next_goal = canonical_task
-            elif plan_goal and _normalize_task_text(plan_goal) == _normalize_task_text(existing_goal):
+            elif plan_goal and normalize_task_text(plan_goal) == normalize_task_text(existing_goal):
                 next_goal = plan_goal
-            elif existing_goal and not _is_remote_followup_wrapper(existing_goal):
+            elif existing_goal and not is_remote_followup_wrapper(existing_goal):
                 next_goal = existing_goal
             else:
                 next_goal = remote_mission_task
-        elif continue_like and plan_goal and _normalize_task_text(plan_goal) == _normalize_task_text(existing_goal):
+        elif continue_like and plan_goal and normalize_task_text(plan_goal) == normalize_task_text(existing_goal):
             next_goal = plan_goal
         else:
             next_goal = canonical_task or existing_goal
@@ -3248,8 +2571,8 @@ class TaskBoundaryService:
             if message.role == "user" and message.content:
                 content = str(message.content or "").strip()
                 resolved = self.resolve_followup_task(content)
-                return _collapse_task_chain(resolved or content)
+                return collapse_task_chain(resolved or content)
         last_task = self.harness.state.scratchpad.get("_last_task_text")
         if isinstance(last_task, str) and last_task:
-            return _collapse_task_chain(last_task)
-        return _collapse_task_chain(self.harness.state.run_brief.original_task)
+            return collapse_task_chain(last_task)
+        return collapse_task_chain(self.harness.state.run_brief.original_task)

@@ -4,61 +4,25 @@ from collections import Counter
 from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_task
+from .detector_classifiers import (
+    WRONG_PATH_MARKERS,
+    WRITE_TOOLS,
+    _BAD_ARG_ERROR_MARKERS,
+    _BAD_ARG_REASONS,
+    _LOOP_COUNTERS,
+    _OUTPUT_MISREAD_REASONS,
+    _READ_LOOP_TOOLS,
+    _REMOTE_CONFUSION_REASONS,
+    _TEST_FAILURE_MARKERS,
+    _ZERO_TEST_MARKERS,
+    _is_patch_target_miss,
+    _looks_like_test_failure_output,
+    _looks_like_zero_tests,
+    _metadata_verifier,
+    _verdict_is_pass,
+    _verifier_failed,
+)
 from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state
-
-_LOOP_COUNTERS = ("no_progress", "no_actionable_progress", "repeat_command", "repeat_patch")
-_READ_LOOP_TOOLS = {"artifact_read", "file_read", "dir_list", "ssh_file_read", "web_fetch"}
-_REMOTE_CONFUSION_REASONS = {
-    "remote_path_requires_ssh_exec",
-    "remote_path_requires_typed_ssh_file_tool",
-}
-_BAD_ARG_ERROR_MARKERS = (
-    "tool arguments must be an object",
-    "missing required field",
-    "expected type",
-    "schema validation",
-    "invalid tool arguments",
-    "validation error",
-)
-_BAD_ARG_REASONS = {"schema_validation", "validation_error", "bad_tool_args", "invalid_arguments"}
-_OUTPUT_MISREAD_REASONS = {
-    "lookup_answer_missing",
-    "answer_missing_from_latest_output",
-    "tool_output_contradiction",
-    "task_complete_contradicts_tool_output",
-}
-WRONG_PATH_MARKERS = (
-    "no such file or directory",
-    "cannot access",
-    "not found",
-    "filenotfounderror",
-    "path does not exist",
-)
-_TEST_OUTPUT_MARKERS = (
-    "assertionerror",
-    "traceback",
-    "failed (failures=",
-    "failed (errors=",
-    "ran ",
-    "pytest",
-    "unittest",
-)
-WRITE_TOOLS = {"file_write", "file_append", "ssh_file_write"}
-_TEST_FAILURE_MARKERS = (
-    "failed",
-    "error",
-    "traceback",
-    "assertionerror",
-    "pytest",
-    "test failed",
-)
-_ZERO_TEST_MARKERS = (
-    "ran 0 tests",
-    "no tests ran",
-    "collected 0 items",
-    "0 tests collected",
-    "no tests collected",
-)
 
 
 def detect_early_stop_from_result(
@@ -251,34 +215,6 @@ def detect_wrong_path(
         failure_class="wrong_path",
         next_safe_action="Run a narrow directory/file check in the correct scope, then retry with the verified path.",
     )
-
-
-def _looks_like_test_failure_output(text: str) -> bool:
-    lowered = str(text or "").lower()
-    if not lowered:
-        return False
-    if "not found in" in lowered and any(marker in lowered for marker in _TEST_OUTPUT_MARKERS):
-        return True
-    if "assertionerror" in lowered and any(marker in lowered for marker in ("failed", "traceback", "ran ")):
-        return True
-    return False
-
-
-def _is_patch_target_miss(tool_name: str, combined_result_text: str) -> bool:
-    tool = str(tool_name or "").strip()
-    if tool not in {"file_patch", "ast_patch", "ssh_file_patch"}:
-        return False
-    text = str(combined_result_text or "").lower()
-    patch_miss_markers = (
-        "patch target text was not found",
-        "target text was not found",
-        "replacement bounds were not found",
-        "bounded region was not found",
-        "class `",
-        "function `",
-        "method `",
-    )
-    return any(marker in text for marker in patch_miss_markers)
 
 
 def detect_write_session_stall(state: Any, *, threshold: int = 3) -> FamaSignal | None:
@@ -729,11 +665,6 @@ def _early_stop_evidence(metadata: dict[str, Any], *, error: str, state: Any) ->
     return ""
 
 
-def _metadata_verifier(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    verdict = metadata.get("last_verifier_verdict")
-    return verdict if isinstance(verdict, dict) and verdict else None
-
-
 def _verifier_from_result_or_state(state: Any, *, result: Any | None) -> dict[str, Any] | None:
     metadata = getattr(result, "metadata", None) if result is not None else None
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -759,17 +690,6 @@ def _verifier_from_result_or_state(state: Any, *, result: Any | None) -> dict[st
     return verdict if isinstance(verdict, dict) and verdict else None
 
 
-def _verifier_failed(verifier: Any) -> bool:
-    if not isinstance(verifier, dict) or not verifier:
-        return False
-    verdict = str(verifier.get("verdict") or "").strip().lower()
-    return bool(verdict) and verdict != "pass"
-
-
-def _verdict_is_pass(value: Any) -> bool:
-    return str(value or "").strip().lower() == "pass"
-
-
 def _verifier_evidence(verifier: dict[str, Any]) -> str:
     verdict = str(verifier.get("verdict") or "unknown").strip()
     target = str(verifier.get("command") or verifier.get("target") or "").strip()
@@ -781,11 +701,6 @@ def _verifier_evidence(verifier: dict[str, Any]) -> str:
     if target:
         return f"task_complete rejected with verifier verdict {verdict}: {target}{qualifier}"
     return f"task_complete rejected with verifier verdict {verdict}{qualifier}"
-
-
-def _looks_like_zero_tests(text: str) -> bool:
-    lowered = str(text or "").lower()
-    return any(marker in lowered for marker in _ZERO_TEST_MARKERS)
 
 
 def _checklist_has_pending(checklist: Any) -> bool:

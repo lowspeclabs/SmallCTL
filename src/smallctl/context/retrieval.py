@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..experience_tags import PHASE_TAG_PREFIX, is_generic_experience_tag
 from ..memory_namespace import (
     NamespaceRouting,
     infer_memory_namespace,
@@ -16,7 +15,6 @@ from ..memory_namespace import (
 )
 from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
 from ..redaction import redact_sensitive_text
-from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
 from ..guards import is_over_twenty_b_model_name, is_seven_b_or_under_model_name
 from ..state import (
     ArtifactRecord,
@@ -24,95 +22,56 @@ from ..state import (
     EpisodicSummary,
     ExperienceMemory,
     LoopState,
-    MemoryEntry,
-    memory_entry_is_stale,
     normalize_intent_label,
 )
-from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
+from .artifact_visibility import is_prompt_visible_artifact, is_retrieval_visible_artifact, is_superseded_artifact
+from .artifact_read_coverage import fully_read_artifact_ids
 from .policy import ContextPolicy, estimate_text_tokens
-
-_CHAT_SUPPRESSED_TOOL_NAMES = {
-    "shell_exec",
-    "ssh_exec",
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-    "file_delete",
-    "process_kill",
-    "http_post",
-    "file_download",
-}
-_CHAT_SUPPRESSED_MEMORY_TAGS = {
-    "shell_exec",
-    "ssh_exec",
-    "scripts",
-    "bash",
-    "terminal",
-    "command",
-    "command_line",
-}
-_LIVE_REMOTE_CORRECTION_PHRASES = (
-    "actually use ssh",
-    "do it live",
-    "redo the remote action",
-    "do not rely on past records",
-    "don't rely on past records",
-    "dont rely on past records",
-    "do not rely on prior records",
-    "don't rely on prior records",
-    "re-run on the host",
-    "rerun on the host",
-    "run it live",
-    "redo it live",
-    "fresh ssh",
-    "fresh run",
+from .retrieval_artifact_helpers import (
+    artifact_body_excerpt,
+    artifact_category,
+    artifact_contains_interactive_prompt,
+    artifact_dedupe_key,
+    artifact_failure_text,
+    artifact_has_resolved_successor,
+    artifact_host,
+    artifact_path,
+    artifact_success,
+    artifact_text,
+    artifact_tool_name,
+    file_like_paths,
+    handoff_recent_research_artifact_ids,
+    is_causal_remote_failure_artifact,
+    is_remote_repair_state,
+    latest_causal_remote_failure_artifact_id,
+    query_requests_specific_detail,
+    should_pin_recent_research_artifacts,
 )
-_LIVE_REMOTE_CORRECTION_HINTS = (
-    "actually",
-    "again",
-    "fresh",
-    "live",
-    "redo",
-    "rerun",
-    "re-run",
-    "retry",
-    "retest",
-    "verify",
+from .retrieval_query import (
+    build_refined_retrieval_query as _build_refined_retrieval_query,
+    build_retrieval_query as _build_retrieval_query,
 )
-_REMOTE_FILE_TOOLS = {
-    "ssh_exec",
-    "ssh_file_read",
-    "ssh_file_write",
-    "ssh_file_patch",
-    "ssh_file_replace_between",
-}
-_MUTATION_RESULT_TOOLS = {
-    "ssh_file_write",
-    "ssh_file_patch",
-    "ssh_file_replace_between",
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-}
-_DIAGNOSTIC_FAILURE_TOOL_PENALTIES = {
-    "artifact_grep": 24.0,
-    "artifact_read": 18.0,
-    "web_search": 12.0,
-}
-_INTERACTIVE_PROMPT_MARKERS = (
-    "(y/n)",
-    "[y/n]",
-    "[y/n",
-    "choice: [",
-    "hit enter",
-    "hit [enter]",
-    "are you sure you wish to continue",
-    "answer not recognized",
-    "sorry, answer not recognized",
+from .retrieval_constants import (
+    CHAT_SUPPRESSED_TOOL_NAMES,
+    REMOTE_FILE_TOOLS,
 )
-_FILE_LIKE_PATH_RE = re.compile(r"(?:^|\s)(?:\.{0,2}/|/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*(?:\.[A-Za-z0-9_.-]+)")
+from .retrieval_scoring import score_artifact
+from .retrieval_state_helpers import (
+    durably_stale_ids,
+    effective_current_goal,
+    is_durably_stale_experience,
+    is_generic_retrieval_tag,
+    is_generic_terminal_memory,
+    is_model_terminal_claim,
+    normalized_goal_text,
+    path_match,
+    prompt_visible_memory_tags,
+    query_requests_live_remote_correction,
+    state_entity_tags,
+    state_environment_tags,
+    state_target_paths,
+    state_touched_symbols,
+)
 
 @dataclass
 class RetrievalBundle:
@@ -135,6 +94,37 @@ class RetrievalBundle:
 class LexicalRetriever:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
+
+    _file_like_paths = staticmethod(file_like_paths)
+    _artifact_text = staticmethod(artifact_text)
+    _artifact_body_excerpt = staticmethod(artifact_body_excerpt)
+    _artifact_category = staticmethod(artifact_category)
+    _artifact_dedupe_key = staticmethod(artifact_dedupe_key)
+    _artifact_success = staticmethod(artifact_success)
+    _artifact_host = staticmethod(artifact_host)
+    _artifact_path = staticmethod(artifact_path)
+    _artifact_has_resolved_successor = staticmethod(artifact_has_resolved_successor)
+    _query_requests_specific_detail = staticmethod(query_requests_specific_detail)
+    _handoff_recent_research_artifact_ids = staticmethod(handoff_recent_research_artifact_ids)
+    _should_pin_recent_research_artifacts = staticmethod(should_pin_recent_research_artifacts)
+    _artifact_tool_name = staticmethod(artifact_tool_name)
+    _artifact_failure_text = staticmethod(artifact_failure_text)
+    _artifact_contains_interactive_prompt = staticmethod(artifact_contains_interactive_prompt)
+    _is_remote_repair_state = staticmethod(is_remote_repair_state)
+    _is_causal_remote_failure_artifact = staticmethod(is_causal_remote_failure_artifact)
+    _latest_causal_remote_failure_artifact_id = staticmethod(latest_causal_remote_failure_artifact_id)
+    _normalized_goal_text = staticmethod(normalized_goal_text)
+    _effective_current_goal = staticmethod(effective_current_goal)
+    _state_environment_tags = staticmethod(state_environment_tags)
+    _is_generic_retrieval_tag = staticmethod(is_generic_retrieval_tag)
+    _prompt_visible_memory_tags = staticmethod(prompt_visible_memory_tags)
+    _is_generic_terminal_memory = staticmethod(is_generic_terminal_memory)
+    _query_requests_live_remote_correction = staticmethod(query_requests_live_remote_correction)
+    _is_model_terminal_claim = staticmethod(is_model_terminal_claim)
+    _state_entity_tags = staticmethod(state_entity_tags)
+    _state_target_paths = staticmethod(state_target_paths)
+    _state_touched_symbols = staticmethod(state_touched_symbols)
+    _path_match = staticmethod(path_match)
 
     @staticmethod
     def _state_model_name(state: LoopState) -> str:
@@ -446,7 +436,7 @@ class LexicalRetriever:
                 continue
             if is_superseded_artifact(artifact):
                 continue
-            if not _is_retrieval_visible_artifact(artifact):
+            if not is_retrieval_visible_artifact(artifact):
                 continue
             score = self._score_artifact(
                 artifact=artifact,
@@ -473,19 +463,7 @@ class LexicalRetriever:
 
     @staticmethod
     def _fully_read_artifact_ids(state: LoopState) -> set[str]:
-        scratchpad = getattr(state, "scratchpad", {})
-        if not isinstance(scratchpad, dict):
-            return set()
-        coverage = scratchpad.get("_artifact_read_coverage")
-        if not isinstance(coverage, dict):
-            return set()
-        return {
-            str(artifact_id).strip()
-            for artifact_id, entry in coverage.items()
-            if str(artifact_id).strip()
-            and isinstance(entry, dict)
-            and bool(entry.get("complete"))
-        }
+        return fully_read_artifact_ids(state)
 
     def _rank_summaries(
         self,
@@ -724,7 +702,7 @@ class LexicalRetriever:
         routing: NamespaceRouting | None = None,
     ) -> float:
         task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-        if task_mode == "chat" and str(m.tool_name or "").strip().lower() in _CHAT_SUPPRESSED_TOOL_NAMES:
+        if task_mode == "chat" and str(m.tool_name or "").strip().lower() in CHAT_SUPPRESSED_TOOL_NAMES:
             return 0.0
         if self._is_durably_stale_experience(state, m):
             return 0.0
@@ -844,26 +822,8 @@ class LexicalRetriever:
 
         return score
 
-    @staticmethod
-    def _durably_stale_ids(state: LoopState, *, key: str) -> set[str]:
-        payload = state.scratchpad.get(key)
-        if not isinstance(payload, dict):
-            return set()
-        ids: set[str] = set()
-        for raw_id, marker in payload.items():
-            item_id = str(raw_id or "").strip()
-            if not item_id or not isinstance(marker, dict):
-                continue
-            if bool(marker.get("stale", False)):
-                ids.add(item_id)
-        return ids
-
-    @classmethod
-    def _is_durably_stale_experience(cls, state: LoopState, memory: ExperienceMemory) -> bool:
-        memory_id = str(getattr(memory, "memory_id", "") or "").strip()
-        if not memory_id:
-            return False
-        return memory_id in cls._durably_stale_ids(state, key="_experience_staleness")
+    _durably_stale_ids = staticmethod(durably_stale_ids)
+    _is_durably_stale_experience = staticmethod(is_durably_stale_experience)
 
     @staticmethod
     def _resolved_memory_namespace(memory: ExperienceMemory, *, state: LoopState) -> str:
@@ -968,159 +928,6 @@ class LexicalRetriever:
             return 999.0
         return ranked[0][0] - ranked[1][0]
 
-    @staticmethod
-    def _normalized_goal_text(text: str) -> str:
-        return re.sub(r"\s+", " ", str(text or "").strip()).lower()
-
-    @classmethod
-    def _effective_current_goal(cls, state: LoopState) -> str:
-        current_goal = str(getattr(state.working_memory, "current_goal", "") or "").strip()
-        if not current_goal:
-            return ""
-        previous_task = str(state.scratchpad.get("_task_boundary_previous_task") or "").strip()
-        if previous_task and cls._normalized_goal_text(previous_task) == cls._normalized_goal_text(current_goal):
-            return ""
-        return current_goal
-
-    @staticmethod
-    def _state_environment_tags(state: LoopState) -> set[str]:
-        phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        if not phase:
-            return set()
-        return {f"{PHASE_TAG_PREFIX}{phase}"}
-
-    @staticmethod
-    def _is_generic_retrieval_tag(tag: str) -> bool:
-        return is_generic_experience_tag(tag)
-
-    @classmethod
-    def _prompt_visible_memory_tags(cls, state: LoopState, memory: ExperienceMemory) -> list[str]:
-        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
-        state_tags = {
-            str(tag).strip().lower()
-            for tag in (getattr(state, "intent_tags", []) or [])
-            if str(tag).strip()
-        }
-        visible: list[str] = []
-        for tag in getattr(memory, "intent_tags", []) or []:
-            normalized = str(tag or "").strip()
-            lowered = normalized.lower()
-            if not normalized or cls._is_generic_retrieval_tag(lowered):
-                continue
-            if task_mode == "chat" and lowered in _CHAT_SUPPRESSED_MEMORY_TAGS:
-                continue
-            if lowered.startswith(PHASE_TAG_PREFIX):
-                continue
-            if lowered == active_intent or lowered in state_tags or lowered.endswith("_exec"):
-                visible.append(normalized)
-                continue
-            if lowered.startswith(("task_", "tool_")):
-                visible.append(normalized)
-        return visible
-
-    @classmethod
-    def _is_generic_terminal_memory(cls, state: LoopState, memory: ExperienceMemory) -> bool:
-        if str(memory.tool_name or "").strip().lower() != "task_complete":
-            return False
-        if normalize_intent_label(memory.intent) != "general_task":
-            return False
-        if normalize_intent_label(getattr(state, "active_intent", "") or "") != "general_task":
-            return False
-        if cls._prompt_visible_memory_tags(state, memory):
-            return False
-        current_goal = cls._effective_current_goal(state)
-        if current_goal and (_tokens(current_goal) & _tokens(memory.notes or "")):
-            return False
-        return True
-
-    @staticmethod
-    def _query_requests_live_remote_correction(query_text: str) -> bool:
-        text = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
-        if not text:
-            return False
-        if any(phrase in text for phrase in _LIVE_REMOTE_CORRECTION_PHRASES):
-            return True
-        has_live_correction_language = any(marker in text for marker in _LIVE_REMOTE_CORRECTION_HINTS)
-        has_remote_anchor = any(token in text for token in ("ssh", "remote", "host", "server"))
-        has_reliance_negation = any(
-            phrase in text
-            for phrase in (
-                "don't rely",
-                "do not rely",
-                "dont rely",
-                "do not trust",
-                "don't trust",
-            )
-        )
-        return has_live_correction_language and (has_remote_anchor or has_reliance_negation)
-
-    @classmethod
-    def _is_model_terminal_claim(cls, memory: ExperienceMemory) -> bool:
-        return (
-            str(memory.tool_name or "").strip().lower() == "task_complete"
-            and str(getattr(memory, "source", "") or "").strip().lower() == "model_terminal_claim"
-        )
-
-    @classmethod
-    def _state_entity_tags(cls, state: LoopState) -> set[str]:
-        return _tokens(
-            " ".join(
-                filter(
-                    None,
-                    [
-                        state.run_brief.original_task,
-                        cls._effective_current_goal(state),
-                        " ".join(state.working_memory.open_questions),
-                    ],
-                )
-            )
-        )
-
-    @staticmethod
-    def _state_target_paths(state: LoopState) -> set[str]:
-        paths: set[str] = set()
-        for value in list(getattr(state, "files_changed_this_cycle", []) or []):
-            text = str(value or "").strip()
-            if text:
-                paths.add(Path(text).as_posix().lower())
-        task_targets = state.scratchpad.get("_task_target_paths")
-        if isinstance(task_targets, list):
-            for value in task_targets:
-                text = str(value or "").strip()
-                if text:
-                    paths.add(Path(text).as_posix().lower())
-        write_session = getattr(state, "write_session", None)
-        if write_session is not None:
-            for key in ("write_target_path", "write_staging_path"):
-                text = str(getattr(write_session, key, "") or "").strip()
-                if text:
-                    paths.add(Path(text).as_posix().lower())
-        return paths
-
-    @staticmethod
-    def _state_touched_symbols(state: LoopState) -> set[str]:
-        payload = state.scratchpad.get("_touched_symbols")
-        if not isinstance(payload, list):
-            return set()
-        symbols: set[str] = set()
-        for value in payload:
-            text = str(value or "").strip()
-            if not text:
-                continue
-            symbols |= _tokens(text)
-        return symbols
-
-    @staticmethod
-    def _path_match(left: str, right: str) -> bool:
-        lhs = str(left or "").strip().lower()
-        rhs = str(right or "").strip().lower()
-        if not lhs or not rhs:
-            return False
-        if lhs == rhs:
-            return True
-        return lhs.endswith(rhs) or rhs.endswith(lhs)
-
     def _infer_requested_tool(self, state: LoopState) -> str | None:
         if state.working_memory.next_actions:
             # Try to find a tool name in the next actions list
@@ -1131,13 +938,13 @@ class LexicalRetriever:
 
     def _uses_remote_artifact_profile(self, *, state: LoopState, query: str) -> bool:
         requested_tool = self._infer_requested_tool(state)
-        if requested_tool in _REMOTE_FILE_TOOLS:
+        if requested_tool in REMOTE_FILE_TOOLS:
             return True
         task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
         if task_mode == "remote_execute":
             return True
         tags = {str(tag).strip().lower() for tag in getattr(state, "intent_tags", []) or []}
-        if tags & _REMOTE_FILE_TOOLS:
+        if tags & REMOTE_FILE_TOOLS:
             return True
         text = " ".join(
             [
@@ -1153,617 +960,10 @@ class LexicalRetriever:
         paths |= self._state_target_paths(state)
         return len(paths) > 1
 
-    @staticmethod
-    def _file_like_paths(text: str) -> set[str]:
-        paths: set[str] = set()
-        for match in _FILE_LIKE_PATH_RE.finditer(str(text or "")):
-            value = match.group(0).strip()
-            if not value or "." not in Path(value).name:
-                continue
-            paths.add(Path(value).as_posix().lower())
-        return paths
-
-    @staticmethod
-    def _artifact_text(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        verifier_verdict = str(metadata.get("verifier_verdict") or "").strip()
-        if verifier_verdict:
-            target = str(metadata.get("verifier_target") or artifact.source or artifact.tool_name or "").strip()
-            exit_code = metadata.get("verifier_exit_code")
-            stdout = str(metadata.get("verifier_stdout") or "").strip()
-            stderr = str(metadata.get("verifier_stderr") or "").strip()
-            transcript = stdout or stderr
-            if len(transcript) > 320:
-                transcript = f"{transcript[:320].rstrip()}..."
-            details = [f"Verifier {verifier_verdict}: {artifact.summary or target or artifact.tool_name}"]
-            if target:
-                details.append(f"Target: {target}")
-            if exit_code not in ("", None):
-                details.append(f"Exit code: {exit_code}")
-            if transcript:
-                details.append(f"Key output: {transcript}")
-            return "\n".join(details)[:900]
-
-        if LexicalRetriever._artifact_category(artifact) == "mutation_result":
-            path = str(metadata.get("path") or artifact.source or "").strip()
-            host = str(metadata.get("host") or "").strip()
-            changed = metadata.get("changed")
-            bits = [f"Mutation result: {artifact.summary or artifact.tool_name}"]
-            if host or path:
-                target = f"{host}:{path}" if host and path else host or path
-                bits.append(f"Target: {target}")
-            if isinstance(changed, bool):
-                bits.append(f"Changed: {'yes' if changed else 'no'}")
-            for key in ("bytes_written", "actual_occurrences", "expected_occurrences", "new_sha256"):
-                value = metadata.get(key)
-                if value not in (None, ""):
-                    bits.append(f"{key}: {value}")
-            readback_sha = str(metadata.get("readback_sha256") or "").strip()
-            new_sha = str(metadata.get("new_sha256") or "").strip()
-            verification = metadata.get("verification") if isinstance(metadata.get("verification"), dict) else {}
-            if readback_sha or verification:
-                verified = bool(verification.get("readback_sha256_matches")) or bool(new_sha and readback_sha == new_sha)
-                bits.append(f"Readback verified: {'yes' if verified else 'no'}")
-            return "\n".join(bits)[:900]
-
-        base = f"{artifact.source or artifact.tool_name} | {artifact.summary}"
-        preview = artifact.preview_text or artifact.inline_content or LexicalRetriever._artifact_body_excerpt(artifact)
-        if metadata.get("complete_file") and preview:
-            preview = f"Full file already captured; excerpt below is preview only.\n{preview[:500].rstrip()}"
-        combined = f"{base}\n{preview}".strip()
-        return combined[:900]
-
-    @staticmethod
-    def _artifact_body_excerpt(artifact: ArtifactRecord, *, limit: int = 500) -> str:
-        content_path = str(getattr(artifact, "content_path", "") or "").strip()
-        if not content_path:
-            return ""
-        try:
-            text = Path(content_path).read_text(encoding="utf-8")
-        except OSError:
-            return ""
-        excerpt = text[:limit].strip()
-        if not excerpt:
-            return ""
-        if len(text) > limit:
-            return f"{excerpt}..."
-        return excerpt
-
-    @staticmethod
-    def _artifact_category(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        if str(metadata.get("verifier_verdict") or "").strip():
-            return "verifier"
-        if str(artifact.tool_name or artifact.kind or "").strip() in _MUTATION_RESULT_TOOLS:
-            return "mutation_result"
-        if artifact.kind == "file_read" and bool(metadata.get("complete_file")):
-            return "primary_file"
-        return "other"
-
-    @staticmethod
-    def _artifact_dedupe_key(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        category = LexicalRetriever._artifact_category(artifact)
-        if category == "verifier":
-            family = str(metadata.get("attempt_family") or "").strip()
-            if family:
-                return f"verifier:{family}"
-            target = str(
-                metadata.get("verifier_target")
-                or metadata.get("command")
-                or artifact.source
-                or artifact.summary
-                or ""
-            ).strip()
-            return f"verifier:{target.lower()}"
-        if category == "mutation_result":
-            path = str(metadata.get("path") or artifact.source or "").strip()
-            host = str(metadata.get("host") or "").strip().lower()
-            if path:
-                return f"mutation_result:{host}:{Path(path).as_posix().lower()}"
-            return f"mutation_result:{artifact.artifact_id}"
-        path = str(metadata.get("path") or artifact.source or "").strip()
-        if path:
-            normalized = Path(path).as_posix().lower()
-            return f"{category}:{normalized}"
-        return f"{category}:{artifact.artifact_id}"
-
-    @staticmethod
-    def _artifact_success(artifact: ArtifactRecord) -> bool:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        if "success" in metadata:
-            return bool(metadata.get("success"))
-        return True
-
-    @staticmethod
-    def _artifact_host(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        host = str(metadata.get("host") or "").strip().lower()
-        if host:
-            return host
-        arguments = metadata.get("arguments")
-        if isinstance(arguments, dict):
-            return str(arguments.get("host") or "").strip().lower()
-        return ""
-
-    @staticmethod
-    def _artifact_path(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        path = str(metadata.get("path") or "").strip()
-        if not path:
-            arguments = metadata.get("arguments")
-            if isinstance(arguments, dict):
-                path = str(arguments.get("path") or "").strip()
-        if not path:
-            source = str(artifact.source or "").strip()
-            if source.startswith("/"):
-                path = source
-        return Path(path).as_posix().lower() if path else ""
-
-    @classmethod
-    def _artifact_has_resolved_successor(
-        cls,
-        *,
-        state: LoopState,
-        artifact: ArtifactRecord,
-        max_gap: int = 6,
-    ) -> bool:
-        if cls._artifact_success(artifact):
-            return False
-        artifact_items = list(state.artifacts.items())
-        artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
-        current_index = next(
-            (index for index, (candidate_id, _) in enumerate(artifact_items) if candidate_id == artifact_id),
-            -1,
-        )
-        if current_index < 0:
-            return False
-
-        failure_path = cls._artifact_path(artifact)
-        failure_host = cls._artifact_host(artifact)
-        if not failure_path:
-            return False
-
-        failure_tool = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
-        for _, successor in artifact_items[current_index + 1 : current_index + 1 + max_gap]:
-            if not cls._artifact_success(successor):
-                continue
-            successor_path = cls._artifact_path(successor)
-            if successor_path != failure_path:
-                continue
-            successor_host = cls._artifact_host(successor)
-            if failure_host and successor_host and successor_host != failure_host:
-                continue
-            successor_tool = str(
-                getattr(successor, "tool_name", "") or getattr(successor, "kind", "") or ""
-            ).strip().lower()
-            if failure_tool and successor_tool and successor_tool != failure_tool:
-                continue
-            return True
-        return False
-
-    @staticmethod
-    def _query_requests_specific_detail(query: str) -> bool:
-        lowered = str(query or "").lower()
-        if not lowered:
-            return False
-        detail_markers = (
-            "specific line",
-            "specific lines",
-            "line-level",
-            "line level",
-            "line numbers",
-            "line number",
-            "start_line",
-            "end_line",
-            "artifact_read",
-            "quote the line",
-            "show the line",
-            "show lines",
-            "inspect lines",
-            "page forward",
-            "narrow excerpt",
-            "exact excerpt",
-            "specific excerpt",
-            "prior evidence",
-            "artifact summary",
-            "artifact summaries",
-            "artifact snippet",
-            "artifact snippets",
-            "show evidence",
-            "reuse evidence",
-        )
-        return any(marker in lowered for marker in detail_markers)
-
-    @staticmethod
-    def _handoff_recent_research_artifact_ids(state: LoopState) -> set[str]:
-        scratchpad = getattr(state, "scratchpad", None)
-        if not isinstance(scratchpad, dict):
-            return set()
-        handoff = scratchpad.get("_last_task_handoff")
-        if not isinstance(handoff, dict):
-            return set()
-        artifact_ids = handoff.get("recent_research_artifact_ids")
-        if not isinstance(artifact_ids, list):
-            return set()
-        return {
-            str(artifact_id).strip()
-            for artifact_id in artifact_ids
-            if str(artifact_id).strip()
-        }
-
-    @staticmethod
-    def _should_pin_recent_research_artifacts(state: LoopState) -> bool:
-        scratchpad = getattr(state, "scratchpad", None)
-        if not isinstance(scratchpad, dict):
-            return False
-        if scratchpad.get("_task_boundary_previous_task"):
-            return True
-        if isinstance(scratchpad.get("_resolved_followup"), dict):
-            return True
-        if isinstance(scratchpad.get("_resolved_remote_followup"), dict):
-            return True
-        return False
-
-    @staticmethod
-    def _artifact_tool_name(artifact: ArtifactRecord) -> str:
-        return str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip().lower()
-
-    @staticmethod
-    def _artifact_failure_text(artifact: ArtifactRecord) -> str:
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        output = metadata.get("output")
-        output_bits: list[str] = []
-        if isinstance(output, dict):
-            output_bits.extend([
-                str(output.get("stdout") or ""),
-                str(output.get("stderr") or ""),
-            ])
-        return "\n".join(
-            bit
-            for bit in [
-                str(artifact.summary or ""),
-                str(artifact.preview_text or ""),
-                str(artifact.inline_content or ""),
-                str(metadata.get("error") or ""),
-                str(metadata.get("failure_mode") or ""),
-                str(metadata.get("failure_kind") or ""),
-                *output_bits,
-            ]
-            if bit
-        )
-
-    @classmethod
-    def _artifact_contains_interactive_prompt(cls, artifact: ArtifactRecord) -> bool:
-        text = cls._artifact_failure_text(artifact).lower()
-        return bool(text and any(marker in text for marker in _INTERACTIVE_PROMPT_MARKERS))
-
-    @classmethod
-    def _is_remote_repair_state(cls, state: LoopState) -> bool:
-        phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
-        intent_tags = {
-            str(tag or "").strip().lower()
-            for tag in getattr(state, "intent_tags", []) or []
-            if str(tag or "").strip()
-        }
-        return (
-            phase == "repair"
-            and (
-                task_mode == "remote_execute"
-                or active_intent == "requested_ssh_exec"
-                or "ssh_exec" in intent_tags
-            )
-        )
-
-    @classmethod
-    def _is_causal_remote_failure_artifact(cls, artifact: ArtifactRecord) -> bool:
-        if cls._artifact_tool_name(artifact) != "ssh_exec":
-            return False
-        if cls._artifact_success(artifact):
-            return False
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        failure_kind = str(metadata.get("failure_kind") or "").strip().lower()
-        ssh_transport_succeeded = bool(metadata.get("ssh_transport_succeeded"))
-        output_received = bool(metadata.get("output_received"))
-        return (
-            failure_kind == "remote_command"
-            or ssh_transport_succeeded
-            or output_received
-            or cls._artifact_contains_interactive_prompt(artifact)
-        )
-
-    @classmethod
-    def _latest_causal_remote_failure_artifact_id(cls, state: LoopState) -> str:
-        latest = ""
-        for artifact_id, artifact in getattr(state, "artifacts", {}).items():
-            if cls._is_causal_remote_failure_artifact(artifact):
-                latest = str(artifact_id or "")
-        return latest
-
-    @staticmethod
-    def _score_artifact(
-        *,
-        artifact: ArtifactRecord,
-        query: str,
-        query_tokens: set[str],
-        recency: int,
-        state: LoopState,
-    ) -> float:
-        expanded_query_tokens = set(query_tokens)
-        for token in list(query_tokens):
-            stripped = token.lstrip("./")
-            if len(stripped) > 1:
-                expanded_query_tokens.add(stripped)
-            for part in re.split(r"[\\/]+", stripped):
-                if len(part) > 1:
-                    expanded_query_tokens.add(part)
-        source_name = Path(artifact.source).name.lower() if artifact.source else ""
-        source_tokens = _tokens(artifact.source)
-        summary_tokens = _tokens(artifact.summary)
-        keyword_tokens = {token.lower() for token in artifact.keywords}
-        path_tokens = {token.lower() for token in artifact.path_tags}
-        metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-        metadata_tokens = _tokens(" ".join(
-            str(metadata.get(key, ""))
-            for key in ("intent", "path", "url", "command", "content_type", "source_type", "confidence")
-        ))
-        overlap = len(expanded_query_tokens & (source_tokens | summary_tokens | keyword_tokens | path_tokens | metadata_tokens))
-        filename_bonus = 5.0 if source_name and source_name in expanded_query_tokens else 0.0
-        path_bonus = 3.0 if artifact.source and any(token in artifact.source.lower() for token in expanded_query_tokens) else 0.0
-        tool_bonus = 2.0 if artifact.tool_name.lower() in expanded_query_tokens else 0.0
-        verifier_bonus = 2.5 if str(metadata.get("verifier_verdict") or "").strip() else 0.0
-        confidence_bonus = 0.0
-        confidence = metadata.get("confidence")
-        try:
-            confidence_bonus = max(0.0, min(1.5, float(confidence) * 1.5)) if confidence is not None else 0.0
-        except (TypeError, ValueError):
-            confidence_bonus = 0.0
-        phase_bonus = 0.0
-        metadata_phase = str(metadata.get("phase") or "").strip().lower()
-        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        if metadata_phase and current_phase and metadata_phase == current_phase:
-            phase_bonus = 2.5
-
-        intent_bonus = 0.0
-        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
-        metadata_intent = normalize_intent_label(metadata.get("intent"))
-        if active_intent and metadata_intent and metadata_intent == active_intent:
-            intent_bonus += 2.5
-        secondary_intents = {
-            normalize_intent_label(intent)
-            for intent in getattr(state, "secondary_intents", []) or []
-            if normalize_intent_label(intent)
-        }
-        if metadata_intent and metadata_intent in secondary_intents:
-            intent_bonus += 1.2
-
-        pinned_research_bonus = 0.0
-        recent_research_artifact_ids = LexicalRetriever._handoff_recent_research_artifact_ids(state)
-        if (
-            recent_research_artifact_ids
-            and artifact.artifact_id in recent_research_artifact_ids
-            and str(getattr(artifact, "kind", "")).strip() in {"web_search", "web_fetch"}
-            and LexicalRetriever._should_pin_recent_research_artifacts(state)
-        ):
-            pinned_research_bonus += 6.0
-
-        target_path_bonus = 0.0
-        target_paths = LexicalRetriever._state_target_paths(state)
-        source_path = Path(artifact.source).as_posix().lower() if artifact.source else ""
-        if source_path and target_paths and any(LexicalRetriever._path_match(source_path, target) for target in target_paths):
-            target_path_bonus += 4.0
-        write_target = str(getattr(getattr(state, "write_session", None), "write_target_path", "") or "").strip()
-        if write_target and source_path and LexicalRetriever._path_match(source_path, Path(write_target).as_posix().lower()):
-            target_path_bonus += 2.0
-
-        entity_bonus = 0.0
-        entity_overlap = len(LexicalRetriever._state_entity_tags(state) & (keyword_tokens | path_tokens | metadata_tokens))
-        if entity_overlap:
-            entity_bonus = min(2.0, entity_overlap * 0.5)
-
-        terminal_claim_penalty = 1.0
-        artifact_source = str(metadata.get("source") or artifact.source or "").strip().lower()
-        if artifact.tool_name == "task_complete" or artifact_source == "model_terminal_claim":
-            terminal_claim_penalty *= 0.7
-            if LexicalRetriever._query_requests_live_remote_correction(query):
-                terminal_claim_penalty *= 0.45
-
-        failure_bonus = 0.0
-        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
-        if failure_mode:
-            failure_haystack = " ".join(
-                [
-                    str(artifact.summary or ""),
-                    str(metadata.get("failure_mode") or ""),
-                    str(metadata.get("error") or ""),
-                ]
-            ).lower()
-            if failure_mode in failure_haystack:
-                failure_bonus += 2.0
-        touched_symbol_bonus = 0.0
-        touched_symbols = LexicalRetriever._state_touched_symbols(state)
-        if touched_symbols:
-            symbol_overlap = len(touched_symbols & (summary_tokens | keyword_tokens | path_tokens | metadata_tokens))
-            if symbol_overlap:
-                touched_symbol_bonus = min(2.5, symbol_overlap * 0.8)
-        resolved_failure_penalty = 0.0
-        if not LexicalRetriever._artifact_success(artifact) and LexicalRetriever._artifact_has_resolved_successor(
-            state=state,
-            artifact=artifact,
-        ):
-            resolved_failure_penalty = 10.0
-        diagnostic_failure_penalty = 0.0
-        tool_name = LexicalRetriever._artifact_tool_name(artifact)
-        if not LexicalRetriever._artifact_success(artifact):
-            diagnostic_failure_penalty = _DIAGNOSTIC_FAILURE_TOOL_PENALTIES.get(tool_name, 0.0)
-            if diagnostic_failure_penalty:
-                query_text = str(query or "").lower()
-                if (
-                    "artifact_grep" in query_text
-                    or "artifact_read" in query_text
-                    or "debug retrieval" in query_text
-                    or "debug artifact" in query_text
-                    or "tool failure" in query_text
-                ):
-                    diagnostic_failure_penalty *= 0.25
-        causal_remote_bonus = 0.0
-        if (
-            LexicalRetriever._is_remote_repair_state(state)
-            and LexicalRetriever._is_causal_remote_failure_artifact(artifact)
-        ):
-            causal_remote_bonus += 8.0
-            if LexicalRetriever._artifact_contains_interactive_prompt(artifact):
-                causal_remote_bonus += 8.0
-
-        relevance = (
-            overlap
-            + filename_bonus
-            + path_bonus
-            + tool_bonus
-            + verifier_bonus
-            + confidence_bonus
-            + phase_bonus
-            + intent_bonus
-            + pinned_research_bonus
-            + target_path_bonus
-            + entity_bonus
-            + failure_bonus
-            + touched_symbol_bonus
-            + causal_remote_bonus
-            - resolved_failure_penalty
-            - diagnostic_failure_penalty
-        ) * terminal_claim_penalty
-        if relevance <= 0:
-            return 0.0
-        recency_bonus = recency * 0.05
-        return relevance + recency_bonus
-
-
-def _dedupe_nonempty_texts(values: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        normalized = str(value or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _retrieval_failure_texts(values: list[str]) -> list[str]:
-    normalized: list[str] = []
-    for text in values:
-        normalized.append(format_failure_tag(text))
-    return _dedupe_nonempty_texts(normalized)
-
-
-def _is_recovery_nudge_message(message: Any) -> bool:
-    metadata = getattr(message, "metadata", {})
-    return isinstance(metadata, dict) and bool(metadata.get("is_recovery_nudge"))
-
-
-def _retrieval_message_text(message: Any) -> str:
-    retrieval_safe_text = str(getattr(message, "retrieval_safe_text", "") or "").strip()
-    if retrieval_safe_text:
-        return retrieval_safe_text
-    return build_retrieval_safe_text(
-        role=str(getattr(message, "role", "") or ""),
-        content=getattr(message, "content", ""),
-        name=getattr(message, "name", ""),
-        metadata=getattr(message, "metadata", {}),
-    )
-
-
-def _is_execution_oriented_text(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return False
-    return any(
-        token in lowered
-        for token in (
-            "shell_exec",
-            "ssh_exec",
-            "run ",
-            "execute",
-            "exec ",
-            "command",
-            "script",
-            "terminal",
-            "pytest",
-            "apt-get",
-            "git ",
-        )
-    )
-
+    _score_artifact = staticmethod(score_artifact)
 
 def build_retrieval_query(state: LoopState) -> str:
-    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-    parts = [
-        state.run_brief.original_task,
-        state.run_brief.task_contract,
-        state.run_brief.current_phase_objective,
-    ]
-    plan = state.active_plan or state.draft_plan
-    if plan is not None:
-        parts.append(f"Plan goal: {plan.goal}")
-        parts.append(f"Plan status: {plan.status}")
-        if plan.requested_output_path:
-            parts.append(f"Plan export: {plan.requested_output_path}")
-    if task_mode:
-        parts.append(f"Task mode: {task_mode}")
-    if state.active_intent:
-        parts.append(f"Intent: {normalize_intent_label(state.active_intent)}")
-    if state.intent_tags:
-        parts.append(f"Tags: {' '.join(state.intent_tags)}")
-    touched_symbols = state.scratchpad.get("_touched_symbols")
-    if isinstance(touched_symbols, list):
-        cleaned_symbols = [str(symbol).strip() for symbol in touched_symbols if str(symbol).strip()]
-        if cleaned_symbols:
-            parts.append("Touched symbols: " + " ".join(cleaned_symbols[:8]))
-    current_goal = LexicalRetriever._effective_current_goal(state)
-    if current_goal:
-        parts.append(f"Current goal: {current_goal}")
-    parts.extend(state.working_memory.plan[-3:])
-    parts.extend(state.working_memory.decisions[-3:])
-    parts.extend(
-        _visible_memory_texts(
-            state.working_memory.known_facts,
-            state.working_memory.known_fact_meta,
-            current_step=state.step_count,
-            current_phase=state.current_phase,
-        )[-4:]
-    )
-    parts.extend(state.working_memory.open_questions[-2:])
-    parts.extend(
-        _retrieval_failure_texts(
-            _visible_memory_texts(
-                state.working_memory.failures,
-                state.working_memory.failure_meta,
-                current_step=state.step_count,
-                current_phase=state.current_phase,
-            )[-4:]
-        )
-    )
-    parts.extend(
-        _visible_memory_texts(
-            state.working_memory.next_actions,
-            state.working_memory.next_action_meta,
-            current_step=state.step_count,
-            current_phase=state.current_phase,
-        )[-3:]
-    )
-    if task_mode == "chat":
-        parts = [part for part in parts if not _is_execution_oriented_text(part)]
-    for content in _dedupe_nonempty_texts([
-        _retrieval_message_text(message)
-        for message in state.recent_messages[-3:]
-        if not _is_recovery_nudge_message(message)
-    ]):
-        parts.append(content)
-    return "\n".join(part for part in parts if part)
+    return _build_retrieval_query(state, retriever_cls=LexicalRetriever)
 
 
 def build_refined_retrieval_query(
@@ -1772,105 +972,9 @@ def build_refined_retrieval_query(
     base_query: str,
     bundle: RetrievalBundle,
 ) -> str:
-    parts = [base_query]
-    if state.run_brief.task_contract:
-        parts.append(f"Contract: {state.run_brief.task_contract}")
-    current_goal = LexicalRetriever._effective_current_goal(state)
-    if current_goal:
-        parts.append(f"Current goal: {current_goal}")
-    if bundle.artifacts:
-        top_snippet = bundle.artifacts[0]
-        top_artifact = state.artifacts.get(top_snippet.artifact_id)
-        if top_artifact:
-            parts.append(f"Top artifact: {top_artifact.artifact_id} | {top_artifact.source} | {top_artifact.summary}")
-            if top_artifact.path_tags:
-                parts.append("Artifact path tags: " + " ".join(top_artifact.path_tags))
-            if top_artifact.tool_name:
-                parts.append(f"Artifact tool: {top_artifact.tool_name}")
-    if bundle.summaries:
-        summary = bundle.summaries[0]
-        if summary.files_touched:
-            parts.append("Summary files: " + " ".join(summary.files_touched[:4]))
-        if summary.remaining_plan:
-            parts.append("Summary next steps: " + " ".join(summary.remaining_plan[:3]))
-        if summary.notes:
-            parts.append("Summary notes: " + " ".join(summary.notes[:2]))
-    if bundle.experiences:
-        memory = bundle.experiences[0]
-        if not (
-            memory.tool_name == "task_complete"
-            and LexicalRetriever._query_requests_live_remote_correction(base_query)
-        ) and not LexicalRetriever._is_generic_terminal_memory(state, memory):
-            parts.append(
-                f"Prior outcome: {normalize_intent_label(memory.intent)} / {memory.tool_name} / {memory.outcome}"
-            )
-            memory_namespace = LexicalRetriever._resolved_memory_namespace(memory, state=state)
-            if (
-                memory_namespace in {"ssh_remote", "local_shell", "planning", "debugging", "incidents"}
-                and (
-                    memory.tool_name in {"task_complete", "task_fail", "memory_update", "artifact_read", "file_read", "dir_list"}
-                    or bundle.score_gaps.get("experiences", 999.0) <= 1.0
-                )
-            ):
-                parts.append(f"Memory namespace: {memory_namespace}")
-            if memory.failure_mode:
-                parts.append(f"Failure mode: {memory.failure_mode}")
-            visible_memory_tags = LexicalRetriever._prompt_visible_memory_tags(state, memory)
-            if visible_memory_tags:
-                parts.append("Memory tags: " + " ".join(visible_memory_tags[:4]))
-    touched_symbols = state.scratchpad.get("_touched_symbols")
-    if isinstance(touched_symbols, list):
-        cleaned_symbols = [str(symbol).strip() for symbol in touched_symbols if str(symbol).strip()]
-        if cleaned_symbols:
-            parts.append("Touched symbols: " + " ".join(cleaned_symbols[:8]))
-    if state.working_memory.open_questions:
-        parts.append("Open questions: " + " ".join(state.working_memory.open_questions[-2:]))
-    retrieval_failures = _retrieval_failure_texts(state.working_memory.failures[-2:])
-    if retrieval_failures:
-        parts.append("Recent failures: " + " ".join(retrieval_failures))
-    if state.recent_messages:
-        last_user = next(
-            (
-                message.content
-                for message in reversed(state.recent_messages)
-                if message.role == "user"
-                and message.content
-                and not _is_recovery_nudge_message(message)
-            ),
-            "",
-        )
-        if last_user:
-            parts.append(f"Latest user context: {last_user[:240]}")
-    return "\n".join(part for part in parts if part)
-
-
-def _is_retrieval_visible_artifact(artifact: ArtifactRecord) -> bool:
-    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-    if metadata.get("model_visible", True) is not False:
-        return True
-    return bool(str(metadata.get("verifier_verdict") or "").strip())
-
-
-
-
-def _visible_memory_texts(
-    values: list[str],
-    entries: list[MemoryEntry],
-    *,
-    current_step: int,
-    current_phase: str,
-) -> list[str]:
-    visible: list[str] = []
-    for index, text in enumerate(values):
-        entry = entries[index] if index < len(entries) else None
-        if entry is not None:
-            if memory_entry_is_stale(
-                entry,
-                current_step=current_step,
-                current_phase=current_phase,
-            ):
-                continue
-            if entry.confidence is not None and entry.confidence < 0.6:
-                continue
-        visible.append(text)
-    return visible
+    return _build_refined_retrieval_query(
+        state,
+        base_query=base_query,
+        bundle=bundle,
+        retriever_cls=LexicalRetriever,
+    )

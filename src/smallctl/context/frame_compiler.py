@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Iterable, Any
 
-from ..guards import is_four_b_or_under_model_name
-from ..remote_scope import has_any_session_ssh_target, remote_scope_is_active
-from ..recovery_metrics import increment_metric
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -15,11 +9,79 @@ from ..state import (
     ExperienceMemory,
     LoopState,
     TurnBundle,
-    clip_string_list,
-    clip_text_value,
     normalize_intent_label,
 )
-from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
+from .frame_recovery_rendering import (
+    fresh_read_loop_recovery_lines,
+    fresh_schema_validation_hint_lines,
+    guard_trip_recovery_lines,
+    remote_mutation_directory_checks,
+    render_recovery_guidance as _render_recovery_guidance,
+    render_remote_mutation_next_action,
+    render_ssh_tool_call,
+    repair_continuity_lines,
+)
+from .frame_run_rendering import (
+    active_ssh_session_labels,
+    artifact_evidence_rows,
+    coding_anchor_lines,
+    continuation_anchor_lines,
+    render_task_ground_truth,
+    render_run_brief,
+    run_boundary_lines,
+    should_render_active_ssh_sessions,
+)
+from .frame_session_rendering import (
+    render_session_notepad,
+    render_write_session,
+    render_write_session_next_action,
+)
+from .frame_working_memory_rendering import (
+    render_sub4b_top_web_findings,
+    render_working_memory,
+)
+from .frame_state_helpers import (
+    collect_files_in_play,
+    dedupe_nonempty,
+    invalidated_fact_hints,
+    state_model_name,
+)
+from .frame_invalidation_utils import (
+    coerce_datetime,
+    durably_stale_ids,
+    guard_trip_preserved_ids,
+    is_optimistic_statement,
+    path_matches_any,
+    path_tokens,
+    recent_invalidation_events,
+)
+from .frame_invalidation_filtering import (
+    artifact_invalidated,
+    brief_invalidated,
+    bundle_invalidated,
+    durably_stale_artifact_ids,
+    durably_stale_brief_ids,
+    durably_stale_experience_ids,
+    durably_stale_observation_ids,
+    durably_stale_summary_ids,
+    durably_stale_turn_bundle_ids,
+    experience_invalidated,
+    filter_invalidated_artifact_snippets,
+    filter_invalidated_context_briefs,
+    filter_invalidated_experiences,
+    filter_invalidated_observations,
+    filter_invalidated_summaries,
+    filter_invalidated_turn_bundles,
+    optimistic_text_invalidated_by_verifier,
+    summary_invalidated,
+    verifier_failure_paths,
+    verifier_failure_related_to_text,
+)
+from .artifact_visibility import (
+    artifact_path_candidates,
+    is_read_only_artifact,
+)
+from .frame_phase_rendering import render_phase_context
 from .frame import (
     PromptArtifactPacket,
     PromptEvidencePacket,
@@ -30,23 +92,6 @@ from .frame import (
 )
 from .observations import build_observation_packets
 from .policy import ContextPolicy
-from .retrieval import LexicalRetriever
-
-_MUTATION_TOOL_NAMES = {
-    "ssh_file_write",
-    "ssh_file_patch",
-    "ssh_file_replace_between",
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-}
-_PATH_TOKEN_RE = re.compile(r"(?<![\w/])(?:\.{0,2}/|/)[^\s'\";,|&<>)]*")
-_OPTIMISTIC_STATEMENT_RE = re.compile(
-    r"(?<![@\w])(pass(?:ed|es|ing)?|verified|success(?:ful(?:ly)?)?|fixed|resolved)(?![@\w])",
-    re.IGNORECASE,
-)
-
 
 class PromptStateFrameCompiler:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
@@ -257,15 +302,7 @@ class PromptStateFrameCompiler:
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for value in values:
-            normalized = str(value or "").strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            ordered.append(normalized)
-        return ordered
+        return dedupe_nonempty(values)
 
     @staticmethod
     def _collect_files_in_play(
@@ -273,36 +310,15 @@ class PromptStateFrameCompiler:
         state: LoopState,
         latest_brief: ContextBrief | None,
     ) -> list[str]:
-        candidates: list[str] = []
-        task_targets = state.scratchpad.get("_task_target_paths")
-        if isinstance(task_targets, list):
-            candidates.extend(str(path or "").strip() for path in task_targets)
-        candidates.extend(state.files_changed_this_cycle)
-        if latest_brief is not None:
-            candidates.extend(latest_brief.files_touched)
-        plan = state.active_plan or state.draft_plan
-        if plan is not None and plan.requested_output_path:
-            candidates.append(str(plan.requested_output_path))
-        if state.write_session is not None:
-            if state.write_session.write_target_path:
-                candidates.append(state.write_session.write_target_path)
-            if state.write_session.write_staging_path:
-                candidates.append(state.write_session.write_staging_path)
-        return PromptStateFrameCompiler._dedupe(candidates)
+        return collect_files_in_play(state=state, latest_brief=latest_brief)
 
     @staticmethod
     def _invalidated_fact_hints(state: LoopState) -> list[str]:
-        queued = state.scratchpad.get("_invalidated_facts_queue")
-        if not isinstance(queued, list):
-            return []
-        return PromptStateFrameCompiler._dedupe([str(item).strip() for item in queued if str(item).strip()])
+        return invalidated_fact_hints(state)
 
     @staticmethod
     def _state_model_name(state: LoopState) -> str:
-        scratchpad = getattr(state, "scratchpad", {})
-        if isinstance(scratchpad, dict):
-            return str(scratchpad.get("_model_name") or "").strip()
-        return ""
+        return state_model_name(state)
 
     @classmethod
     def _filter_invalidated_turn_bundles(
@@ -311,24 +327,7 @@ class PromptStateFrameCompiler:
         state: LoopState,
         bundles: list[TurnBundle],
     ) -> tuple[list[TurnBundle], list[str]]:
-        invalidations = cls._recent_invalidation_events(state)
-        stale_ids = cls._durably_stale_turn_bundle_ids(state)
-        if not bundles:
-            return bundles, []
-        if not invalidations and not stale_ids:
-            return bundles, []
-        kept: list[TurnBundle] = []
-        dropped_ids: list[str] = []
-        for bundle in bundles:
-            if bundle.bundle_id and bundle.bundle_id in stale_ids:
-                dropped_ids.append(bundle.bundle_id)
-                continue
-            if cls._bundle_invalidated(state=state, bundle=bundle, invalidations=invalidations):
-                if bundle.bundle_id:
-                    dropped_ids.append(bundle.bundle_id)
-                continue
-            kept.append(bundle)
-        return kept, dropped_ids
+        return filter_invalidated_turn_bundles(state=state, bundles=bundles)
 
     @classmethod
     def _filter_invalidated_observations(
@@ -337,27 +336,7 @@ class PromptStateFrameCompiler:
         state: LoopState,
         observations: list[Any],
     ) -> tuple[list[Any], list[str], int]:
-        stale_ids = cls._durably_stale_observation_ids(state)
-        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_observation_ids")
-        kept: list[Any] = []
-        dropped_ids: list[str] = []
-        dropped_count = 0
-        for packet in observations:
-            observation_id = str(getattr(packet, "observation_id", "") or "").strip()
-            if observation_id and observation_id in guard_preserved_ids:
-                kept.append(packet)
-                continue
-            if observation_id and observation_id in stale_ids:
-                dropped_count += 1
-                dropped_ids.append(observation_id)
-                continue
-            if bool(getattr(packet, "stale", False)):
-                dropped_count += 1
-                if observation_id:
-                    dropped_ids.append(observation_id)
-                continue
-            kept.append(packet)
-        return kept, dropped_ids, dropped_count
+        return filter_invalidated_observations(state=state, observations=observations)
 
     @classmethod
     def _filter_invalidated_context_briefs(
@@ -366,24 +345,7 @@ class PromptStateFrameCompiler:
         state: LoopState,
         briefs: list[ContextBrief],
     ) -> tuple[list[ContextBrief], list[str]]:
-        invalidations = cls._recent_invalidation_events(state)
-        stale_ids = cls._durably_stale_brief_ids(state)
-        if not briefs:
-            return briefs, []
-        if not invalidations and not stale_ids:
-            return briefs, []
-        kept: list[ContextBrief] = []
-        dropped_ids: list[str] = []
-        for brief in briefs:
-            if brief.brief_id and brief.brief_id in stale_ids:
-                dropped_ids.append(brief.brief_id)
-                continue
-            if cls._brief_invalidated(state=state, brief=brief, invalidations=invalidations):
-                if brief.brief_id:
-                    dropped_ids.append(brief.brief_id)
-                continue
-            kept.append(brief)
-        return kept, dropped_ids
+        return filter_invalidated_context_briefs(state=state, briefs=briefs)
 
     @classmethod
     def _filter_invalidated_summaries(
@@ -392,28 +354,7 @@ class PromptStateFrameCompiler:
         state: LoopState,
         summaries: list[EpisodicSummary],
     ) -> tuple[list[EpisodicSummary], list[str]]:
-        invalidations = cls._recent_invalidation_events(state)
-        stale_ids = cls._durably_stale_summary_ids(state)
-        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_summary_ids")
-        if not summaries:
-            return summaries, []
-        if not invalidations and not stale_ids:
-            return summaries, []
-        kept: list[EpisodicSummary] = []
-        dropped_ids: list[str] = []
-        for summary in summaries:
-            if summary.summary_id and summary.summary_id in guard_preserved_ids:
-                kept.append(summary)
-                continue
-            if summary.summary_id and summary.summary_id in stale_ids:
-                dropped_ids.append(summary.summary_id)
-                continue
-            if cls._summary_invalidated(state=state, summary=summary, invalidations=invalidations):
-                if summary.summary_id:
-                    dropped_ids.append(summary.summary_id)
-                continue
-            kept.append(summary)
-        return kept, dropped_ids
+        return filter_invalidated_summaries(state=state, summaries=summaries)
 
     @classmethod
     def _filter_invalidated_experiences(
@@ -422,21 +363,7 @@ class PromptStateFrameCompiler:
         state: LoopState,
         experiences: list[ExperienceMemory],
     ) -> tuple[list[ExperienceMemory], list[str]]:
-        invalidations = cls._recent_invalidation_events(state)
-        stale_ids = cls._durably_stale_experience_ids(state)
-        if not experiences:
-            return experiences, []
-        if not invalidations and not stale_ids:
-            return experiences, []
-        kept: list[ExperienceMemory] = []
-        dropped_ids: list[str] = []
-        for memory in experiences:
-            if cls._experience_invalidated(state=state, memory=memory, invalidations=invalidations):
-                if memory.memory_id:
-                    dropped_ids.append(memory.memory_id)
-                continue
-            kept.append(memory)
-        return kept, dropped_ids
+        return filter_invalidated_experiences(state=state, experiences=experiences)
 
     @classmethod
     def _filter_invalidated_artifact_snippets(
@@ -445,138 +372,63 @@ class PromptStateFrameCompiler:
         state: LoopState,
         snippets: list[ArtifactSnippet],
     ) -> tuple[list[ArtifactSnippet], list[str]]:
-        invalidations = cls._recent_invalidation_events(state)
-        stale_ids = cls._durably_stale_artifact_ids(state)
-        guard_preserved_ids = cls._guard_trip_preserved_ids(state, "_guard_trip_preserved_artifact_ids")
-        if not snippets:
-            return snippets, []
-        if not invalidations and not stale_ids:
-            return snippets, []
-        artifacts = getattr(state, "artifacts", {}) if isinstance(getattr(state, "artifacts", {}), dict) else {}
-        kept: list[ArtifactSnippet] = []
-        dropped_ids: list[str] = []
-        for snippet in snippets:
-            if snippet.artifact_id and snippet.artifact_id in guard_preserved_ids:
-                kept.append(snippet)
-                continue
-            if snippet.artifact_id and snippet.artifact_id in stale_ids:
-                dropped_ids.append(snippet.artifact_id)
-                continue
-            artifact = artifacts.get(snippet.artifact_id)
-            if cls._artifact_invalidated(state=state, artifact=artifact, invalidations=invalidations):
-                if snippet.artifact_id:
-                    dropped_ids.append(snippet.artifact_id)
-                continue
-            kept.append(snippet)
-        return kept, dropped_ids
+        return filter_invalidated_artifact_snippets(state=state, snippets=snippets)
 
     @staticmethod
     def _recent_invalidation_events(state: LoopState) -> list[dict[str, Any]]:
-        payload = state.scratchpad.get("_context_invalidations")
-        if not isinstance(payload, list):
-            return []
-        return [item for item in payload[-24:] if isinstance(item, dict)]
+        return recent_invalidation_events(state)
 
     @staticmethod
     def _durably_stale_ids(state: LoopState, key: str) -> set[str]:
-        payload = state.scratchpad.get(key)
-        if not isinstance(payload, dict):
-            return set()
-        ids: set[str] = set()
-        for item_id, marker in payload.items():
-            normalized_id = str(item_id or "").strip()
-            if not normalized_id or not isinstance(marker, dict):
-                continue
-            if bool(marker.get("stale", False)):
-                ids.add(normalized_id)
-        return ids
+        return durably_stale_ids(state, key)
 
     @staticmethod
     def _guard_trip_preserved_ids(state: LoopState, key: str) -> set[str]:
-        payload = state.scratchpad.get(key)
-        if not isinstance(payload, list):
-            return set()
-        return {str(item).strip() for item in payload if str(item).strip()}
+        return guard_trip_preserved_ids(state, key)
 
     @classmethod
     def _durably_stale_experience_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_experience_staleness")
+        return durably_stale_experience_ids(state)
 
     @classmethod
     def _durably_stale_turn_bundle_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_turn_bundle_staleness")
+        return durably_stale_turn_bundle_ids(state)
 
     @classmethod
     def _durably_stale_brief_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_context_brief_staleness")
+        return durably_stale_brief_ids(state)
 
     @classmethod
     def _durably_stale_summary_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_summary_staleness")
+        return durably_stale_summary_ids(state)
 
     @classmethod
     def _durably_stale_artifact_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_artifact_staleness")
+        return durably_stale_artifact_ids(state)
 
     @classmethod
     def _durably_stale_observation_ids(cls, state: LoopState) -> set[str]:
-        return cls._durably_stale_ids(state, "_observation_staleness")
+        return durably_stale_observation_ids(state)
 
     @staticmethod
     def _path_matches_any(target: str, changed_paths: list[str]) -> bool:
-        normalized_target = Path(str(target or "").strip()).as_posix().lower()
-        if not normalized_target:
-            return False
-        for changed in changed_paths:
-            normalized_changed = Path(str(changed or "").strip()).as_posix().lower()
-            if not normalized_changed:
-                continue
-            if (
-                normalized_target == normalized_changed
-                or normalized_target.endswith(normalized_changed)
-                or normalized_changed.endswith(normalized_target)
-            ):
-                return True
-            changed_name = Path(normalized_changed).name
-            if changed_name and changed_name in normalized_target:
-                return True
-        return False
+        return path_matches_any(target, changed_paths)
 
     @staticmethod
     def _path_tokens(text: str) -> list[str]:
-        paths: list[str] = []
-        for match in _PATH_TOKEN_RE.finditer(str(text or "")):
-            path = match.group(0).strip().strip("`'\".,:;")
-            if path and path not in paths:
-                paths.append(path)
-        return paths
+        return path_tokens(text)
 
     @classmethod
     def _verifier_failure_paths(cls, event: dict[str, Any]) -> list[str]:
-        candidates = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-        details = event.get("details")
-        if isinstance(details, dict):
-            for key in ("command", "target"):
-                candidates.extend(cls._path_tokens(str(details.get(key) or "")))
-        normalized: list[str] = []
-        for path in candidates:
-            if path and path not in normalized:
-                normalized.append(path)
-        return normalized
+        return verifier_failure_paths(event)
 
     @classmethod
     def _verifier_failure_related_to_text(cls, text: str, event: dict[str, Any]) -> bool:
-        failure_paths = cls._verifier_failure_paths(event)
-        if not failure_paths:
-            return True
-        text_paths = cls._path_tokens(text)
-        if text_paths:
-            return any(cls._path_matches_any(path, failure_paths) for path in text_paths)
-        return any(cls._path_matches_any(text, [path]) for path in failure_paths)
+        return verifier_failure_related_to_text(text, event)
 
     @classmethod
     def _optimistic_text_invalidated_by_verifier(cls, text: str, event: dict[str, Any]) -> bool:
-        return cls._is_optimistic_statement(text) and cls._verifier_failure_related_to_text(text, event)
+        return optimistic_text_invalidated_by_verifier(text, event)
 
     @classmethod
     def _bundle_invalidated(
@@ -586,21 +438,7 @@ class PromptStateFrameCompiler:
         bundle: TurnBundle,
         invalidations: list[dict[str, Any]],
     ) -> bool:
-        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        for event in invalidations:
-            reason = str(event.get("reason") or "").strip().lower()
-            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-            if reason in {"file_changed", "write_session_target_changed"} and paths:
-                if any(cls._path_matches_any(path, paths) for path in bundle.files_touched):
-                    return True
-            if reason in {"phase_advanced", "environment_changed"}:
-                if bundle.phase and str(bundle.phase).strip().lower() != current_phase:
-                    return True
-            if reason in {"verifier_failed", "fama_failure_detected"} and any(
-                cls._optimistic_text_invalidated_by_verifier(line, event) for line in bundle.summary_lines
-            ):
-                return True
-        return False
+        return bundle_invalidated(state=state, bundle=bundle, invalidations=invalidations)
 
     @classmethod
     def _brief_invalidated(
@@ -610,22 +448,7 @@ class PromptStateFrameCompiler:
         brief: ContextBrief,
         invalidations: list[dict[str, Any]],
     ) -> bool:
-        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        for event in invalidations:
-            reason = str(event.get("reason") or "").strip().lower()
-            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-            if reason in {"file_changed", "write_session_target_changed"} and paths:
-                if any(cls._path_matches_any(path, paths) for path in brief.files_touched):
-                    return True
-            if reason in {"phase_advanced", "environment_changed"}:
-                if brief.current_phase and str(brief.current_phase).strip().lower() != current_phase:
-                    return True
-            if reason in {"verifier_failed", "fama_failure_detected"}:
-                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in brief.key_discoveries):
-                    return True
-                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in brief.new_facts):
-                    return True
-        return False
+        return brief_invalidated(state=state, brief=brief, invalidations=invalidations)
 
     @classmethod
     def _summary_invalidated(
@@ -635,27 +458,7 @@ class PromptStateFrameCompiler:
         summary: EpisodicSummary,
         invalidations: list[dict[str, Any]],
     ) -> bool:
-        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
-        summary_created_at = cls._coerce_datetime(getattr(summary, "created_at", None))
-        for event in invalidations:
-            event_created_at = cls._coerce_datetime(event.get("created_at"))
-            if summary_created_at is not None and event_created_at is not None and event_created_at <= summary_created_at:
-                continue
-            reason = str(event.get("reason") or "").strip().lower()
-            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-            if reason in {"file_changed", "write_session_target_changed"} and paths:
-                if any(cls._path_matches_any(path, paths) for path in summary.files_touched):
-                    return True
-            if reason in {"verifier_failed", "fama_failure_detected"}:
-                if any(cls._optimistic_text_invalidated_by_verifier(line, event) for line in summary.notes):
-                    return True
-                if (
-                    failure_mode
-                    and any(failure_mode in str(line).strip().lower() for line in summary.failed_approaches)
-                    and not cls._verifier_failure_paths(event)
-                ):
-                    return True
-        return False
+        return summary_invalidated(state=state, summary=summary, invalidations=invalidations)
 
     @classmethod
     def _experience_invalidated(
@@ -665,31 +468,7 @@ class PromptStateFrameCompiler:
         memory: ExperienceMemory,
         invalidations: list[dict[str, Any]],
     ) -> bool:
-        stale_ids = cls._durably_stale_experience_ids(state)
-        if memory.memory_id and memory.memory_id in stale_ids:
-            return True
-        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
-        notes = str(memory.notes or "").strip()
-        for event in invalidations:
-            reason = str(event.get("reason") or "").strip().lower()
-            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-            if reason in {"file_changed", "write_session_target_changed"} and paths:
-                if any(cls._path_matches_any(notes, [path]) for path in paths):
-                    return True
-            if reason in {"phase_advanced", "environment_changed"}:
-                if memory.phase and str(memory.phase).strip().lower() != current_phase:
-                    return True
-            if reason in {"verifier_failed", "fama_failure_detected"}:
-                if str(memory.outcome or "").strip().lower() == "success" and cls._optimistic_text_invalidated_by_verifier(notes, event):
-                    return True
-                if (
-                    failure_mode
-                    and str(memory.failure_mode or "").strip().lower() == failure_mode
-                    and not cls._verifier_failure_paths(event)
-                ):
-                    return True
-        return False
+        return experience_invalidated(state=state, memory=memory, invalidations=invalidations)
 
     @classmethod
     def _artifact_invalidated(
@@ -699,684 +478,87 @@ class PromptStateFrameCompiler:
         artifact: Any,
         invalidations: list[dict[str, Any]],
     ) -> bool:
-        if artifact is None:
-            return False
-        metadata = getattr(artifact, "metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-        artifact_paths = cls._artifact_path_candidates(artifact, metadata)
-        current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip().lower()
-        verifier_verdict = str(metadata.get("verifier_verdict") or "").strip().lower()
-        for event in invalidations:
-            reason = str(event.get("reason") or "").strip().lower()
-            paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
-            if reason in {"file_changed", "write_session_target_changed"} and paths:
-                if any(cls._path_matches_any(candidate, paths) for candidate in artifact_paths):
-                    return True
-            if reason in {"phase_advanced", "environment_changed"} and metadata_phase:
-                if metadata_phase != current_phase:
-                    if not cls._is_read_only_artifact(artifact):
-                        return True
-            if reason in {"verifier_failed", "fama_failure_detected"} and verifier_verdict == "pass":
-                if not cls._verifier_failure_related_to_text(
-                    " ".join(
-                        str(part or "")
-                        for part in (
-                            getattr(artifact, "source", ""),
-                            getattr(artifact, "summary", ""),
-                            metadata.get("path", ""),
-                            metadata.get("command", ""),
-                            metadata.get("verifier_command", ""),
-                            metadata.get("verifier_target", ""),
-                        )
-                    ),
-                    event,
-                ):
-                    continue
-                return True
-        return False
+        return artifact_invalidated(state=state, artifact=artifact, invalidations=invalidations)
 
     @staticmethod
     def _is_read_only_artifact(artifact: Any) -> bool:
-        if artifact is None:
-            return False
-        tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
-        read_only_tools = frozenset({"ssh_file_read", "file_read", "web_search", "artifact_read", "artifact_print", "find"})
-        if tool_name in read_only_tools:
-            return True
-        if tool_name in {"ssh_exec", "shell_exec"}:
-            metadata = getattr(artifact, "metadata", {}) or {}
-            if isinstance(metadata, dict):
-                command = str(metadata.get("command") or "").strip()
-                if command:
-                    mutating_pattern = re.compile(
-                        r"\b(start|restart|stop|enable|disable|rm\b|mv\b|cp\b|sed\s+-i|tee\b|>>>?\s*/|cat\s*>\s*/|install\s+-m|truncate\b|chmod\s+\d|chown\s+\S+:\S+)\b",
-                        re.IGNORECASE,
-                    )
-                    if not mutating_pattern.search(command):
-                        return True
-        return False
+        return is_read_only_artifact(artifact)
 
     @staticmethod
     def _artifact_path_candidates(artifact: Any, metadata: dict[str, Any]) -> list[str]:
-        candidates: list[str] = []
-        source = str(getattr(artifact, "source", "") or "").strip()
-        if source:
-            candidates.append(source)
-        for key in ("path", "target_path", "write_target_path"):
-            value = str(metadata.get(key) or "").strip()
-            if value:
-                candidates.append(value)
-        path_tags = getattr(artifact, "path_tags", [])
-        if isinstance(path_tags, list):
-            candidates.extend(str(item).strip() for item in path_tags if str(item).strip())
-        return candidates
+        return artifact_path_candidates(artifact, metadata)
 
     @staticmethod
     def _is_optimistic_statement(value: str) -> bool:
-        return bool(_OPTIMISTIC_STATEMENT_RE.search(str(value or "")))
+        return is_optimistic_statement(value)
 
     @staticmethod
     def _coerce_datetime(value: Any) -> datetime | None:
-        if value in (None, ""):
-            return None
-        if isinstance(value, datetime):
-            parsed = value
-        else:
-            try:
-                parsed = datetime.fromisoformat(str(value))
-            except (TypeError, ValueError):
-                return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
+        return coerce_datetime(value)
 
     @staticmethod
     def _coding_anchor_lines(state: LoopState) -> list[str]:
-        anchors: list[str] = []
-        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-        is_coding_mode = bool(state.write_session) or bool(state.files_changed_this_cycle) or task_mode in {
-            "analysis",
-            "local_execute",
-            "debug_inspect",
-        }
-        if not is_coding_mode:
-            return anchors
-
-        if state.write_session is not None:
-            session = state.write_session
-            if session.write_target_path:
-                anchors.append(f"target_file={session.write_target_path}")
-            anchors.append(f"write_mode={session.write_session_mode}")
-            if session.write_sections_completed:
-                anchors.append("completed_sections=" + ", ".join(session.write_sections_completed[:5]))
-            if session.write_failed_local_patches:
-                anchors.append(f"failed_sections={session.write_failed_local_patches} local patch failures")
-        if state.files_changed_this_cycle:
-            anchors.append("files_changed=" + ", ".join(state.files_changed_this_cycle[-5:]))
-        verdict = state.current_verifier_verdict()
-        if isinstance(verdict, dict):
-            anchors.append("verifier_status=" + str(verdict.get("verdict") or "unknown"))
-            command = str(verdict.get("command") or "").strip()
-            if command:
-                anchors.append(f"verifier_command={command}")
-        checklist = state.acceptance_checklist()
-        unmet = [
-            str(item.get("criterion") or "").strip()
-            for item in checklist
-            if item.get("satisfied") is False and str(item.get("criterion") or "").strip()
-        ]
-        if unmet:
-            anchors.append("acceptance_deltas=" + "; ".join(unmet[:4]))
-        symbols = state.scratchpad.get("_touched_symbols")
-        if isinstance(symbols, list):
-            touched = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
-            if touched:
-                anchors.append("touched_symbols=" + ", ".join(touched[:8]))
-        return PromptStateFrameCompiler._dedupe(anchors)
+        return coding_anchor_lines(state)
 
     @staticmethod
     def _artifact_evidence_rows(state: LoopState, *, limit: int = 8) -> list[str]:
-        rows: list[str] = []
-        for aid, art in state.artifacts.items():
-            if is_superseded_artifact(art):
-                continue
-            if not is_prompt_visible_artifact(art):
-                continue
-            metadata = getattr(art, "metadata", {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            source_candidates = PromptStateFrameCompiler._artifact_path_candidates(art, metadata)
-            source = " / ".join(PromptStateFrameCompiler._dedupe(source_candidates)[:2]) or "observed"
-            summary = (getattr(art, "summary", "") or getattr(art, "tool_name", "") or "").strip()
-            rows.append(f"  {aid} | {source.replace('|', '/')} | {summary.replace('|', '/')[:110]}")
-            if len(rows) >= limit:
-                break
-        return rows
+        return artifact_evidence_rows(state, limit=limit)
 
     @staticmethod
     def _render_run_brief(state: LoopState) -> str:
-        brief = state.run_brief
-        has_content = any(
-            [
-                brief.original_task,
-                brief.task_contract,
-                brief.current_phase_objective,
-                state.active_intent,
-                bool(brief.constraints),
-                bool(brief.acceptance_criteria),
-            ]
-        )
-        if not has_content:
-            return ""
-        parts = ["Run brief:"]
-        parts.append(f"  CWD: {state.cwd}")
-
-        if brief.original_task:
-            parts.append(f"  Goal: {brief.original_task}")
-
-        if brief.task_contract:
-            parts.append(f"  Contract: {brief.task_contract}")
-
-        if brief.current_phase_objective:
-            parts.append(f"  Phase focus: {brief.current_phase_objective}")
-
-        if state.active_intent:
-            parts.append(f"  Active intent: {normalize_intent_label(state.active_intent)}")
-
-        ssh_sessions = PromptStateFrameCompiler._active_ssh_session_labels(state)
-        if ssh_sessions and PromptStateFrameCompiler._should_render_active_ssh_sessions(state):
-            parts.append("  Active SSH sessions: " + " | ".join(ssh_sessions[:3]))
-
-        if brief.constraints:
-            parts.append("  Constraints: " + "; ".join(brief.constraints))
-
-        if brief.acceptance_criteria:
-            parts.append("  Acceptance criteria: " + "; ".join(brief.acceptance_criteria))
-
-        resolved = state.scratchpad.get("_resolved_followup")
-        if isinstance(resolved, dict):
-            title = str(resolved.get("option_title") or "").strip()
-            index = str(resolved.get("option_index") or "").strip()
-            paths = resolved.get("target_paths")
-            if isinstance(paths, list):
-                cleaned_paths = [str(path).strip() for path in paths if str(path).strip()]
-            else:
-                cleaned_paths = []
-            if title and index:
-                if cleaned_paths:
-                    parts.append(
-                        f"  Resolved follow-up: proposal #{index} = {title} in {', '.join(cleaned_paths)}."
-                    )
-                else:
-                    parts.append(f"  Resolved follow-up: proposal #{index} = {title}.")
-
-        if len(parts) == 1:
-            return ""
-        return "\n".join(parts)
+        return render_run_brief(state)
 
     @staticmethod
     def _run_boundary_lines(state: LoopState) -> list[str]:
-        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
-        transaction = scratchpad.get("_task_transaction")
-        handoff = scratchpad.get("_last_task_handoff")
-        source: dict[str, Any] = {}
-        if isinstance(transaction, dict) and transaction:
-            source = transaction
-        elif isinstance(handoff, dict) and str(handoff.get("status") or "").strip().lower() in {
-            "closed",
-            "failed",
-            "aborted",
-            "superseded",
-        }:
-            source = handoff
-        if not source:
-            return []
-
-        lines = ["Run boundary:"]
-        status = str(source.get("status") or "").strip().lower()
-        if status in {"closed", "failed", "aborted", "superseded"}:
-            lines.append("  Previous task is closed.")
-        turn_type = str(source.get("turn_type") or "").strip()
-        if turn_type:
-            lines.append(f"  Current turn type: {turn_type}.")
-        goal = str(source.get("user_goal") or source.get("current_goal") or source.get("effective_task") or "").strip()
-        if goal:
-            clipped_goal, _ = clip_text_value(goal, limit=220)
-            lines.append(f"  Current goal: {clipped_goal}")
-        relevant: list[str] = []
-        paths = source.get("allowed_paths")
-        if not isinstance(paths, list) or not paths:
-            paths = source.get("target_paths")
-        if not isinstance(paths, list) or not paths:
-            paths = source.get("remote_target_paths")
-        if isinstance(paths, list):
-            relevant.extend(str(path).strip() for path in paths if str(path).strip())
-        artifacts = source.get("allowed_artifacts")
-        if not isinstance(artifacts, list) or not artifacts:
-            artifacts = source.get("last_good_artifact_ids")
-        if isinstance(artifacts, list):
-            relevant.extend(str(artifact).strip() for artifact in artifacts if str(artifact).strip())
-        relevant = PromptStateFrameCompiler._dedupe(relevant)
-        if relevant:
-            lines.append("  Relevant prior context: " + "; ".join(relevant[:4]) + ".")
-        ignored = source.get("ignored_context")
-        if isinstance(ignored, list):
-            cleaned_ignored = [str(item).strip() for item in ignored if str(item).strip()]
-            if cleaned_ignored:
-                lines.append("  Ignore: " + "; ".join(cleaned_ignored[:3]) + ".")
-        success = str(source.get("success_condition") or "").strip()
-        if success:
-            clipped_success, _ = clip_text_value(success, limit=180)
-            lines.append(f"  Stop when: {clipped_success}")
-        return lines[:7]
+        return run_boundary_lines(state)
 
     @staticmethod
     def _active_ssh_session_labels(state: LoopState) -> list[str]:
-        labels: list[str] = []
-        seen: set[str] = set()
-
-        resolved_remote = state.scratchpad.get("_resolved_remote_followup")
-        if isinstance(resolved_remote, dict):
-            host = str(resolved_remote.get("host") or "").strip().lower()
-            user = str(resolved_remote.get("user") or "").strip()
-            if host:
-                label = f"{user}@{host}" if user else host
-                seen.add(label)
-                labels.append(label)
-
-        targets = state.scratchpad.get("_session_ssh_targets")
-        if not isinstance(targets, dict):
-            return labels
-
-        for key, value in targets.items():
-            if not isinstance(value, dict):
-                continue
-            host = str(value.get("host") or key or "").strip().lower()
-            if not host:
-                continue
-            user = str(value.get("user") or "").strip()
-            label = f"{user}@{host}" if user else host
-            if label in seen:
-                continue
-            seen.add(label)
-            labels.append(label)
-        return labels
+        return active_ssh_session_labels(state)
 
     @staticmethod
     def _continuation_anchor_lines(state: LoopState) -> list[str]:
-        handoff = state.scratchpad.get("_last_task_handoff")
-        if not isinstance(handoff, dict) or not handoff:
-            return []
-        if not (
-            state.scratchpad.get("_task_boundary_previous_task")
-            or state.scratchpad.get("_resolved_followup")
-            or state.scratchpad.get("_resolved_remote_followup")
-        ):
-            return []
-
-        lines: list[str] = []
-        next_required_tool = handoff.get("next_required_tool")
-        if isinstance(next_required_tool, dict):
-            tool_name = str(next_required_tool.get("tool_name") or "").strip()
-            if tool_name:
-                lines.append(f"next_required_tool={tool_name}")
-
-        last_failed_tool = handoff.get("last_failed_tool")
-        if isinstance(last_failed_tool, dict):
-            failed_tool_name = str(last_failed_tool.get("tool_name") or "").strip()
-            if failed_tool_name:
-                lines.append(f"last_failed_tool={failed_tool_name}")
-
-        ssh_target = handoff.get("ssh_target")
-        if isinstance(ssh_target, dict):
-            host = str(ssh_target.get("host") or "").strip().lower()
-            user = str(ssh_target.get("user") or "").strip()
-            if host:
-                lines.append(f"ssh_target={user + '@' if user else ''}{host}")
-                targets = state.scratchpad.get("_session_ssh_targets")
-                if isinstance(targets, dict):
-                    target_entry = targets.get(host)
-                    if isinstance(target_entry, dict):
-                        validated_tools = target_entry.get("validated_tools")
-                        if isinstance(validated_tools, list):
-                            cleaned_tools = [str(item).strip() for item in validated_tools if str(item).strip()]
-                        else:
-                            cleaned_tools = []
-                        last_path = str(target_entry.get("last_validated_path") or "").strip()
-                        if cleaned_tools:
-                            tool_line = f"validated_remote={user + '@' if user else ''}{host} via {', '.join(cleaned_tools[:2])}"
-                            if last_path:
-                                tool_line += f" on {last_path}"
-                            lines.append(tool_line)
-
-        artifact_ids = handoff.get("last_good_artifact_ids")
-        if isinstance(artifact_ids, list):
-            cleaned_ids = [str(item).strip() for item in artifact_ids if str(item).strip()]
-            if cleaned_ids:
-                lines.append("recent_artifacts=" + ", ".join(cleaned_ids[:3]))
-        research_artifact_ids = handoff.get("recent_research_artifact_ids")
-        if isinstance(research_artifact_ids, list):
-            cleaned_research_ids = [str(item).strip() for item in research_artifact_ids if str(item).strip()]
-            if cleaned_research_ids:
-                lines.append("recent_research_artifacts=" + ", ".join(cleaned_research_ids[:2]))
-        return PromptStateFrameCompiler._dedupe(lines)
+        return continuation_anchor_lines(state)
 
     @staticmethod
     def _should_render_active_ssh_sessions(state: LoopState) -> bool:
-        return remote_scope_is_active(state) or has_any_session_ssh_target(state)
+        return should_render_active_ssh_sessions(state)
 
     @staticmethod
     def _render_task_ground_truth(state: LoopState) -> str:
-        """Render explicit ground-truth about successful tools in the current task.
-
-        This prevents model confabulation where the model hallucinates that
-        mutating work was already performed in a prior turn or task.
-        """
-        successful_tools: list[str] = []
-        for entry in state.tool_history:
-            if not isinstance(entry, str):
-                continue
-            parts = entry.split("|")
-            if len(parts) >= 3 and parts[-1] == "success":
-                successful_tools.append(parts[0])
-
-        if not successful_tools:
-            return (
-                "Task ground truth: No tools have succeeded in this task yet. "
-                "Do not assume any work is already complete."
-            )
-
-        mutation_tools = [t for t in successful_tools if t in _MUTATION_TOOL_NAMES]
-        if mutation_tools:
-            changed = ", ".join(state.files_changed_this_cycle[-5:]) if state.files_changed_this_cycle else "none"
-            return (
-                "Task ground truth: Mutating operations performed this task: "
-                + ", ".join(mutation_tools)
-                + ". Files changed this cycle: "
-                + changed
-                + "."
-            )
-        else:
-            return (
-                "Task ground truth: Only read/observation tools have succeeded so far ("
-                + ", ".join(successful_tools[-5:])
-                + "). No mutating operations have been performed in this task yet. "
-                "Do not assume any work is already complete."
-            )
+        return render_task_ground_truth(state)
 
     @staticmethod
     def _render_remote_mutation_next_action(state: LoopState) -> str:
-        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
-        requirement = scratchpad.get("_remote_mutation_requires_verification")
-        if not isinstance(requirement, dict) or not requirement:
-            return ""
-
-        host = str(requirement.get("host") or "").strip()
-        user = str(requirement.get("user") or "").strip()
-        verified_paths = {
-            str(path).strip()
-            for path in requirement.get("verified_paths", [])
-            if str(path).strip()
-        }
-        guessed_paths = [
-            str(path).strip()
-            for path in requirement.get("guessed_paths", [])
-            if str(path).strip()
-        ]
-        pending_path = next((path for path in guessed_paths if path not in verified_paths), "")
-        if pending_path:
-            return "Run " + PromptStateFrameCompiler._render_ssh_tool_call(
-                "ssh_file_read",
-                host=host,
-                user=user,
-                path=pending_path,
-            )
-
-        verified_directories = {
-            str(path).strip().rstrip("/")
-            for path in requirement.get("verified_directory_empty_checks", [])
-            if str(path).strip()
-        }
-        for check in PromptStateFrameCompiler._remote_mutation_directory_checks(requirement):
-            directory_path = check["path"]
-            if directory_path in verified_directories:
-                continue
-            command = f"find {directory_path} -mindepth 1 -maxdepth 1 -print -quit"
-            return "Run " + PromptStateFrameCompiler._render_ssh_tool_call(
-                "ssh_exec",
-                host=host,
-                user=user,
-                command=command,
-            )
-        return ""
+        return render_remote_mutation_next_action(state)
 
     @staticmethod
     def _render_ssh_tool_call(tool_name: str, *, host: str, user: str = "", path: str = "", command: str = "") -> str:
-        args: list[str] = []
-        if host:
-            args.append(f"host={host!r}")
-        if user:
-            args.append(f"user={user!r}")
-        if path:
-            args.append(f"path={path!r}")
-        if command:
-            args.append(f"command={command!r}")
-        return f"{tool_name}(" + ", ".join(args) + ")"
+        return render_ssh_tool_call(tool_name, host=host, user=user, path=path, command=command)
 
     @staticmethod
     def _remote_mutation_directory_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
-        raw_checks = requirement.get("directory_empty_checks")
-        if not isinstance(raw_checks, list):
-            return []
-        checks: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for item in raw_checks:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or "").strip().rstrip("/")
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            glob = str(item.get("glob") or "").strip()
-            checks.append({"path": path, "glob": glob})
-        return checks
+        return remote_mutation_directory_checks(requirement)
 
     @staticmethod
     def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[str]:
-        config = state.scratchpad.get("_recovery_config")
-        config = config if isinstance(config, dict) else {}
-        if not bool(config.get("reflexion_enabled", True)):
-            return []
-        active_subtask = None
-        ledger = state.subtask_ledger
-        if ledger is not None:
-            active_subtask = ledger.active()
-        latest_failure = state.failure_events[-1] if state.failure_events else None
-        if (
-            active_subtask is None
-            and latest_failure is None
-            and not state.reflexion_memory
-            and not state.last_failure_class
-            and state.write_session is None
-            and not isinstance(state.scratchpad.get("_last_schema_validation_hint"), dict)
-            and not isinstance(state.scratchpad.get("_read_loop_recovery_payload"), dict)
-        ):
-            return []
-
-        lines: list[str] = []
-        lines.extend(PromptStateFrameCompiler._fresh_schema_validation_hint_lines(state))
-        lines.extend(PromptStateFrameCompiler._fresh_read_loop_recovery_lines(state))
-        if active_subtask is not None:
-            line = f"Active subtask {active_subtask.subtask_id} [{active_subtask.status}]: {active_subtask.title}"
-            if active_subtask.attempts:
-                line += f"; attempts={active_subtask.attempts}"
-            if active_subtask.next_action:
-                line += f"; next={active_subtask.next_action}"
-            lines.append(line)
-            if active_subtask.blockers:
-                lines.append("Latest blocker: " + active_subtask.blockers[-1])
-        if latest_failure is not None:
-            failure_line = f"Latest failure: {latest_failure.failure_class}"
-            if latest_failure.message:
-                failure_line += f" - {latest_failure.message}"
-            lines.append(failure_line)
-            if latest_failure.suggested_next_action:
-                lines.append("Next safe action: " + latest_failure.suggested_next_action)
-        elif state.last_failure_class:
-            lines.append("Latest failure class: " + state.last_failure_class)
-
-        active_subtask_id = str(getattr(active_subtask, "subtask_id", "") or "").strip()
-        top_k = max(0, int(config.get("reflexion_inject_top_k", 3) or 3))
-        reflections = [
-            item
-            for item in state.reflexion_memory
-            if not active_subtask_id or not item.subtask_id or item.subtask_id == active_subtask_id
-        ]
-        reflections.sort(
-            key=lambda item: (
-                float(getattr(item, "score", 0.0) or 0.0),
-                float(getattr(item, "timestamp", 0.0) or 0.0),
-            ),
-            reverse=True,
-        )
-        injected_reflections = reflections[:top_k]
-        for reflection in injected_reflections:
-            lines.append(
-                f"Lesson {reflection.failure_class}: {reflection.lesson} Avoid: {reflection.avoid} Next: {reflection.next_safe_action}"
-            )
-        if injected_reflections:
-            increment_metric(state, "reflections_injected", len(injected_reflections))
-            for reflection in injected_reflections:
-                reflection.used_count = int(getattr(reflection, "used_count", 0) or 0) + 1
-
-        completed_limit = max(0, int(config.get("subtask_inject_completed_limit", 3) or 3))
-        if ledger is not None and completed_limit:
-            completed = [task for task in ledger.subtasks if task.status == "done"][-completed_limit:]
-            for task in completed:
-                lines.append(f"Completed subtask {task.subtask_id}: {task.title}")
-
-        clipped: list[str] = []
-        budget_chars = max(80, int(token_budget or 500) * 4)
-        used = 0
-        for line in lines:
-            text = str(line or "").strip()
-            if not text:
-                continue
-            if len(text) > 240:
-                text = text[:239].rstrip() + "..."
-            if used + len(text) > budget_chars and clipped:
-                break
-            clipped.append(text)
-            used += len(text)
-        return clipped
+        return _render_recovery_guidance(state, token_budget=token_budget)
 
     @staticmethod
     def _fresh_schema_validation_hint_lines(state: LoopState) -> list[str]:
-        payload = state.scratchpad.get("_last_schema_validation_hint")
-        if not isinstance(payload, dict):
-            return []
-        created = int(payload.get("created_at_step", 0) or 0)
-        if int(state.step_count or 0) - created > 6:
-            return []
-        excerpt = str(payload.get("schema_excerpt") or "").strip()
-        if not excerpt:
-            return []
-        return ["Latest tool schema hint: " + excerpt.replace("\n", " | ")]
+        return fresh_schema_validation_hint_lines(state)
 
     @staticmethod
     def _fresh_read_loop_recovery_lines(state: LoopState) -> list[str]:
-        payload = state.scratchpad.get("_read_loop_recovery_payload")
-        if not isinstance(payload, dict):
-            return []
-        created = int(payload.get("created_at_step", 0) or 0)
-        if int(state.step_count or 0) - created > 6:
-            return []
-        tool_name = str(payload.get("tool_name") or "").strip()
-        target = str(payload.get("target") or "").strip()
-        summary = str(payload.get("last_evidence_summary") or "").strip()
-        action = str(payload.get("allowed_next_action") or "").strip()
-        line = "Read-loop recovery"
-        if tool_name:
-            line += f" for {tool_name}"
-        if target:
-            line += f" target={target}"
-        lines = [line + "."]
-        if summary:
-            lines.append("Prior evidence: " + summary)
-        if action:
-            lines.append("Allowed next action: " + action)
-        return lines
+        return fresh_read_loop_recovery_lines(state)
 
     @staticmethod
     def _repair_continuity_lines(state: LoopState) -> list[str]:
-        capsule = state.scratchpad.get("_repair_continuity_capsule")
-        if not isinstance(capsule, dict):
-            return []
-        created_at_step = int(capsule.get("created_at_step", 0) or 0)
-        current_step = int(state.step_count or 0)
-        if current_step - created_at_step > 5:
-            return []
-        lines: list[str] = []
-        command = str(capsule.get("command") or "").strip()
-        if command:
-            lines.append(f"Failed command: {command}")
-        verdict = str(capsule.get("verdict") or "").strip()
-        exit_code = capsule.get("exit_code")
-        if verdict or exit_code is not None:
-            parts: list[str] = []
-            if verdict:
-                parts.append(f"verdict={verdict}")
-            if exit_code is not None:
-                parts.append(f"exit={exit_code}")
-            lines.append(f"Result: {' | '.join(parts)}")
-        failure_mode = str(capsule.get("failure_mode") or "").strip()
-        if failure_mode:
-            lines.append(f"Suspected cause: {failure_mode}")
-        last_attempted_fix = str(capsule.get("last_attempted_fix") or "").strip()
-        if last_attempted_fix:
-            lines.append(f"Last attempted fix: {last_attempted_fix}")
-        next_action = str(
-            capsule.get("next_suggested_action") or capsule.get("suggested_next_action") or ""
-        ).strip()
-        if next_action:
-            lines.append(f"Next suggested action: {next_action}")
-        return lines
+        return repair_continuity_lines(state)
 
     @staticmethod
     def _guard_trip_recovery_lines(state: LoopState) -> list[str]:
-        capsule = state.scratchpad.get("_guard_trip_recovery_capsule")
-        if not isinstance(capsule, dict):
-            return []
-        created_at_step = int(capsule.get("created_at_step", 0) or 0)
-        current_step = int(state.step_count or 0)
-        if current_step - created_at_step > 8:
-            return []
-        lines: list[str] = []
-        goal = str(capsule.get("goal") or "").strip()
-        if goal:
-            clipped_goal, _ = clip_text_value(goal, limit=220)
-            lines.append(f"Interrupted goal: {clipped_goal}")
-        failed_tool = str(capsule.get("failed_tool") or "").strip()
-        if failed_tool:
-            lines.append(f"Guard stopped repeated tool: {failed_tool}")
-            lines.append(f"Do not retry {failed_tool} with the same arguments; continue from preserved progress.")
-        reason = str(capsule.get("reason") or "").strip()
-        if reason and not failed_tool:
-            clipped_reason, _ = clip_text_value(reason, limit=220)
-            lines.append(f"Guard reason: {clipped_reason}")
-        artifact_ids = [
-            str(item).strip()
-            for item in (capsule.get("preserved_artifact_ids") or [])
-            if str(item).strip()
-        ]
-        if artifact_ids:
-            lines.append("Preserved progress artifacts: " + ", ".join(artifact_ids[:6]))
-        summary_id = str(capsule.get("summary_id") or "").strip()
-        if summary_id:
-            lines.append(f"Preserved task summary: {summary_id}")
-        return lines
+        return guard_trip_recovery_lines(state)
 
     @staticmethod
     def _render_working_memory(
@@ -1387,355 +569,30 @@ class PromptStateFrameCompiler:
         fama_capsule_lines: list[str] | None = None,
         recovery_guidance_lines: list[str] | None = None,
     ) -> str:
-        fama_capsule_lines = list(fama_capsule_lines or [])
-        recovery_guidance_lines = list(recovery_guidance_lines or [])
-        memory = state.working_memory
-        plan = state.active_plan or state.draft_plan
-        has_content = any(
-            [
-                memory.current_goal,
-                memory.plan,
-                memory.decisions,
-                memory.open_questions,
-                memory.known_facts,
-                memory.failures,
-                memory.next_actions,
-                bool((state.scratchpad.get("_session_notepad") or {}).get("entries"))
-                if isinstance(state.scratchpad.get("_session_notepad"), dict)
-                else False,
-                plan is not None,
-                bool(state.artifacts),
-                state.write_session is not None,
-                bool(phase_lines),
-                bool(coding_anchor_lines),
-                bool(fama_capsule_lines),
-                bool(recovery_guidance_lines),
-                bool(PromptStateFrameCompiler._run_boundary_lines(state)),
-                bool(PromptStateFrameCompiler._guard_trip_recovery_lines(state)),
-            ]
+        return render_working_memory(
+            state,
+            phase_lines=phase_lines,
+            coding_anchor_lines=coding_anchor_lines,
+            fama_capsule_lines=fama_capsule_lines,
+            recovery_guidance_lines=recovery_guidance_lines,
         )
-        if not has_content:
-            return ""
-        sections = [f"Current CWD: {state.cwd}"]
-        task_targets = state.scratchpad.get("_task_target_paths")
-        if isinstance(task_targets, list):
-            cleaned_targets = [str(path).strip() for path in task_targets if str(path).strip()]
-            if cleaned_targets:
-                sections.append("Task targets: " + " | ".join(cleaned_targets[:3]))
-        ground_truth = PromptStateFrameCompiler._render_task_ground_truth(state)
-        if ground_truth:
-            sections.append(ground_truth)
-        run_boundary_lines = PromptStateFrameCompiler._run_boundary_lines(state)
-        if run_boundary_lines:
-            sections.extend(run_boundary_lines)
-        if fama_capsule_lines:
-            sections.append("FAMA mitigation:")
-            sections.extend(f"  {line}" for line in fama_capsule_lines[:5])
-        if recovery_guidance_lines:
-            sections.append("Recovery guidance:")
-            sections.extend(f"  {line}" for line in recovery_guidance_lines[:8])
-        repair_continuity_lines = PromptStateFrameCompiler._repair_continuity_lines(state)
-        if repair_continuity_lines:
-            sections.append("Repair continuity:")
-            sections.extend(f"  {line}" for line in repair_continuity_lines[:6])
-        guard_trip_recovery_lines = PromptStateFrameCompiler._guard_trip_recovery_lines(state)
-        if guard_trip_recovery_lines:
-            sections.append("Guard trip recovery:")
-            sections.extend(f"  {line}" for line in guard_trip_recovery_lines[:6])
-        current_goal = LexicalRetriever._effective_current_goal(state)
-        if current_goal:
-            sections.append("Current goal: " + current_goal)
-        if memory.plan:
-            sections.append("Plan: " + " | ".join(memory.plan))
-        if memory.decisions:
-            sections.append("Decisions: " + " | ".join(memory.decisions))
-        if memory.open_questions:
-            sections.append("Open questions: " + " | ".join(memory.open_questions))
-        if memory.known_facts:
-            sections.append("Known facts: " + " | ".join(memory.known_facts))
-        sub4b_web_findings = PromptStateFrameCompiler._render_sub4b_top_web_findings(state)
-        if sub4b_web_findings:
-            sections.append(sub4b_web_findings)
-        if memory.failures:
-            sections.append("Known failures: " + " | ".join(memory.failures))
-        if memory.next_actions:
-            sections.append("Next actions: " + " | ".join(memory.next_actions))
-        remote_mutation_action = PromptStateFrameCompiler._render_remote_mutation_next_action(state)
-        if remote_mutation_action:
-            sections.append("Remote mutation verification pending: " + remote_mutation_action)
-        continuation_anchor_lines = PromptStateFrameCompiler._continuation_anchor_lines(state)
-        if continuation_anchor_lines:
-            sections.append("Continuation anchor:")
-            sections.extend(f"  {line}" for line in continuation_anchor_lines[:4])
-        notepad_section = PromptStateFrameCompiler._render_session_notepad(state)
-        if notepad_section:
-            sections.append(notepad_section)
-        if phase_lines:
-            sections.extend(phase_lines)
-        if coding_anchor_lines:
-            sections.append("Coding anchors:")
-            sections.extend(f"  {line}" for line in coding_anchor_lines[:8])
-        if plan is not None:
-            sections.append("Plan summary: " + plan.goal)
-            sections.append(f"Plan status: {plan.status}")
-            sections.append(
-                "Plan resolved: "
-                + ("yes" if state.plan_resolved else "no")
-                + (f" | Plan artifact: {state.plan_artifact_id}" if state.plan_artifact_id else "")
-            )
-            if state.plan_artifact_id:
-                sections.append(
-                    f"Plan playbook artifact: {state.plan_artifact_id} (use this as the staged implementation checklist)"
-                )
-            active_step = plan.active_step()
-            if active_step is not None:
-                sections.append(f"Active step: {active_step.step_id} [{active_step.status}] {active_step.title}")
-            for step in plan.steps[:6]:
-                sections.append(f"Plan step: [{step.status}] {step.step_id} {step.title}")
-            if plan.requested_output_path:
-                sections.append(f"Plan export: {plan.requested_output_path}")
-        elif state.plan_resolved and memory.plan:
-            sections.append(
-                "Plan resolved: yes"
-                + (f" | Plan artifact: {state.plan_artifact_id}" if state.plan_artifact_id else "")
-            )
-            if state.plan_artifact_id:
-                sections.append(
-                    f"Plan playbook artifact: {state.plan_artifact_id} (use this as the staged implementation checklist)"
-                )
-        if state.contract_phase() == "repair":
-            repair_bits = [f"Repair phase: {state.contract_phase()}"]
-            if state.last_failure_class:
-                repair_bits.append(f"Failure class: {state.last_failure_class}")
-            if state.repair_cycle_id:
-                repair_bits.append(
-                    f"System repair cycle: {state.repair_cycle_id} (diagnostic only; not a write_session_id)"
-                )
-            if state.files_changed_this_cycle:
-                repair_bits.append(
-                    "Files changed this cycle: " + ", ".join(state.files_changed_this_cycle[-5:])
-                )
-            if state.stagnation_counters:
-                counters = ", ".join(
-                    f"{name}={count}"
-                    for name, count in sorted(state.stagnation_counters.items())
-                    if count
-                )
-                if counters:
-                    repair_bits.append(f"Stagnation: {counters}")
-            sections.append("Repair focus: " + " | ".join(repair_bits))
-        if state.write_session:
-            sections.append(PromptStateFrameCompiler._render_write_session(state))
-
-        if state.artifacts:
-            art_lines = []
-            for aid, art in state.artifacts.items():
-                if is_superseded_artifact(art):
-                    continue
-                if not is_prompt_visible_artifact(art):
-                    continue
-                summary_snippet = (art.summary or art.tool_name or "").strip()[:90]
-                art_lines.append(f"  - {aid}: {summary_snippet}")
-            if art_lines:
-                if is_four_b_or_under_model_name(PromptStateFrameCompiler._state_model_name(state)):
-                    evidence_rows = PromptStateFrameCompiler._artifact_evidence_rows(state)
-                    if evidence_rows:
-                        sections.append(
-                            "Available Evidence (pinned for this 4B-or-under model; use these artifact/source cues before rereading):\n"
-                            "  artifact_id | source/path | summary\n"
-                            + "\n".join(evidence_rows)
-                            + "\n  Only page forward with artifact_read(start_line=...) when you need unseen lines."
-                        )
-                else:
-                    sections.append(
-                        "Available Artifacts (compressed summaries already in context; page forward with artifact_read(start_line=...) only if you need more unseen lines):\n"
-                        + "\n".join(art_lines)
-                    )
-        if not sections:
-            return ""
-        return "Working memory:\n" + "\n".join(sections)
 
     @staticmethod
     def _render_sub4b_top_web_findings(state: LoopState) -> str:
-        if not is_four_b_or_under_model_name(PromptStateFrameCompiler._state_model_name(state)):
-            return ""
-        packets = [
-            packet
-            for packet in build_observation_packets(state, limit=8)
-            if packet.tool_name in {"web_search", "web_fetch"} and not packet.stale and str(packet.summary or "").strip()
-        ]
-        if not packets:
-            return ""
-        findings: list[str] = []
-        for packet in packets[-3:]:
-            summary = str(packet.summary or "").strip()
-            if not summary:
-                continue
-            if len(summary) > 180:
-                summary = summary[:179].rstrip() + "..."
-            if summary not in findings:
-                findings.append(summary)
-        if not findings:
-            return ""
-        return "Top web findings: " + " | ".join(findings)
+        return render_sub4b_top_web_findings(state)
 
     @staticmethod
     def _render_session_notepad(state: LoopState) -> str:
-        payload = state.scratchpad.get("_session_notepad")
-        if not isinstance(payload, dict):
-            return ""
-        raw_entries = payload.get("entries")
-        if not isinstance(raw_entries, list):
-            return ""
-
-        entries, clipped = clip_string_list(
-            raw_entries,
-            limit=5,
-            item_char_limit=160,
-        )
-        if not entries:
-            return ""
-
-        bits = ["Session notepad: " + " | ".join(entries)]
-        bits.append("Keep this brief; the notepad is durable session memory, not a transcript dump.")
-        if clipped or len(entries) < len([item for item in raw_entries if str(item).strip()]):
-            bits.append("Some entries were clipped to keep the session note concise.")
-        return " ".join(bits)
+        return render_session_notepad(state)
 
     @staticmethod
     def _render_write_session(state: LoopState) -> str:
-        session = state.write_session
-        ws_bits = [f"Session: {session.write_session_id}"]
-        if session.write_target_path:
-            ws_bits.append(f"Target: {session.write_target_path}")
-        if session.write_staging_path:
-            ws_bits.append(f"Staging: {session.write_staging_path}")
-        if session.write_staging_path:
-            ws_bits.append("Reminder: the staging path is for read/verify only; write to the target path.")
-        else:
-            ws_bits.append("Reminder: write to the target path; staged copies are for read/verify.")
-        ws_bits.append(f"Mode: {session.write_session_mode}")
-        ws_bits.append(f"Intent: {session.write_session_intent}")
-        ws_bits.append(f"Status: {session.status}")
-        if session.write_current_section:
-            ws_bits.append(f"Current section: {session.write_current_section}")
-        if session.write_next_section:
-            ws_bits.append(f"Next section: {session.write_next_section}")
-        if session.write_sections_completed:
-            ws_bits.append(f"Completed sections: {', '.join(session.write_sections_completed)}")
-        if session.suggested_sections:
-            ws_bits.append(f"Suggested sections: {', '.join(session.suggested_sections)}")
-        if session.write_failed_local_patches:
-            ws_bits.append(f"Local patch failures: {session.write_failed_local_patches}")
-        if session.write_pending_finalize:
-            ws_bits.append("Pending finalize: yes")
-        else:
-            ws_bits.append("Pending finalize: no")
-        next_action = PromptStateFrameCompiler._render_write_session_next_action(session)
-        if next_action:
-            ws_bits.append(f"Next action: {next_action}")
-        verifier = session.write_last_verifier or {}
-        if verifier:
-            ws_bits.append(f"Last verifier verdict: {verifier.get('verdict', 'unknown')}")
-            command = str(verifier.get("command", "") or "").strip()
-            if command:
-                ws_bits.append(f"Verifier command: {command}")
-            verifier_output, clipped = clip_text_value(str(verifier.get("output", "") or "").strip(), limit=180)
-            if verifier_output:
-                suffix = " [truncated]" if clipped else ""
-                ws_bits.append(f"Verifier output: {verifier_output}{suffix}")
-        return "Active Write Session: " + " | ".join(ws_bits)
+        return render_write_session(state)
 
     @staticmethod
     def _render_write_session_next_action(session: Any) -> str:
-        if bool(getattr(session, "write_pending_finalize", False)):
-            return "Finalize the staged copy after verification."
-        next_section = str(getattr(session, "write_next_section", "") or "").strip()
-        if next_section:
-            return f"Continue with section {next_section}."
-        current_section = str(getattr(session, "write_current_section", "") or "").strip()
-        if current_section:
-            return f"Complete section {current_section} or move to verification once it is ready."
-        completed = list(getattr(session, "write_sections_completed", []) or [])
-        if completed:
-            return "Choose the next section or verify the completed staged file."
-        return "Continue authoring the active target file."
+        return render_write_session_next_action(session)
 
     @staticmethod
     def _render_phase_context(state: LoopState) -> list[str]:
-        phase = state.contract_phase()
-        sections: list[str] = []
-        reasoning = state.reasoning_graph
-        if phase == "explore":
-            sections.append("Phase handoff: explore -> plan")
-            if state.context_briefs:
-                brief = state.context_briefs[-1]
-                brief_bits = [f"brief={brief.brief_id}", f"phase={brief.current_phase}"]
-                if brief.key_discoveries:
-                    brief_bits.append("facts=" + "; ".join(brief.key_discoveries[:4]))
-                if brief.open_questions:
-                    brief_bits.append("questions=" + "; ".join(brief.open_questions[:3]))
-                if brief.evidence_refs:
-                    brief_bits.append("evidence=" + ", ".join(brief.evidence_refs[:5]))
-                sections.append("Explore brief: " + " | ".join(brief_bits))
-        elif phase == "plan":
-            sections.append("Phase handoff: plan from compressed evidence")
-            evidence_bits = []
-            for record in reasoning.evidence_records[-5:]:
-                statement = record.statement.strip()
-                if statement:
-                    evidence_bits.append(f"{record.evidence_id}: {statement}")
-            if evidence_bits:
-                sections.append("Evidence packet: " + " | ".join(evidence_bits))
-            if reasoning.claim_records:
-                claim_bits = []
-                for claim in reasoning.claim_records[-4:]:
-                    claim_bits.append(f"{claim.claim_id} [{claim.status}] {claim.statement}".strip())
-                if claim_bits:
-                    sections.append("Claims: " + " | ".join(claim_bits))
-            plan = state.active_plan or state.draft_plan
-            if plan is not None and getattr(plan, "claim_refs", None):
-                sections.append("Plan claim refs: " + ", ".join(plan.claim_refs[:5]))
-        elif phase == "author":
-            sections.append("Phase handoff: plan -> author")
-            plan = state.active_plan or state.draft_plan
-            if plan is not None:
-                sections.append(f"Authoring plan: {plan.plan_id} | {plan.goal}")
-                active_step = plan.active_step()
-                if active_step is not None:
-                    sections.append(
-                        f"Current step: {active_step.step_id} [{active_step.status}] {active_step.title}"
-                    )
-                    if active_step.claim_refs:
-                        sections.append("Current step claims: " + ", ".join(active_step.claim_refs[:5]))
-                if plan.acceptance_criteria:
-                    sections.append("Acceptance: " + "; ".join(plan.acceptance_criteria[:4]))
-                if getattr(plan, "claim_refs", None):
-                    sections.append("Plan claims: " + ", ".join(plan.claim_refs[:5]))
-                if plan.requested_output_path:
-                    sections.append(f"Target output: {plan.requested_output_path}")
-        elif phase == "execute":
-            sections.append("Phase handoff: author -> execute")
-            plan = state.active_plan or state.draft_plan
-            if plan is not None:
-                sections.append(f"Execution plan: {plan.plan_id} [{plan.status}]")
-                if getattr(plan, "claim_refs", None):
-                    sections.append("Plan claims: " + ", ".join(plan.claim_refs[:5]))
-            if state.reasoning_graph.evidence_records:
-                evidence_ids = [record.evidence_id for record in state.reasoning_graph.evidence_records[-5:]]
-                sections.append("Evidence refs: " + ", ".join(evidence_ids))
-        elif phase == "verify":
-            sections.append("Phase handoff: execute -> verify")
-            if state.current_verifier_verdict():
-                sections.append("Verifier verdict present")
-            if state.run_brief.acceptance_criteria:
-                sections.append("Acceptance criteria: " + "; ".join(state.run_brief.acceptance_criteria[:4]))
-        elif phase == "repair":
-            sections.append("Phase handoff: verify -> repair")
-            if state.last_failure_class:
-                sections.append(f"Failure class: {state.last_failure_class}")
-            if state.files_changed_this_cycle:
-                sections.append("Files changed: " + ", ".join(state.files_changed_this_cycle[-5:]))
-            if state.write_session:
-                sections.append(f"Write session: {state.write_session.write_session_id}")
-        return sections
+        return render_phase_context(state)

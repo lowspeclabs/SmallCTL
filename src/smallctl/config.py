@@ -229,6 +229,170 @@ class SmallctlConfig:
         return asdict(self)
 
 
+_BOOL_CONFIG_KEYS = {
+    "debug",
+    "thinking_visibility",
+    "checkpoint_on_exit",
+    "restore_graph_state",
+    "fresh_run",
+    "planning_mode",
+    "contract_flow_ui",
+    "staged_reasoning",
+    "staged_execution_enabled",
+    "indexer",
+    "enable_write_intent_recovery",
+    "enable_assistant_code_write_recovery",
+    "write_recovery_allow_raw_text_targets",
+    "chunk_mode_new_file_only",
+    "allow_multi_section_turns_for_small_edits",
+    "loop_guard_enabled",
+    "loop_guard_cumulative_write_gate",
+    "loop_guard_checkpoint_gate",
+    "loop_guard_diff_gate",
+    "fama_enabled",
+    "fama_done_gate_on_failure",
+    "fama_llm_judge_enabled",
+    "reflexion_enabled",
+    "reflexion_persist_cross_task",
+    "subtask_ledger_enabled",
+    "tool_plan_runtime_enabled",
+    "tool_plan_auto_select",
+    "tool_plan_readonly_only",
+    "tool_plan_allow_web",
+    "tool_plan_allow_artifact_read",
+    "tool_plan_allow_git",
+    "tool_plan_fallback_to_loop_on_invalid_plan",
+    "tool_dag_enabled",
+    "tool_dag_preserve_result_order",
+    "solver_refine_enabled",
+    "solver_refine_on_final_answer",
+    "solver_refine_on_patch_plan",
+    "solver_refine_on_task_complete",
+    "rewoo_lane_frames_enabled",
+    "rewoo_planner_frame_enabled",
+    "rewoo_solver_frame_enabled",
+    "rewoo_refiner_frame_enabled",
+    "test_time_scaling_enabled",
+    "test_time_scaling_mutating_parallel_enabled",
+    "escalation_enabled",
+    "escalation_expose_tool",
+    "escalation_auto_trigger",
+    "escalation_require_tool_plan_evidence",
+    "escalation_redact_secrets",
+}
+
+_INT_ALLOW_ZERO_CONFIG_KEYS = {"fresh_run_turns"}
+
+_INT_CONFIG_KEYS = {
+    "context_limit",
+    "max_prompt_tokens",
+    "reserve_completion_tokens",
+    "reserve_tool_tokens",
+    "first_token_timeout_sec",
+    "startup_grace_period_sec",
+    "max_restarts_per_hour",
+    "backend_healthcheck_timeout_sec",
+    "backend_restart_grace_sec",
+    "graph_node_timeout_sec",
+    "graph_model_call_timeout_sec",
+    "graph_dispatch_tools_timeout_sec",
+    "graph_idle_watchdog_sec",
+    "graph_recursion_limit",
+    "graph_coding_recursion_limit",
+    "needs_human_timeout_sec",
+    "recent_message_limit",
+    "max_summary_items",
+    "max_artifact_snippets",
+    "artifact_snippet_token_limit",
+    "multi_file_artifact_snippet_limit",
+    "multi_file_primary_file_limit",
+    "remote_task_artifact_snippet_limit",
+    "remote_task_primary_file_limit",
+    "min_exploration_steps",
+    "artifact_summarization_threshold",
+    "chunk_mode_min_bytes",
+    "small_model_soft_write_chars",
+    "small_model_hard_write_chars",
+    "new_file_chunk_mode_line_estimate",
+    "failed_local_patch_limit",
+    "loop_guard_stagnation_threshold",
+    "loop_guard_level2_threshold",
+    "loop_guard_recent_writes_limit",
+    "loop_guard_tail_lines",
+    "staged_step_prompt_tokens",
+    "fama_default_ttl_steps",
+    "fama_max_active_mitigations",
+    "fama_signal_window",
+    "fama_capsule_token_budget",
+    "fama_llm_judge_min_severity",
+    "reflexion_max_items",
+    "reflexion_inject_top_k",
+    "subtask_max_active",
+    "subtask_max_history",
+    "subtask_inject_completed_limit",
+    "tool_plan_max_steps",
+    "tool_plan_max_repair_attempts",
+    "schema_validation_max_repair_attempts",
+    "tool_plan_observation_token_limit",
+    "tool_plan_max_observation_chars_per_step",
+    "tool_plan_solver_fresh_output_limit",
+    "tool_dag_max_parallel",
+    "tool_dag_timeout_sec",
+    "solver_refine_max_passes",
+    "solver_refine_token_budget",
+    "rewoo_frame_token_budget",
+    "test_time_scaling_max_candidates",
+    "test_time_scaling_min_candidates",
+    "test_time_scaling_parallel_max",
+    "test_time_scaling_timeout_sec",
+    "escalation_max_prompt_chars",
+    "escalation_max_response_tokens",
+    "escalation_timeout_sec",
+    "escalation_max_per_task",
+    "escalation_cooldown_turns",
+    "escalation_repeated_failure_threshold",
+}
+
+_FLOAT_CONFIG_KEYS = {
+    "summarize_at_ratio",
+    "loop_guard_similarity_threshold",
+    "test_time_scaling_score_threshold",
+    "escalation_temperature",
+}
+
+_COMMA_LIST_CONFIG_KEYS = {"test_time_scaling_runtimes", "chunk_mode_supported_models"}
+
+
+def _apply_typed_config_values(values: dict[str, Any]) -> None:
+    for key in _BOOL_CONFIG_KEYS:
+        if key in values:
+            values[key] = _to_bool(values[key])
+    for key in _INT_ALLOW_ZERO_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_int_allow_zero(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _INT_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_int(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _FLOAT_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_float(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _COMMA_LIST_CONFIG_KEYS:
+        if key in values and isinstance(values[key], str):
+            values[key] = [item.strip() for item in values[key].split(",") if item.strip()]
+
+
 def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     # Source precedence (before provider defaults):
     # user config path -> local config -> env/.env -> CLI
@@ -251,207 +415,13 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         from .tools.profiles import parse_public_profiles
 
         cli_clean["tool_profiles"] = parse_public_profiles(cli_clean["tool_profiles"])
-    if "debug" in cli_clean:
-        cli_clean["debug"] = _to_bool(cli_clean["debug"])
-    if "thinking_visibility" in cli_clean:
-        cli_clean["thinking_visibility"] = _to_bool(cli_clean["thinking_visibility"])
-    if "checkpoint_on_exit" in cli_clean:
-        cli_clean["checkpoint_on_exit"] = _to_bool(cli_clean["checkpoint_on_exit"])
-    if "restore_graph_state" in cli_clean:
-        cli_clean["restore_graph_state"] = _to_bool(cli_clean["restore_graph_state"])
-    if "fresh_run" in cli_clean:
-        cli_clean["fresh_run"] = _to_bool(cli_clean["fresh_run"])
-    if "fresh_run_turns" in cli_clean:
-        cli_clean["fresh_run_turns"] = _to_int_allow_zero(cli_clean["fresh_run_turns"])
-    if "planning_mode" in cli_clean:
-        cli_clean["planning_mode"] = _to_bool(cli_clean["planning_mode"])
-    if "contract_flow_ui" in cli_clean:
-        cli_clean["contract_flow_ui"] = _to_bool(cli_clean["contract_flow_ui"])
-    if "staged_reasoning" in cli_clean:
-        cli_clean["staged_reasoning"] = _to_bool(cli_clean["staged_reasoning"])
-    if "staged_execution_enabled" in cli_clean:
-        cli_clean["staged_execution_enabled"] = _to_bool(cli_clean["staged_execution_enabled"])
-    if "indexer" in cli_clean:
-        cli_clean["indexer"] = _to_bool(cli_clean["indexer"])
+    _apply_typed_config_values(cli_clean)
     if "run_mode" in cli_clean:
         cli_clean["run_mode"] = _normalize_run_mode(cli_clean["run_mode"])
-    if "enable_write_intent_recovery" in cli_clean:
-        cli_clean["enable_write_intent_recovery"] = _to_bool(cli_clean["enable_write_intent_recovery"])
-    if "enable_assistant_code_write_recovery" in cli_clean:
-        cli_clean["enable_assistant_code_write_recovery"] = _to_bool(cli_clean["enable_assistant_code_write_recovery"])
-    if "write_recovery_allow_raw_text_targets" in cli_clean:
-        cli_clean["write_recovery_allow_raw_text_targets"] = _to_bool(
-            cli_clean["write_recovery_allow_raw_text_targets"]
-        )
-    if "chunk_mode_new_file_only" in cli_clean:
-        cli_clean["chunk_mode_new_file_only"] = _to_bool(cli_clean["chunk_mode_new_file_only"])
-    if "allow_multi_section_turns_for_small_edits" in cli_clean:
-        cli_clean["allow_multi_section_turns_for_small_edits"] = _to_bool(
-            cli_clean["allow_multi_section_turns_for_small_edits"]
-        )
-    for key in (
-        "loop_guard_enabled",
-        "loop_guard_cumulative_write_gate",
-        "loop_guard_checkpoint_gate",
-        "loop_guard_diff_gate",
-        "fama_enabled",
-        "fama_done_gate_on_failure",
-        "fama_llm_judge_enabled",
-        "reflexion_enabled",
-        "reflexion_persist_cross_task",
-        "subtask_ledger_enabled",
-        "tool_plan_runtime_enabled",
-        "tool_plan_auto_select",
-        "tool_plan_readonly_only",
-        "tool_plan_allow_web",
-        "tool_plan_allow_artifact_read",
-        "tool_plan_allow_git",
-        "tool_plan_fallback_to_loop_on_invalid_plan",
-        "tool_dag_enabled",
-        "tool_dag_preserve_result_order",
-        "solver_refine_enabled",
-        "solver_refine_on_final_answer",
-        "solver_refine_on_patch_plan",
-        "solver_refine_on_task_complete",
-        "rewoo_lane_frames_enabled",
-        "rewoo_planner_frame_enabled",
-        "rewoo_solver_frame_enabled",
-        "rewoo_refiner_frame_enabled",
-        "test_time_scaling_enabled",
-        "test_time_scaling_mutating_parallel_enabled",
-        "escalation_enabled",
-        "escalation_expose_tool",
-        "escalation_auto_trigger",
-        "escalation_require_tool_plan_evidence",
-        "escalation_redact_secrets",
-    ):
-        if key in cli_clean:
-            cli_clean[key] = _to_bool(cli_clean[key])
     if "graph_checkpointer" in cli_clean:
         cli_clean["graph_checkpointer"] = _normalize_graph_checkpointer(cli_clean["graph_checkpointer"])
     if "graph_checkpoint_path" in cli_clean and "graph_checkpointer" not in cli_clean:
         cli_clean["graph_checkpointer"] = "file"
-    if "context_limit" in cli_clean:
-        parsed_limit = _to_int(cli_clean["context_limit"])
-        if parsed_limit is None:
-            cli_clean.pop("context_limit", None)
-        else:
-            cli_clean["context_limit"] = parsed_limit
-    for key in (
-        "max_prompt_tokens",
-        "reserve_completion_tokens",
-        "reserve_tool_tokens",
-        "first_token_timeout_sec",
-        "startup_grace_period_sec",
-        "max_restarts_per_hour",
-        "backend_healthcheck_timeout_sec",
-        "backend_restart_grace_sec",
-        "graph_node_timeout_sec",
-        "graph_model_call_timeout_sec",
-        "graph_dispatch_tools_timeout_sec",
-        "graph_idle_watchdog_sec",
-        "graph_recursion_limit",
-        "graph_coding_recursion_limit",
-        "needs_human_timeout_sec",
-        "recent_message_limit",
-        "max_summary_items",
-        "max_artifact_snippets",
-        "artifact_snippet_token_limit",
-        "multi_file_artifact_snippet_limit",
-        "multi_file_primary_file_limit",
-        "remote_task_artifact_snippet_limit",
-        "remote_task_primary_file_limit",
-        "artifact_summarization_threshold",
-        "chunk_mode_min_bytes",
-        "small_model_soft_write_chars",
-        "small_model_hard_write_chars",
-        "new_file_chunk_mode_line_estimate",
-        "failed_local_patch_limit",
-        "loop_guard_stagnation_threshold",
-        "loop_guard_level2_threshold",
-        "loop_guard_recent_writes_limit",
-        "loop_guard_tail_lines",
-        "staged_step_prompt_tokens",
-        "fama_default_ttl_steps",
-        "fama_max_active_mitigations",
-        "fama_signal_window",
-        "fama_capsule_token_budget",
-        "fama_llm_judge_min_severity",
-        "graph_node_timeout_sec",
-        "graph_model_call_timeout_sec",
-        "graph_dispatch_tools_timeout_sec",
-        "graph_idle_watchdog_sec",
-        "graph_recursion_limit",
-        "graph_coding_recursion_limit",
-        "reflexion_max_items",
-        "reflexion_inject_top_k",
-        "subtask_max_active",
-        "subtask_max_history",
-        "subtask_inject_completed_limit",
-        "tool_plan_max_steps",
-        "tool_plan_max_repair_attempts",
-        "schema_validation_max_repair_attempts",
-        "tool_plan_observation_token_limit",
-        "tool_plan_max_observation_chars_per_step",
-        "tool_plan_solver_fresh_output_limit",
-        "tool_dag_max_parallel",
-        "tool_dag_timeout_sec",
-        "solver_refine_max_passes",
-        "solver_refine_token_budget",
-        "rewoo_frame_token_budget",
-        "test_time_scaling_max_candidates",
-        "test_time_scaling_min_candidates",
-        "test_time_scaling_parallel_max",
-        "test_time_scaling_timeout_sec",
-        "escalation_max_prompt_chars",
-        "escalation_max_response_tokens",
-        "escalation_timeout_sec",
-        "escalation_max_per_task",
-        "escalation_cooldown_turns",
-        "escalation_repeated_failure_threshold",
-    ):
-        if key in cli_clean:
-            parsed_limit = _to_int(cli_clean[key])
-            if parsed_limit is None:
-                cli_clean.pop(key, None)
-            else:
-                cli_clean[key] = parsed_limit
-    if "summarize_at_ratio" in cli_clean:
-        parsed_ratio = _to_float(cli_clean["summarize_at_ratio"])
-        if parsed_ratio is None:
-            cli_clean.pop("summarize_at_ratio", None)
-        else:
-            cli_clean["summarize_at_ratio"] = parsed_ratio
-    if "loop_guard_similarity_threshold" in cli_clean:
-        parsed_ratio = _to_float(cli_clean["loop_guard_similarity_threshold"])
-        if parsed_ratio is None:
-            cli_clean.pop("loop_guard_similarity_threshold", None)
-        else:
-            cli_clean["loop_guard_similarity_threshold"] = parsed_ratio
-    if "test_time_scaling_score_threshold" in cli_clean:
-        parsed_ratio = _to_float(cli_clean["test_time_scaling_score_threshold"])
-        if parsed_ratio is None:
-            cli_clean.pop("test_time_scaling_score_threshold", None)
-        else:
-            cli_clean["test_time_scaling_score_threshold"] = parsed_ratio
-    if "escalation_temperature" in cli_clean:
-        parsed_ratio = _to_float(cli_clean["escalation_temperature"])
-        if parsed_ratio is None:
-            cli_clean.pop("escalation_temperature", None)
-        else:
-            cli_clean["escalation_temperature"] = parsed_ratio
-    if "test_time_scaling_runtimes" in cli_clean and isinstance(cli_clean["test_time_scaling_runtimes"], str):
-        cli_clean["test_time_scaling_runtimes"] = [
-            item.strip()
-            for item in cli_clean["test_time_scaling_runtimes"].split(",")
-            if item.strip()
-        ]
-    if "chunk_mode_supported_models" in cli_clean and isinstance(cli_clean["chunk_mode_supported_models"], str):
-        cli_clean["chunk_mode_supported_models"] = [
-            item.strip()
-            for item in cli_clean["chunk_mode_supported_models"].split(",")
-            if item.strip()
-        ]
     if "healthcheck_url" not in cli_clean and "backend_healthcheck_url" in cli_clean:
         cli_clean["healthcheck_url"] = cli_clean["backend_healthcheck_url"]
     if "restart_command" not in cli_clean and "backend_restart_command" in cli_clean:
@@ -475,117 +445,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     merged.update(cli_clean)
     if preset_name:
         merged["preset"] = preset_name
+    _apply_typed_config_values(merged)
     if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
         merged["staged_execution_enabled"] = True
-    for key in (
-        "fama_enabled",
-        "fama_done_gate_on_failure",
-        "fama_llm_judge_enabled",
-        "reflexion_enabled",
-        "reflexion_persist_cross_task",
-        "subtask_ledger_enabled",
-        "tool_plan_runtime_enabled",
-        "tool_plan_auto_select",
-        "tool_plan_readonly_only",
-        "tool_plan_allow_web",
-        "tool_plan_allow_artifact_read",
-        "tool_plan_allow_git",
-        "tool_plan_fallback_to_loop_on_invalid_plan",
-        "tool_dag_enabled",
-        "tool_dag_preserve_result_order",
-        "solver_refine_enabled",
-        "solver_refine_on_final_answer",
-        "solver_refine_on_patch_plan",
-        "solver_refine_on_task_complete",
-        "chunk_mode_new_file_only",
-        "allow_multi_section_turns_for_small_edits",
-        "enable_write_intent_recovery",
-        "enable_assistant_code_write_recovery",
-        "write_recovery_allow_raw_text_targets",
-        "rewoo_lane_frames_enabled",
-        "rewoo_planner_frame_enabled",
-        "rewoo_solver_frame_enabled",
-        "rewoo_refiner_frame_enabled",
-        "test_time_scaling_enabled",
-        "test_time_scaling_mutating_parallel_enabled",
-        "escalation_enabled",
-        "escalation_expose_tool",
-        "escalation_auto_trigger",
-        "escalation_require_tool_plan_evidence",
-        "escalation_redact_secrets",
-    ):
-        if key in merged:
-            merged[key] = _to_bool(merged[key])
-    for key in (
-        "fama_default_ttl_steps",
-        "fama_max_active_mitigations",
-        "fama_signal_window",
-        "fama_capsule_token_budget",
-        "fama_llm_judge_min_severity",
-        "reflexion_max_items",
-        "reflexion_inject_top_k",
-        "subtask_max_active",
-        "subtask_max_history",
-        "subtask_inject_completed_limit",
-        "tool_plan_max_steps",
-        "tool_plan_max_repair_attempts",
-        "schema_validation_max_repair_attempts",
-        "tool_plan_observation_token_limit",
-        "tool_plan_max_observation_chars_per_step",
-        "tool_plan_solver_fresh_output_limit",
-        "tool_dag_max_parallel",
-        "tool_dag_timeout_sec",
-        "solver_refine_max_passes",
-        "solver_refine_token_budget",
-        "artifact_summarization_threshold",
-        "chunk_mode_min_bytes",
-        "small_model_soft_write_chars",
-        "small_model_hard_write_chars",
-        "new_file_chunk_mode_line_estimate",
-        "failed_local_patch_limit",
-        "needs_human_timeout_sec",
-        "rewoo_frame_token_budget",
-        "test_time_scaling_max_candidates",
-        "test_time_scaling_min_candidates",
-        "test_time_scaling_parallel_max",
-        "test_time_scaling_timeout_sec",
-        "escalation_max_prompt_chars",
-        "escalation_max_response_tokens",
-        "escalation_timeout_sec",
-        "escalation_max_per_task",
-        "escalation_cooldown_turns",
-        "escalation_repeated_failure_threshold",
-    ):
-        if key in merged:
-            parsed_limit = _to_int(merged[key])
-            if parsed_limit is None:
-                merged.pop(key, None)
-            else:
-                merged[key] = parsed_limit
-    if "test_time_scaling_score_threshold" in merged:
-        parsed_ratio = _to_float(merged["test_time_scaling_score_threshold"])
-        if parsed_ratio is None:
-            merged.pop("test_time_scaling_score_threshold", None)
-        else:
-            merged["test_time_scaling_score_threshold"] = parsed_ratio
-    if "escalation_temperature" in merged:
-        parsed_ratio = _to_float(merged["escalation_temperature"])
-        if parsed_ratio is None:
-            merged.pop("escalation_temperature", None)
-        else:
-            merged["escalation_temperature"] = parsed_ratio
-    if "test_time_scaling_runtimes" in merged and isinstance(merged["test_time_scaling_runtimes"], str):
-        merged["test_time_scaling_runtimes"] = [
-            item.strip()
-            for item in merged["test_time_scaling_runtimes"].split(",")
-            if item.strip()
-        ]
-    if "chunk_mode_supported_models" in merged and isinstance(merged["chunk_mode_supported_models"], str):
-        merged["chunk_mode_supported_models"] = [
-            item.strip()
-            for item in merged["chunk_mode_supported_models"].split(",")
-            if item.strip()
-        ]
 
     explicit_prompt_budget = "max_prompt_tokens" in explicit_merged
     merged["max_prompt_tokens_explicit"] = explicit_prompt_budget

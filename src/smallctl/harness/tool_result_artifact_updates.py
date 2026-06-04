@@ -8,12 +8,47 @@ from pathlib import Path
 from typing import Any
 
 from ..models.conversation import ConversationMessage
+from .directory_empty_checks import (
+    guess_deletion_directory_empty_checks,
+    parse_directory_empty_checks,
+)
+from .remote_mutation_helpers import (
+    _REMOTE_MULTILINE_REPLACEMENT_RE,
+    _REMOTE_MUTATING_COMMAND_RE,
+    _REMOTE_MUTATION_VERIFICATION_KEY,
+    _REMOTE_SED_MUTATION_RE,
+    _SED_SUBSTITUTION_RE,
+    _SSH_FILE_VERIFIER_TOOLS,
+    _STALE_VERIFIER_KEY,
+    mark_remote_mutation_directory_verified,
+    mark_remote_mutation_path_verified,
+    remote_mutation_directory_checks,
+    remote_mutation_requirement_satisfied,
+)
+from .remote_mutation_parsing import (
+    _REMOTE_DELETION_RE,
+    append_remote_mutation_path as _append_remote_mutation_path,
+    collect_remote_mutator_operands as _collect_remote_mutator_operands,
+    collect_remote_redirection_targets as _collect_remote_redirection_targets,
+    guess_remote_deletion_directory_empty_checks as _guess_remote_deletion_directory_empty_checks,
+    guess_remote_deletion_paths as _guess_remote_deletion_paths,
+    guess_remote_mutation_paths as _guess_remote_mutation_paths,
+    normalize_remote_deletion_operand as _normalize_remote_deletion_operand,
+    normalize_remote_mutation_operand as _normalize_remote_mutation_operand,
+    python_open_write_mutation as _python_open_write_mutation,
+    remote_deletion_glob_empty_check as _remote_deletion_glob_empty_check,
+    remote_path_is_known_directory as _remote_path_is_known_directory,
+    remote_path_should_be_ignored as _remote_path_should_be_ignored,
+    remote_shell_command_lines as _remote_shell_command_lines,
+    shell_command_name as _shell_command_name,
+)
 from ..models.tool_result import ToolEnvelope
 from ..challenge_progress import record_code_change
 from ..normalization import dedupe_keep_tail
 from ..recovery_metrics import increment_metric
 from ..state_schema import MemoryEntry
 from .artifact_tracking import consolidate_shell_attempt_family as _consolidate_shell_attempt_family
+from .artifact_read_ledger import record_artifact_read_ledger as _record_artifact_read_ledger
 from ..tools.shell_support import _REMOTE_INSTALLER_PREFLIGHT_KEY
 from .tool_result_evidence import record_evidence as _record_evidence
 from .tool_result_support import (
@@ -21,6 +56,12 @@ from .tool_result_support import (
     invalidate_file_read_cache as _invalidate_file_read_cache,
     is_small_model as _is_small_model,
     maybe_support_claim_from_evidence as _maybe_support_claim_from_evidence,
+)
+from .touched_symbols import (
+    SYMBOL_CAPTURE_LIMIT,
+    extract_symbol_candidates_from_file,
+    extract_symbol_candidates_from_path,
+    extract_symbol_candidates_from_text,
 )
 from .tool_result_verification import (
     _annotate_verifier_artifact,
@@ -36,9 +77,6 @@ from ..shell_utils import (
 from ..tools.fs import is_file_mutating_tool
 from ..tools.ssh_files import SSH_FILE_MUTATING_TOOLS
 
-_ARTIFACT_COVERAGE_SCRATCHPAD_KEY = "_artifact_read_coverage"
-
-
 def _should_auto_record_known_fact(tool_name: str, result: ToolEnvelope) -> bool:
     if tool_name == "shell_exec":
         return False
@@ -48,120 +86,6 @@ def _should_auto_record_known_fact(tool_name: str, result: ToolEnvelope) -> bool
     if not result.success and (is_file_mutating_tool(tool_name) or tool_name in SSH_FILE_MUTATING_TOOLS):
         return False
     return True
-
-
-def _coerce_int_or_none(value: Any) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_artifact_read_ranges(ranges: Any) -> list[tuple[int, int]]:
-    normalized: list[tuple[int, int]] = []
-    if not isinstance(ranges, list):
-        return normalized
-    for item in ranges:
-        if isinstance(item, dict):
-            start_line = _coerce_int_or_none(item.get("start_line"))
-            end_line = _coerce_int_or_none(item.get("end_line"))
-        elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            start_line = _coerce_int_or_none(item[0])
-            end_line = _coerce_int_or_none(item[1])
-        else:
-            continue
-        if start_line is None or end_line is None or start_line < 1 or end_line < start_line:
-            continue
-        normalized.append((start_line, end_line))
-    normalized.sort()
-    merged: list[tuple[int, int]] = []
-    for start_line, end_line in normalized:
-        if not merged or start_line > merged[-1][1] + 1:
-            merged.append((start_line, end_line))
-            continue
-        prior_start, prior_end = merged[-1]
-        merged[-1] = (prior_start, max(prior_end, end_line))
-    return merged
-
-
-def _artifact_read_coverage_is_complete(*, ranges: Any, total_lines: int) -> bool:
-    if total_lines < 1:
-        return False
-    normalized = _normalize_artifact_read_ranges(ranges)
-    return bool(normalized and normalized[0][0] <= 1 and normalized[0][1] >= total_lines)
-
-
-def _record_artifact_read_ledger(
-    service: Any,
-    *,
-    result: ToolEnvelope,
-    arguments: dict[str, Any] | None,
-    artifact: Any,
-) -> None:
-    state = getattr(service.harness, "state", None)
-    scratchpad = getattr(state, "scratchpad", None) if state is not None else None
-    if not isinstance(scratchpad, dict):
-        return
-    metadata = result.metadata if isinstance(result.metadata, dict) else {}
-    artifact_id = str(metadata.get("artifact_id") or getattr(artifact, "artifact_id", "") or "").strip()
-    if not artifact_id:
-        return
-
-    args = arguments if isinstance(arguments, dict) else {}
-    requested_start = _coerce_int_or_none(args.get("start_line"))
-    requested_end = _coerce_int_or_none(args.get("end_line"))
-    start_line = _coerce_int_or_none(metadata.get("line_start", metadata.get("requested_start_line", requested_start)))
-    end_line = _coerce_int_or_none(metadata.get("line_end", metadata.get("requested_end_line", requested_end)))
-    total_lines = _coerce_int_or_none(metadata.get("total_lines", metadata.get("artifact_total_lines")))
-    if start_line is None:
-        return
-    if end_line is None and total_lines is not None and not bool(metadata.get("truncated")):
-        end_line = total_lines
-    if end_line is None:
-        return
-    if total_lines is not None:
-        end_line = min(end_line, total_lines)
-    if start_line < 1 or end_line < start_line:
-        return
-
-    coverage = scratchpad.setdefault(_ARTIFACT_COVERAGE_SCRATCHPAD_KEY, {})
-    if not isinstance(coverage, dict):
-        coverage = {}
-        scratchpad[_ARTIFACT_COVERAGE_SCRATCHPAD_KEY] = coverage
-    entry = coverage.setdefault(artifact_id, {"ranges": []})
-    if not isinstance(entry, dict):
-        entry = {"ranges": []}
-        coverage[artifact_id] = entry
-
-    if total_lines is not None:
-        entry["total_lines"] = total_lines
-    entry["last_read_step"] = int(getattr(state, "step_count", 0) or 0)
-    entry["truncated"] = bool(metadata.get("truncated"))
-    if getattr(artifact, "source", ""):
-        entry["source"] = str(getattr(artifact, "source", ""))
-    output = result.output if isinstance(result.output, str) else ""
-    if output:
-        entry["preview"] = output[:1200]
-
-    if bool(metadata.get("eof_overread")):
-        entry["eof_overread"] = True
-        return
-
-    ranges = _normalize_artifact_read_ranges(entry.get("ranges", []))
-    ranges.append((start_line, end_line))
-    entry["ranges"] = [
-        {"start_line": merged_start, "end_line": merged_end}
-        for merged_start, merged_end in _normalize_artifact_read_ranges(ranges)
-    ]
-    total = _coerce_int_or_none(entry.get("total_lines"))
-    if total is not None and total > 0:
-        entry["complete"] = _artifact_read_coverage_is_complete(
-            ranges=entry["ranges"],
-            total_lines=total,
-        )
-
 
 def _supersede_prior_read_artifacts(
     service: Any,
@@ -245,65 +169,6 @@ def _mark_prior_read_artifacts_stale(
                     "reason": reason,
                     "paths": [art_path],
                 }
-
-
-_SYMBOL_TOKEN_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]{0,80}$")
-_SYMBOL_LINE_PATTERNS = (
-    re.compile(r"^\s*(?:async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("),
-    re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b"),
-    re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\("),
-    re.compile(r"^\s*(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)\b"),
-    re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*="),
-)
-_SYMBOL_CAPTURE_LIMIT = 24
-_REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
-_STALE_VERIFIER_KEY = "_last_verifier_stale_after_mutation"
-_SSH_FILE_VERIFIER_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
-_REMOTE_MUTATING_COMMAND_RE = re.compile(
-    r"\bsed\s+-i\b"
-    r"|"
-    r"\bperl\s+-p(?:i|[^A-Za-z0-9_]*-i)\b"
-    r"|"
-    r"\bpython3?\s+-c\b.*\bopen\s*\([^)]*['\"]w"
-    r"|"
-    r"(?:^|\s)(?:\d?>|\d?>>|>>|>)\s*(?!/dev/(?:null|stdout|stderr|fd/\d+)\b)\S+"
-    r"|"
-    r"\btee(?:\s+-a)?\s+/\S+"
-    r"|"
-    r"\bcat\s*>\s*/\S+"
-    r"|"
-    r"\b(?:rm|truncate|install\s+-m)\b"
-    r"|"
-    r"\b(?:mv|cp)\b.+\s+/(?:etc|var|usr|opt|srv|root)/\S+",
-    re.IGNORECASE | re.DOTALL,
-)
-_REMOTE_SED_MUTATION_RE = re.compile(r"\bsed\s+-i\b", re.IGNORECASE)
-# Extracts simple `s|old|new|` / `s/old/new/` / `s#old#new#` substitutions from sed commands.
-_SED_SUBSTITUTION_RE = re.compile(
-    r"""s([/|#])((?:\\.|(?!\1).)+)\1((?:\\.|(?!\1).)+)\1[gim]*""",
-    re.IGNORECASE,
-)
-_REMOTE_MULTILINE_REPLACEMENT_RE = re.compile(
-    r"<[A-Za-z][^>]*>.*</[A-Za-z][^>]*>"
-    r"|"
-    r"\\n|\[\\s\\S\]|\.\*"
-    r"|"
-    r"\.(?:html|xml|conf|service|ya?ml|json)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+(?:\.[A-Za-z0-9._-]+)?")
-_REMOTE_DELETION_RE = re.compile(r"\b(?:rm|truncate)\b", re.IGNORECASE)
-_BENIGN_REMOTE_MUTATION_PATHS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
-_BENIGN_REMOTE_MUTATION_PATH_RE = re.compile(r"^/dev/fd/\d+$")
-_REMOTE_SHELL_INTERPRETER_PATHS = frozenset(
-    {"/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh", "/usr/bin/env"}
-)
-_REMOTE_PATH_GLOB_CHARS = frozenset("*?[")
-_REMOTE_CONTROL_TOKENS = frozenset({"&&", "||", "|", ";", "\n", "&"})
-_REMOTE_REDIRECT_TOKENS = frozenset({">", ">>", "<", "<<", "<<<", "<>", ">|"})
-_REMOTE_OUTPUT_REDIRECT_TOKENS = frozenset({">", ">>", "<>", ">|"})
-_REMOTE_DELETION_COMMANDS = frozenset({"rm", "truncate"})
-_REMOTE_PATH_MUTATOR_COMMANDS = frozenset({"sed", "perl", "tee", "cp", "mv", "install"})
 
 
 def _maybe_emit_artifact_read_eof_overread_nudge(
@@ -623,7 +488,7 @@ def _record_remote_mutation_requirement(
     host = str(arguments.get("host") or arguments.get("target") or "").strip()
     is_deletion = _REMOTE_DELETION_RE.search(mutation_command) is not None
     guessed_paths = _guess_remote_mutation_paths(mutation_command, deletion=is_deletion)
-    directory_empty_checks = _guess_remote_deletion_directory_empty_checks(mutation_command) if is_deletion else []
+    directory_empty_checks = guess_deletion_directory_empty_checks(mutation_command) if is_deletion else []
     if is_deletion and not guessed_paths and not directory_empty_checks:
         return
     requirement: dict[str, Any] = {
@@ -688,324 +553,6 @@ def _record_remote_mutation_requirement(
             guessed_paths=guessed_paths,
             multiline=bool(_REMOTE_MULTILINE_REPLACEMENT_RE.search(command)),
         )
-
-
-def _guess_remote_mutation_paths(command: str, *, deletion: bool = False) -> list[str]:
-    if deletion:
-        return _guess_remote_deletion_paths(command)
-    paths: list[str] = []
-    _collect_remote_redirection_targets(command, paths)
-    _collect_remote_mutator_operands(command, paths)
-    if _python_open_write_mutation(command):
-        for match in _REMOTE_PATH_RE.finditer(str(command or "")):
-            _append_remote_mutation_path(paths, match.group(0))
-    return paths[:12]
-
-
-def _collect_remote_redirection_targets(command: str, paths: list[str]) -> None:
-    for tokens in _remote_shell_command_lines(command):
-        index = 0
-        while index < len(tokens):
-            target_index = _redirection_target_index(tokens, index, output_only=True)
-            if target_index is None:
-                index += 1
-                continue
-            if target_index < len(tokens):
-                target = _redirection_target_token(tokens[target_index])
-                _append_remote_mutation_path(paths, target)
-            index = target_index + 1
-
-
-def _collect_remote_mutator_operands(command: str, paths: list[str]) -> None:
-    for tokens in _remote_shell_command_lines(command):
-        index = 0
-        while index < len(tokens):
-            token = _shell_command_name(tokens[index])
-            if token not in _REMOTE_PATH_MUTATOR_COMMANDS:
-                index += 1
-                continue
-            index = _collect_mutator_path_operands(tokens, index, paths)
-
-
-def _collect_mutator_path_operands(tokens: list[str], command_index: int, paths: list[str]) -> int:
-    command = _shell_command_name(tokens[command_index])
-    index = command_index + 1
-    operands: list[str] = []
-    while index < len(tokens):
-        token = tokens[index]
-        if token in _REMOTE_CONTROL_TOKENS or token == "+":
-            break
-        target_index = _redirection_target_index(tokens, index, output_only=False)
-        if target_index is not None:
-            index = target_index + 1
-            continue
-        if token == "--" or token.startswith("-") or token in {"{}", r"\;"}:
-            index += 1
-            continue
-        normalized = _normalize_remote_mutation_operand(token)
-        if normalized:
-            operands.append(normalized)
-        index += 1
-
-    if command in {"cp", "install"} and operands:
-        _append_remote_mutation_path(paths, operands[-1])
-    else:
-        for operand in operands:
-            _append_remote_mutation_path(paths, operand)
-    return max(index, command_index + 1)
-
-
-def _python_open_write_mutation(command: str) -> bool:
-    return bool(
-        re.search(
-            r"\bpython3?\s+-c\b.*\bopen\s*\([^)]*['\"]w",
-            str(command or ""),
-            re.IGNORECASE | re.DOTALL,
-        )
-    )
-
-
-def _guess_remote_deletion_paths(command: str) -> list[str]:
-    paths: list[str] = []
-    for tokens in _remote_shell_command_lines(command):
-        index = 0
-        while index < len(tokens):
-            token = _shell_command_name(tokens[index])
-            if token in _REMOTE_DELETION_COMMANDS:
-                index = _collect_deletion_operands(tokens, index + 1, paths)
-                continue
-            index += 1
-    return paths[:12]
-
-
-def _guess_remote_deletion_directory_empty_checks(command: str) -> list[dict[str, str]]:
-    checks: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for tokens in _remote_shell_command_lines(command):
-        index = 0
-        while index < len(tokens):
-            token = _shell_command_name(tokens[index])
-            if token in _REMOTE_DELETION_COMMANDS:
-                index = _collect_deletion_glob_checks(tokens, index + 1, checks, seen)
-                continue
-            index += 1
-    return checks[:12]
-
-
-def _remote_shell_command_lines(command: str) -> list[list[str]]:
-    lines: list[list[str]] = []
-    for raw_line in str(command or "").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-            lexer.whitespace_split = True
-            lexer.commenters = "#"
-            tokens = list(lexer)
-        except ValueError:
-            tokens = shlex.split(line, comments=True, posix=True)
-        if tokens:
-            lines.append(tokens)
-    return lines
-
-
-def _collect_deletion_operands(tokens: list[str], start_index: int, paths: list[str]) -> int:
-    index = start_index
-    while index < len(tokens):
-        token = tokens[index]
-        if token in _REMOTE_CONTROL_TOKENS or token == "+":
-            return index + 1
-        if _token_starts_redirection(tokens, index):
-            index = _skip_redirection(tokens, index)
-            continue
-        if token == "--" or token.startswith("-") or token in {"{}", r"\;"}:
-            index += 1
-            continue
-        path = _normalize_remote_deletion_operand(token)
-        if path and path not in paths:
-            paths.append(path)
-        index += 1
-    return index
-
-
-def _collect_deletion_glob_checks(
-    tokens: list[str],
-    start_index: int,
-    checks: list[dict[str, str]],
-    seen: set[str],
-) -> int:
-    index = start_index
-    while index < len(tokens):
-        token = tokens[index]
-        if token in _REMOTE_CONTROL_TOKENS or token == "+":
-            return index + 1
-        if _token_starts_redirection(tokens, index):
-            index = _skip_redirection(tokens, index)
-            continue
-        if token == "--" or token.startswith("-") or token in {"{}", r"\;"}:
-            index += 1
-            continue
-        check = _remote_deletion_glob_empty_check(token)
-        path = check.get("path", "") if check else ""
-        if check and path not in seen:
-            seen.add(path)
-            checks.append(check)
-        index += 1
-    return index
-
-
-def _shell_command_name(token: str) -> str:
-    value = str(token or "").strip()
-    if not value:
-        return ""
-    return Path(value).name.lower()
-
-
-def _token_starts_redirection(tokens: list[str], index: int) -> bool:
-    token = str(tokens[index] or "").strip()
-    if token in _REMOTE_REDIRECT_TOKENS:
-        return True
-    if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in _REMOTE_REDIRECT_TOKENS:
-        return True
-    return bool(re.match(r"^\d*(?:>>?|<<?|<>)", token))
-
-
-def _skip_redirection(tokens: list[str], index: int) -> int:
-    token = str(tokens[index] or "").strip()
-    if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in _REMOTE_REDIRECT_TOKENS:
-        index += 2
-    elif token in _REMOTE_REDIRECT_TOKENS:
-        index += 1
-    else:
-        index += 1
-        return index
-    if index < len(tokens) and tokens[index] not in _REMOTE_CONTROL_TOKENS:
-        index += 1
-    return index
-
-
-def _redirection_target_index(tokens: list[str], index: int, *, output_only: bool) -> int | None:
-    token = str(tokens[index] or "").strip()
-    redirect_token = ""
-    target_index = index + 1
-    if token.isdigit() and index + 1 < len(tokens) and tokens[index + 1] in _REMOTE_REDIRECT_TOKENS:
-        redirect_token = str(tokens[index + 1])
-        target_index = index + 2
-    elif token in _REMOTE_REDIRECT_TOKENS:
-        redirect_token = token
-    else:
-        compact = re.match(r"^\d*(>>?|<>|>\|)(/\S+)$", token)
-        if not compact:
-            return None
-        redirect_token = compact.group(1)
-        if output_only and redirect_token not in _REMOTE_OUTPUT_REDIRECT_TOKENS:
-            return None
-        return index
-
-    if output_only and redirect_token not in _REMOTE_OUTPUT_REDIRECT_TOKENS:
-        return None
-    if redirect_token in {"<<", "<<<"}:
-        return None
-    if target_index < len(tokens) and tokens[target_index] not in _REMOTE_CONTROL_TOKENS:
-        return target_index
-    return None
-
-
-def _redirection_target_token(token: str) -> str:
-    value = str(token or "").strip()
-    compact = re.match(r"^\d*(?:>>?|<>|>\|)(/\S+)$", value)
-    if compact:
-        return compact.group(1)
-    return value
-
-
-def _normalize_remote_deletion_operand(token: str) -> str:
-    candidate = str(token or "").strip().strip("`'\"")
-    candidate = candidate.rstrip(";,")
-    if not candidate.startswith("/"):
-        return ""
-    if any(char in candidate for char in _REMOTE_PATH_GLOB_CHARS):
-        return ""
-    if candidate.endswith("/"):
-        candidate = candidate.rstrip("/")
-    if not _REMOTE_PATH_RE.fullmatch(candidate):
-        return ""
-    if _remote_path_should_be_ignored(candidate):
-        return ""
-    return candidate
-
-
-def _normalize_remote_mutation_operand(token: str) -> str:
-    candidate = str(token or "").strip().strip("`'\"")
-    candidate = candidate.rstrip(";,")
-    if not candidate.startswith("/"):
-        return ""
-    if any(char in candidate for char in _REMOTE_PATH_GLOB_CHARS):
-        return ""
-    if candidate.endswith("/"):
-        candidate = candidate.rstrip("/")
-    if not _REMOTE_PATH_RE.fullmatch(candidate):
-        return ""
-    if _remote_path_should_be_ignored(candidate) or _remote_path_is_known_directory(candidate):
-        return ""
-    return candidate
-
-
-def _append_remote_mutation_path(paths: list[str], path: str) -> None:
-    normalized = _normalize_remote_mutation_operand(path)
-    if normalized and normalized not in paths:
-        paths.append(normalized)
-
-
-def _remote_path_is_known_directory(path: str) -> bool:
-    return str(path or "").strip().rstrip("/") in {
-        "/",
-        "/bin",
-        "/boot",
-        "/dev",
-        "/etc",
-        "/home",
-        "/opt",
-        "/proc",
-        "/root",
-        "/run",
-        "/sbin",
-        "/srv",
-        "/sys",
-        "/tmp",
-        "/usr",
-        "/var",
-    }
-
-
-def _remote_deletion_glob_empty_check(token: str) -> dict[str, str] | None:
-    candidate = str(token or "").strip().strip("`'\"").rstrip(";,")
-    if not candidate.startswith("/") or not any(char in candidate for char in _REMOTE_PATH_GLOB_CHARS):
-        return None
-    if not candidate.endswith("/*"):
-        return None
-    parent = candidate[:-2].rstrip("/")
-    if not parent or not _REMOTE_PATH_RE.fullmatch(parent):
-        return None
-    if _remote_path_should_be_ignored(parent):
-        return None
-    return {"path": parent, "glob": candidate}
-
-
-def _remote_path_should_be_ignored(path: str) -> bool:
-    normalized = str(path or "").strip()
-    if (
-        normalized in _BENIGN_REMOTE_MUTATION_PATHS
-        or normalized in _REMOTE_SHELL_INTERPRETER_PATHS
-        or bool(_BENIGN_REMOTE_MUTATION_PATH_RE.match(normalized))
-    ):
-        return True
-    # Ignore ephemeral temp files that are not task deliverables
-    return any(
-        normalized.startswith(prefix)
-        for prefix in ("/tmp/", "/var/tmp/", "/dev/shm/")
-    )
 
 
 def _emit_remote_mutation_nudge(
@@ -1134,68 +681,19 @@ def _clear_remote_mutation_requirement_from_tool(
 
 
 def _mark_remote_mutation_path_verified(requirement: dict[str, Any], path: str) -> None:
-    normalized = str(path or "").strip()
-    if not normalized:
-        return
-    verified = requirement.get("verified_paths")
-    if not isinstance(verified, list):
-        verified = []
-    cleaned = [str(item).strip() for item in verified if str(item).strip()]
-    if normalized not in cleaned:
-        cleaned.append(normalized)
-    requirement["verified_paths"] = cleaned[-24:]
+    mark_remote_mutation_path_verified(requirement, path)
 
 
 def _mark_remote_mutation_directory_verified(requirement: dict[str, Any], path: str) -> None:
-    normalized = str(path or "").strip().rstrip("/")
-    if not normalized:
-        return
-    verified = requirement.get("verified_directory_empty_checks")
-    if not isinstance(verified, list):
-        verified = []
-    cleaned = [str(item).strip().rstrip("/") for item in verified if str(item).strip()]
-    if normalized not in cleaned:
-        cleaned.append(normalized)
-    requirement["verified_directory_empty_checks"] = cleaned[-24:]
+    mark_remote_mutation_directory_verified(requirement, path)
 
 
 def _remote_mutation_requirement_satisfied(requirement: dict[str, Any]) -> bool:
-    guessed_paths = [str(item).strip() for item in requirement.get("guessed_paths", []) if str(item).strip()]
-    verified_paths = {
-        str(item).strip()
-        for item in requirement.get("verified_paths", [])
-        if str(item).strip()
-    }
-    pending_paths = [path for path in guessed_paths if path not in verified_paths]
-
-    directory_checks = _remote_mutation_directory_checks(requirement)
-    verified_directories = {
-        str(item).strip().rstrip("/")
-        for item in requirement.get("verified_directory_empty_checks", [])
-        if str(item).strip()
-    }
-    pending_directories = [
-        check["path"] for check in directory_checks if check["path"] not in verified_directories
-    ]
-    return not pending_paths and not pending_directories
+    return remote_mutation_requirement_satisfied(requirement)
 
 
 def _remote_mutation_directory_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
-    raw_checks = requirement.get("directory_empty_checks")
-    if not isinstance(raw_checks, list):
-        return []
-    checks: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in raw_checks:
-        if not isinstance(item, dict):
-            continue
-        path = str(item.get("path") or "").strip().rstrip("/")
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        glob = str(item.get("glob") or "").strip()
-        checks.append({"path": path, "glob": glob})
-    return checks
+    return remote_mutation_directory_checks(requirement)
 
 
 def _record_failed_verification_attempt(
@@ -1581,22 +1079,22 @@ def _record_touched_symbols_from_mutation(
 
     candidates: list[str] = []
     for chunk in text_chunks:
-        candidates.extend(_extract_symbol_candidates_from_text(chunk))
+        candidates.extend(extract_symbol_candidates_from_text(chunk))
 
     path_candidate = str(mutated_path or metadata.get("path") or "").strip()
     if not path_candidate and isinstance(arguments, dict):
         path_candidate = str(arguments.get("path") or "").strip()
     if not path_candidate and artifact is not None:
         path_candidate = str(getattr(artifact, "source", "") or "").strip()
-    candidates.extend(_extract_symbol_candidates_from_path(path_candidate))
-    candidates.extend(_extract_symbol_candidates_from_file(path_candidate, cwd=str(service.harness.state.cwd or "")))
+    candidates.extend(extract_symbol_candidates_from_path(path_candidate))
+    candidates.extend(extract_symbol_candidates_from_file(path_candidate, cwd=str(service.harness.state.cwd or "")))
 
-    deduped = dedupe_keep_tail(existing_symbols + [token for token in candidates if token], limit=_SYMBOL_CAPTURE_LIMIT)
+    deduped = dedupe_keep_tail(existing_symbols + [token for token in candidates if token], limit=SYMBOL_CAPTURE_LIMIT)
     if not deduped:
         return
     existing = service.harness.state.scratchpad.get("_touched_symbols")
     existing_list = [str(item).strip() for item in existing] if isinstance(existing, list) else []
-    merged = dedupe_keep_tail(existing_list + deduped, limit=_SYMBOL_CAPTURE_LIMIT)
+    merged = dedupe_keep_tail(existing_list + deduped, limit=SYMBOL_CAPTURE_LIMIT)
     if not merged:
         return
     service.harness.state.scratchpad["_touched_symbols"] = merged
@@ -1610,70 +1108,6 @@ def _record_touched_symbols_from_mutation(
             symbol_count=len(deduped),
             symbols=deduped[:8],
         )
-
-
-def _extract_symbol_candidates_from_text(text: str) -> list[str]:
-    symbols: list[str] = []
-    if not text:
-        return symbols
-    for raw_line in str(text).splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith(("+++", "---")):
-            continue
-        if line[0] in {"+", "-"} and len(line) > 1:
-            line = line[1:].lstrip()
-        for pattern in _SYMBOL_LINE_PATTERNS:
-            match = pattern.search(line)
-            if match is None:
-                continue
-            token = _normalize_symbol_token(match.group(1))
-            if token and token not in symbols:
-                symbols.append(token)
-    return symbols
-
-
-def _extract_symbol_candidates_from_path(path: str) -> list[str]:
-    normalized = str(path or "").strip()
-    if not normalized:
-        return []
-    stem = Path(normalized).stem.strip()
-    if stem.lower() in {"", "__init__", "__main__", "index", "main"}:
-        return []
-    token = _normalize_symbol_token(stem)
-    return [token] if token else []
-
-
-def _extract_symbol_candidates_from_file(path: str, *, cwd: str) -> list[str]:
-    normalized = str(path or "").strip()
-    if not normalized:
-        return []
-    candidate = Path(normalized)
-    if not candidate.is_absolute():
-        candidate = Path(cwd or ".") / candidate
-    try:
-        if not candidate.exists() or not candidate.is_file():
-            return []
-        content = candidate.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return []
-    # We only need top-level-ish anchors for prompt stability; avoid scanning huge files.
-    lines = content.splitlines()[:500]
-    return _extract_symbol_candidates_from_text("\n".join(lines))
-
-
-def _normalize_symbol_token(value: str) -> str:
-    token = str(value or "").strip().strip("`'\".,:;()[]{}<>")
-    if not token:
-        return ""
-    if token.lower() in {"path", "file", "content", "target", "replacement"}:
-        return ""
-    if not _SYMBOL_TOKEN_RE.match(token):
-        return ""
-    return token
-
-
 _CRITICAL_ERROR_RE = re.compile(
     r"^(?:\s*[-*]+\s*)?(?:Error|ERROR|error|fatal|FATAL|Failed|FAILED|FAILURE|failure|Exception|EXCEPTION)\b.*",
     re.MULTILINE,
@@ -1840,127 +1274,63 @@ def _is_dry_run_invariant_violation(tool_name: str, result: ToolEnvelope) -> boo
     return dry_run and bool(changed)
 
 
-def apply_artifact_success_outcome(
+def _apply_shell_exec_updates(
     service: Any,
     *,
     tool_name: str,
     result: ToolEnvelope,
     artifact: Any,
     arguments: dict[str, Any] | None,
-    operation_id: str | None,
-) -> Any:
+) -> None:
+    """Apply side-effects for shell_exec and ssh_exec results."""
     artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip() if artifact else ""
-    if artifact:
-        service.harness.state.artifacts[artifact.artifact_id] = artifact
-        service.harness.state.retrieval_cache = [artifact.artifact_id]
-    if _is_dry_run_invariant_violation(tool_name, result):
-        result.success = False
-        result.status = "failed"
-        if not result.error:
-            result.error = "Tool returned contradictory metadata: dry_run=true with changed=yes. This is an invariant violation."
-        result.metadata = {**(result.metadata if isinstance(result.metadata, dict) else {}), "dry_run_invariant_violation": True}
-        service.harness._runlog(
-            "dry_run_invariant_violation",
-            "SSH mutating tool returned dry_run=true and changed=yes; treating as failure",
-            tool_name=tool_name,
-        )
-    if tool_name in {"shell_exec", "ssh_exec"} and artifact_id:
+    if artifact_id:
         _consolidate_shell_attempt_family(state=service.harness.state, artifact_id=artifact_id, result=result)
         _record_stderr_signature_circuit_breaker(service, tool_name=tool_name, result=result)
     if tool_name == "ssh_exec":
-        _remember_session_ssh_target(
-            service,
-            tool_name=tool_name,
-            result=result,
-            arguments=arguments,
-        )
-        _observe_remote_installer_preflight_check(
-            service,
-            result=result,
-            arguments=arguments,
-        )
-        _handle_remote_mutation_verifier_result(
-            service,
-            result=result,
-            arguments=arguments,
-        )
-        # Count failed ssh_exec verifier attempts so the requirement can be
-        # auto-disabled after repeated SSH failures (e.g. auth unavailable).
+        _remember_session_ssh_target(service, tool_name=tool_name, result=result, arguments=arguments)
+        _observe_remote_installer_preflight_check(service, result=result, arguments=arguments)
+        _handle_remote_mutation_verifier_result(service, result=result, arguments=arguments)
         if not result.success:
-            _record_failed_verification_attempt(
-                service,
-                tool_name=tool_name,
-                result=result,
-                arguments=arguments,
-            )
-        _record_remote_mutation_requirement(
-            service,
-            result=result,
-            arguments=arguments,
-        )
-    elif tool_name in _SSH_FILE_VERIFIER_TOOLS:
-        _remember_session_ssh_target(
-            service,
-            tool_name=tool_name,
-            result=result,
-            arguments=arguments,
-        )
-        if not result.success:
-            _record_failed_verification_attempt(
-                service,
-                tool_name=tool_name,
-                result=result,
-                arguments=arguments,
-            )
-            _maybe_emit_bounded_region_trap_nudge(
-                service,
-                tool_name=tool_name,
-                result=result,
-                arguments=arguments,
-            )
-        _clear_remote_mutation_requirement_from_tool(
-            service,
-            tool_name=tool_name,
-            result=result,
-            arguments=arguments,
-        )
-    elif tool_name == "web_search" and result.success:
-        _remember_web_search_results(
-            service,
-            result=result,
-            artifact=artifact,
-        )
-    verifier_verdict = _store_verifier_verdict(
-        service.harness.state,
-        tool_name=tool_name,
-        result=result,
-        arguments=arguments,
-    )
-    loop_info = track_verifier_rejection(service.harness.state, verifier_verdict)
-    if loop_info.get("is_loop"):
-        service.harness._runlog(
-            "verifier_loop_detected",
-            "Verifier rejecting task_complete repeatedly",
-            rejection_count=loop_info["rejection_count"],
-            last_verdict=loop_info["verdict"],
-        )
-    _update_subtask_ledger_from_verifier(service, verifier_verdict)
-    if isinstance(verifier_verdict, dict):
-        verdict_label = str(verifier_verdict.get("verdict") or "").strip().lower()
-        if verdict_label == "fail":
-            _emit_context_invalidation(
-                service,
-                reason="verifier_failed",
-                details={
-                    "command": str(verifier_verdict.get("command") or ""),
-                    "target": str(verifier_verdict.get("target") or ""),
-                    "failure_mode": str(getattr(service.harness.state, "last_failure_class", "") or ""),
-                    "state_change": "Verifier failure invalidated optimistic context",
-                },
-            )
-    if artifact and isinstance(verifier_verdict, dict) and verifier_verdict:
-        _annotate_verifier_artifact(artifact, verifier_verdict=verifier_verdict)
-    if tool_name == "file_read" and result.success and artifact:
+            _record_failed_verification_attempt(service, tool_name=tool_name, result=result, arguments=arguments)
+        _record_remote_mutation_requirement(service, result=result, arguments=arguments)
+
+
+def _apply_ssh_file_verifier_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Apply side-effects for SSH file verifier tools."""
+    _remember_session_ssh_target(service, tool_name=tool_name, result=result, arguments=arguments)
+    if not result.success:
+        _record_failed_verification_attempt(service, tool_name=tool_name, result=result, arguments=arguments)
+        _maybe_emit_bounded_region_trap_nudge(service, tool_name=tool_name, result=result, arguments=arguments)
+    _clear_remote_mutation_requirement_from_tool(service, tool_name=tool_name, result=result, arguments=arguments)
+
+
+def _apply_web_search_updates(
+    service: Any,
+    *,
+    result: ToolEnvelope,
+    artifact: Any,
+) -> None:
+    """Apply side-effects for web_search results."""
+    _remember_web_search_results(service, result=result, artifact=artifact)
+
+
+def _apply_file_read_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    artifact: Any,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Apply side-effects for file_read and ssh_file_read results."""
+    if tool_name == "file_read":
         cache_key = _file_read_cache_key(service.harness.state.cwd, result.metadata)
         if cache_key:
             cache = service.harness.state.scratchpad.setdefault("file_read_cache", {})
@@ -1977,7 +1347,7 @@ def apply_artifact_success_outcome(
                 tool_name="file_read",
                 path=read_path,
             )
-    elif tool_name == "ssh_file_read" and result.success and artifact:
+    elif tool_name == "ssh_file_read":
         cache_key = _ssh_file_read_cache_key(result.metadata)
         if cache_key:
             cache = service.harness.state.scratchpad.setdefault("ssh_file_read_cache", {})
@@ -1997,111 +1367,135 @@ def apply_artifact_success_outcome(
                 path=read_path,
                 host=read_host,
             )
-    elif is_file_mutating_tool(tool_name) and result.success:
-        metadata = result.metadata if isinstance(result.metadata, dict) else {}
-        if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
-            pass
-        else:
-            mutated_path = ""
-            if isinstance(result.metadata, dict):
-                mutated_path = str(result.metadata.get("path") or "").strip()
-            if not mutated_path and isinstance(arguments, dict):
-                mutated_path = str(arguments.get("path") or "").strip()
-            if mutated_path:
-                _invalidate_file_read_cache(service.harness, mutated_path)
-                _mark_prior_read_artifacts_stale(
-                    service,
-                    path=mutated_path,
-                    reason=f"{tool_name}_applied",
-                )
-                _emit_context_invalidation(
-                    service,
-                    reason="file_changed",
-                    paths=[mutated_path],
-                    details={
-                        "tool_name": tool_name,
-                        "state_change": f"File changed: {mutated_path}",
-                    },
-                )
-                _mark_verifier_stale_after_file_change(
-                    service,
-                    tool_name=tool_name,
-                    paths=[mutated_path],
-                )
-            record_code_change(
-                service.harness.state,
-                tool_name=tool_name,
-                path=mutated_path,
-                changed=True,
-            )
-            _record_touched_symbols_from_mutation(
-                service,
-                tool_name=tool_name,
-                result=result,
-                arguments=arguments,
-                artifact=artifact,
-                mutated_path=mutated_path,
-            )
-    elif tool_name in SSH_FILE_MUTATING_TOOLS and result.success:
-        metadata = result.metadata if isinstance(result.metadata, dict) else {}
-        if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
-            pass
-        else:
-            mutated_path = ""
-            host = ""
-            if isinstance(result.metadata, dict):
-                mutated_path = str(result.metadata.get("path") or "").strip()
-                host = str(result.metadata.get("host") or "").strip().lower()
-            if not mutated_path and isinstance(arguments, dict):
-                mutated_path = str(arguments.get("path") or "").strip()
-                host = str(arguments.get("host") or "").strip().lower()
-            if mutated_path and host:
-                cache = service.harness.state.scratchpad.get("ssh_file_read_cache")
-                if isinstance(cache, dict):
-                    prefix = f"ssh://{host}{mutated_path}"
-                    for key in list(cache.keys()):
-                        if key.startswith(prefix):
-                            cache.pop(key, None)
-                _emit_context_invalidation(
-                    service,
-                    reason="file_changed",
-                    paths=[f"{host}:{mutated_path}"],
-                    details={
-                        "tool_name": tool_name,
-                        "state_change": f"Remote file changed: {host}:{mutated_path}",
-                    },
-                )
-                _mark_verifier_stale_after_file_change(
-                    service,
-                    tool_name=tool_name,
-                    paths=[f"{host}:{mutated_path}"],
-                )
-                from ..graph.tool_call_parser import allow_repeated_tool_call_once
 
-                # Grant a one-shot pass for ssh_file_read using the same connection
-                # parameters the model will likely emit (host/user/password/path).
-                # We copy them from the original patch arguments so the fingerprint
-                # matches the model's next read attempt.
-                one_shot_args: dict[str, Any] = {"path": mutated_path, "host": host}
-                if isinstance(arguments, dict):
-                    for conn_key in ("user", "password", "target", "port", "identity_file"):
-                        val = arguments.get(conn_key)
-                        if val is not None:
-                            one_shot_args[conn_key] = val
-                allow_repeated_tool_call_once(
-                    service.harness,
-                    "ssh_file_read",
-                    one_shot_args,
-                )
-            _record_touched_symbols_from_mutation(
-                service,
-                tool_name=tool_name,
-                result=result,
-                arguments=arguments,
-                artifact=artifact,
-                mutated_path=mutated_path,
-            )
 
+def _apply_file_mutation_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    arguments: dict[str, Any] | None,
+    artifact: Any,
+) -> None:
+    """Apply side-effects for local file mutating tools."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
+        return
+    mutated_path = ""
+    if isinstance(result.metadata, dict):
+        mutated_path = str(result.metadata.get("path") or "").strip()
+    if not mutated_path and isinstance(arguments, dict):
+        mutated_path = str(arguments.get("path") or "").strip()
+    if mutated_path:
+        _invalidate_file_read_cache(service.harness, mutated_path)
+        _mark_prior_read_artifacts_stale(
+            service,
+            path=mutated_path,
+            reason=f"{tool_name}_applied",
+        )
+        _emit_context_invalidation(
+            service,
+            reason="file_changed",
+            paths=[mutated_path],
+            details={
+                "tool_name": tool_name,
+                "state_change": f"File changed: {mutated_path}",
+            },
+        )
+        _mark_verifier_stale_after_file_change(
+            service,
+            tool_name=tool_name,
+            paths=[mutated_path],
+        )
+    record_code_change(
+        service.harness.state,
+        tool_name=tool_name,
+        path=mutated_path,
+        changed=True,
+    )
+    _record_touched_symbols_from_mutation(
+        service,
+        tool_name=tool_name,
+        result=result,
+        arguments=arguments,
+        artifact=artifact,
+        mutated_path=mutated_path,
+    )
+
+
+def _apply_ssh_file_mutation_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    arguments: dict[str, Any] | None,
+    artifact: Any,
+) -> None:
+    """Apply side-effects for SSH file mutating tools."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
+        return
+    mutated_path = ""
+    host = ""
+    if isinstance(result.metadata, dict):
+        mutated_path = str(result.metadata.get("path") or "").strip()
+        host = str(result.metadata.get("host") or "").strip().lower()
+    if not mutated_path and isinstance(arguments, dict):
+        mutated_path = str(arguments.get("path") or "").strip()
+        host = str(arguments.get("host") or "").strip().lower()
+    if mutated_path and host:
+        cache = service.harness.state.scratchpad.get("ssh_file_read_cache")
+        if isinstance(cache, dict):
+            prefix = f"ssh://{host}{mutated_path}"
+            for key in list(cache.keys()):
+                if key.startswith(prefix):
+                    cache.pop(key, None)
+        _emit_context_invalidation(
+            service,
+            reason="file_changed",
+            paths=[f"{host}:{mutated_path}"],
+            details={
+                "tool_name": tool_name,
+                "state_change": f"Remote file changed: {host}:{mutated_path}",
+            },
+        )
+        _mark_verifier_stale_after_file_change(
+            service,
+            tool_name=tool_name,
+            paths=[f"{host}:{mutated_path}"],
+        )
+        from ..graph.tool_call_parser import allow_repeated_tool_call_once
+
+        one_shot_args: dict[str, Any] = {"path": mutated_path, "host": host}
+        if isinstance(arguments, dict):
+            for conn_key in ("user", "password", "target", "port", "identity_file"):
+                val = arguments.get(conn_key)
+                if val is not None:
+                    one_shot_args[conn_key] = val
+        allow_repeated_tool_call_once(
+            service.harness,
+            "ssh_file_read",
+            one_shot_args,
+        )
+    _record_touched_symbols_from_mutation(
+        service,
+        tool_name=tool_name,
+        result=result,
+        arguments=arguments,
+        artifact=artifact,
+        mutated_path=mutated_path,
+    )
+
+
+def _apply_plan_and_read_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    artifact: Any,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Apply side-effects for plan tools, memory_update, and artifact_read."""
     if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
         playbook_artifact_id = str(result.metadata.get("artifact_id", "") or "").strip()
         if playbook_artifact_id:
@@ -2156,6 +1550,60 @@ def apply_artifact_success_outcome(
             artifact=artifact,
         )
 
+
+def _apply_verifier_and_evidence_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    artifact: Any,
+    arguments: dict[str, Any] | None,
+) -> Any:
+    """Store verifier verdict, update ledger, emit invalidations, and record evidence."""
+    verifier_verdict = _store_verifier_verdict(
+        service.harness.state,
+        tool_name=tool_name,
+        result=result,
+        arguments=arguments,
+    )
+    loop_info = track_verifier_rejection(service.harness.state, verifier_verdict)
+    if loop_info.get("is_loop"):
+        service.harness._runlog(
+            "verifier_loop_detected",
+            "Verifier rejecting task_complete repeatedly",
+            rejection_count=loop_info["rejection_count"],
+            last_verdict=loop_info["verdict"],
+        )
+    _update_subtask_ledger_from_verifier(service, verifier_verdict)
+    if isinstance(verifier_verdict, dict):
+        verdict_label = str(verifier_verdict.get("verdict") or "").strip().lower()
+        if verdict_label == "fail":
+            _emit_context_invalidation(
+                service,
+                reason="verifier_failed",
+                details={
+                    "command": str(verifier_verdict.get("command") or ""),
+                    "target": str(verifier_verdict.get("target") or ""),
+                    "failure_mode": str(getattr(service.harness.state, "last_failure_class", "") or ""),
+                    "state_change": "Verifier failure invalidated optimistic context",
+                },
+            )
+    if artifact and isinstance(verifier_verdict, dict) and verifier_verdict:
+        _annotate_verifier_artifact(artifact, verifier_verdict=verifier_verdict)
+    return verifier_verdict
+
+
+def _apply_finalization_updates(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    artifact: Any,
+    arguments: dict[str, Any] | None,
+    operation_id: str | None,
+    verifier_verdict: Any,
+) -> Any:
+    """Record evidence, update known facts, and return the evidence object."""
     evidence = _record_evidence(
         service,
         tool_name=tool_name,
@@ -2185,3 +1633,58 @@ def apply_artifact_success_outcome(
     _extract_and_pin_critical_errors(service, tool_name=tool_name, result=result, artifact=artifact)
     service.harness.state.recent_errors = []
     return evidence
+
+
+def apply_artifact_success_outcome(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    artifact: Any,
+    arguments: dict[str, Any] | None,
+    operation_id: str | None,
+) -> Any:
+    artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip() if artifact else ""
+    if artifact:
+        service.harness.state.artifacts[artifact.artifact_id] = artifact
+        service.harness.state.retrieval_cache = [artifact.artifact_id]
+    if _is_dry_run_invariant_violation(tool_name, result):
+        result.success = False
+        result.status = "failed"
+        if not result.error:
+            result.error = "Tool returned contradictory metadata: dry_run=true with changed=yes. This is an invariant violation."
+        result.metadata = {**(result.metadata if isinstance(result.metadata, dict) else {}), "dry_run_invariant_violation": True}
+        service.harness._runlog(
+            "dry_run_invariant_violation",
+            "SSH mutating tool returned dry_run=true and changed=yes; treating as failure",
+            tool_name=tool_name,
+        )
+    if tool_name in {"shell_exec", "ssh_exec"}:
+        _apply_shell_exec_updates(service, tool_name=tool_name, result=result, artifact=artifact, arguments=arguments)
+    elif tool_name in _SSH_FILE_VERIFIER_TOOLS:
+        _apply_ssh_file_verifier_updates(service, tool_name=tool_name, result=result, arguments=arguments)
+    elif tool_name == "web_search" and result.success:
+        _apply_web_search_updates(service, result=result, artifact=artifact)
+
+    verifier_verdict = _apply_verifier_and_evidence_updates(
+        service, tool_name=tool_name, result=result, artifact=artifact, arguments=arguments
+    )
+
+    if tool_name in {"file_read", "ssh_file_read"} and result.success and artifact:
+        _apply_file_read_updates(service, tool_name=tool_name, result=result, artifact=artifact, arguments=arguments)
+    elif is_file_mutating_tool(tool_name) and result.success:
+        _apply_file_mutation_updates(service, tool_name=tool_name, result=result, arguments=arguments, artifact=artifact)
+    elif tool_name in SSH_FILE_MUTATING_TOOLS and result.success:
+        _apply_ssh_file_mutation_updates(service, tool_name=tool_name, result=result, arguments=arguments, artifact=artifact)
+
+    _apply_plan_and_read_updates(service, tool_name=tool_name, result=result, artifact=artifact, arguments=arguments)
+
+    return _apply_finalization_updates(
+        service,
+        tool_name=tool_name,
+        result=result,
+        artifact=artifact,
+        arguments=arguments,
+        operation_id=operation_id,
+        verifier_verdict=verifier_verdict,
+    )

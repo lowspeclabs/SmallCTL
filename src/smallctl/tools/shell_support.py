@@ -9,73 +9,65 @@ from ..state import LoopState
 from .common import fail
 from .fs_sessions import _same_target_path, _write_session_can_finalize
 from .fs_write_session_policy import _write_session_resume_metadata
+from .shell_parsing import (
+    _simple_shell_command_segments,
+    _split_shell_command_segments,
+    _split_shell_words,
+    _strip_environment_and_wrappers,
+)
+from .shell_path_utils import (
+    _is_within_path,
+    _path_alias_mentioned,
+    _safe_resolve_path,
+    _target_path_aliases,
+    _token_path_candidates,
+)
+from .shell_support_constants import (
+    _ARGPARSE_REQUIRED_ARGS_PATTERN,
+    _DEB822_FIELDS,
+    _DETACHED_COMMAND_MARKERS,
+    _DISPOSABLE_PATH_NAMES,
+    _DISPOSABLE_PATH_SUFFIXES,
+    _FOLLOW_FLAGS,
+    _FOREGROUND_BINARIES,
+    _FOREGROUND_SUBCOMMANDS,
+    _INSPECTION_FLAGS,
+    _INVALID_INPUT_MARKERS,
+    _PACKAGE_RUNNERS,
+    _REMOTE_INSTALLER_PREFLIGHT_KEY,
+    _SERVICE_MANAGER_COMMANDS,
+    _SHELL_CONTROL_TOKENS,
+    _SINGLE_ANSWER_PIPE_PATTERN,
+    _SOURCE_OR_TEST_DIR_NAMES,
+    _SOURCE_OR_TEST_SUFFIXES,
+    _YES_PIPE_PATTERN,
+)
 
 
-_ARGPARSE_REQUIRED_ARGS_PATTERN = re.compile(
-    r"(?:error:\s*)?the following arguments are required:\s*(.+)",
-    re.IGNORECASE,
-)
-_YES_PIPE_PATTERN = re.compile(
-    r"(?:^|[;&(]\s*)yes(?:\s+[^|;&]+)?\s*\|\s*(?P<target>[^;&|]+)",
-    re.IGNORECASE | re.DOTALL,
-)
-_SINGLE_ANSWER_PIPE_PATTERN = re.compile(
-    r"(?:^|[;&(]\s*)echo\s+(?P<answer>(?:-[A-Za-z]+\s+)?(?:['\"]?\s*[YyNn](?:[Ee][Ss]|[Oo])?\s*['\"]?))\s*\|\s*(?P<target>[^;&|]+)",
-    re.IGNORECASE | re.DOTALL,
-)
-_INVALID_INPUT_MARKERS = (
-    "invalid input, please try again",
-    "answer not recognized",
-)
-_REMOTE_INSTALLER_PREFLIGHT_KEY = "_remote_installer_preflight"
-_DEB822_FIELDS = ("Types:", "URIs:", "Suites:", "Components:")
-_SHELL_CONTROL_TOKENS = {"&&", ";", "||", "|"}
-_DISPOSABLE_PATH_NAMES = {
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".cache",
-}
-_DISPOSABLE_PATH_SUFFIXES = {".pyc", ".pyo", ".tmp"}
-_SOURCE_OR_TEST_SUFFIXES = {
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".rb",
-    ".php",
-    ".cs",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".ini",
-    ".cfg",
-    ".md",
-    ".sh",
-    ".sql",
-}
-_SOURCE_OR_TEST_DIR_NAMES = {
-    "src",
-    "lib",
-    "app",
-    "tests",
-    "test",
-    "scripts",
-    "components",
-    "pages",
-    "packages",
-}
+def guard_fail(
+    message: str,
+    *,
+    reason: str,
+    command: str,
+    error_kind: str | None = None,
+    next_required_tool: dict[str, Any] | None = None,
+    next_required_action: dict[str, Any] | str | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a consistent guard failure result."""
+    metadata: dict[str, Any] = {
+        "reason": reason,
+        "command": command,
+    }
+    if error_kind is not None:
+        metadata["error_kind"] = error_kind
+    if next_required_tool is not None:
+        metadata["next_required_tool"] = next_required_tool
+    if next_required_action is not None:
+        metadata["next_required_action"] = next_required_action
+    if extra_metadata is not None:
+        metadata.update(extra_metadata)
+    return fail(message, metadata=metadata)
 
 
 def _apt_deb822_preflight_guard(command: str, *, tool_name: str) -> dict[str, Any] | None:
@@ -113,34 +105,6 @@ def _apt_deb822_preflight_guard(command: str, *, tool_name: str) -> dict[str, An
             },
         },
     )
-
-
-def compose_remote_command(*parts: str, via_script: bool = False, script_path: str = "/tmp/smallctl_probe.sh") -> str:
-    """Compose a remote SSH command with safe quoting. For long or complex commands, upload a script."""
-    if via_script or len(shlex.join(parts)) > 400:
-        script_body = "\n".join(parts)
-        return f"cat > {script_path} << 'EOF'\n{script_body}\nEOF\nbash {script_path}"
-    return " ".join(shlex.quote(p) for p in parts)
-
-
-def _safe_resolve_path(path: str | Path, *, cwd: str | None = None) -> Path:
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = Path(cwd or Path.cwd()) / candidate
-    try:
-        return candidate.resolve()
-    except Exception:
-        return candidate.absolute()
-
-
-def _is_within_path(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
 def _extract_shell_delete_targets(command: str) -> list[str]:
     raw = str(command or "").strip()
     if not raw:
@@ -489,18 +453,6 @@ def _looks_like_remote_installer_mutation(command: str) -> bool:
         if executable.endswith(".sh") and ("install" in executable or "bootstrap" in executable):
             return True
     return False
-
-
-def _simple_shell_command_segments(command: str) -> list[str]:
-    raw = str(command or "")
-    if not raw.strip():
-        return []
-    # Good enough for safety classification: split on common shell command
-    # separators while preserving ordinary arguments like installer paths.
-    parts = re.split(r"\s*(?:&&|\|\||[;|])\s*", raw)
-    return [part.strip() for part in parts if part.strip()]
-
-
 def _remote_installer_cwd_and_script(command: str) -> tuple[str, str]:
     raw = str(command or "").strip()
     cwd = ""
@@ -800,36 +752,6 @@ def _likely_long_running_simple_command_reason(command: str) -> str | None:
         if executable in {"uvicorn", "gunicorn", "redis-server", "http-server", "vite", "webpack-dev-server", "nodemon"}:
             return "service_foreground_binary"
     return None
-
-
-def _split_shell_command_segments(command: str) -> list[str]:
-    words = _split_shell_words(command)
-    if not words:
-        return []
-    segments: list[list[str]] = [[]]
-    for word in words:
-        if word in {"&&", "||", ";", "|"}:
-            if segments[-1]:
-                segments.append([])
-            continue
-        segments[-1].append(word)
-    return [" ".join(shlex.quote(part) for part in segment) for segment in segments if segment]
-
-
-def _strip_environment_and_wrappers(words: list[str]) -> list[str]:
-    stripped = list(words)
-    while stripped and "=" in stripped[0] and not stripped[0].startswith("="):
-        key, _value = stripped[0].split("=", 1)
-        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            break
-        stripped.pop(0)
-    while stripped and Path(stripped[0]).name.lower() in {"sudo", "doas", "env", "command"}:
-        stripped.pop(0)
-        while stripped and stripped[0].startswith("-"):
-            stripped.pop(0)
-    return stripped
-
-
 def _shell_workspace_relative_hint(command: str, cwd: str | None = None) -> str | None:
     raw_command = str(command or "")
     match = re.search(r"(?<![\w/])(/temp(?:/[^\s\"'`]+)*)", raw_command)
@@ -1016,15 +938,6 @@ def _write_session_delete_targets(command: str) -> list[str]:
                 for path_candidate in _token_path_candidates(candidate):
                     targets.append(path_candidate)
     return targets
-
-
-def _split_shell_words(command: str) -> list[str]:
-    try:
-        return shlex.split(str(command or ""), posix=True)
-    except ValueError:
-        return str(command or "").split()
-
-
 def _protected_write_session_paths(session: Any, *, cwd: str | None = None) -> set[str]:
     protected: set[str] = set()
     for raw_path in (
@@ -1105,69 +1018,6 @@ def _command_targets_path(command: str, *, target_path: str, cwd: str | None = N
             if _same_target_path(candidate, target, cwd):
                 return True
     return False
-
-
-def _target_path_aliases(target_path: str, *, cwd: str | None = None) -> list[str]:
-    aliases: set[str] = set()
-    raw = str(target_path or "").strip()
-    if not raw:
-        return []
-
-    aliases.add(raw)
-    if raw.startswith("./"):
-        aliases.add(raw[2:])
-    elif not raw.startswith("/"):
-        aliases.add(f"./{raw}")
-
-    try:
-        base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
-        resolved = (Path(raw) if Path(raw).is_absolute() else (base / raw)).resolve()
-        aliases.add(str(resolved))
-        try:
-            rel = resolved.relative_to(base)
-        except Exception:
-            rel = None
-        if rel is not None:
-            rel_str = str(rel)
-            if rel_str:
-                aliases.add(rel_str)
-                aliases.add(f"./{rel_str}")
-    except Exception:
-        pass
-
-    return [alias for alias in aliases if alias]
-
-
-def _path_alias_mentioned(command: str, alias: str) -> bool:
-    if not alias:
-        return False
-    pattern = rf"(?<![A-Za-z0-9_./-]){re.escape(alias)}(?![A-Za-z0-9_./-])"
-    return bool(re.search(pattern, command))
-
-
-def _token_path_candidates(token: str) -> list[str]:
-    normalized = str(token or "").strip().strip("'\"`")
-    if not normalized:
-        return []
-
-    while normalized.startswith("("):
-        normalized = normalized[1:].strip()
-    while normalized.endswith((";", "|", "&", ",", ")")):
-        normalized = normalized[:-1].strip()
-    if not normalized:
-        return []
-
-    candidates = [normalized]
-    if "=" in normalized and not normalized.startswith("="):
-        _, value = normalized.split("=", 1)
-        value = value.strip().strip("'\"`")
-        while value.endswith((";", "|", "&", ",", ")")):
-            value = value[:-1].strip()
-        if value:
-            candidates.append(value)
-    return candidates
-
-
 def _shell_status_update_interval(timeout_sec: int) -> float:
     return max(1.0, min(max(1, timeout_sec) / 3.0, 10.0))
 

@@ -34,31 +34,26 @@ from .write_session_outcomes import (
     maybe_finalize_stranded_write_session,
     maybe_replay_stranded_write_session_record,
 )
+from .lifecycle_guard_recovery import (
+    _dispatch_artifact_read_recovery,
+    _dispatch_stagnation_recovery,
+    _inject_artifact_read_recovery_nudge,
+)
+from .lifecycle_tool_validation import _validate_pending_tool_calls
 from .tool_call_parser import (
     _artifact_read_recovery_hint,
     _artifact_read_synthesis_hint,
     _clear_artifact_read_guard_state,
     _clear_tool_attempt_history,
-    _detect_empty_file_write_payload,
     _detect_hallucinated_tool_call,
-    _detect_missing_required_tool_arguments,
-    _detect_oversize_patch_payload,
-    _detect_oversize_write_payload,
-    _detect_patch_existing_stage_read_contract_violation,
-    _detect_placeholder_tool_call,
     _detect_repeated_tool_loop,
-    _ensure_chunk_write_session,
     _extract_artifact_id_from_args,
     _fallback_repeated_artifact_read,
     _fallback_repeated_file_read,
     _recover_declared_read_before_write,
     _record_tool_attempt,
-    _repair_empty_target_file_patch_to_file_write,
-    _repair_active_write_session_args,
     _salvage_active_write_session_append,
-    _should_enter_chunk_mode,
     _should_suppress_resolved_plan_artifact_read,
-    _suggested_chunk_sections,
 )
 from .shell_outcomes import (
     _shell_human_retry_hint,
@@ -647,35 +642,8 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
     # Hard step-budget safety net for small models: if we've burned >40 steps
     # without convergence, force a synthesize-and-exit directive.
     if harness.state.step_count > 40:
-        model_name = str(
-            getattr(harness.state, "scratchpad", {}).get("_model_name")
-            or getattr(getattr(harness, "client", None), "model", "")
-            or ""
-        ).strip()
-        if is_seven_b_or_under_model_name(model_name):
-            if graph_state.final_result is None and getattr(harness.state, "write_session", None) is None:
-                # Only force-exit if the model hasn't already called task_complete/task_fail
-                # and isn't in the middle of a write session.
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=(
-                            "Step budget exceeded (12+ steps). You must now call `task_complete` "
-                            "with your best synthesis of findings, or call `task_fail` if blocked. "
-                            "Do not issue any more discovery commands."
-                        ),
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "step_budget_exceeded",
-                        },
-                    )
-                )
-                harness._runlog(
-                    "step_budget_exceeded",
-                    "injected hard step-budget nudge for small model",
-                    step=harness.state.step_count,
-                    model_name=model_name,
-                )
+        from .lifecycle_step_budget import _maybe_inject_step_budget_nudge
+        _maybe_inject_step_budget_nudge(harness, graph_state)
 
     harness.state.decay_experiences()
     harness.dispatcher.phase = normalize_phase(harness.state.contract_phase())
@@ -763,302 +731,22 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             or "repeated tool call loop" in guard_error
             or "Progress stagnation guard tripped" in guard_error
         ):
-            state = getattr(harness, "state", None)
-            scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
-            transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
-            tx_lines = recovery_context_lines(transaction)
-            tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
-            phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-            active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
-            if phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}:
-                repair_directive = (
-                    " You MUST now call a concrete mutation tool (`file_patch`, `file_write`, or `ast_patch`) "
-                    "or run a focused verifier (`shell_exec`). Do not read, analyze, or plan further."
-                )
-            else:
-                repair_directive = " Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
-            harness.state.append_message(
-                ConversationMessage(
-                    role="system",
-                    content=(
-                        f"System: {guard_error}."
-                        f"{repair_directive}"
-                        f"{tx_note}"
-                    ),
-                    metadata={
-                        "is_recovery_nudge": True,
-                        "recovery_kind": "stagnation",
-                        "guard_error": guard_error,
-                    },
-                )
-            )
-            harness._runlog(
-                "stagnation_recovery",
-                "injected strategy pivot nudge",
-                step=harness.state.step_count,
-            )
-            if "no_progress" in harness.state.stagnation_counters:
-                harness.state.stagnation_counters["no_progress"] = 0
-            if "repeat_command" in harness.state.stagnation_counters:
-                harness.state.stagnation_counters["repeat_command"] = 0
-            if "repeat_patch" in harness.state.stagnation_counters:
-                harness.state.stagnation_counters["repeat_patch"] = 0
-            phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
-            if phase != "repair":
-                harness.state.tool_history.clear()
-            else:
-                # Keep recent history in repair so failure patterns remain visible
-                harness.state.tool_history = harness.state.tool_history[-6:]
+            _dispatch_stagnation_recovery(harness, guard_error)
             guard_error = None
 
         if guard_error:
             recovery_hint = _artifact_read_recovery_hint(harness, guard_error)
             if recovery_hint is not None and graph_state.run_mode != "chat":
-                artifact_id, query = recovery_hint
-                _clear_artifact_read_guard_state(harness, artifact_id)
-                graph_state.pending_tool_calls = [
-                    PendingToolCall(
-                        tool_name="artifact_grep",
-                        args={
-                            "artifact_id": artifact_id,
-                            "query": query,
-                        },
-                        source="system",
-                    )
-                ]
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=(
-                            f"Auto-advancing repeated `artifact_read` on artifact {artifact_id} "
-                            f"to `artifact_grep` with query `{query}`."
-                        ),
-                        metadata={
-                            "recovery_kind": "artifact_read",
-                            "artifact_id": artifact_id,
-                            "query": query,
-                            "recovery_mode": "direct_dispatch",
-                        },
-                    )
-                )
-                harness._runlog(
-                    "artifact_read_recovery",
-                    "scheduled recovery dispatch",
-                    step=harness.state.step_count,
-                    artifact_id=artifact_id,
-                    query=query,
-                    guard_error=guard_error,
-                )
+                _dispatch_artifact_read_recovery(harness, graph_state, recovery_hint)
                 guard_error = None
         elif recovery_hint is not None and graph_state.run_mode == "chat":
-            recovery_armed = harness.state.scratchpad.get("_artifact_read_recovery_nudged")
-            if recovery_armed != recovery_hint[0]:
-                artifact_id, query = recovery_hint
-                msg = (
-                    f"You are repeating `artifact_read` on artifact {artifact_id}. "
-                    f"Use `artifact_grep` with query `{query}` instead of reading the same artifact again."
-                )
-                harness.state.scratchpad["_artifact_read_recovery_nudged"] = artifact_id
-                harness.state.scratchpad["_artifact_read_recovery_query"] = query
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="user",
-                        content=msg,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "artifact_read",
-                            "artifact_id": artifact_id,
-                            "query": query,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "artifact_read_recovery",
-                    "injected recovery nudge",
-                    step=harness.state.step_count,
-                    artifact_id=artifact_id,
-                    query=query,
-                    guard_error=guard_error,
-                )
-                guard_error = None
+            _inject_artifact_read_recovery_nudge(harness, recovery_hint)
+            guard_error = None
 
     if graph_state.pending_tool_calls and not guard_error:
-        for pending in graph_state.pending_tool_calls:
-            _repair_active_write_session_args(
-                harness,
-                pending,
-                assistant_text=str(graph_state.last_assistant_text or ""),
-            )
-            _repair_empty_target_file_patch_to_file_write(harness, pending)
-
-            missing_args = _detect_placeholder_tool_call(harness, pending)
-            if missing_args is None:
-                missing_args = _detect_empty_file_write_payload(harness, pending)
-            if missing_args is None:
-                missing_args = _detect_missing_required_tool_arguments(harness, pending)
-            if missing_args is None:
-                missing_args = _detect_patch_existing_stage_read_contract_violation(harness, pending)
-            if missing_args is not None:
-                err_msg, details = missing_args
-                target_path = None
-                if pending.tool_name in {"file_write", "file_patch", "ast_patch"}:
-                    target_path = primary_task_target_path(harness)
-                    if pending.tool_name == "file_write" and target_path:
-                        _ensure_chunk_write_session(harness, target_path)
-                    if target_path:
-                        details = dict(details)
-                        details["target_path"] = target_path
-
-                repair_decision = _nodes.schema_validation_repair_decision(
-                    harness,
-                    pending,
-                    err_msg,
-                    details,
-                    target_path=target_path,
-                )
-                if repair_decision.status == "fail":
-                    harness.state.recent_errors.append(err_msg)
-                    harness._runlog(
-                        "tool_call_validation_error",
-                        "tool call missing required arguments",
-                        **repair_decision.runlog_data,
-                    )
-                    await harness._emit(
-                        deps.event_handler,
-                        UIEvent(
-                            event_type=UIEventType.ERROR,
-                            content=err_msg,
-                            data=repair_decision.alert_data,
-                        ),
-                    )
-                    graph_state.pending_tool_calls = []
-                    graph_state.final_result = harness._failure(
-                        err_msg,
-                        error_type="schema_validation_error",
-                        details=repair_decision.details,
-                    )
-                    graph_state.error = graph_state.final_result["error"]
-                    return
-
-                harness.state.recent_errors.append(err_msg)
-                if repair_decision.conversation_message is not None:
-                    harness.state.append_message(repair_decision.conversation_message)
-                harness._runlog(
-                    "tool_call_repair",
-                    "injected schema repair nudge",
-                    **repair_decision.runlog_data,
-                )
-                await harness._emit(
-                    deps.event_handler,
-                    UIEvent(
-                        event_type=UIEventType.ALERT,
-                        content=repair_decision.repair_message,
-                        data=repair_decision.alert_data,
-                    ),
-                )
-                graph_state.pending_tool_calls = []
-                return
-
-            if _should_enter_chunk_mode(harness, pending):
-                target_path = str(pending.args.get("path") or "")
-                content = str(pending.args.get("content") or "")
-
-                suggestions = _get_suggested_sections(target_path)
-                session_id = new_write_session_id()
-
-                harness.state.write_session = new_write_session(
-                    session_id=session_id,
-                    target_path=target_path,
-                    intent=infer_write_session_intent(
-                        target_path,
-                        getattr(harness.state, "cwd", None),
-                    ),
-                    mode="chunked_author",
-                    suggested_sections=suggestions,
-                    next_section=suggestions[0] if suggestions else "",
-                )
-                _register_write_session_stage_artifact(harness, harness.state.write_session)
-                record_write_session_event(
-                    harness.state,
-                    event="session_opened",
-                    session=harness.state.write_session,
-                    details={"source": "chunk_mode_trigger", "size": len(content)},
-                )
-
-                msg = (
-                    f"Writing `{target_path}` requires chunked authoring for this model/task ({len(content)} chars in the attempted write). "
-                    f"I have initialized a Write Session `{session_id}`. "
-                    "Please break this file into logical sections (e.g. imports, classes, functions) and write them one by one. "
-                    f"Use `file_write` with `write_session_id='{session_id}'`, `section_name='...'`, and `next_section_name='...'`. "
-                    "When finished, call `file_write` for the last chunk without `next_section_name` to finalize."
-                )
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=msg,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "chunk_mode_trigger",
-                            "session_id": session_id,
-                            "target_path": target_path,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "chunk_mode_triggered",
-                    "intercepted large write, suggesting chunk mode",
-                    session_id=session_id,
-                    target_path=target_path,
-                    size=len(content),
-                )
-                graph_state.pending_tool_calls = []
-                break
-
-            oversize = _detect_oversize_write_payload(harness, pending)
-            if oversize:
-                err_msg, details = oversize
-                harness.state.recent_errors.append(err_msg)
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=err_msg,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "oversize_write",
-                            **details,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "oversize_write_intercepted",
-                    "rejected one-shot write exceeding hard threshold",
-                    **details,
-                )
-                graph_state.pending_tool_calls = []
-                break
-
-            oversize_patch = _detect_oversize_patch_payload(harness, pending)
-            if oversize_patch:
-                err_msg, details = oversize_patch
-                harness.state.recent_errors.append(err_msg)
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=err_msg,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "oversize_patch",
-                            **details,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "oversize_patch_intercepted",
-                    "rejected large patch exceeding hard threshold",
-                    **details,
-                )
-                graph_state.pending_tool_calls = []
-                break
+        should_return = await _validate_pending_tool_calls(harness, graph_state, deps)
+        if should_return:
+            return
 
     if guard_error:
         harness.state.recent_errors.append(guard_error)

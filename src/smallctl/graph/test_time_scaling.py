@@ -18,46 +18,22 @@ from .model_call_nodes import _conversation_tool_calls_from_pending, model_call
 from .plan_execution import PlanExecutionEngine
 from .plan_verification import StepCompletionGate, compact_step_evidence
 from .state import GraphRunState, PendingToolCall
+from .scaling_constants import (
+    LOCAL_FILE_MUTATION_TOOLS,
+    PROMPT_VARIANTS,
+)
+from .scaling_helpers import (
+    candidate_uses_local_file_mutation_tools,
+    candidate_uses_only_read_only_tools,
+    is_read_only_tool_call,
+    score_proposal,
+    select_best_proposal,
+    unsafe_branch_execution_reason,
+)
 from .tool_plan_schema import READONLY_TOOL_PLAN_TOOLS
 from .tool_execution_nodes import dispatch_tools
 from .tool_execution_persistence import persist_tool_results
 from .tool_outcomes import apply_tool_outcomes
-
-
-PROMPT_VARIANTS = (
-    "Use the standard staged-step strategy. Prefer concrete tool progress and call step_complete only when verified.",
-    "Be conservative: inspect or verify before mutation, prefer the smallest change, and avoid unrelated edits.",
-    "Try an alternate route from the obvious one while still obeying the active step contract and tool allowlist.",
-    "Debug first: identify the likely failure mode, gather targeted evidence, then act.",
-    "Minimize risk: avoid shell or remote tools unless they are necessary for this exact step.",
-)
-
-HIGH_RISK_TOOLS = {
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-    "file_delete",
-    "shell_exec",
-    "ssh_exec",
-    "ssh_file_write",
-    "ssh_file_patch",
-}
-
-READ_ONLY_CONTROL_TOOLS = {"loop_status"}
-
-READ_ONLY_STAGED_TOOLS = frozenset(set(READONLY_TOOL_PLAN_TOOLS) | READ_ONLY_CONTROL_TOOLS)
-
-LOCAL_FILE_MUTATION_TOOLS = {
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-    "file_delete",
-}
-
-SHELL_EXECUTION_TOOLS = {"shell_exec", "ssh_exec"}
-REMOTE_MUTATION_TOOLS = {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
 
 
 @dataclass(slots=True)
@@ -257,59 +233,6 @@ def build_candidate_prompts(
         )
         prompts.append((variant, messages))
     return prompts
-
-
-def score_proposal(
-    pending_tool_calls: list[PendingToolCall],
-    *,
-    allowed_tool_names: set[str],
-    assistant_text: str = "",
-) -> tuple[float, list[str]]:
-    failed: list[str] = []
-    if not pending_tool_calls:
-        failed.append("no_tool_calls")
-    unknown = [
-        call.tool_name
-        for call in pending_tool_calls
-        if str(call.tool_name or "").strip() not in allowed_tool_names
-    ]
-    if unknown:
-        failed.append("tool_not_allowed:" + ",".join(sorted(set(unknown))))
-    missing_args = [
-        call.tool_name
-        for call in pending_tool_calls
-        if not isinstance(call.args, dict)
-    ]
-    if missing_args:
-        failed.append("invalid_arguments:" + ",".join(sorted(set(missing_args))))
-
-    score = 1.0
-    if "no_tool_calls" in failed:
-        score -= 0.55
-    if unknown:
-        score -= 0.75
-    if missing_args:
-        score -= 0.3
-    risk_count = sum(1 for call in pending_tool_calls if call.tool_name in HIGH_RISK_TOOLS)
-    score -= min(0.18, 0.06 * risk_count)
-    if assistant_text.strip():
-        score += 0.03
-    return max(0.0, min(1.0, score)), failed
-
-
-def select_best_proposal(candidates: list[ProposalCandidate]) -> ProposalCandidate | None:
-    if not candidates:
-        return None
-    return sorted(
-        candidates,
-        key=lambda candidate: (
-            candidate.score,
-            -len(candidate.failed_criteria),
-            -_risk_count(candidate.pending_tool_calls),
-            -candidate.candidate_idx,
-        ),
-        reverse=True,
-    )[0]
 
 
 async def run_proposal_scaling(
@@ -893,50 +816,6 @@ async def _generate_one_proposal_candidate(
             score=score,
             failed_criteria=failed,
         )
-
-
-def is_read_only_tool_call(call: PendingToolCall) -> bool:
-    tool_name = str(getattr(call, "tool_name", "") or "").strip()
-    if not tool_name:
-        return False
-    if tool_name in READ_ONLY_STAGED_TOOLS:
-        return True
-    if tool_name in {"shell_exec", "ssh_exec"}:
-        args = getattr(call, "args", {}) or {}
-        if not isinstance(args, dict):
-            return False
-        return is_read_only_shell_evidence_action(str(args.get("command") or ""))
-    return False
-
-
-def candidate_uses_only_read_only_tools(candidate: ProposalCandidate) -> bool:
-    return bool(candidate.pending_tool_calls) and all(is_read_only_tool_call(call) for call in candidate.pending_tool_calls)
-
-
-def candidate_uses_local_file_mutation_tools(candidate: ProposalCandidate) -> bool:
-    return any(
-        str(getattr(call, "tool_name", "") or "").strip() in LOCAL_FILE_MUTATION_TOOLS
-        for call in candidate.pending_tool_calls
-    )
-
-
-def unsafe_branch_execution_reason(candidate: ProposalCandidate) -> str:
-    remote_mutation_tools = [
-        str(getattr(call, "tool_name", "") or "").strip()
-        for call in candidate.pending_tool_calls
-        if str(getattr(call, "tool_name", "") or "").strip() in REMOTE_MUTATION_TOOLS
-    ]
-    if remote_mutation_tools:
-        return "unsafe_branch_tool:" + ",".join(sorted(set(remote_mutation_tools)))
-    unsafe_shell_tools = [
-        str(getattr(call, "tool_name", "") or "").strip()
-        for call in candidate.pending_tool_calls
-        if str(getattr(call, "tool_name", "") or "").strip() in SHELL_EXECUTION_TOOLS
-        and not is_read_only_tool_call(call)
-    ]
-    if unsafe_shell_tools:
-        return "unsafe_branch_tool:" + ",".join(sorted(set(unsafe_shell_tools)))
-    return ""
 
 
 def _candidate_history(

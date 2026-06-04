@@ -20,11 +20,13 @@ from .shell_outcomes import (
     _shell_workspace_relative_retry_hint,
 )
 from .tool_execution_recovery import handle_failed_file_write_outcome
-from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_patch_stall
-from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_completion_block
-from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_verifier_stall
-from .tool_execution_recovery import _maybe_auto_trigger_escalation_for_apt_sources_failure
-from .tool_execution_recovery import _maybe_confirm_apt_sources_tip
+from .escalation_triggers import (
+    _maybe_auto_trigger_escalation_for_patch_stall,
+    _maybe_auto_trigger_escalation_for_completion_block,
+    _maybe_auto_trigger_escalation_for_verifier_stall,
+    _maybe_auto_trigger_escalation_for_apt_sources_failure,
+    _maybe_confirm_apt_sources_tip,
+)
 from ..harness.tool_visibility import schedule_retry_tool_exposure
 from ..models.conversation import ConversationMessage
 from .tool_execution_recovery_helpers import (

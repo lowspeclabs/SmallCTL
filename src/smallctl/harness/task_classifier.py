@@ -2,287 +2,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 from ..interrupt_replies import is_interrupt_response
 from ..models.conversation import ConversationMessage
+from .task_classifier_constants import (
+    ANALYSIS_MARKERS,
+    AUTHORING_TARGET_MARKERS,
+    AUTHORING_TARGET_RE,
+    CAPABILITY_QUERY_CONTEXTUAL_MARKERS,
+    CAPABILITY_QUERY_NEGATIVE_PHRASES,
+    CAPABILITY_QUERY_STRONG_MARKERS,
+    CAPABILITY_QUERY_TARGETS,
+    CODE_TARGET_RE,
+    DEBUG_MARKERS,
+    EXECUTION_ACTION_MARKERS,
+    IP_ADDRESS_PATTERN,
+    LOCAL_SHELL_OVERRIDE_RE,
+    OPERATIONAL_ACTION_TARGETS,
+    OPERATIONAL_ACTION_VERBS,
+    PLAN_ONLY_PHRASES,
+    READONLY_FILE_TARGETS,
+    READONLY_SUGGESTION_MARKERS,
+    REMOTE_HINTS,
+    SSH_AUTH_MARKERS,
+    TOOL_PLAN_EVIDENCE_MARKERS,
+    WEB_LOOKUP_MARKERS,
+    WRITE_ACTION_MARKERS,
+    WRITE_FILE_CREATION_MARKERS,
+)
+from .task_classifier_content_lookup import needs_loop_for_content_lookup
 
-_IP_ADDRESS_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-_EXECUTION_ACTION_MARKERS = (
-    "run",
-    "exec",
-    "shell",
-    "terminal",
-    "ping",
-    "curl",
-    "wget",
-    "git",
-)
-_OPERATIONAL_ACTION_VERBS = (
-    "install",
-    "setup",
-    "set up",
-    "spin up",
-    "configure",
-    "deploy",
-    "provision",
-    "restart",
-    "start",
-    "stop",
-    "enable",
-    "disable",
-    "uninstall",
-    "remove",
-    "upgrade",
-    "update",
-)
-_WRITE_ACTION_MARKERS = (
-    "patch",
-    "edit",
-    "modify",
-    "fix",
-    "update",
-    "implement",
-    "write",
-    "create",
-    "refactor",
-)
-_WRITE_FILE_CREATION_MARKERS = (
-    "build",
-    "create",
-    "make",
-    "write",
-    "generate",
-    "implement",
-    "save",
-    "produce",
-)
-_READONLY_SUGGESTION_MARKERS = (
-    "list improvement",
-    "list improvements",
-    "improvements you would make",
-    "improvements would you make",
-    "what improvements",
-    "recommend improvements",
-    "suggest improvements",
-    "suggest changes",
-    "would change",
-    "would improve",
-)
-_CODE_TARGET_RE = re.compile(
-    r"\b(?:file|script|code|source|module|repo|repository)\b|(?:^|[\s`'\"(])[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json)\b",
-    re.IGNORECASE,
-)
-_AUTHORING_TARGET_MARKERS = (
-    "report",
-    "summary",
-    "summaries",
-    "findings",
-    "note",
-    "notes",
-    "writeup",
-    "write-up",
-    "readme",
-    "documentation",
-    "markdown",
-    "text file",
-    "doc",
-    "docs",
-)
-_AUTHORING_TARGET_RE = re.compile(
-    r"(?:^|[\s`'\"(])[\./\\A-Za-z0-9_-]+\.(?:md|txt|text|rst)\b",
-    re.IGNORECASE,
-)
-_OPERATIONAL_ACTION_TARGETS = (
-    "remote",
-    "host",
-    "server",
-    "vm",
-    "machine",
-    "instance",
-    "service",
-    "daemon",
-    "package",
-    "packages",
-    "apt",
-    "apt-get",
-    "yum",
-    "dnf",
-    "apk",
-    "pacman",
-    "brew",
-    "ssh",
-    "systemd",
-    "caddy",
-    "nginx",
-    "apache",
-    "postgres",
-    "postgresql",
-    "mysql",
-    "mariadb",
-    "redis",
-    "docker",
-    "kubernetes",
-)
-_PLAN_ONLY_PHRASES = (
-    "make a plan",
-    "make a short plan",
-    "create a plan",
-    "create a short plan",
-    "create a brief plan",
-    "plan this",
-    "plan this out",
-    "make a plan first",
-    "plan out",
-    "before doing anything, create a short plan",
-    "before doing anything, create a plan",
-    "before doing anything, plan",
-)
-_ANALYSIS_MARKERS = (
-    "explain",
-    "analyze",
-    "analyse",
-    "review",
-    "reason about",
-    "understand",
-    "why",
-    "what caused",
-)
-_DEBUG_MARKERS = (
-    "debug",
-    "inspect",
-    "investigate",
-    "look at",
-    "check",
-    "trace",
-    "failure",
-    "failed",
-    "error",
-    "exception",
-    "traceback",
-    "stack trace",
-    "log",
-    "logs",
-)
-_REMOTE_HINTS = (
-    "remote",
-    "ssh",
-    "server",
-    "host",
-    "vm",
-    "instance",
-)
-_SSH_AUTH_MARKERS = (
-    "pubkey auth",
-    "public key auth",
-    "public-key auth",
-    "pubkey authentication",
-    "public key authentication",
-    "ssh key",
-    "ssh keys",
-    "authorized_keys",
-    "authorized keys",
-)
-_LOCAL_SHELL_OVERRIDE_RE = re.compile(
-    r"\b(?:use\s+)?shell_exec\b.*\bno\s+(?:ssh|ssh_exec)\b"
-    r"|"
-    r"\bno\s+(?:ssh|ssh_exec)\b.*\b(?:use\s+)?shell_exec\b"
-    r"|"
-    r"\buse\s+shell\s+exec\b.*\bno\s+ssh\b"
-    r"|"
-    r"\buse\s+local\s+shell_exec\b"
-    r"|"
-    r"\bshell_exec\b.*\blocal\b"
-    r"|"
-    r"\blocal\b.*\bshell_exec\b",
-    re.IGNORECASE,
-)
-_READONLY_FILE_TARGETS = (
-    "file",
-    "files",
-    "folder",
-    "directory",
-    "repo",
-    "repository",
-    "code",
-    "source",
-    "src",
-    "log",
-    "logs",
-)
-_CAPABILITY_QUERY_STRONG_MARKERS = (
-    "what tools",
-    "available tools",
-    "tool access",
-    "what do you have access to",
-    "which tools",
-    "what capabilities",
-    "what mode are you in",
-    "which mode are you in",
-    "what harness capabilities",
-    "can you inspect the environment",
-)
-_CAPABILITY_QUERY_CONTEXTUAL_MARKERS = (
-    "what can you do",
-)
-_CAPABILITY_QUERY_TARGETS = (
-    "tool",
-    "tools",
-    "capability",
-    "capabilities",
-    "access",
-    "available",
-    "enabled",
-    "mode",
-    "environment",
-    "harness",
-)
-_CAPABILITY_QUERY_NEGATIVE_PHRASES = (
-    "what tools would you use",
-    "how do your tools work",
-    "tooling seems broken",
-    "tooling failure",
-    "tool failure",
-)
-_WEB_LOOKUP_MARKERS = (
-    "latest",
-    "current",
-    "recent",
-    "today",
-    "web",
-    "website",
-    "internet",
-    "online",
-    "search the web",
-    "search web",
-    "web search",
-    "docs",
-    "documentation",
-    "pricing",
-    "release",
-    "releases",
-    "announcement",
-    "news",
-)
-_TOOL_PLAN_EVIDENCE_MARKERS = (
-    "read through",
-    "look through",
-    "find where",
-    "find out where",
-    "summarize current implementation",
-    "summarize the implementation",
-    "identify files",
-    "where does",
-    "where is",
-    "trace",
-    "investigate",
-    "multi-file",
-    "codebase",
-    "repo",
-    "repository",
-    "web research",
-)
 
+@dataclass(frozen=True, slots=True)
+class TaskClassificationRule:
+    """Declarative rule for classify_task_mode precedence table."""
+
+    name: str
+    check: Callable[[str], bool]
+    mode: str
 
 @dataclass(frozen=True)
 class RuntimeIntent:
@@ -319,18 +77,18 @@ def looks_like_plan_only_request(task: str) -> bool:
     text = task.strip().lower()
     if not text:
         return False
-    return any(phrase in text for phrase in _PLAN_ONLY_PHRASES)
+    return any(phrase in text for phrase in PLAN_ONLY_PHRASES)
 
 
 def has_remote_execution_target(task: str) -> bool:
     text = task.strip().lower()
     if not text:
         return False
-    if _IP_ADDRESS_PATTERN.search(text):
+    if IP_ADDRESS_PATTERN.search(text):
         return True
     if "@" in text and any(marker in text for marker in ("ssh", "scp", "sftp")):
         return True
-    return any(marker in text for marker in _REMOTE_HINTS)
+    return any(marker in text for marker in REMOTE_HINTS)
 
 
 def looks_like_debug_inspection_request(task: str) -> bool:
@@ -339,7 +97,7 @@ def looks_like_debug_inspection_request(task: str) -> bool:
         return False
     if "tell me what failed" in text or "what failed" in text:
         return True
-    has_debug_marker = any(marker in text for marker in _DEBUG_MARKERS)
+    has_debug_marker = any(marker in text for marker in DEBUG_MARKERS)
     has_read_signal = any(
         marker in text
         for marker in (
@@ -359,12 +117,12 @@ def looks_like_analysis_request(task: str) -> bool:
     text = task.strip().lower()
     if not text:
         return False
-    if any(marker in text for marker in _ANALYSIS_MARKERS):
+    if any(marker in text for marker in ANALYSIS_MARKERS):
         return True
     if looks_like_readonly_chat_request(task) and not looks_like_debug_inspection_request(task):
         return True
     if needs_loop_for_content_lookup(task) and not looks_like_debug_inspection_request(task):
-        return any(target in text for target in _READONLY_FILE_TARGETS)
+        return any(target in text for target in READONLY_FILE_TARGETS)
     return False
 
 
@@ -398,144 +156,60 @@ def task_is_local_coding_target(task: str) -> bool:
     return has_coding_marker and has_py_target and not has_explicit_remote
 
 
+_TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
+    TaskClassificationRule(
+        "local_shell_override", lambda t: bool(LOCAL_SHELL_OVERRIDE_RE.search(t)), "local_execute"
+    ),
+    TaskClassificationRule(
+        "local_coding_target", task_is_local_coding_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "smalltalk", is_smalltalk, "chat"
+    ),
+    TaskClassificationRule(
+        "plan_only", looks_like_plan_only_request, "plan_only"
+    ),
+    TaskClassificationRule(
+        "remote_execute",
+        lambda t: has_remote_execution_target(t)
+        and (
+            looks_like_action_request(t)
+            or looks_like_shell_request(t)
+            or looks_like_debug_inspection_request(t)
+            or needs_contextual_loop_escalation([], t)
+        ),
+        "remote_execute",
+    ),
+    TaskClassificationRule(
+        "write_patch",
+        lambda t: looks_like_write_patch_request(t) or looks_like_write_file_request(t) or looks_like_author_write_request(t),
+        "local_execute",
+    ),
+    TaskClassificationRule(
+        "debug_inspect", looks_like_debug_inspection_request, "debug_inspect"
+    ),
+    TaskClassificationRule(
+        "action_or_shell",
+        lambda t: looks_like_action_request(t) or looks_like_shell_request(t),
+        "local_execute",
+    ),
+    TaskClassificationRule(
+        "analysis", looks_like_analysis_request, "analysis"
+    ),
+]
+
+
 def classify_task_mode(task: str) -> str:
     text = task.strip()
     if not text:
         return "chat"
-    if _LOCAL_SHELL_OVERRIDE_RE.search(text):
-        return "local_execute"
-    if task_is_local_coding_target(text):
-        return "local_execute"
+    for rule in _TASK_CLASSIFICATION_RULES:
+        if rule.check(text):
+            return rule.mode
     lowered = text.lower()
-    if is_smalltalk(text):
-        return "chat"
-    if looks_like_plan_only_request(text):
-        return "plan_only"
-    # Remote context wins: if the task explicitly targets a remote host,
-    # don't let local-write markers override it. Sysadmin tasks often say
-    # "SSH to host X ... save report to ./temp/xxx.txt" — the remote
-    # execution is the primary intent; the local write is secondary.
-    if has_remote_execution_target(text) and (
-        looks_like_action_request(text)
-        or looks_like_shell_request(text)
-        or looks_like_debug_inspection_request(text)
-        or needs_contextual_loop_escalation([], text)
-    ):
-        return "remote_execute"
-    if (
-        looks_like_write_patch_request(text)
-        or looks_like_write_file_request(text)
-        or looks_like_author_write_request(text)
-    ):
-        return "local_execute"
-    if looks_like_debug_inspection_request(text):
-        return "debug_inspect"
-    if looks_like_action_request(text) or looks_like_shell_request(text):
-        return "local_execute"
-    if looks_like_analysis_request(text):
-        return "analysis"
     if "error" in lowered or "failed" in lowered or "failure" in lowered:
         return "analysis"
     return "chat"
-
-
-def needs_loop_for_content_lookup(task: str) -> bool:
-    text = task.strip().lower()
-    if not text:
-        return False
-
-    file_markers = (
-        "file",
-        "log",
-        "logs",
-        ".log",
-        ".jsonl",
-        ".txt",
-        ".md",
-        ".py",
-        "/",
-        "\\",
-        "code",
-        "source",
-        "src",
-    )
-    content_queries = (
-        "what is",
-        "what's",
-        "show",
-        "read",
-        "tell me",
-        "summarize",
-        "contents",
-        "content",
-        "line ",
-        "lines ",
-        "bug",
-        "error",
-        "inconsistent",
-        "inconsistency",
-        "issue",
-        "debug",
-        "still",
-    )
-    asks_for_specific_line = bool(re.search(r"\bline(?:s)?\s+\d+\b", text))
-    asks_for_range = bool(re.search(r"\b\d+\s*-\s*\d+\b", text))
-    asks_for_log_or_file_content = any(marker in text for marker in file_markers) and any(
-        query in text for query in content_queries
-    )
-    asks_for_command_execution = (
-        bool(re.search(r"\b(run|execute|exec)\b", text))
-        and bool(
-            re.search(
-                r"\b(ls|dir|pwd|cd|cat|type|findstr|grep|git\s+status|get-childitem|pytest|python|powershell|pwsh|cmd)\b",
-                text,
-            )
-        )
-    )
-    asks_for_directory_contents = (
-        any(
-            phrase in text
-            for phrase in (
-                "what files",
-                "which files",
-                "list files",
-                "show files",
-                "what folders",
-                "which folders",
-                "list folders",
-                "show folders",
-                "list directory",
-                "show directory",
-                "directory contents",
-                "folder contents",
-                "current directory",
-                "this directory",
-                "current folder",
-                "this folder",
-                "what is in this directory",
-                "what is in the current directory",
-                "what is in this folder",
-                "what is in the current folder",
-            )
-        )
-        or bool(
-            re.search(
-                r"\b(list|show|what|which)\b.*\b(files?|folders?|directories?|contents?)\b",
-                text,
-            )
-        )
-    )
-    asks_where_specific_line_is = asks_for_specific_line and any(
-        phrase in text for phrase in ("what is", "what's", "show", "read")
-    )
-    return (
-        asks_for_specific_line
-        or asks_for_range
-        or asks_for_log_or_file_content
-        or asks_where_specific_line_is
-        or asks_for_directory_contents
-        or asks_for_command_execution
-    )
 
 
 def looks_like_execution_followup(text: str) -> bool:
@@ -558,11 +232,11 @@ def looks_like_action_request(task: str) -> bool:
     text = task.strip().lower()
     if _looks_like_ssh_auth_request(text):
         return True
-    if any(marker in text for marker in _EXECUTION_ACTION_MARKERS):
+    if any(marker in text for marker in EXECUTION_ACTION_MARKERS):
         return True
-    has_operational_verb = any(verb in text for verb in _OPERATIONAL_ACTION_VERBS)
-    has_operational_target = any(target in text for target in _OPERATIONAL_ACTION_TARGETS)
-    if has_operational_verb and (has_operational_target or bool(_IP_ADDRESS_PATTERN.search(text))):
+    has_operational_verb = any(verb in text for verb in OPERATIONAL_ACTION_VERBS)
+    has_operational_target = any(target in text for target in OPERATIONAL_ACTION_TARGETS)
+    if has_operational_verb and (has_operational_target or bool(IP_ADDRESS_PATTERN.search(text))):
         return True
     return False
 
@@ -573,18 +247,18 @@ def looks_like_write_patch_request(task: str) -> bool:
         return False
     if re.search(r"\b(?:new|fresh)\s+(?:script|file|module|code)\b", text) and looks_like_write_file_request(text):
         return False
-    has_write_action = any(marker in text for marker in _WRITE_ACTION_MARKERS)
-    return bool(has_write_action and _CODE_TARGET_RE.search(text))
+    has_write_action = any(marker in text for marker in WRITE_ACTION_MARKERS)
+    return bool(has_write_action and CODE_TARGET_RE.search(text))
 
 
 def looks_like_write_file_request(task: str) -> bool:
     text = str(task or "").strip().lower()
     if not text:
         return False
-    if any(marker in text for marker in _READONLY_SUGGESTION_MARKERS):
+    if any(marker in text for marker in READONLY_SUGGESTION_MARKERS):
         return False
-    has_creation_marker = any(marker in text for marker in _WRITE_FILE_CREATION_MARKERS)
-    has_code_target = "script" in text or bool(_CODE_TARGET_RE.search(text))
+    has_creation_marker = any(marker in text for marker in WRITE_FILE_CREATION_MARKERS)
+    has_code_target = "script" in text or bool(CODE_TARGET_RE.search(text))
     return bool(has_creation_marker and has_code_target)
 
 
@@ -592,9 +266,9 @@ def looks_like_author_write_request(task: str) -> bool:
     text = str(task or "").strip().lower()
     if not text:
         return False
-    has_creation_marker = any(marker in text for marker in _WRITE_FILE_CREATION_MARKERS)
-    has_authoring_target = any(marker in text for marker in _AUTHORING_TARGET_MARKERS)
-    has_authoring_path = bool(_AUTHORING_TARGET_RE.search(text))
+    has_creation_marker = any(marker in text for marker in WRITE_FILE_CREATION_MARKERS)
+    has_authoring_target = any(marker in text for marker in AUTHORING_TARGET_MARKERS)
+    has_authoring_path = bool(AUTHORING_TARGET_RE.search(text))
     return bool(
         has_creation_marker
         and (has_authoring_target or has_authoring_path)
@@ -678,9 +352,9 @@ def looks_like_shell_request(task: str) -> bool:
     )
     if any(marker in text for marker in shell_markers):
         return True
-    if any(verb in text for verb in _OPERATIONAL_ACTION_VERBS) and (
-        any(target in text for target in _OPERATIONAL_ACTION_TARGETS)
-        or bool(_IP_ADDRESS_PATTERN.search(text))
+    if any(verb in text for verb in OPERATIONAL_ACTION_VERBS) and (
+        any(target in text for target in OPERATIONAL_ACTION_TARGETS)
+        or bool(IP_ADDRESS_PATTERN.search(text))
     ):
         return True
     return bool(
@@ -699,7 +373,7 @@ def looks_like_tool_plan_candidate(task: str) -> bool:
         return False
     if looks_like_shell_request(text) or looks_like_action_request(text):
         return False
-    if any(marker in text for marker in _TOOL_PLAN_EVIDENCE_MARKERS):
+    if any(marker in text for marker in TOOL_PLAN_EVIDENCE_MARKERS):
         return True
     if (
         looks_like_write_patch_request(text)
@@ -707,7 +381,7 @@ def looks_like_tool_plan_candidate(task: str) -> bool:
         or looks_like_author_write_request(text)
     ):
         return False
-    if any(marker in text for marker in _WEB_LOOKUP_MARKERS) and looks_like_readonly_chat_request(text):
+    if any(marker in text for marker in WEB_LOOKUP_MARKERS) and looks_like_readonly_chat_request(text):
         return True
     mode = classify_task_mode(text)
     return mode in {"analysis", "debug_inspect"} and (
@@ -846,11 +520,11 @@ def looks_like_capability_query(
     text = str(task or "").strip().lower()
     if not text:
         return False
-    if any(phrase in text for phrase in _CAPABILITY_QUERY_NEGATIVE_PHRASES):
+    if any(phrase in text for phrase in CAPABILITY_QUERY_NEGATIVE_PHRASES):
         return False
-    if any(marker in text for marker in _CAPABILITY_QUERY_STRONG_MARKERS):
+    if any(marker in text for marker in CAPABILITY_QUERY_STRONG_MARKERS):
         return True
-    if any(marker in text for marker in _CAPABILITY_QUERY_CONTEXTUAL_MARKERS) and any(
+    if any(marker in text for marker in CAPABILITY_QUERY_CONTEXTUAL_MARKERS) and any(
         scope in text
         for scope in (
             "harness",
@@ -869,7 +543,7 @@ def looks_like_capability_query(
     ):
         return True
 
-    has_target = any(target in text for target in _CAPABILITY_QUERY_TARGETS)
+    has_target = any(target in text for target in CAPABILITY_QUERY_TARGETS)
     if not has_target:
         return False
 
@@ -1013,7 +687,7 @@ def looks_like_complex_task(task: str) -> bool:
         return True
 
     # Both remote and local targets
-    has_remote = any(m in text for m in _REMOTE_HINTS) or bool(_IP_ADDRESS_PATTERN.search(text))
+    has_remote = any(m in text for m in REMOTE_HINTS) or bool(IP_ADDRESS_PATTERN.search(text))
     has_local = any(m in text for m in ("file", "files", "code", "script", "patch", "edit", "module", "repo"))
     if has_remote and has_local:
         return True
@@ -1036,7 +710,7 @@ def _looks_like_ssh_auth_request(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     if not normalized:
         return False
-    if not any(marker in normalized for marker in _SSH_AUTH_MARKERS):
+    if not any(marker in normalized for marker in SSH_AUTH_MARKERS):
         return False
     return any(
         token in normalized

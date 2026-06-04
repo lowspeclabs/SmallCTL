@@ -18,6 +18,12 @@ from ..write_session_fsm import recent_write_session_events, record_write_sessio
 from .common import fail, ok
 from .fs_loop_guard import build_loop_guard_status
 from .fs_write_sessions import write_session_contract
+from .verifier_quality import (
+    phase_verifier_is_inconclusive as _phase_verifier_is_inconclusive,
+    phase_verifier_is_weak as _phase_verifier_is_weak,
+    verifier_notes_text as _verifier_notes_text,
+    verifier_quality as _verifier_quality,
+)
 
 
 _WRITE_SESSION_SCHEMA_FAILURE_KEY = "_last_write_session_schema_failure"
@@ -354,21 +360,8 @@ def _remote_mutation_block_payload(requirement: dict[str, Any]) -> dict[str, Any
 
 
 def _remote_mutation_directory_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
-    raw_checks = requirement.get("directory_empty_checks")
-    if not isinstance(raw_checks, list):
-        return []
-    checks: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in raw_checks:
-        if not isinstance(item, dict):
-            continue
-        path = str(item.get("path") or "").strip().rstrip("/")
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        glob = str(item.get("glob") or "").strip()
-        checks.append({"path": path, "glob": glob})
-    return checks
+    from ..harness.remote_mutation_helpers import remote_mutation_directory_checks
+    return remote_mutation_directory_checks(requirement)
 
 
 def _write_session_resume_action(
@@ -990,81 +983,6 @@ def _mutation_expectation_block(state: LoopState, *, message: str) -> dict[str, 
     }
 
 
-def _phase_verifier_is_weak(command: str) -> bool:
-    normalized = " ".join(str(command or "").strip().lower().split())
-    if not normalized:
-        return True
-    weak_patterns = (
-        " -m py_compile ",
-        " py_compile ",
-        " pip install ",
-        " python -m pip install ",
-        " python3 -m pip install ",
-        " python -m venv ",
-        " python3 -m venv ",
-        " rm -rf ",
-        " ls ",
-        " grep ",
-    )
-    padded = f" {normalized} "
-    return any(pattern in padded for pattern in weak_patterns)
-
-
-def _verifier_quality(command: str) -> dict[str, Any]:
-    normalized = " ".join(str(command or "").strip().lower().split())
-    if not normalized:
-        return {"score": 0, "label": "none"}
-    padded = f" {normalized} "
-    if any(pattern in padded for pattern in (" pip install ", " -m pip install ", " -m venv ", " rm -rf ", " ls ", " grep ")):
-        return {"score": 0, "label": "setup_or_probe"}
-    if " -m py_compile " in padded or " py_compile " in padded:
-        return {"score": 1, "label": "syntax"}
-    if any(pattern in padded for pattern in (" pytest ", " -m pytest ", " unittest ", " -m unittest ")):
-        return {"score": 3, "label": "behavioral"}
-    if " -c " in padded:
-        if "assert " in normalized or ".handle_" in normalized or ".spawn" in normalized or ".move" in normalized:
-            return {"score": 3, "label": "behavioral"}
-        if "import " in normalized:
-            return {"score": 2, "label": "import"}
-    if " --smoke" in padded or " smoke" in padded:
-        return {"score": 3, "label": "behavioral"}
-    if " selenium " in padded or " playwright " in padded:
-        return {"score": 5, "label": "e2e"}
-    if any(token in normalized for token in ("curl ", "http://", "https://")):
-        return {"score": 4, "label": "integration"}
-    return {"score": 2, "label": "execution"}
-
-
-def _phase_verifier_is_inconclusive(
-    verifier: dict[str, Any],
-    *,
-    command: str,
-    failure_mode: str,
-    notes: str,
-) -> bool:
-    haystack = "\n".join(
-        str(part or "")
-        for part in [
-            command,
-            failure_mode,
-            notes,
-            verifier.get("key_stdout"),
-            verifier.get("key_stderr"),
-        ]
-    ).lower()
-    return any(token in haystack for token in ("timed out", "timeout", "infinite_loop", "infinite loop"))
-
-
-def _verifier_notes_text(verifier: dict[str, Any]) -> str:
-    acceptance_delta = verifier.get("acceptance_delta") if isinstance(verifier, dict) else None
-    if not isinstance(acceptance_delta, dict):
-        return ""
-    notes = acceptance_delta.get("notes")
-    if isinstance(notes, list):
-        return "\n".join(str(note or "") for note in notes)
-    return str(notes or "")
-
-
 def _phase_gate_payload(
     state: LoopState,
     verifier: dict[str, Any],
@@ -1134,7 +1052,7 @@ def _missing_dependency_block(state: LoopState) -> dict[str, Any] | None:
     }
 
 
-async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
+def _task_complete_gate_staged_execution(state: LoopState) -> dict | None:
     if state.plan_execution_mode and state.active_step_id:
         return fail(
             "Cannot call `task_complete` while staged execution is active. Use `step_complete` for the active step.",
@@ -1144,6 +1062,10 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "active_step_run_id": state.active_step_run_id,
             },
         )
+    return None
+
+
+def _task_complete_gate_runtime_error(state: LoopState) -> dict | None:
     verifier_verdict = _normalized_verifier_verdict(state)
     runtime_error_block = runtime_error_completion_block(state, verifier_verdict=verifier_verdict)
     if runtime_error_block is not None:
@@ -1154,19 +1076,25 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
+
+
+def _task_complete_gate_post_change(state: LoopState) -> dict | None:
     post_change_block = _post_change_verification_block(state)
     if post_change_block is not None:
         return fail(
             "Cannot complete the task until the latest file change is verified.",
             metadata={
                 **post_change_block,
-                "last_verifier_verdict": verifier_verdict,
+                "last_verifier_verdict": _normalized_verifier_verdict(state),
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
 
-    # Fix 4: Interactive programs (pygame, GUI, etc.) require behavioral verification,
-    # not just syntax checks like py_compile.
+
+def _task_complete_gate_interactive_program(state: LoopState) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
     if _task_involves_interactive_program(state) and verifier_verdict:
         verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip()
         quality = _verifier_quality(verifier_command)
@@ -1189,12 +1117,10 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                     },
                 },
             )
-    ledger_service = getattr(harness, "subtask_ledger", None)
-    if ledger_service is not None:
-        try:
-            ledger_service.import_plan_if_needed(replace_synthetic_root=True)
-        except Exception:
-            pass
+    return None
+
+
+def _task_complete_gate_remote_mutation(state: LoopState) -> dict | None:
     remote_requirement = _remote_mutation_verification_requirement(state)
     if remote_requirement is not None:
         block_payload = _remote_mutation_block_payload(remote_requirement)
@@ -1204,9 +1130,13 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "reason": "remote_mutation_requires_verification",
                 "remote_mutation_requirement": remote_requirement,
                 "next_required_action": block_payload["next_required_action"],
-                "last_verifier_verdict": verifier_verdict,
+                "last_verifier_verdict": _normalized_verifier_verdict(state),
             },
         )
+    return None
+
+
+def _task_complete_gate_missing_input(state: LoopState) -> dict | None:
     missing_input = _unresolved_missing_input_file(state)
     if missing_input is not None:
         path = str(missing_input.get("path") or "").strip()
@@ -1223,22 +1153,29 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                         "Do not infer the missing file contents from memory or directory listings.",
                     ],
                 },
-                "last_verifier_verdict": verifier_verdict,
+                "last_verifier_verdict": _normalized_verifier_verdict(state),
             },
         )
+    return None
+
+
+def _task_complete_gate_mutation_expectation(state: LoopState, message: str) -> dict | None:
     mutation_block = _mutation_expectation_block(state, message=message)
     if mutation_block is not None:
         return fail(
             "Cannot complete a phase implementation task with zero code changes.",
             metadata={
                 **mutation_block,
-                "last_verifier_verdict": verifier_verdict,
+                "last_verifier_verdict": _normalized_verifier_verdict(state),
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
+
+
+async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> dict | None:
     session = state.write_session
     if session is not None and str(session.status or "").strip().lower() != "complete":
-        # P2: auto-finalize if the session is clearly ready but was never finalized.
         from ..graph.write_session_outcomes import _attempt_write_session_finalize
         from ..tools.fs_sessions import _write_session_can_finalize
 
@@ -1254,9 +1191,6 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 session = state.write_session
 
         if str(session.status or "").strip().lower() != "complete":
-            # Fix 3 (RCA 8b79ca76): Track consecutive task_complete rejections
-            # for the same write session. Auto-abandon orphan sessions (no
-            # sections written, target file already exists) to prevent deadlock.
             scratchpad = state.scratchpad
             blocker_key = f"write_session:{session.write_session_id}"
             last_blocker = scratchpad.get("_task_complete_last_blocker")
@@ -1288,7 +1222,7 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                     state.write_session = None
                     scratchpad.pop("_task_complete_last_blocker", None)
                     scratchpad.pop("_task_complete_blocker_count", None)
-                    return await task_complete(message, state, harness)
+                    return await task_complete("", state, harness)
 
             record_write_session_event(
                 state,
@@ -1314,15 +1248,15 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 metadata={
                     "write_session": session.to_dict(),
                     "next_required_tool": _write_session_resume_action(state, failure),
-                    "last_verifier_verdict": verifier_verdict,
+                    "last_verifier_verdict": _normalized_verifier_verdict(state),
                     "acceptance_checklist": state.acceptance_checklist(),
                 },
             )
-    verifier_failure_satisfies_diagnostic = (
-        verifier_verdict
-        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
-        and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
-    )
+    return None
+
+
+def _task_complete_gate_verifier_approval(state: LoopState) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
     if (
         verifier_verdict
         and _verifier_requires_human_approval(verifier_verdict)
@@ -1340,6 +1274,16 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "approval_required": True,
             },
         )
+    return None
+
+
+def _task_complete_gate_verifier_failure(state: LoopState, message: str) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
+    verifier_failure_satisfies_diagnostic = (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
+    )
     if (
         verifier_verdict
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
@@ -1357,6 +1301,11 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
+
+
+def _task_complete_gate_phase_contract(state: LoopState) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
     verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip() if isinstance(verifier_verdict, dict) else ""
     phase_contract_block = phase_contract_completion_block(
         state,
@@ -1371,6 +1320,11 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
+
+
+def _task_complete_gate_phase_promotion(state: LoopState, message: str) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
     phase_promotion_block = _phase_promotion_gate_block(
         state,
         message=message,
@@ -1384,6 +1338,11 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "acceptance_checklist": state.acceptance_checklist(),
             },
         )
+    return None
+
+
+def _task_complete_gate_plan_subtasks(state: LoopState) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
     plan_subtask_block = _plan_subtask_completion_block(state, verifier_verdict=verifier_verdict)
     if plan_subtask_block is not None:
         next_subtask = plan_subtask_block["next_required_subtask"]
@@ -1395,6 +1354,16 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 **plan_subtask_block,
             },
         )
+    return None
+
+
+def _task_complete_gate_acceptance(state: LoopState, message: str) -> dict | None:
+    verifier_verdict = _normalized_verifier_verdict(state)
+    verifier_failure_satisfies_diagnostic = (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
+    )
     if not state.acceptance_ready() and not verifier_failure_satisfies_diagnostic:
         checklist = state.acceptance_checklist()
         pending = [item["criterion"] for item in checklist if not item["satisfied"]]
@@ -1406,6 +1375,49 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
                 "last_verifier_verdict": _normalized_verifier_verdict(state),
             },
         )
+    return None
+
+
+async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
+    verifier_verdict = _normalized_verifier_verdict(state)
+    gates = [
+        lambda: _task_complete_gate_staged_execution(state),
+        lambda: _task_complete_gate_runtime_error(state),
+        lambda: _task_complete_gate_post_change(state),
+        lambda: _task_complete_gate_interactive_program(state),
+        lambda: _task_complete_gate_remote_mutation(state),
+        lambda: _task_complete_gate_missing_input(state),
+        lambda: _task_complete_gate_mutation_expectation(state, message),
+    ]
+    for gate in gates:
+        result = gate()
+        if result is not None:
+            return result
+
+    ledger_service = getattr(harness, "subtask_ledger", None)
+    if ledger_service is not None:
+        try:
+            ledger_service.import_plan_if_needed(replace_synthetic_root=True)
+        except Exception:
+            pass
+
+    result = await _task_complete_gate_write_session(state, harness)
+    if result is not None:
+        return result
+
+    gates = [
+        lambda: _task_complete_gate_verifier_approval(state),
+        lambda: _task_complete_gate_verifier_failure(state, message),
+        lambda: _task_complete_gate_phase_contract(state),
+        lambda: _task_complete_gate_phase_promotion(state, message),
+        lambda: _task_complete_gate_plan_subtasks(state),
+        lambda: _task_complete_gate_acceptance(state, message),
+    ]
+    for gate in gates:
+        result = gate()
+        if result is not None:
+            return result
+
     if _is_weather_lookup_task(state) and _looks_like_weather_search_meta_completion(message):
         return fail(
             "Task is not complete yet: the user asked for the weather, but your completion message only reports that a search ran. "

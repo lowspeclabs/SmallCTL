@@ -5,27 +5,187 @@ from typing import Any
 
 from .guards import is_over_twenty_b_model_name, is_seven_b_or_under_model_name, is_small_model_name
 from .phases import phase_contract
+from .prompt_fragments import (
+    _ARTIFACT_PAGING,
+    _CONTRACT_PHASE_FOCUS_LARGE,
+    _CONTRACT_PHASE_FOCUS_SMALL,
+    _LARGE_MODEL_STRUCTURED_REASONING,
+    _LOCAL_ARTIFACT_TASK_PREFIX,
+    _MEMORY_PERSIST_KEY_FACTS,
+    _META_COGNITIVE_REPAIR_BRIEF,
+    _PATCH_VERBATIM_RULE,
+    _PRIVILEGES_NO_SUDO_GUESS,
+    _REDUNDANCY_PREFER_SUMMARY,
+    _REFLECTION_GATE,
+    _REMOTE_CLEANUP_TASK_KEYWORDS,
+    _REMOTE_PROBES_BATCH,
+    _RESPONSE_STRUCTURE_GEMMA,
+    _RESPONSE_STRUCTURE_SMALL_GEMMA,
+    _RESPONSE_STRUCTURE_THINK,
+    _SHELL_POSIX_REDIRECTION,
+    _SMALL_GEMMA_STRICT_FORMAT,
+    _STDERR_CIRCUIT_BREAKER_PREFIX,
+    _TOOL_CALL_FORMAT_JSON,
+    _TOOL_CALL_FORMAT_TERMINAL,
+    _TOOL_CALL_FORMAT_TERMINAL_SAME_TURN,
+    _WORKSPACE_RELATIVE_PATHS,
+)
+from .prompt_model_classifiers import (
+    is_exact_large_gemma_4_26b_a4b_it_model_name,
+    is_exact_small_gemma_4_it_model_name,
+    is_gemma_model_name,
+)
 from .state import LoopState, clip_text_value, normalize_intent_label
 from .tools.fs_loop_guard import build_loop_guard_prompt
 from .tools.fs_write_sessions import write_session_contract
 
-_GEMMA_MODEL_MARKERS = (
-    "google_gemma-4",
-    "google_gemma",
-    "gemma-4",
-    "gemma-3",
-    "gemma/",
+
+_RESPONSE_STRUCTURE_THINK = (
+    "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. "
 )
-_EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
-    "gemma-4-e2b-it",
-    "gemma-4-e4b-it",
+
+_RESPONSE_STRUCTURE_GEMMA = (
+    "RESPONSE STRUCTURE: This Gemma model may use its native reasoning format. "
+    "Do not force a <think> block or add conflicting wrapper tags. "
+    "Use the model's normal reasoning flow, then continue with tool calls or the final answer as needed. "
 )
-_EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES = (
-    "google_gemma-4-26b-a4b-it",
+
+_RESPONSE_STRUCTURE_SMALL_GEMMA = (
+    "SMALL GEMMA-4 FORMAT: If you include short reasoning before a tool call, end the reasoning cleanly, "
+    "then emit exactly one JSON tool object on its own line with no wrapper tags. "
 )
-_REMOTE_CLEANUP_TASK_KEYWORDS = (
-    "uninstall", "remove", "delete", "purge", "clean up", "clean-up",
-    "get rid of", "wipe", "tear down", "teardown", "disable",
+
+_TOOL_CALL_FORMAT_JSON = (
+    "TOOL CALL FORMAT: If tools are available, call them using the JSON format: "
+    '`{"name": "tool_name", "arguments": {"arg": "val"}}`. '
+)
+
+_TOOL_CALL_FORMAT_TERMINAL = (
+    "TERMINAL TOOL FORMAT: When the task is complete, emit the `task_complete` JSON tool call directly. "
+    "Do not write `task_complete(message='...')` in chat text or Markdown. "
+)
+
+_TOOL_CALL_FORMAT_TERMINAL_SAME_TURN = (
+    "TERMINAL TOOL FORMAT: If you have enough evidence to answer, call `task_complete` in the same turn "
+    "that you formulate the answer. Do not send answer-only chat and wait for a later nudge. "
+)
+
+_WORKSPACE_RELATIVE_PATHS = (
+    "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. "
+)
+
+_PRIVILEGES_NO_SUDO_GUESS = (
+    "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. "
+)
+
+_SHELL_POSIX_REDIRECTION = (
+    "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. "
+)
+
+_REMOTE_PROBES_BATCH = (
+    "REMOTE PROBES: Batch read-only checks into single ssh_exec calls using && or ;. "
+    "For commands longer than ~300 chars or with nested quotes, upload a temporary script "
+    "(cat > /tmp/probe.sh << 'EOF' ...) and execute it. Use shlex.quote() for interpolated paths. "
+)
+
+_MEMORY_PERSIST_KEY_FACTS = "MEMORY: Use `memory_update` to persist key facts. "
+
+_REDUNDANCY_PREFER_SUMMARY = (
+    "REDUNDANCY: Prefer the compressed summary or preview first. Use `artifact_read` or `artifact_grep` only when you need the full evidence or line-level detail. "
+)
+
+_ARTIFACT_PAGING = (
+    "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. "
+)
+
+_PATCH_VERBATIM_RULE = (
+    "PATCH VERBATIM RULE: When using `file_patch` or `ast_patch`, copy the `target_text` verbatim from the most recent `file_read` or `artifact_print` output or artifact. "
+    "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. "
+)
+
+_SMALL_GEMMA_STRICT_FORMAT = (
+    "SMALL GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
+    "`<channel|>`, `<thought>`, angle-bracket function wrappers like `<task_complete(...)>`, "
+    "or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
+    "If tools are needed, emit only the JSON object. The backticked task_complete examples in this prompt "
+    "describe intent only; do not copy that literal syntax into the response. "
+)
+
+_LARGE_MODEL_STRUCTURED_REASONING = (
+    "\n### STRUCTURED REASONING\n"
+    "Use this framework for complex tasks:\n"
+    "1. OBSERVE: What do I know from tools/memory?\n"
+    "2. ORIENT: What's the gap between current state and goal?\n"
+    "3. DECIDE: What's the single best next action?\n"
+    "4. ACT: Execute the tool call.\n"
+    "5. VERIFY: Did the result match expectations? If not, adjust.\n"
+    "\n### SELF-CORRECTION\n"
+    "Before calling task_complete, verify:\n"
+    "- Did I fully address all parts of the task?\n"
+    "- Are my conclusions supported by tool evidence (not inference)?\n"
+    "- Did I skip any acceptance criteria?\n"
+    "- If the task involves files, did I verify the final state?\n"
+    "\n### PARALLEL EXECUTION\n"
+    "When multiple independent facts are needed, make multiple tool calls in a single turn. "
+    "For example, read 2-3 config files simultaneously rather than sequentially.\n"
+    "\n### CONFIDENCE CALIBRATION\n"
+    "If uncertain about a conclusion, say so. Prefer 'Based on the evidence, X seems likely but I cannot confirm Y' "
+    "over definitive statements without evidence. When uncertain, gather more evidence rather than guessing.\n"
+    "\n### FEW-SHOT EXAMPLES\n"
+    "Good tool call: `{'name': 'file_read', 'arguments': {'path': 'src/app.py'}}`\n"
+    "Bad (never do): `<tool_call>file_read(path='src/app.py')</tool_call>`\n"
+    "Bad (never do): Writing `task_complete(message='...')` in chat text instead of proper JSON."
+)
+
+_CONTRACT_PHASE_FOCUS_SMALL: dict[str, str] = {
+    "explore": "EXPLORE: Collect facts with read-only tools.",
+    "plan": "PLAN: Draft an executable plan.",
+    "author": "AUTHOR: Implement one bounded change at a time.",
+    "execute": "EXECUTE: Run approved actions and verify.",
+    "verify": "VERIFY: Compare results against acceptance criteria.",
+}
+
+_CONTRACT_PHASE_FOCUS_LARGE: dict[str, str] = {
+    "explore": (
+        "EXPLORE FOCUS: Collect verified observations, reduce uncertainty, and surface open questions before drafting a plan. "
+        "Prefer read-only tools and concise fact capture."
+    ),
+    "plan": (
+        "PLAN FOCUS: Rely on the compressed evidence packet, candidate causes, and handoff artifacts rather than a raw transcript dump. "
+        "Turn observations into hypotheses and an executable plan."
+    ),
+    "author": (
+        "AUTHOR FOCUS: Use the approved ExecutionPlan, the target files, and the active write session. "
+        "Prefer one bounded implementation change at a time."
+    ),
+    "execute": (
+        "EXECUTE FOCUS: Use the approved plan and evidence support, keep execution bounded to approved actions, and note the verification target."
+    ),
+    "verify": (
+        "VERIFY FOCUS: Compare the observed state against the acceptance criteria and recent evidence. Prefer verification reads over new writes."
+    ),
+}
+
+_REFLECTION_GATE = (
+    "REFLECTION GATE: Before attempting the same fix again, you MUST explain in your reasoning: "
+    "(1) what file the error message actually names, "
+    "(2) what is currently in that file, and "
+    "(3) why your previous fix did not affect that file. "
+    "Do not call any repair tool until you have answered these three questions."
+)
+
+_META_COGNITIVE_REPAIR_BRIEF = (
+    "META-COGNITIVE REPAIR BRIEF: If a configuration test or verifier fails, "
+    "read the exact file path named in the error message before modifying any other file. "
+    "Do not patch a source file (e.g., sites-available) when the error names a different path (e.g., sites-enabled)."
+)
+
+_STDERR_CIRCUIT_BREAKER_PREFIX = (
+    "STDERR CIRCUIT BREAKER: The same stderr signature recurred twice: "
+)
+
+_LOCAL_ARTIFACT_TASK_PREFIX = (
+    "LOCAL ARTIFACT TASK: Remote evidence collection is required, but the final report must be written to local path(s): "
 )
 
 
@@ -79,33 +239,6 @@ def _phase_contract_prompt(state: LoopState, available_tool_names: list[str] | N
     )
 
 
-def is_gemma_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
-
-
-def is_exact_small_gemma_4_it_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(
-        normalized
-        and any(
-            normalized == suffix or normalized.endswith(f"/{suffix}")
-            for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
-        )
-    )
-
-
-def is_exact_large_gemma_4_26b_a4b_it_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(
-        normalized
-        and any(
-            normalized == suffix or normalized.endswith(f"/{suffix}")
-            for suffix in _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES
-        )
-    )
-
-
 def _state_has_remote_cleanup_intent(state: LoopState) -> bool:
     run_brief = getattr(state, "run_brief", None)
     wm = getattr(state, "working_memory", None)
@@ -142,27 +275,18 @@ def build_system_prompt(
     small_model = is_seven_b_or_under_model_name(model_name)
     large_model = is_over_twenty_b_model_name(model_name)
     if gemma_mode:
-        response_structure = (
-            "RESPONSE STRUCTURE: This Gemma model may use its native reasoning format. "
-            "Do not force a <think> block or add conflicting wrapper tags. "
-            "Use the model's normal reasoning flow, then continue with tool calls or the final answer as needed. "
-        )
+        response_structure = _RESPONSE_STRUCTURE_GEMMA
         if exact_small_gemma_mode:
-            response_structure += (
-                "SMALL GEMMA-4 FORMAT: If you include short reasoning before a tool call, end the reasoning cleanly, "
-                "then emit exactly one JSON tool object on its own line with no wrapper tags. "
-            )
+            response_structure += _RESPONSE_STRUCTURE_SMALL_GEMMA
     else:
-        response_structure = (
-            "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. "
-        )
+        response_structure = _RESPONSE_STRUCTURE_THINK
     if exact_large_gemma_26b_mode:
         contract = phase_contract(phase)
         parts = [
             "You are smallctl, an autonomous execution agent. ",
             response_structure,
             "PRIMARY RULE: Solve the current user task only. Keep the task goal in view and avoid side quests. ",
-            "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
+            _TOOL_CALL_FORMAT_JSON,
             "STRICT: No hallucinations. Only report what tools actually returned. ",
             "STRICT: NEVER use text-based tool tags like `<tool_call>` or functional syntax like `dir_list()`. ",
             "CONCISENESS: Do not paste long tool output into chat. Summarize briefly, then call `task_complete(message='...')` when done. ",
@@ -180,25 +304,22 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "PRIMARY RULE: Solve the current user task only. Keep the task goal in view and avoid side quests. ",
-                "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
-                "TERMINAL TOOL FORMAT: When the task is complete, emit the `task_complete` JSON tool call directly. Do not write `task_complete(message='...')` in chat text or Markdown. ",
+                _TOOL_CALL_FORMAT_JSON,
+                _TOOL_CALL_FORMAT_TERMINAL,
                 "STRICT: No hallucinations. Only report what tools actually returned. ",
                 "CONCISENESS: Summarize findings briefly, then call `task_complete(message='...')` when done. ",
                 "REDUNDANCY: Reuse what you already know. Do not repeat identical or near-identical tool calls. ",
                 f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
                 f"Contract phase: {state.contract_phase()}. ",
                 f"Phase contract focus: {contract.focus}. ",
-                "WORKSPACE: Use relative paths. You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
-                "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
-                "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
-                "REMOTE PROBES: Batch read-only checks into single ssh_exec calls using && or ;. "
-                "For commands longer than ~300 chars or with nested quotes, upload a temporary script "
-                "(cat > /tmp/probe.sh << 'EOF' ...) and execute it. Use shlex.quote() for interpolated paths. ",
-                "MEMORY: Use `memory_update` to persist key facts. ",
-                "REDUNDANCY: Prefer the compressed summary or preview first. Use `artifact_read` or `artifact_grep` only when you need the full evidence or line-level detail. ",
-                "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. ",
-                "PATCH VERBATIM RULE: When using `file_patch` or `ast_patch`, copy the `target_text` verbatim from the most recent `file_read` or `artifact_print` output or artifact. "
-                "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. ",
+                _WORKSPACE_RELATIVE_PATHS,
+                _PRIVILEGES_NO_SUDO_GUESS,
+                _SHELL_POSIX_REDIRECTION,
+                _REMOTE_PROBES_BATCH,
+                _MEMORY_PERSIST_KEY_FACTS,
+                _REDUNDANCY_PREFER_SUMMARY,
+                _ARTIFACT_PAGING,
+                _PATCH_VERBATIM_RULE,
                 "If the task is complete, stop and call `task_complete(message='...')`. ",
             ]
         else:
@@ -206,9 +327,9 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
-                "TOOL CALL FORMAT: If tools are available, call them using the JSON format: `{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"val\"}}`. ",
-                "TERMINAL TOOL FORMAT: When the task is complete, emit the `task_complete` JSON tool call directly. Do not write `task_complete(message='...')` in chat text or Markdown. ",
-                "TERMINAL TOOL FORMAT: If you have enough evidence to answer, call `task_complete` in the same turn that you formulate the answer. Do not send answer-only chat and wait for a later nudge. ",
+                _TOOL_CALL_FORMAT_JSON,
+                _TOOL_CALL_FORMAT_TERMINAL,
+                _TOOL_CALL_FORMAT_TERMINAL_SAME_TURN,
                 "CONCISENESS: NEVER re-type detailed tool outputs (like full directory listings or file contents) in your conversational chat. ",
                 "CONCISENESS: Summarize findings in 1-2 sentences in chat, then call `task_complete(message='...')` with the definitive answer. ",
                 "STRICT: No hallucinations. Do not add descriptions or metadata (like 'Python project config') to file lists unless the tool returned them. ",
@@ -217,22 +338,20 @@ def build_system_prompt(
                 f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
                 f"Contract phase: {state.contract_phase()}. ",
                 f"Phase contract focus: {contract.focus}. ",
-                "WORKSPACE: Use relative paths (e.g. 'src/app.py'). You should prefer workspace-relative paths and do not start them with a leading slash or backslash. ",
-                "PRIVILEGES: Do not invent or guess a sudo password. If privileged access is required, use passwordless sudo or ask the user for help via `ask_human`. ",
-                "SHELL: Prefer standard POSIX redirection (e.g., `2>&1`) for robustness. ",
+                _WORKSPACE_RELATIVE_PATHS,
+                _PRIVILEGES_NO_SUDO_GUESS,
+                _SHELL_POSIX_REDIRECTION,
                 "SHELL: When verifying a Python script that has `if __name__ == '__main__': main()`, do not run it bare without arguments if `main()` reads from stdin. Pipe sample input (e.g., `echo '{}' | python3 script.py`) or use `python3 -m unittest discover` / `python3 -m pytest` instead of bare execution. ",
-                "REMOTE PROBES: Batch read-only checks into single ssh_exec calls using && or ;. "
-                "For commands longer than ~300 chars or with nested quotes, upload a temporary script "
-                "(cat > /tmp/probe.sh << 'EOF' ...) and execute it. Use shlex.quote() for interpolated paths. ",
-                "MEMORY: Use `memory_update` to persist key facts. ",
+                _REMOTE_PROBES_BATCH,
+                _MEMORY_PERSIST_KEY_FACTS,
                 "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
                 "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
                 "MEMORY: `memory_update`, session notes, and plans do not satisfy the supported-claim gate for diagnosis/remediation. Only actual tool evidence counts, so do not try to satisfy a shell/SSH/file guard by storing the intended command in memory. ",
-                "REDUNDANCY: Prefer the compressed summary or preview first. Use `artifact_read` or `artifact_grep` only when you need the full evidence or line-level detail. ",
+                _REDUNDANCY_PREFER_SUMMARY,
                 "REDUNDANCY: reuse information you already retrieved. avoid rereading the same path unless the summary is insufficient. ",
                 "REDUNDANCY: Do not call `artifact_read` again on an artifact that is already summarized in the tool preview, Working Memory, or Retrieved Artifact Snippets unless you need unseen lines, line-level verification, or the current full content for authoring. ",
                 "REDUNDANCY: If `artifact_read` or `artifact_print` reports that an artifact is missing or unavailable, treat the evidence as unavailable. Do not describe or infer the missing artifact from memory, summaries, or prior reasoning. Re-execute the original tool call (e.g. re-run the shell command); if that is impossible, explicitly say you cannot verify it from the current session state. ",
-                "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. ",
+                _ARTIFACT_PAGING,
                 "ARTIFACT COMPLETENESS: Retrieved Artifact Snippets, previews, and compact summaries do NOT count as a full artifact read. If you need to continue, patch, or overwrite based on a file or staged artifact, first read 100% of the current content with `file_read(path=...)` or by paging `artifact_read(..., start_line=...)` until the artifact is fully covered. ",
                 "PLAN HANDOFF: If a plan exists, treat its playbook artifact as the implementation contract. The required order is: 1) write the file skeleton, 2) add function signatures, 3) fill in the code, 4) debug and verify. Do not jump straight to a one-shot full script. ",
                 "AUTHORING: In the author phase, prefer one concrete write or read action at a time. If you already have a target file, write or replace it directly instead of bouncing through multiple exploratory calls. Create the target artifact before shell execution; the harness will block shell and SSH commands until there is something concrete to verify. ",
@@ -268,55 +387,26 @@ def build_system_prompt(
                 f"Once your objective is met, stop exploring and call task_complete(message='...').",
             ]
     if exact_small_gemma_mode:
-        parts.append(
-            "SMALL GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
-            "`<channel|>`, `<thought>`, angle-bracket function wrappers like `<task_complete(...)>`, "
-            "or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
-            "If tools are needed, emit only the JSON object. The backticked task_complete examples in this prompt "
-            "describe intent only; do not copy that literal syntax into the response. "
-        )
+        parts.append(_SMALL_GEMMA_STRICT_FORMAT)
     if large_model:
-        parts.append(
-            "\n### STRUCTURED REASONING\n"
-            "Use this framework for complex tasks:\n"
-            "1. OBSERVE: What do I know from tools/memory?\n"
-            "2. ORIENT: What's the gap between current state and goal?\n"
-            "3. DECIDE: What's the single best next action?\n"
-            "4. ACT: Execute the tool call.\n"
-            "5. VERIFY: Did the result match expectations? If not, adjust.\n"
-            "\n### SELF-CORRECTION\n"
-            "Before calling task_complete, verify:\n"
-            "- Did I fully address all parts of the task?\n"
-            "- Are my conclusions supported by tool evidence (not inference)?\n"
-            "- Did I skip any acceptance criteria?\n"
-            "- If the task involves files, did I verify the final state?\n"
-            "\n### PARALLEL EXECUTION\n"
-            "When multiple independent facts are needed, make multiple tool calls in a single turn. "
-            "For example, read 2-3 config files simultaneously rather than sequentially.\n"
-            "\n### CONFIDENCE CALIBRATION\n"
-            "If uncertain about a conclusion, say so. Prefer 'Based on the evidence, X seems likely but I cannot confirm Y' "
-            "over definitive statements without evidence. When uncertain, gather more evidence rather than guessing.\n"
-            "\n### FEW-SHOT EXAMPLES\n"
-            "Good tool call: `{'name': 'file_read', 'arguments': {'path': 'src/app.py'}}`\n"
-            "Bad (never do): `<tool_call>file_read(path='src/app.py')</tool_call>`\n"
-            "Bad (never do): Writing `task_complete(message='...')` in chat text instead of proper JSON."
-        )
+        parts.append(_LARGE_MODEL_STRUCTURED_REASONING)
     step_budget_prompt = _graph_step_budget_prompt(scratchpad)
     if step_budget_prompt:
         parts.append(step_budget_prompt)
     if isinstance(scratchpad, dict) and isinstance(scratchpad.get("_stderr_signature_circuit_breaker"), dict):
         breaker = scratchpad["_stderr_signature_circuit_breaker"]
         parts.append(
-            "STDERR CIRCUIT BREAKER: The same stderr signature recurred twice: "
-            f"{breaker.get('signature')}. Do not retry the same command or same edit. "
-            "Force a different strategy, such as reading the named config file, replacing the full small config file, finalizing with current evidence, or asking the human."
+            _STDERR_CIRCUIT_BREAKER_PREFIX
+            + f"{breaker.get('signature')}. Do not retry the same command or same edit. "
+            + "Force a different strategy, such as reading the named config file, replacing the full small config file, finalizing with current evidence, or asking the human."
         )
     from .remote_scope import sysadmin_local_artifact_paths
     local_artifacts = sysadmin_local_artifact_paths(state)
     if local_artifacts:
         parts.append(
-            f"LOCAL ARTIFACT TASK: Remote evidence collection is required, but the final report must be written to local path(s): {', '.join(local_artifacts)}. "
-            "Use local file_write for the report; use SSH tools only for evidence gathering."
+            _LOCAL_ARTIFACT_TASK_PREFIX
+            + f"{', '.join(local_artifacts)}. "
+            + "Use local file_write for the report; use SSH tools only for evidence gathering."
         )
     if state.contract_phase() == "repair":
         repair_bits = []
@@ -350,57 +440,20 @@ def build_system_prompt(
             int(counters.get("repeat_command", 0) or 0),
         )
         if stall_level >= 2:
-            parts.append(
-                "REFLECTION GATE: Before attempting the same fix again, you MUST explain in your reasoning: "
-                "(1) what file the error message actually names, "
-                "(2) what is currently in that file, and "
-                "(3) why your previous fix did not affect that file. "
-                "Do not call any repair tool until you have answered these three questions."
-            )
+            parts.append(_REFLECTION_GATE)
         # A4) Meta-Cognitive Repair Brief
         verifier_verdict = state.current_verifier_verdict() or {}
         if verifier_verdict and str(verifier_verdict.get("verdict") or "").strip() not in {"", "pass"}:
-            parts.append(
-                "META-COGNITIVE REPAIR BRIEF: If a configuration test or verifier fails, "
-                "read the exact file path named in the error message before modifying any other file. "
-                "Do not patch a source file (e.g., sites-available) when the error names a different path (e.g., sites-enabled)."
-            )
+            parts.append(_META_COGNITIVE_REPAIR_BRIEF)
     current_contract_phase = state.contract_phase()
     if small_model:
-        if current_contract_phase == "explore":
-            parts.append("EXPLORE: Collect facts with read-only tools.")
-        elif current_contract_phase == "plan":
-            parts.append("PLAN: Draft an executable plan.")
-        elif current_contract_phase == "author":
-            parts.append("AUTHOR: Implement one bounded change at a time.")
-        elif current_contract_phase == "execute":
-            parts.append("EXECUTE: Run approved actions and verify.")
-        elif current_contract_phase == "verify":
-            parts.append("VERIFY: Compare results against acceptance criteria.")
+        focus = _CONTRACT_PHASE_FOCUS_SMALL.get(current_contract_phase)
+        if focus:
+            parts.append(focus)
     else:
-        if current_contract_phase == "explore":
-            parts.append(
-                "EXPLORE FOCUS: Collect verified observations, reduce uncertainty, and surface open questions before drafting a plan. "
-                "Prefer read-only tools and concise fact capture."
-            )
-        elif current_contract_phase == "plan":
-            parts.append(
-                "PLAN FOCUS: Rely on the compressed evidence packet, candidate causes, and handoff artifacts rather than a raw transcript dump. "
-                "Turn observations into hypotheses and an executable plan."
-            )
-        elif current_contract_phase == "author":
-            parts.append(
-                "AUTHOR FOCUS: Use the approved ExecutionPlan, the target files, and the active write session. "
-                "Prefer one bounded implementation change at a time."
-            )
-        elif current_contract_phase == "execute":
-            parts.append(
-                "EXECUTE FOCUS: Use the approved plan and evidence support, keep execution bounded to approved actions, and note the verification target."
-            )
-        elif current_contract_phase == "verify":
-            parts.append(
-                "VERIFY FOCUS: Compare the observed state against the acceptance criteria and recent evidence. Prefer verification reads over new writes."
-            )
+        focus = _CONTRACT_PHASE_FOCUS_LARGE.get(current_contract_phase)
+        if focus:
+            parts.append(focus)
     if state.write_session:
         session = state.write_session
         ws_contract = write_session_contract(session)

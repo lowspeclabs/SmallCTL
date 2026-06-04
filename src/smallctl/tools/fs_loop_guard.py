@@ -7,9 +7,79 @@ import time
 from pathlib import Path
 from typing import Any
 
+from dataclasses import dataclass, field
+
 from ..state import LoopState
 from .common import fail
+from .fs_loop_guard_actions import forced_escape_action, next_required_read, outline_handoff_question
+from .fs_loop_guard_utils import content_hash, count_added_lines, resolve_path, tail_excerpt as _tail_excerpt
 from .fs_sessions import _write_session_can_finalize
+
+
+@dataclass
+class LoopGuardDecision:
+    action: str
+    message: str
+    error_kind: str
+    trigger_kind: str = ""
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _emit_block(
+    state: LoopState | None,
+    path_state: dict[str, Any],
+    decision: LoopGuardDecision,
+    *,
+    resolved_path: str,
+    session_id: str,
+    section_name: str,
+    next_section_name: str,
+    score: int,
+    signals: dict[str, Any],
+    tail_excerpt: str,
+    level: int = 1,
+    schedule_read: bool = True,
+    outline_required: bool = False,
+    event_name: str | None = None,
+) -> dict[str, Any]:
+    path_state["pending_read_before_write"] = schedule_read
+    path_state["escalation_level"] = max(
+        int(path_state.get("escalation_level", 0) or 0), level
+    )
+    path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
+    path_state["last_error_kind"] = decision.error_kind
+    path_state["outline_required"] = outline_required
+    _record_guard_event(
+        state,
+        event=event_name or f"loop_guard_{decision.error_kind}",
+        path=resolved_path,
+        session_id=session_id,
+        payload={
+            "escalation_level": level,
+            "stagnation_score": score,
+            "section_name": section_name,
+            "next_section_name": next_section_name,
+            "signals": signals,
+        },
+    )
+    metadata: dict[str, Any] = {
+        "path": resolved_path,
+        "write_session_id": session_id,
+        "section_name": section_name,
+        "next_section_name": next_section_name,
+        "error_kind": decision.error_kind,
+        "loop_guard_score": score,
+        "loop_guard_escalation_level": level,
+        "loop_guard_signals": signals,
+        "loop_guard_schedule_read": schedule_read,
+        "loop_guard_tail_excerpt": tail_excerpt,
+        "next_required_tool": next_required_read(resolved_path),
+    }
+    if outline_required:
+        metadata["loop_guard_outline_required"] = True
+        metadata["loop_guard_outline_question"] = outline_handoff_question(resolved_path)
+    metadata.update(decision.extra_metadata)
+    return fail(decision.message, metadata=metadata)
 
 _LOOP_GUARD_STATE_KEY = "_chunk_write_loop_guard"
 _LOOP_GUARD_CONFIG_KEY = "_chunk_write_loop_guard_config"
@@ -25,21 +95,6 @@ _DEFAULT_LOOP_GUARD_CONFIG: dict[str, Any] = {
     "checkpoint_gate": True,
     "diff_gate": True,
 }
-
-
-def _resolve(path: str, cwd: str | None = None) -> str:
-    base = Path(cwd) if cwd else Path.cwd()
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = base / candidate
-    try:
-        return str(candidate.resolve())
-    except Exception:
-        return str(candidate)
-
-
-def _content_hash(text: str) -> str:
-    return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
 
 
 def _loop_guard_root(state: LoopState | None) -> dict[str, Any] | None:
@@ -171,23 +226,6 @@ def loop_guard_config(state: LoopState | None) -> dict[str, Any]:
     return config
 
 
-def _count_added_lines(before: str, after: str) -> int:
-    added = 0
-    for line in difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=""):
-        if line.startswith("+++") or line.startswith("@@"):
-            continue
-        if line.startswith("+"):
-            added += 1
-    return added
-
-
-def _tail_excerpt(text: str, *, tail_lines: int) -> str:
-    lines = str(text or "").splitlines()
-    if not lines:
-        return ""
-    return "\n".join(lines[-max(1, int(tail_lines)) :])
-
-
 def _record_guard_event(
     state: LoopState | None,
     *,
@@ -231,41 +269,6 @@ def _record_guard_event(
             pass
 
 
-def _next_required_read(path: str) -> dict[str, Any]:
-    return {
-        "tool_name": "file_read",
-        "required_fields": ["path"],
-        "required_arguments": {"path": path},
-        "optional_fields": ["start_line", "end_line"],
-        "notes": [
-            "Read the current staged content before attempting another chunk write.",
-            "Confirm the exact missing section or lines from the read result before writing again.",
-        ],
-    }
-
-
-def _forced_escape_action(path: str, session_id: str) -> dict[str, Any]:
-    return {
-        "strategy": "escape_write_dead_end",
-        "allowed_operations": ["full_file_rewrite", "finalize_and_verify", "human_handoff"],
-        "notes": [
-            "Do not retry the same chunk write again.",
-            "Either perform one complete file_write overwrite, finalize and verify the staged file, or ask_human for handoff.",
-        ],
-        "full_file_rewrite": {
-            "tool_name": "file_write",
-            "required_arguments": {
-                "path": path,
-                "write_session_id": session_id,
-                "section_name": "full_file",
-                "replace_strategy": "overwrite",
-            },
-        },
-        "finalize_and_verify": {"tool_name": "finalize_write_session"},
-        "human_handoff": {"tool_name": "ask_human"},
-    }
-
-
 def _clear_loop_guard_read_schedule(state: LoopState | None) -> None:
     if state is None:
         return
@@ -273,16 +276,6 @@ def _clear_loop_guard_read_schedule(state: LoopState | None) -> None:
     if not isinstance(scratchpad, dict):
         return
     scratchpad.pop("_chunk_write_loop_guard_read_scheduled", None)
-
-
-def _outline_handoff_question(path: str) -> str:
-    return (
-        f"LoopGuard outline required for `{path}`.\n"
-        "- Bullet 1: next missing section\n"
-        "- Bullet 2: section after that\n"
-        "- Bullet 3: final section or verification step\n"
-        "Reply `continue` to resume writing, or provide corrections first."
-    )
 
 
 def _append_recent_write(path_state: dict[str, Any], record: dict[str, Any], *, limit: int) -> None:
@@ -356,7 +349,7 @@ def _hard_abort_chunked_write(
             "loop_guard_postmortem": postmortem,
             "loop_guard_trigger_kind": trigger_kind,
             "loop_guard_attempts": attempts,
-            "next_required_action": _forced_escape_action(resolved_path, session_id),
+            "next_required_action": forced_escape_action(resolved_path, session_id),
         },
     )
 
@@ -387,7 +380,7 @@ def maybe_block_chunked_write(
     if session_mode != "chunked_author" or session_status == "complete":
         return None
 
-    resolved_path = _resolve(path, cwd)
+    resolved_path = resolve_path(path, cwd)
     path_state = _path_state(state, resolved_path)
     if path_state is None:
         return None
@@ -412,8 +405,8 @@ def maybe_block_chunked_write(
         recent_writes = []
     previous = recent_writes[-1] if recent_writes else {}
     writes_since_last_read = int(path_state.get("writes_since_last_read", 0) or 0) + 1
-    projected_hash = _content_hash(updated_content)
-    payload_hash = _content_hash(content)
+    projected_hash = content_hash(updated_content)
+    payload_hash = content_hash(content)
     projected_length = len(updated_content)
     payload_length = len(content)
     previous_projected_length = int(previous.get("projected_length", 0) or 0)
@@ -456,7 +449,7 @@ def maybe_block_chunked_write(
     )
     size_delta_signal = bool(previous and size_delta < 0.01)
     clustering_signal = writes_since_last_read >= 3
-    added_lines = _count_added_lines(staged_content, updated_content)
+    added_lines = count_added_lines(staged_content, updated_content)
 
     append_large_overlap = bool(
         append_overlap_ratio >= float(config.get("append_overlap_threshold", 0.75))
@@ -531,40 +524,24 @@ def maybe_block_chunked_write(
                 trigger_kind="read_required_retry",
             )
         level = 2 if prior_level >= 1 else 1
-        path_state["escalation_level"] = max(prior_level, level)
-        path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-        path_state["last_error_kind"] = "chunked_write_requires_read_before_write"
-        path_state["outline_required"] = level >= 2
-        _record_guard_event(
+        return _emit_block(
             state,
-            event="loop_guard_read_required",
-            path=resolved_path,
+            path_state,
+            LoopGuardDecision(
+                action="block",
+                message="LoopGuard: repeated write detected. You must read the current file content and confirm "
+                "which section is missing before writing again.",
+                error_kind="chunked_write_requires_read_before_write",
+            ),
+            resolved_path=resolved_path,
             session_id=session_id,
-            payload={
-                "escalation_level": level,
-                "stagnation_score": score,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-            },
-        )
-        return fail(
-            "LoopGuard: repeated write detected. You must read the current file content and confirm "
-            "which section is missing before writing again.",
-            metadata={
-                "path": resolved_path,
-                "write_session_id": session_id,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-                "error_kind": "chunked_write_requires_read_before_write",
-                "loop_guard_score": score,
-                "loop_guard_escalation_level": level,
-                "loop_guard_signals": signals,
-                "loop_guard_schedule_read": True,
-                "loop_guard_tail_excerpt": tail_excerpt,
-                "next_required_tool": _next_required_read(path),
-                "loop_guard_outline_required": level >= 2,
-                "loop_guard_outline_question": _outline_handoff_question(resolved_path) if level >= 2 else "",
-            },
+            section_name=section_name,
+            next_section_name=next_section_name,
+            score=score,
+            signals=signals,
+            tail_excerpt=tail_excerpt,
+            level=level,
+            outline_required=level >= 2,
         )
 
     if (
@@ -585,34 +562,23 @@ def maybe_block_chunked_write(
                 tail_excerpt=tail_excerpt,
                 trigger_kind="checkpoint_revisit",
             )
-        path_state["pending_read_before_write"] = True
-        path_state["escalation_level"] = max(prior_level, 1)
-        path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-        path_state["last_error_kind"] = "chunked_write_checkpoint_revisit"
-        path_state["outline_required"] = False
-        _record_guard_event(
+        return _emit_block(
             state,
-            event="loop_guard_checkpoint_revisit",
-            path=resolved_path,
+            path_state,
+            LoopGuardDecision(
+                action="block",
+                message=f"LoopGuard: section `{section_name}` was already checkpointed for `{path}`. "
+                "Read the current staged content and advance to the next section instead of rewriting it.",
+                error_kind="chunked_write_checkpoint_revisit",
+            ),
+            resolved_path=resolved_path,
             session_id=session_id,
-            payload={"section_name": section_name, "next_section_name": next_section_name},
-        )
-        return fail(
-            f"LoopGuard: section `{section_name}` was already checkpointed for `{path}`. "
-            "Read the current staged content and advance to the next section instead of rewriting it.",
-            metadata={
-                "path": resolved_path,
-                "write_session_id": session_id,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-                "error_kind": "chunked_write_checkpoint_revisit",
-                "loop_guard_score": score,
-                "loop_guard_escalation_level": max(prior_level, 1),
-                "loop_guard_signals": signals,
-                "loop_guard_schedule_read": True,
-                "loop_guard_tail_excerpt": tail_excerpt,
-                "next_required_tool": _next_required_read(path),
-            },
+            section_name=section_name,
+            next_section_name=next_section_name,
+            score=score,
+            signals=signals,
+            tail_excerpt=tail_excerpt,
+            level=1,
         )
 
     if (
@@ -635,34 +601,23 @@ def maybe_block_chunked_write(
                 tail_excerpt=tail_excerpt,
                 trigger_kind="non_growing_overwrite",
             )
-        path_state["pending_read_before_write"] = True
-        path_state["escalation_level"] = max(prior_level, 1)
-        path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-        path_state["last_error_kind"] = "chunked_write_non_growing_overwrite"
-        path_state["outline_required"] = False
-        _record_guard_event(
+        return _emit_block(
             state,
-            event="loop_guard_non_growing_overwrite",
-            path=resolved_path,
+            path_state,
+            LoopGuardDecision(
+                action="block",
+                message="LoopGuard: chunked overwrite must grow the staged file or explicitly replace a missing section. "
+                "Read the current staged content before overwriting from memory.",
+                error_kind="chunked_write_non_growing_overwrite",
+            ),
+            resolved_path=resolved_path,
             session_id=session_id,
-            payload={"section_name": section_name, "content_length": len(content), "staged_length": len(staged_content)},
-        )
-        return fail(
-            "LoopGuard: chunked overwrite must grow the staged file or explicitly replace a missing section. "
-            "Read the current staged content before overwriting from memory.",
-            metadata={
-                "path": resolved_path,
-                "write_session_id": session_id,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-                "error_kind": "chunked_write_non_growing_overwrite",
-                "loop_guard_score": score,
-                "loop_guard_escalation_level": max(prior_level, 1),
-                "loop_guard_signals": signals,
-                "loop_guard_schedule_read": True,
-                "loop_guard_tail_excerpt": tail_excerpt,
-                "next_required_tool": _next_required_read(path),
-            },
+            section_name=section_name,
+            next_section_name=next_section_name,
+            score=score,
+            signals=signals,
+            tail_excerpt=tail_excerpt,
+            level=1,
         )
 
     if append_large_overlap:
@@ -679,38 +634,29 @@ def maybe_block_chunked_write(
                 tail_excerpt=tail_excerpt,
                 trigger_kind="append_large_overlap",
             )
-        path_state["pending_read_before_write"] = True
-        path_state["escalation_level"] = max(prior_level, 1)
-        path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-        path_state["last_error_kind"] = "chunked_write_append_overlap_detected"
-        path_state["outline_required"] = False
-        _record_guard_event(
+        return _emit_block(
             state,
-            event="loop_guard_append_overlap_detected",
-            path=resolved_path,
+            path_state,
+            LoopGuardDecision(
+                action="block",
+                message="LoopGuard: overlapping chunk append detected. "
+                "Call `file_read` to check the current staged content, then use `file_patch` (narrow exact edit) or `ast_patch` (narrow structural edit) "
+                "or `file_write` with `replace_strategy=\"overwrite\"` to modify. Do not append existing overlapping lines.",
+                error_kind="chunked_write_append_overlap_detected",
+                extra_metadata={
+                    "overlap_ratio": append_overlap_ratio,
+                    "staged_bytes": len(staged_content.encode("utf-8", errors="replace")),
+                    "incoming_bytes": len(content.encode("utf-8", errors="replace")),
+                },
+            ),
+            resolved_path=resolved_path,
             session_id=session_id,
-            payload={"section_name": section_name, "append_overlap_ratio": append_overlap_ratio},
-        )
-        return fail(
-            "LoopGuard: overlapping chunk append detected. "
-            "Call `file_read` to check the current staged content, then use `file_patch` (narrow exact edit) or `ast_patch` (narrow structural edit) "
-            "or `file_write` with `replace_strategy=\"overwrite\"` to modify. Do not append existing overlapping lines.",
-            metadata={
-                "overlap_ratio": append_overlap_ratio,
-                "staged_bytes": len(staged_content.encode("utf-8", errors="replace")),
-                "incoming_bytes": len(content.encode("utf-8", errors="replace")),
-                "path": resolved_path,
-                "write_session_id": session_id,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-                "error_kind": "chunked_write_append_overlap_detected",
-                "loop_guard_score": score,
-                "loop_guard_escalation_level": max(prior_level, 1),
-                "loop_guard_signals": signals,
-                "loop_guard_schedule_read": True,
-                "loop_guard_tail_excerpt": tail_excerpt,
-                "next_required_tool": _next_required_read(path),
-            },
+            section_name=section_name,
+            next_section_name=next_section_name,
+            score=score,
+            signals=signals,
+            tail_excerpt=tail_excerpt,
+            level=1,
         )
 
     if bool(config.get("diff_gate", True)) and (updated_content == staged_content or added_lines == 0):
@@ -727,34 +673,23 @@ def maybe_block_chunked_write(
                 tail_excerpt=tail_excerpt,
                 trigger_kind="no_new_content",
             )
-        path_state["pending_read_before_write"] = True
-        path_state["escalation_level"] = max(prior_level, 1)
-        path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-        path_state["last_error_kind"] = "chunked_write_no_new_content"
-        path_state["outline_required"] = False
-        _record_guard_event(
+        return _emit_block(
             state,
-            event="loop_guard_no_new_content",
-            path=resolved_path,
+            path_state,
+            LoopGuardDecision(
+                action="block",
+                message="LoopGuard: no new staged content would be added by this chunk write. "
+                "Read the current file content and advance to the next missing section.",
+                error_kind="chunked_write_no_new_content",
+            ),
+            resolved_path=resolved_path,
             session_id=session_id,
-            payload={"section_name": section_name, "added_lines": added_lines},
-        )
-        return fail(
-            "LoopGuard: no new staged content would be added by this chunk write. "
-            "Read the current file content and advance to the next missing section.",
-            metadata={
-                "path": resolved_path,
-                "write_session_id": session_id,
-                "section_name": section_name,
-                "next_section_name": next_section_name,
-                "error_kind": "chunked_write_no_new_content",
-                "loop_guard_score": score,
-                "loop_guard_escalation_level": max(prior_level, 1),
-                "loop_guard_signals": signals,
-                "loop_guard_schedule_read": True,
-                "loop_guard_tail_excerpt": tail_excerpt,
-                "next_required_tool": _next_required_read(path),
-            },
+            section_name=section_name,
+            next_section_name=next_section_name,
+            score=score,
+            signals=signals,
+            tail_excerpt=tail_excerpt,
+            level=1,
         )
 
     if score < int(config["stagnation_threshold"]):
@@ -775,28 +710,7 @@ def maybe_block_chunked_write(
             trigger_kind="stagnation",
         )
 
-    level = 1
-    if score >= int(config["level2_threshold"]) or prior_level >= 1:
-        level = 2
-    path_state["pending_read_before_write"] = True
-    path_state["escalation_level"] = max(prior_level, level)
-    path_state["blocked_attempts"] = int(path_state.get("blocked_attempts", 0) or 0) + 1
-    path_state["last_error_kind"] = "chunked_write_loop_guard"
-    path_state["outline_required"] = level >= 2
-
-    _record_guard_event(
-        state,
-        event="loop_guard_triggered",
-        path=resolved_path,
-        session_id=session_id,
-        payload={
-            "escalation_level": level,
-            "stagnation_score": score,
-            "section_name": section_name,
-            "next_section_name": next_section_name,
-            "signals": signals,
-        },
-    )
+    level = 2 if score >= int(config["level2_threshold"]) or prior_level >= 1 else 1
     message = (
         "LoopGuard: repeated chunk write detected. Read the current staged content and confirm the exact missing "
         "section before writing again."
@@ -806,24 +720,27 @@ def maybe_block_chunked_write(
             "LoopGuard: repeated chunk write persisted after an earlier recovery. Stop blind writing, "
             "read the current staged content, and outline the remaining sections before the next file_write."
         )
-    return fail(
-        message,
-        metadata={
-            "path": resolved_path,
-            "write_session_id": session_id,
-            "section_name": section_name,
-            "next_section_name": next_section_name,
-            "error_kind": "chunked_write_loop_guard",
-            "loop_guard_score": score,
-            "loop_guard_escalation_level": level,
-            "loop_guard_signals": signals,
-            "loop_guard_schedule_read": True,
-            "loop_guard_tail_excerpt": tail_excerpt,
-            "next_required_tool": _next_required_read(path),
-            "loop_guard_plan_only_requested": level >= 2,
-            "loop_guard_outline_required": level >= 2,
-            "loop_guard_outline_question": _outline_handoff_question(resolved_path) if level >= 2 else "",
-        },
+    return _emit_block(
+        state,
+        path_state,
+        LoopGuardDecision(
+            action="block",
+            message=message,
+            error_kind="chunked_write_loop_guard",
+            extra_metadata={
+                "loop_guard_plan_only_requested": level >= 2,
+            },
+        ),
+        resolved_path=resolved_path,
+        session_id=session_id,
+        section_name=section_name,
+        next_section_name=next_section_name,
+        score=score,
+        signals=signals,
+        tail_excerpt=tail_excerpt,
+        level=level,
+        outline_required=level >= 2,
+        event_name="loop_guard_triggered",
     )
 
 
@@ -836,7 +753,7 @@ def mark_chunked_write_success(
 ) -> None:
     if state is None:
         return
-    path_state = _path_state(state, _resolve(path, cwd))
+    path_state = _path_state(state, resolve_path(path, cwd))
     if path_state is None:
         return
     checkpoints = path_state.setdefault("section_checkpoints", [])
@@ -859,7 +776,7 @@ def clear_loop_guard_verification_requirement(
 ) -> None:
     if state is None:
         return
-    resolved_path = _resolve(path, cwd)
+    resolved_path = resolve_path(path, cwd)
     path_state = _path_state(state, resolved_path)
     if path_state is None:
         return
@@ -940,7 +857,7 @@ def _matches_outline_requirement(
         for item in active:
             if str(item.get("session_id", "") or "").strip() == normalized_session_id:
                 return item
-    normalized_path = _resolve(str(path or "").strip(), getattr(state, "cwd", None)) if path else ""
+    normalized_path = resolve_path(str(path or "").strip(), getattr(state, "cwd", None)) if path else ""
     if normalized_path:
         for item in active:
             if str(item.get("path", "") or "").strip() == normalized_path:
@@ -992,7 +909,7 @@ def outline_mode_violation(
         "path": path,
         "write_session_id": str(requirement.get("session_id", "") or ""),
         "message": message,
-        "question": _outline_handoff_question(path),
+        "question": outline_handoff_question(path),
         "pending_read_before_write": bool(requirement.get("pending_read_before_write")),
     }
 
@@ -1017,7 +934,7 @@ def build_loop_guard_outline_interrupt_payload(
     )
     return {
         "kind": "chunked_write_loop_guard_outline",
-        "question": question or _outline_handoff_question(path),
+        "question": question or outline_handoff_question(path),
         "guidance": guidance,
         "path": path,
         "write_session_id": str(primary.get("session_id", "") or ""),
@@ -1042,7 +959,7 @@ def clear_loop_guard_outline_requirement(
     if not isinstance(paths, dict):
         return False
 
-    normalized_path = _resolve(path, cwd or getattr(state, "cwd", None)) if path else ""
+    normalized_path = resolve_path(path, cwd or getattr(state, "cwd", None)) if path else ""
     normalized_session_id = str(write_session_id or "").strip()
     cleared = False
     for stored_path, payload in paths.items():

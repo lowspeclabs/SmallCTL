@@ -95,32 +95,6 @@ def _latest_verifier_blocks_success_claim(state: LoopState, content: str) -> dic
     return verdict
 
 
-async def scratch_set(key: str, value: Any, state: LoopState, persist: bool = False) -> dict[str, Any]:
-    state.scratchpad[key] = value
-    state.touch()
-    if persist:
-        await checkpoint(state=state, label=f"scratch_set:{key}")
-    return ok({"key": key, "value": value})
-
-
-async def scratch_get(key: str, state: LoopState) -> dict[str, Any]:
-    if key not in state.scratchpad:
-        return fail(f"Missing scratch key: {key}")
-    return ok({"key": key, "value": state.scratchpad[key]})
-
-
-async def scratch_list(state: LoopState) -> dict[str, Any]:
-    return ok(state.scratchpad, metadata={"count": len(state.scratchpad)})
-
-
-async def scratch_delete(key: str, state: LoopState) -> dict[str, Any]:
-    if key not in state.scratchpad:
-        return fail(f"Missing scratch key: {key}")
-    del state.scratchpad[key]
-    state.touch()
-    return ok({"deleted": key})
-
-
 async def checkpoint(
     state: LoopState,
     label: str = "checkpoint",

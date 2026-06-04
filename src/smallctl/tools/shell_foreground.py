@@ -9,6 +9,7 @@ from ..models.events import UIEvent, UIEventType
 from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .common import fail, needs_human, ok
+from .process_lifecycle import stop_process, truncate_output, unregister_process
 from .process_streams import read_stream_chunks
 from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
 from .shell_support import (
@@ -255,11 +256,8 @@ async def shell_exec_foreground(
                 final_stdout = "".join(stdout_data)
                 final_stderr = "".join(stderr_data)
 
-                MAX_FINAL_RESULT = 256 * 1024
-                if len(final_stdout) > MAX_FINAL_RESULT:
-                    final_stdout = final_stdout[:MAX_FINAL_RESULT] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
-                if len(final_stderr) > MAX_FINAL_RESULT:
-                    final_stderr = final_stderr[:MAX_FINAL_RESULT] + "\n[OUTPUT TRUNCATED - TOO LARGE]"
+                final_stdout = truncate_output(final_stdout)
+                final_stderr = truncate_output(final_stderr)
 
                 output = {
                     "stdout": final_stdout,
@@ -363,12 +361,7 @@ async def shell_exec_foreground(
         except asyncio.TimeoutError:
             if start_time:
                 execution_sec = time.monotonic() - start_time
-            if proc and proc.returncode is None:
-                try:
-                    proc.kill()
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except Exception:
-                    pass
+            await stop_process(proc, harness=harness, timeout=1.0)
             if password_prompt_detected:
                 return needs_human(
                     f"Command timed out waiting for sudo/password input: '{command}'. {sudo_human_message}",
@@ -381,21 +374,12 @@ async def shell_exec_foreground(
         except asyncio.CancelledError:
             if start_time:
                 execution_sec = time.monotonic() - start_time
-            if proc and proc.returncode is None:
-                try:
-                    proc.kill()
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except Exception:
-                    pass
+            await stop_process(proc, harness=harness, timeout=1.0)
             raise
         except Exception as exc:
             return fail(str(exc))
         finally:
-            if harness and proc and hasattr(harness, "_active_processes"):
-                try:
-                    harness._active_processes.discard(proc)
-                except Exception:
-                    pass
+            unregister_process(harness, proc)
 
         return fail("Unknown shell execution error")
     result = await _run()

@@ -7,12 +7,12 @@ from typing import Any
 from ..experience_tags import PHASE_TAG_PREFIX
 from ..state import clip_string_list, clip_text_value
 from .task_classifier import (
-    _LOCAL_SHELL_OVERRIDE_RE,
     is_smalltalk,
     looks_like_author_write_request,
     looks_like_write_file_request,
     looks_like_write_patch_request,
 )
+from .task_classifier_constants import LOCAL_SHELL_OVERRIDE_RE as _LOCAL_SHELL_OVERRIDE_RE
 
 _MEMORY_MARKERS = (
     "save this in memory",

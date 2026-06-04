@@ -12,192 +12,50 @@ from ..docker_retry_normalization import (
     docker_retry_key,
     extract_docker_command_target,
 )
+from .directory_empty_checks import (
+    match_directory_empty_check,
+    parse_directory_empty_checks,
+)
 from ..models.tool_result import ToolEnvelope
 from ..challenge_progress import record_verifier_result
 from ..shell_utils import strip_benign_shell_redirections as _strip_benign_shell_redirections
-
-# Patterns that indicate the command is probing for a binary's presence.
-# These are the canonical "is X installed?" commands.
-# The lookahead after the subcommand keyword accepts whitespace, shell
-# redirects (2>&1), pipes, or end-of-string so that commands like
-# "docker info 2>&1 | head -5" are still recognised as probes.
-_BINARY_PROBE_RE = re.compile(
-    r"^(?:"
-    r"which\s+\S+"
-    r"|whereis\s+\S+"
-    r"|\S+\s+(?:--version|version|info|status|--help)(?:\s|\||\>|\&|$)"
-    r"|type\s+\S+"
-    r"|command\s+-v\s+\S+"
-    r"|dpkg\s+-l\s+\S+"
-    r"|apt\s+(?:list|show|search)\s+\S+"
-    r"|rpm\s+-q\s+\S+"
-    r"|apk\s+info\s+\S+"
-    r"|pgrep\b"
-    r"|pidof\b"
-    r")"
-    r"(?:.*)?$",
-    re.IGNORECASE,
+from .tool_result_verification_constants import (
+    _BINARY_PROBE_RE,
+    _CURL_VERIFIER_FAILURE_RE,
+    _FOG_RESOURCE_RE,
+    _INTERACTIVE_PROMPT_RE,
+    _LONG_RUNNING_REMOTE_INSTALLER_COMMAND_RE,
+    _LONG_RUNNING_REMOTE_INSTALLER_OUTPUT_RE,
+    _LS_NO_SUCH_FILE_RE,
+    _NGINX_VERIFIER_COMMAND_RE,
+    _NGINX_VERIFIER_FAILURE_RE,
+    _NOT_FOUND_MARKERS,
+    _RAW_SSH_COMMAND_RE,
+    _REMOTE_APPLICATION_BLOCKERS,
+    _REMOTE_FILE_PRESENCE_PROBE_RE,
+    _REMOTE_MUTATING_COMMAND_RE,
+    _REMOTE_READBACK_COMMANDS,
+    _REMOVAL_ABSENCE_PIPE_RE,
+    _REMOVAL_ABSENCE_PROBE_RE,
+    _REMOVAL_TASK_KEYWORDS,
+    _SSH_AUTH_RECOVERY_KEY,
+    _TEST_FAILURE_COUNT_RE,
+    _TEST_FAILURE_OUTPUT_RE,
+    _TEST_FAILURE_SUMMARY_RE,
+    _ZERO_TESTS_RAN_RE,
 )
-_REMOVAL_ABSENCE_PROBE_RE = re.compile(
-    r"\b(?:grep|egrep|fgrep|find|ls|systemctl|pgrep|ps)\b",
-    re.IGNORECASE,
+from .tool_result_verification_helpers import (
+    _VERIFIER_KIND_STRENGTH,
+    classify_execution_failure,
+    command_has_write_or_heredoc_shape,
+    command_is_binary_probe,
+    exit_code_matches,
+    looks_like_infinite_loop,
+    output_confirms_not_found,
+    snip_text,
+    verifier_kind_for_command,
+    verifier_strength,
 )
-_REMOVAL_ABSENCE_PIPE_RE = re.compile(
-    r"\|\s*(?:grep|egrep|fgrep)\b",
-    re.IGNORECASE,
-)
-_LS_NO_SUCH_FILE_RE = re.compile(
-    r"\bls:\s+cannot\s+access\b.*\b(?:no such file|not found)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_FOG_RESOURCE_RE = re.compile(
-    r"\bfog(?:project|server|\.service|[_-]?(?:nfs|scheduler|multicast|snapin|replicator|image|web|php|worker))?\b",
-    re.IGNORECASE,
-)
-
-# Keywords that indicate a removal/uninstall task.
-_REMOVAL_TASK_KEYWORDS = frozenset([
-    "uninstall", "remove", "delete", "purge", "rm ", "rm -f",
-    "stop and remove", "stop all", "clean up", "clean-up",
-    "get rid of", "wipe", "tear down", "teardown", "disable",
-])
-
-# Strings in stderr/stdout that confirm exit-127 means "not found".
-_NOT_FOUND_MARKERS = ("command not found", "not found", "no such file", "permission denied", "could not be found")
-_SSH_AUTH_RECOVERY_KEY = "_ssh_auth_recovery_state"
-_REMOTE_MUTATING_COMMAND_RE = re.compile(
-    r"\bsed\s+-i\b"
-    r"|"
-    r"\bperl\s+-p(?:i|[^A-Za-z0-9_]*-i)\b"
-    r"|"
-    r"\bpython3?\s+-c\b.*\bopen\s*\([^)]*['\"]w"
-    r"|"
-    r"(?:^|\s)(?:\d?>|\d?>>|>>|>)\s*\S+"
-    r"|"
-    r"\btee(?:\s+-a)?\s+/\S+"
-    r"|"
-    r"\bcat\s*>\s*/\S+"
-    r"|"
-    r"\b(?:rm|truncate|install\s+-m)\b"
-    r"|"
-    r"\b(?:mv|cp)\b.+\s+/(?:etc|var|usr|opt|srv|root)/\S+",
-    re.IGNORECASE | re.DOTALL,
-)
-_REMOTE_READBACK_COMMANDS = {"cat", "head", "tail"}
-_REMOTE_FILE_PRESENCE_PROBE_RE = re.compile(
-    r"(?:^|[;&|]\s*)test\s+-s\s+/\S+"
-    r"|"
-    r"(?:^|[;&|]\s*)sha256sum\s+/\S+"
-    r"|"
-    r"(?:^|[;&|]\s*)stat\s+(?:-[^\s]+\s+)*?/\S+",
-    re.IGNORECASE,
-)
-_NGINX_VERIFIER_COMMAND_RE = re.compile(r"\bnginx\s+-t\b", re.IGNORECASE)
-_NGINX_VERIFIER_FAILURE_RE = re.compile(
-    r"nginx:\s*configuration\s*file\b.*\btest\s*failed\b"
-    r"|"
-    r"\[\s*emerg\s*\].*?\bin\s+/etc/nginx/"
-    r"|"
-    r"unexpected\s+end\s+of\s*file,\s*expecting\s+[\"']?[;}]",
-    re.IGNORECASE | re.DOTALL,
-)
-_CURL_VERIFIER_FAILURE_RE = re.compile(
-    r"\bcurl:\s*\(\d+\)"
-    r"|"
-    r"\bfailed to connect\b"
-    r"|"
-    r"\bconnection refused\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_ZERO_TESTS_RAN_RE = re.compile(
-    r"\bNO TESTS RAN\b"
-    r"|"
-    r"\bRan\s+0\s+tests?\b",
-    re.IGNORECASE,
-)
-_TEST_FAILURE_OUTPUT_RE = re.compile(
-    r"\bFAILED\s*\((?:failures|errors|failed|passed|skipped|xfailed|xpassed)[^)]*\)"
-    r"|"
-    r"\b(?:FAIL|ERROR):\s+\S+"
-    r"|"
-    r"\b=+\s*(?:FAILURES|ERRORS|short test summary info)\s*=+"
-    r"|"
-    r"\b\d+\s+failed\b",
-    re.IGNORECASE,
-)
-_TEST_FAILURE_SUMMARY_RE = re.compile(
-    r"\bFAILED\s*\([^)]*\)"
-    r"|"
-    r"\b\d+\s+failed\b",
-    re.IGNORECASE,
-)
-_TEST_FAILURE_COUNT_RE = re.compile(
-    r"FAILED\s*\((?:[^)]*?failures\s*=\s*(\d+)[^)]*?)\)"
-    r"|"
-    r"(\d+)\s+failed",
-    re.IGNORECASE,
-)
-_LONG_RUNNING_REMOTE_INSTALLER_COMMAND_RE = re.compile(
-    r"\binstallfog\.sh\b"
-    r"|"
-    r"\b(?:apt-get|apt|dnf|yum|zypper|pacman)\b.*\b(?:install|upgrade|dist-upgrade|full-upgrade)\b"
-    r"|"
-    r"\b(?:docker\s+compose|docker-compose)\s+up\b"
-    r"|"
-    r"\b(?:make|ninja)\s+(?:install|build)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_LONG_RUNNING_REMOTE_INSTALLER_OUTPUT_RE = re.compile(
-    r"\binstallation started\b"
-    r"|"
-    r"\btesting internet connection\b"
-    r"|"
-    r"\binstalling\b.+\bas needed\b"
-    r"|"
-    r"\bbuilding dependency tree\b"
-    r"|"
-    r"\bsetting up\b\s+\S+"
-    r"|"
-    r"\bpulling\b.+\bimage\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_REMOTE_APPLICATION_BLOCKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "fogproject_account_exists",
-        re.compile(
-            r'The account\s+"fogproject"\s+already exists.*?'
-            r"(?:Please remove the account\s+\"fogproject\".*?|"
-            r"username=<usernameForSystem>\s+\./installfog\.sh\s+-y)",
-            re.IGNORECASE | re.DOTALL,
-        ),
-    ),
-    (
-        "account_exists",
-        re.compile(
-            r'The account\s+"[^"]+"\s+already exists.*?'
-            r"(?:Please remove the account|set a new service username|userdel\s+\S+)",
-            re.IGNORECASE | re.DOTALL,
-        ),
-    ),
-    (
-        "command_not_found",
-        re.compile(r"\b(?:bash|sh):\s+line\s+\d+:\s+\S+:\s+command not found\b", re.IGNORECASE),
-    ),
-    (
-        "file_exists",
-        re.compile(r"\bfailed to create symbolic link\b.*?\bFile exists\b", re.IGNORECASE | re.DOTALL),
-    ),
-    (
-        "permission_denied",
-        re.compile(r"\bpermission denied\b", re.IGNORECASE),
-    ),
-)
-_INTERACTIVE_PROMPT_RE = re.compile(
-    r"\b(?:Choice:\s*\[\d+\]|Are you sure you wish to continue|Should .*?\?\s*\([yYnN]/|"
-    r"Sorry,\s+answer not recognized|Hit \[?Enter\]?)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-_RAW_SSH_COMMAND_RE = re.compile(r"^\s*(?:ssh\b|scp\b|sftp\b|sshpass\b)", re.IGNORECASE)
 
 
 def _ssh_auth_recovery_entry_key(host: str, user: str) -> str:
@@ -615,28 +473,16 @@ _VERIFIER_KIND_STRENGTH = {
 
 
 def _verifier_kind_for_command(command: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
-    if not normalized:
-        return ""
-    padded = f" {normalized}"
-    if "py_compile" in padded:
-        return "syntax_only"
-    if any(marker in padded for marker in (" pytest", " unittest", " npm test", "npm run test", "pnpm test", "yarn test", "go test", "cargo test", "vitest", "jest")):
-        return "test_suite"
-    if any(marker in padded for marker in (" ruff", " mypy", " eslint", "cargo clippy")):
-        return "lint_typecheck"
-    if re.search(r"\bpython(?:3(?:\.\d+)?)?\b.*\.py\b", normalized):
-        return "run_target"
-    return "diagnostic"
+    return verifier_kind_for_command(command)
 
 
 def _verifier_strength(kind: str) -> int:
-    return _VERIFIER_KIND_STRENGTH.get(str(kind or "").strip(), 0)
+    return verifier_strength(kind)
 
 
 def _task_or_history_requires_runtime_verifier(state: Any) -> bool:
     prior_command = _prior_failed_verifier_command(state)
-    if _verifier_strength(_verifier_kind_for_command(prior_command)) > _verifier_strength("syntax_only"):
+    if verifier_strength(verifier_kind_for_command(prior_command)) > verifier_strength("syntax_only"):
         return True
     texts: list[str] = []
     run_brief = getattr(state, "run_brief", None)
@@ -686,15 +532,15 @@ def _passing_verifier_is_weaker_than_prior_failure(
     current_command: str,
     current_kind: str,
 ) -> bool:
-    if _verifier_strength(current_kind) > _verifier_strength("syntax_only"):
+    if verifier_strength(current_kind) > verifier_strength("syntax_only"):
         return False
     if not _task_or_history_requires_runtime_verifier(state):
         return False
     prior_command = _prior_failed_verifier_command(state)
     if not prior_command:
         return False
-    prior_kind = _verifier_kind_for_command(prior_command)
-    if _verifier_strength(prior_kind) <= _verifier_strength(current_kind):
+    prior_kind = verifier_kind_for_command(prior_command)
+    if verifier_strength(prior_kind) <= verifier_strength(current_kind):
         return False
     normalized_current = re.sub(r"\s+", " ", str(current_command or "").strip().lower())
     normalized_prior = re.sub(r"\s+", " ", prior_command.strip().lower())
@@ -742,8 +588,8 @@ def assess_remote_mutation_verification(
 
     guessed_paths = [str(item).strip() for item in requirement.get("guessed_paths", []) if str(item).strip()]
     path_match = any(path in command for path in guessed_paths) if guessed_paths else False
-    directory_checks = _remote_mutation_directory_empty_checks(requirement)
-    directory_check = _matched_directory_empty_check(command, directory_checks)
+    directory_checks = parse_directory_empty_checks(requirement)
+    directory_check = match_directory_empty_check(command, directory_checks)
     profile = str(requirement.get("verification_profile") or "").strip().lower()
     patterns = requirement.get("verification_patterns")
     new_patterns = patterns.get("new_present", []) if isinstance(patterns, dict) else []
@@ -927,40 +773,6 @@ def _simple_remote_readback_path(command: str) -> str:
     return ""
 
 
-def _remote_mutation_directory_empty_checks(requirement: dict[str, Any]) -> list[dict[str, str]]:
-    raw_checks = requirement.get("directory_empty_checks")
-    if not isinstance(raw_checks, list):
-        return []
-    checks: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in raw_checks:
-        if not isinstance(item, dict):
-            continue
-        path = str(item.get("path") or "").strip().rstrip("/")
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        glob = str(item.get("glob") or "").strip()
-        checks.append({"path": path, "glob": glob})
-    return checks
-
-
-def _matched_directory_empty_check(command: str, checks: list[dict[str, str]]) -> dict[str, str] | None:
-    command_text = str(command or "")
-    if not command_text or not checks:
-        return None
-    lowered = command_text.lower()
-    if not any(marker in lowered for marker in ("find ", "ls ", "test ", "compgen ")):
-        return None
-    if not any(marker in lowered for marker in ("-mindepth", "-maxdepth", "-print", "-quit", "-a", "-z", "compgen")):
-        return None
-    for check in checks:
-        path = str(check.get("path") or "").strip().rstrip("/")
-        glob = str(check.get("glob") or "").strip()
-        if path and (path in command_text or glob and glob in command_text):
-            return check
-    return None
-
 
 def _annotate_verifier_artifact(
     artifact: Any,
@@ -991,51 +803,15 @@ def _annotate_verifier_artifact(
 
 
 def _snip_text(value: Any, *, limit: int = 400) -> str:
-    text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "..."
+    return snip_text(value, limit=limit)
 
 
 def _classify_execution_failure(text: str) -> str:
-    lowered = str(text or "").lower()
-    if not lowered:
-        return ""
-    docker_class = classify_docker_failure(lowered)
-    if docker_class:
-        return docker_class
-    if "syntaxerror" in lowered or "parseerror" in lowered:
-        return "syntax"
-    if "importerror" in lowered or "modulenotfounderror" in lowered:
-        return "import"
-    if "malformed stanza" in lowered and "sources" in lowered:
-        return "apt_sources_malformed"
-    if "deb822" in lowered or "invalid line" in lowered and "sources.list" in lowered:
-        return "apt_sources_malformed"
-    if "timed out" in lowered or "timeout" in lowered or "connection timed out" in lowered:
-        return "environment"
-    if "permission denied" in lowered or "password" in lowered or "sudo" in lowered:
-        return "environment"
-    if "assert" in lowered or "failed" in lowered or "traceback" in lowered:
-        return "test"
-    if "no such file" in lowered or "not found" in lowered:
-        return "path"
-    return "logic"
+    return classify_execution_failure(text)
 
 
 def _looks_like_infinite_loop(command: str, error: str, stdout: str, stderr: str) -> bool:
-    """Heuristic: command timed out with no output for a Python script = likely infinite loop."""
-    cmd = str(command or "").strip().lower()
-    if not cmd:
-        return False
-    if "python" not in cmd and "py_compile" not in cmd:
-        return False
-    err = str(error or "").lower()
-    if "timed out" not in err and "timeout" not in err:
-        return False
-    out = str(stdout or "").strip()
-    err_out = str(stderr or "").strip()
-    return not out and not err_out
+    return looks_like_infinite_loop(command, error, stdout, stderr)
 
 
 def _is_long_running_remote_command_timeout(
@@ -1069,21 +845,11 @@ def _is_long_running_remote_command_timeout(
 
 
 def _command_is_binary_probe(command: str) -> bool:
-    """Return True when the command looks like a binary-presence probe."""
-    cmd = str(command or "").strip()
-    if not cmd:
-        return False
-    return bool(_BINARY_PROBE_RE.match(cmd))
+    return command_is_binary_probe(command)
 
 
 def _output_confirms_not_found(stdout: str, stderr: str) -> bool:
-    """Return True when stdout/stderr text confirms the binary is absent."""
-    combined = (str(stdout or "") + " " + str(stderr or "")).lower()
-    # A completely empty combined output with exit 127 also qualifies — the
-    # shell itself swallowed the "not found" message (happens on some remotes).
-    if not combined.strip():
-        return True
-    return any(marker in combined for marker in _NOT_FOUND_MARKERS)
+    return output_confirms_not_found(stdout, stderr)
 
 
 def _classify_removal_absence_probe(
@@ -1187,16 +953,7 @@ def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
 
 
 def _command_has_write_or_heredoc_shape(command: str) -> bool:
-    lowered = str(command or "").strip().lower()
-    if not lowered:
-        return False
-    if "<<" in lowered:
-        return True
-    if re.search(r"(?:^|[;&|]\s*)(?:cat|printf|echo)\b[^\n;&|]*(?:>>|>)", lowered):
-        return True
-    if re.search(r"(?:^|[;&|]\s*)tee(?:\s+-a)?\s+", lowered):
-        return True
-    return False
+    return command_has_write_or_heredoc_shape(command)
 
 
 def _command_mentions_removal_subject(command: str, state: Any) -> bool:
@@ -1259,10 +1016,7 @@ def _absence_probe_found_resources(
 
 
 def _exit_code_matches(exit_code: Any, values: set[int]) -> bool:
-    try:
-        return int(exit_code) in values
-    except (TypeError, ValueError):
-        return exit_code is None and 0 in values
+    return exit_code_matches(exit_code, values)
 
 
 def _task_has_removal_intent(state: Any) -> bool:

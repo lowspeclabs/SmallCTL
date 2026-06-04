@@ -24,6 +24,7 @@ from ..chat_sessions import (
 from .app_approvals import handle_approval_prompt
 from .app_approvals import handle_sudo_password_prompt
 from .app_approvals import maybe_handle_plan_approval_result
+from .app_flow_utils import _extract_terminal_result_text, _harness_event_message_type
 from .console import ConsolePane
 from .display import (
     StatusState,
@@ -39,34 +40,6 @@ from .chat_selector import ChatSelectButton
 from .harness_bridge import HarnessBridge, _serialize_recent_messages
 from .model_selector import ModelSelectButton
 from .statusbar import StatusBar
-
-
-def _harness_event_message_type() -> type[Any]:
-    # Imported lazily to avoid a module cycle with app.py, which mixes this class in.
-    from .app import HarnessEvent
-
-    return HarnessEvent
-
-
-def _extract_terminal_result_text(result: dict[str, Any]) -> str:
-    if not isinstance(result, dict) or not result:
-        return ""
-
-    message = result.get("message")
-    if isinstance(message, dict):
-        for key in ("message", "output", "text", "question"):
-            value = message.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    elif isinstance(message, str) and message.strip():
-        return message.strip()
-
-    assistant = str(result.get("assistant") or "").strip()
-    if assistant:
-        return assistant
-
-    reason = str(result.get("reason") or "").strip()
-    return reason
 
 
 class SmallctlAppFlowMixin:
@@ -522,21 +495,18 @@ class SmallctlAppFlowMixin:
         except (NoMatches, ScreenStackError):
             return None
 
-    async def _create_harness(self) -> None:
-        # Defensive: shut down any existing bridge/harness before creating new ones
+    async def _shutdown_harness(self) -> None:
+        """Defensively shut down any existing bridge/harness."""
+        from .app_lifecycle import shutdown_harness
         old_bridge = getattr(self, "_harness_bridge", None)
+        await shutdown_harness(old_bridge, self.harness if old_bridge is None else None)
         if old_bridge is not None:
-            try:
-                await old_bridge.shutdown()
-            except Exception:
-                pass
             self._harness_bridge = None
-        elif getattr(self, "harness", None) is not None:
-            try:
-                await self.harness.teardown()
-            except Exception:
-                pass
+        else:
             self.harness = None
+
+    async def _create_harness(self) -> None:
+        await self._shutdown_harness()
 
         try:
             self.harness = Harness(self.harness_config)
@@ -621,18 +591,7 @@ class SmallctlAppFlowMixin:
                 )
                 self.harness_config.context_limit = None
             else:
-                old_bridge = getattr(self, "_harness_bridge", None)
-                if old_bridge is not None:
-                    try:
-                        await old_bridge.shutdown()
-                    except Exception:
-                        pass
-                    self._harness_bridge = None
-                elif harness is not None:
-                    try:
-                        await harness.teardown()
-                    except Exception:
-                        pass
+                await self._shutdown_harness()
                 old_state = harness.state
                 await self._create_harness()
                 if self.harness is not None:

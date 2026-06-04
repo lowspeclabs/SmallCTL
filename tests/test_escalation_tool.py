@@ -20,7 +20,7 @@ from smallctl.recovery_schema import FailureEvent, Subtask, SubtaskLedger
 from smallctl.state import LoopState
 from smallctl.models.conversation import ConversationMessage
 from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
-from smallctl.graph.tool_execution_recovery import (
+from smallctl.graph.escalation_triggers import (
     _maybe_auto_trigger_escalation_for_completion_block,
     _maybe_auto_trigger_escalation_for_patch_stall,
     _maybe_auto_trigger_escalation_for_tool_loop,

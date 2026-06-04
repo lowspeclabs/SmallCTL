@@ -515,6 +515,92 @@ async def web_search(
         return fail(str(exc))
 
 
+def _resolve_fetch_selector(
+    state: Any,
+    *,
+    url: str | None,
+    result_id: str | None,
+    fetch_id: str | None,
+) -> tuple[str | None, str | None, str | None, list[str]]:
+    requested_url = str(url or "").strip() or None
+    requested_result_id = str(result_id or "").strip() or None
+    requested_fetch_id = str(fetch_id or "").strip() or None
+    selector_count = sum(1 for value in (requested_url, requested_result_id, requested_fetch_id) if value)
+    warnings: list[str] = []
+    if selector_count == 0:
+        return None, None, None, warnings
+    if selector_count > 1:
+        if requested_fetch_id:
+            requested_url = None
+            requested_result_id = None
+            warnings.append("Warning: Multiple target arguments provided. Using fetch_id and ignoring others.")
+        elif requested_result_id:
+            requested_url = None
+            requested_fetch_id = None
+            warnings.append("Warning: Multiple target arguments provided. Using result_id and ignoring others.")
+        else:
+            requested_result_id = None
+            requested_fetch_id = None
+            warnings.append("Warning: Multiple target arguments provided. Using url and ignoring others.")
+    return requested_url, requested_result_id, requested_fetch_id, warnings
+
+
+def _persist_fetch_artifact(
+    harness: Any,
+    state: Any,
+    response: Any,
+    full_text: str,
+    citation: Any,
+    resolved_result_id: str | None,
+    payload: dict[str, Any],
+) -> str | None:
+    if not hasattr(harness, "artifact_store"):
+        return None
+    bounded_max_chars = payload.get("_bounded_max_chars", 12000)
+    body_total_lines = len(full_text.splitlines()) or (1 if full_text else 0)
+    excerpt = str(response.text_excerpt or response.untrusted_text or "")
+    preview_text = structured_plain_text(payload) or excerpt or full_text[:bounded_max_chars]
+    summary = (
+        summarize_structured_output(tool_name="web_fetch", output=payload)
+        or response.title
+        or response.domain
+        or response.url
+        or "web fetch"
+    )
+    artifact = harness.artifact_store.persist_generated_text(
+        kind="web_fetch",
+        source=response.canonical_url or response.url,
+        content=full_text,
+        summary=summary,
+        preview_text=preview_text,
+        metadata={
+            "source_id": response.source_id,
+            "url": response.url,
+            "canonical_url": response.canonical_url,
+            "domain": response.domain,
+            "title": response.title,
+            "byline": response.byline,
+            "content_type": response.content_type,
+            "content_sha256": response.content_sha256,
+            "provider": citation.provider,
+            "extractor": citation.extractor,
+            "published_at": response.published_at,
+            "fetched_at": response.fetched_at,
+            "body_char_count": len(full_text),
+            "body_total_lines": body_total_lines,
+            "excerpt_char_count": len(excerpt),
+            "render_mode": "body_with_preview",
+            "untrusted": True,
+            "result_id": str(resolved_result_id or ""),
+            "fetch_id": str(payload.get("fetch_id") or ""),
+        },
+        tool_name="web_fetch",
+        session_id=str(getattr(state, "thread_id", "") or ""),
+    )
+    state.artifacts[artifact.artifact_id] = artifact
+    return artifact.artifact_id
+
+
 async def web_fetch(
     *,
     harness: Any,
@@ -528,33 +614,11 @@ async def web_fetch(
     config = _config_for_harness(harness)
     if not config.enabled:
         return fail("Web search is disabled.")
-    requested_url = str(url or "").strip() or None
-    requested_result_id = str(result_id or "").strip() or None
-    requested_fetch_id = str(fetch_id or "").strip() or None
-    selector_count = sum(1 for value in (requested_url, requested_result_id, requested_fetch_id) if value)
-    toleration_warnings: list[str] = []
-    if selector_count == 0:
+    requested_url, requested_result_id, requested_fetch_id, toleration_warnings = _resolve_fetch_selector(
+        state, url=url, result_id=result_id, fetch_id=fetch_id
+    )
+    if requested_url is None and requested_result_id is None and requested_fetch_id is None:
         return fail("Provide exactly one of url, result_id, or fetch_id.")
-    elif selector_count > 1:
-        # Prefer fetch_id > result_id > url to avoid hard failures from over-eager models.
-        if requested_fetch_id:
-            requested_url = None
-            requested_result_id = None
-            toleration_warnings.append(
-                "Warning: Multiple target arguments provided. Using fetch_id and ignoring others."
-            )
-        elif requested_result_id:
-            requested_url = None
-            requested_fetch_id = None
-            toleration_warnings.append(
-                "Warning: Multiple target arguments provided. Using result_id and ignoring others."
-            )
-        else:
-            requested_result_id = None
-            requested_fetch_id = None
-            toleration_warnings.append(
-                "Warning: Multiple target arguments provided. Using url and ignoring others."
-            )
     requested_result_token = requested_result_id or requested_fetch_id
     try:
         bounded_max_chars = min(max(1, int(max_chars or config.default_fetch_chars)), min(config.max_fetch_chars, _MAX_TOOL_FETCH_CHARS))
@@ -636,13 +700,14 @@ async def web_fetch(
                 response.canonical_url = str(source.get("canonical_url") or response.canonical_url)
                 response.domain = str(source.get("domain") or response.domain)
         payload = response.to_dict()
+        payload["_bounded_max_chars"] = bounded_max_chars
         if requested_result_token:
             payload["result_id"] = str(resolved_result_id or "")
             if isinstance(indexed_result, dict):
                 payload["resolved_via_url"] = bool(resolved_url)
-                fetch_id = str(indexed_result.get("fetch_id") or "").strip()
-                if fetch_id:
-                    payload["fetch_id"] = fetch_id
+                fid = str(indexed_result.get("fetch_id") or "").strip()
+                if fid:
+                    payload["fetch_id"] = fid
             if requested_result_token != resolved_result_id:
                 payload["requested_result_id"] = requested_result_token
             if alias_metadata:
@@ -650,50 +715,9 @@ async def web_fetch(
         payload["citation"] = citation.to_dict()
         payload["excerpt_only"] = True
         payload["body_available_via_artifact"] = False
-        artifact_id = None
-        if hasattr(harness, "artifact_store"):
-            body_total_lines = len(full_text.splitlines()) or (1 if full_text else 0)
-            excerpt = str(response.text_excerpt or response.untrusted_text or "")
-            preview_text = structured_plain_text(payload) or excerpt or full_text[:bounded_max_chars]
-            summary = (
-                summarize_structured_output(tool_name="web_fetch", output=payload)
-                or response.title
-                or response.domain
-                or response.url
-                or "web fetch"
-            )
-            artifact = harness.artifact_store.persist_generated_text(
-                kind="web_fetch",
-                source=response.canonical_url or response.url,
-                content=full_text,
-                summary=summary,
-                preview_text=preview_text,
-                metadata={
-                    "source_id": response.source_id,
-                    "url": response.url,
-                    "canonical_url": response.canonical_url,
-                    "domain": response.domain,
-                    "title": response.title,
-                    "byline": response.byline,
-                    "content_type": response.content_type,
-                    "content_sha256": response.content_sha256,
-                    "provider": citation.provider,
-                    "extractor": citation.extractor,
-                    "published_at": response.published_at,
-                    "fetched_at": response.fetched_at,
-                    "body_char_count": len(full_text),
-                    "body_total_lines": body_total_lines,
-                    "excerpt_char_count": len(excerpt),
-                    "render_mode": "body_with_preview",
-                    "untrusted": True,
-                    "result_id": str(resolved_result_id or ""),
-                    "fetch_id": str(payload.get("fetch_id") or ""),
-                },
-                tool_name="web_fetch",
-                session_id=str(getattr(state, "thread_id", "") or ""),
-            )
-            state.artifacts[artifact.artifact_id] = artifact
-            artifact_id = artifact.artifact_id
+        artifact_id = _persist_fetch_artifact(harness, state, response, full_text, citation, resolved_result_id, payload)
+        if artifact_id is not None:
+            payload.pop("_bounded_max_chars", None)
             response.artifact_id = artifact_id
             payload["artifact_id"] = artifact_id
             payload["body_artifact_id"] = artifact_id
@@ -722,4 +746,6 @@ async def web_fetch(
         _mark_web_fetch_budget_exhausted(state, str(exc))
         return fail(str(exc), metadata=getattr(exc, "metadata", {}))
     except Exception as exc:
-        return fail(str(exc))
+        import logging
+        logging.getLogger("smallctl.tools.web").warning("web_fetch unexpected error: %s", exc, exc_info=True)
+        return fail(str(exc), metadata={"error_type": type(exc).__name__})

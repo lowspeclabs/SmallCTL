@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>9B Benchmark Repair Plan - 2026-05-25</title>
+  <style>
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --surface: #111821;
+  --surface-2: #172230;
+  --surface-3: #1d2a3a;
+  --text: #e7edf5;
+  --muted: #9fb0c7;
+  --muted-2: #718096;
+  --line: rgba(255,255,255,.10);
+  --accent: #7c9cff;
+  --accent-2: #29d3a3;
+  --danger: #ff5d73;
+  --warn: #ffcc66;
+  --ok: #62e6a8;
+  --shadow: 0 20px 60px rgba(0,0,0,.40);
+  --radius: 22px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--sans);
+  background:
+    radial-gradient(circle at 20% 0%, rgba(124,156,255,.25), transparent 30%),
+    radial-gradient(circle at 90% 20%, rgba(41,211,163,.12), transparent 26%),
+    var(--bg);
+  color: var(--text);
+}
+a { color: inherit; }
+.app { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 100vh; }
+aside {
+  position: sticky; top: 0; height: 100vh; overflow: auto;
+  padding: 24px 18px;
+  background: rgba(9, 14, 20, .78);
+  border-right: 1px solid var(--line);
+  backdrop-filter: blur(18px);
+}
+.brand { padding: 12px 10px 20px; }
+.eyebrow { color: var(--accent-2); font-size: 12px; text-transform: uppercase; letter-spacing: .14em; font-weight: 800; }
+h1 { margin: 8px 0 8px; font-size: clamp(34px, 4vw, 62px); line-height: .95; letter-spacing: -.05em; }
+.brand h2 { margin: 8px 0 0; font-size: 21px; line-height: 1.05; letter-spacing: -.02em; }
+.subtle { color: var(--muted); }
+.small { font-size: 13px; }
+nav { display: grid; gap: 8px; margin-top: 18px; }
+.nav-btn {
+  width: 100%; border: 1px solid transparent; background: transparent; color: var(--muted);
+  text-align: left; padding: 12px 13px; border-radius: 16px; cursor: pointer;
+  font-weight: 700; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  transition: .18s ease;
+}
+.nav-btn:hover, .nav-btn.active { background: rgba(124,156,255,.12); color: var(--text); border-color: rgba(124,156,255,.22); }
+.nav-btn span:last-child { color: var(--muted-2); font-size: 12px; font-family: var(--mono); }
+main { min-width: 0; padding: 24px; }
+.topbar {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin: -24px -24px 22px; padding: 14px 24px;
+  border-bottom: 1px solid var(--line); background: rgba(11,15,20,.72); backdrop-filter: blur(18px);
+}
+.pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+button, .button {
+  border: 1px solid var(--line); background: rgba(255,255,255,.06); color: var(--text); border-radius: 999px;
+  padding: 10px 14px; font-weight: 800; cursor: pointer; transition: .18s ease; text-decoration: none; display: inline-flex; gap: 8px; align-items: center;
+}
+button:hover, .button:hover { transform: translateY(-1px); background: rgba(255,255,255,.10); }
+.page { display: none; max-width: 1280px; margin: 0 auto; animation: fade .22s ease; }
+.page.active { display: block; }
+@keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.hero { min-height: calc(100vh - 96px); display: grid; align-content: center; gap: 26px; padding: 40px 0 70px; }
+.hero-card {
+  padding: clamp(24px, 5vw, 54px); border-radius: 34px; border: 1px solid var(--line);
+  background: linear-gradient(145deg, rgba(23,34,48,.90), rgba(17,24,33,.72)); box-shadow: var(--shadow);
+  position: relative; overflow: hidden;
+}
+.hero-card::after { content: ''; position: absolute; inset: auto -20% -55% 45%; height: 420px; background: radial-gradient(circle, rgba(124,156,255,.22), transparent 62%); pointer-events: none; }
+.grid { display: grid; gap: 16px; }
+.grid.cards { grid-template-columns: repeat(5, minmax(120px, 1fr)); }
+.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.card, .doc-card {
+  background: rgba(17,24,33,.82); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 18px; box-shadow: 0 12px 28px rgba(0,0,0,.18);
+}
+.metric { font-size: 38px; font-weight: 900; line-height: 1; letter-spacing: -.04em; }
+.metric.danger { color: var(--danger); }
+.metric.ok { color: var(--ok); }
+.metric.warn { color: var(--warn); }
+.label { color: var(--muted); margin-top: 8px; font-size: 13px; font-weight: 700; }
+.section-title { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 12px 0 18px; }
+h2 { font-size: clamp(26px, 3vw, 42px); margin: 0; line-height: 1; letter-spacing: -.04em; }
+h3 { margin: 0 0 12px; font-size: 19px; }
+.doc-card h2 { font-size: clamp(24px, 2.4vw, 36px); margin: 0 0 18px; }
+.doc-card h3 { margin: 24px 0 12px; color: var(--text); font-size: 22px; letter-spacing: -.02em; }
+.doc-card h4 { margin: 20px 0 8px; color: var(--accent-2); font-size: 16px; text-transform: uppercase; letter-spacing: .08em; }
+.doc-card p { color: var(--muted); line-height: 1.7; }
+.doc-card li { color: var(--muted); line-height: 1.6; margin: 5px 0; }
+ul.clean { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+ul.clean li { padding: 12px 14px; border-radius: 15px; background: rgba(255,255,255,.045); border: 1px solid var(--line); color: var(--text); }
+.checklist { list-style: none; padding-left: 0; }
+.checklist li { display: flex; gap: 9px; align-items: flex-start; }
+.box { display: inline-grid; place-items: center; min-width: 16px; width: 16px; height: 16px; border-radius: 5px; border: 1px solid rgba(124,156,255,.35); margin-top: 4px; color: var(--accent-2); font-size: 11px; }
+code, .code { font-family: var(--mono); background: rgba(124,156,255,.12); border: 1px solid rgba(124,156,255,.18); border-radius: 8px; padding: .13rem .38rem; color: #cbd8ff; }
+.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: rgba(17,24,33,.72); margin: 14px 0; }
+table { width: 100%; border-collapse: collapse; min-width: 760px; }
+th, td { padding: 13px 14px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { position: sticky; top: 0; background: #121a24; z-index: 1; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+tr:hover td { background: rgba(124,156,255,.055); }
+pre {
+  max-height: 620px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  background: rgba(4,8,13,.75); border: 1px solid rgba(255,255,255,.10);
+  border-radius: 16px; padding: 14px; color: #c9d7ea; font-family: var(--mono); font-size: 12px; line-height: 1.5;
+}
+.footer-note { color: var(--muted-2); font-size: 12px; padding: 28px 0 10px; }
+@media (max-width: 980px) {
+  .app { grid-template-columns: 1fr; }
+  aside { position: relative; height: auto; }
+  nav { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .grid.cards, .two, .three { grid-template-columns: 1fr; }
+  main { padding: 16px; }
+  .topbar { margin: -16px -16px 18px; padding: 12px 16px; }
+}
+@media print {
+  body { background: #fff; color: #111; }
+  aside, .topbar { display: none !important; }
+  .app { display: block; }
+  main { padding: 0; }
+  .page { display: block !important; page-break-after: always; max-width: none; }
+  .card, .hero-card, .doc-card { box-shadow: none; background: #fff; color: #111; border-color: #ddd; }
+  .subtle, .label { color: #444; }
+  .doc-card p, .doc-card li { color: #222; }
+}
+</style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand">
+        <div class="eyebrow">SmallCTL repair plan</div>
+        <h2>9B Benchmark Repair Plan - 2026-05-25</h2>
+        <p class="subtle small">Converted from uploaded text</p>
+      </div>
+      <nav id="nav"></nav>
+    </aside>
+    <main>
+      <div class="topbar">
+        <div class="subtle small"><span id="pageCounter">Page 1 / 12</span></div>
+        <div class="pager">
+          <button id="prevBtn" type="button">← Previous</button>
+          <button id="nextBtn" type="button">Next →</button>
+          <button type="button" onclick="window.print()">Print / PDF</button>
+        </div>
+      </div>
+      
+      <section class="page active" data-title="Overview" data-kicker="01" id="overview">
+        
+<div class="hero">
+  <div class="hero-card">
+    <div class="eyebrow">SmallCTL repair planning</div>
+    <h1>9B Benchmark Repair Plan - 2026-05-25</h1>
+    <p class="subtle" style="max-width:820px;font-size:18px;line-height:1.65">
+      A paged HTML conversion of the benchmark repair plan, preserving implementation steps,
+      acceptance checks, test plan, success criteria, and runtime/reporting distinctions.
+    </p>
+    <div class="grid cards" style="margin-top:28px">
+      <div class="card"><div class="metric">6</div><div class="label">Repair phases</div></div>
+      <div class="card"><div class="metric">16</div><div class="label">Main work items</div></div>
+      <div class="card"><div class="metric">15</div><div class="label">Acceptance groups</div></div>
+      <div class="card"><div class="metric">7</div><div class="label">Code areas reviewed</div></div>
+      <div class="card"><div class="metric ok">2026-05-25</div><div class="label">Plan date</div></div>
+    </div>
+  </div>
+</div>
+<div class="doc-card"><h2>9B Benchmark Repair Plan - 2026-05-25</h2></div>
+      </section>
+    
+      <section class="page" data-title="Plan Index" data-kicker="02" id="plan-index">
+        
+<div class="section-title"><div><div class="eyebrow">Index</div><h2>Diagnosis and code areas</h2></div></div>
+<div class="grid two"><div class="card"><h3>Working diagnosis</h3><ul class="clean"><li>Benchmark/reporting is losing or misrepresenting evidence. <span class="code">aho/run_baseline.py</span> currently discovers log dirs from the first <span class="code">logging_ready</span> path, but <span class="code">RunLogger.set_session_id()</span> can rename that directory later. It also counts only a narrow subset of events and renders duplicate <span class="code">challenge-NN</span> headings across sysadmin and coding tasks.</li><li>Many failures are timeout-after-progress loops. The runtime often has enough evidence, has written or is about to write the required artifact, or has already verified a coding change, but the model keeps reading, rechecking, or polling <span class="code">loop_status</span>.</li><li>Some failures are local/remote routing drift. Coding tasks that target local <span class="code">./temp/*.py</span> files are still exposed to, or prompted toward, SSH tools through stale handoff/memory signals and broad network profiles.</li><li>Some failures are backend/model-stream failures rather than task-control failures. At least one run hit a remote protocol stream failure, and at least one emitted initial assistant text without any completed tool dispatch before the run timeout.</li><li>Report-only patch:</li><li>Routing-only patch:</li><li>Terminal-state breaker only:</li><li>Backend classification only:</li><li>Retrieval ablation:</li></ul></div><div class="card"><h3>Primary code areas reviewed</h3><ul class="clean"><li><span class="code">aho/run_baseline.py</span>: challenge parsing, smallctl invocation, log discovery, log review, and markdown report generation.</li><li><span class="code">src/smallctl/logging_utils.py</span> and <span class="code">src/smallctl/main.py</span>: run logger directory creation, session-id-based log directory rename, and <span class="code">logging_ready</span> stdout emission.</li><li><span class="code">src/smallctl/harness/task_classifier.py</span>, <span class="code">src/smallctl/harness/task_intent.py</span>, <span class="code">src/smallctl/harness/run_mode.py</span>, <span class="code">src/smallctl/harness/tool_visibility.py</span>, and <span class="code">src/smallctl/remote_scope.py</span>: task mode, local/remote scope, and exposed tool selection.</li><li><span class="code">src/smallctl/prompts.py</span> and <span class="code">src/smallctl/context/frame_compiler.py</span>: prompt guidance, remote file guidance, coding anchors, and recovered memory/context rendering.</li><li><span class="code">src/smallctl/challenge_progress.py</span>, <span class="code">src/smallctl/graph/chat_progress.py</span>, and <span class="code">src/smallctl/graph/tool_loop_guards.py</span>: coding challenge progress, repeated tool loops, verifier loops, and completion nudges.</li><li><span class="code">src/smallctl/client/streaming.py</span>, <span class="code">src/smallctl/graph/model_stream_resolution.py</span>, and <span class="code">src/smallctl/graph/model_call_nodes.py</span>: streaming failures, partial streams, idle turns, and model-call classification.</li><li><span class="code">src/smallctl/tools/fs.py</span>, <span class="code">src/smallctl/tools/fs_write_flow.py</span>, and <span class="code">src/smallctl/tools/shell_support.py</span>: file write recovery messages, write-session continuity, shell/SSH command classification, and expected command failures.</li></ul></div></div>
+
+      </section>
+    
+      <section class="page" data-title="Context" data-kicker="03" id="context">
+        <div class="doc-card"><h3>Context</h3>
+<p>This plan targets the failure modes identified in the full log review addendum for the 2026-05-25 9B baseline run. The codebase already has substantial loop guards, write-session recovery, remote-scope gating, stream fallback handling, and report generation, but the addendum shows that the benchmark/reporting layer and a few runtime policies are not preserving the right distinctions.</p>
+<p>Primary code areas reviewed:</p>
+<ul>
+<li><span class="code">aho/run_baseline.py</span>: challenge parsing, smallctl invocation, log discovery, log review, and markdown report generation.</li>
+<li><span class="code">src/smallctl/logging_utils.py</span> and <span class="code">src/smallctl/main.py</span>: run logger directory creation, session-id-based log directory rename, and <span class="code">logging_ready</span> stdout emission.</li>
+<li><span class="code">src/smallctl/harness/task_classifier.py</span>, <span class="code">src/smallctl/harness/task_intent.py</span>, <span class="code">src/smallctl/harness/run_mode.py</span>, <span class="code">src/smallctl/harness/tool_visibility.py</span>, and <span class="code">src/smallctl/remote_scope.py</span>: task mode, local/remote scope, and exposed tool selection.</li>
+<li><span class="code">src/smallctl/prompts.py</span> and <span class="code">src/smallctl/context/frame_compiler.py</span>: prompt guidance, remote file guidance, coding anchors, and recovered memory/context rendering.</li>
+<li><span class="code">src/smallctl/challenge_progress.py</span>, <span class="code">src/smallctl/graph/chat_progress.py</span>, and <span class="code">src/smallctl/graph/tool_loop_guards.py</span>: coding challenge progress, repeated tool loops, verifier loops, and completion nudges.</li>
+<li><span class="code">src/smallctl/client/streaming.py</span>, <span class="code">src/smallctl/graph/model_stream_resolution.py</span>, and <span class="code">src/smallctl/graph/model_call_nodes.py</span>: streaming failures, partial streams, idle turns, and model-call classification.</li>
+<li><span class="code">src/smallctl/tools/fs.py</span>, <span class="code">src/smallctl/tools/fs_write_flow.py</span>, and <span class="code">src/smallctl/tools/shell_support.py</span>: file write recovery messages, write-session continuity, shell/SSH command classification, and expected command failures.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Working Diagnosis" data-kicker="04" id="working-diagnosis">
+        <div class="doc-card"><h3>Working Diagnosis</h3>
+<p>The addendum points to four separate problem classes that should not be collapsed:</p>
+<ol>
+<li>Benchmark/reporting is losing or misrepresenting evidence. <span class="code">aho/run_baseline.py</span> currently discovers log dirs from the first <span class="code">logging_ready</span> path, but <span class="code">RunLogger.set_session_id()</span> can rename that directory later. It also counts only a narrow subset of events and renders duplicate <span class="code">challenge-NN</span> headings across sysadmin and coding tasks.</li>
+<li>Many failures are timeout-after-progress loops. The runtime often has enough evidence, has written or is about to write the required artifact, or has already verified a coding change, but the model keeps reading, rechecking, or polling <span class="code">loop_status</span>.</li>
+<li>Some failures are local/remote routing drift. Coding tasks that target local <span class="code">./temp/*.py</span> files are still exposed to, or prompted toward, SSH tools through stale handoff/memory signals and broad network profiles.</li>
+<li>Some failures are backend/model-stream failures rather than task-control failures. At least one run hit a remote protocol stream failure, and at least one emitted initial assistant text without any completed tool dispatch before the run timeout.</li>
+</ol>
+<p>The repair should therefore split instrumentation fixes from runtime behavior changes. Otherwise the next benchmark will still mix reporting bugs, backend instability, and genuine agent-control regressions.</p></div>
+      </section>
+    
+      <section class="page" data-title="Phase 1 - Fix Benchmark Report Ground Truth" data-kicker="05" id="phase-1-fix-benchmark-report-ground-truth">
+        <div class="doc-card"><h3>Phase 1 - Fix Benchmark Report Ground Truth</h3>
+<h4>1. Persist Actual Log Directory</h4>
+<p>Problem:</p>
+<ul>
+<li><span class="code">src/smallctl/main.py</span> prints <span class="code">{&quot;status&quot;: &quot;logging_ready&quot;, &quot;run_log_dir&quot;: ...}</span> before the logger may be renamed by <span class="code">RunLogger.set_session_id()</span>.</li>
+<li><span class="code">aho/run_baseline.py:discover_log_dir()</span> trusts that early path if it exists.</li>
+<li>The markdown report can link a stale prefix, e.g. timestamp suffix matches but run-id prefix does not.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Add a stable machine-readable event after session binding that records the final <span class="code">run_logger.run_dir</span>.</li>
+<li>Prefer writing this into both stdout and harness logs:</li>
+<li>stdout event: <span class="code">{&quot;status&quot;:&quot;log_dir_finalized&quot;,&quot;run_log_dir&quot;:&quot;...&quot;,&quot;reported_run_log_dir&quot;:&quot;...&quot;}</span></li>
+<li>harness event: <span class="code">log_dir_finalized</span> with the same fields.</li>
+<li>In <span class="code">RunLogger.set_session_id()</span>, after rename, log or expose enough state for the caller to emit the finalized directory.</li>
+<li>In <span class="code">aho/run_baseline.py</span>, replace <span class="code">discover_log_dir(stdout)</span> with <span class="code">discover_log_dirs(stdout)</span> returning:</li>
+<li><span class="code">reported_log_dir</span>: first <span class="code">logging_ready</span> path.</li>
+<li><span class="code">actual_log_dir</span>: latest <span class="code">log_dir_finalized</span> path, or a timestamp-suffix search fallback under <span class="code">.venv/logs</span> / <span class="code">logs</span>.</li>
+<li>Store both on each challenge result as <span class="code">reported_log_dir</span> and <span class="code">actual_log_dir</span>; render <span class="code">actual_log_dir</span> as the main Log dir.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Add a unit test where stdout contains <span class="code">logging_ready</span> for <span class="code">39da4dbd-20260525-130259</span> and <span class="code">log_dir_finalized</span> for <span class="code">1d2d5b35-20260525-130259</span>; report uses the latter.</li>
+<li>Add a fallback test where only a stale prefix exists in stdout but a unique on-disk directory with the same timestamp suffix exists.</li>
+</ul>
+<h4>2. Rebuild Report Metrics From Logs</h4>
+<p>Problem:</p>
+<ul>
+<li><span class="code">review_logs()</span> counts <span class="code">ask_human</span> only from <span class="code">tools.jsonl dispatch_start</span>, tool failures only from <span class="code">dispatch_complete success=false</span>, and guards only from a small event-name subset.</li>
+<li>The addendum confirms <span class="code">03bccce4-20260525-125210/tools.jsonl</span> has a successful <span class="code">ask_human</span>, while the markdown showed <span class="code">AskHuman=0</span>.</li>
+<li><span class="code">task_summary.json</span> and full logs disagree with the markdown in several places.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Introduce a dedicated parser module, for example <span class="code">aho/log_review.py</span>, instead of growing <span class="code">aho/run_baseline.py</span>.</li>
+<li>Parse these inputs when present:</li>
+<li><span class="code">task_summary.json</span></li>
+<li><span class="code">harness.jsonl</span></li>
+<li><span class="code">tools.jsonl</span></li>
+<li><span class="code">chat.jsonl</span></li>
+<li><span class="code">model_output.jsonl</span></li>
+<li>text fallbacks: <span class="code">harness.log</span>, <span class="code">tools.log</span>, <span class="code">model_output.log</span></li>
+<li>Count <span class="code">ask_human</span> from both <span class="code">dispatch_start</span> and <span class="code">dispatch_complete</span> records, deduped by operation/tool-call id where available.</li>
+<li>Count tool failures from every failed dispatch result, failed tool envelope, and tool error event, not only one event shape.</li>
+<li>Count guard activity from event names and metadata:</li>
+<li>event contains <span class="code">guard</span>, <span class="code">blocked</span>, <span class="code">loop</span>, <span class="code">fama</span>, <span class="code">verifier</span>, <span class="code">recovery</span>, <span class="code">stall</span>, or <span class="code">task_complete_*_loop_status</span></li>
+<li>result metadata contains <span class="code">active_mitigation</span>, <span class="code">reason</span>, <span class="code">error_kind</span>, or <span class="code">recovery_kind</span></li>
+<li>Preserve top examples for each count so the report can explain the number.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Fixture for <span class="code">03bccce4-20260525-125210</span> yields <span class="code">ask_human_count &gt;= 1</span>.</li>
+<li>Fixture with failed <span class="code">ssh_exec</span>, wrong-path file operation, and shell quoting error yields nonzero <span class="code">tool_failure_count</span>.</li>
+<li>Existing <span class="code">test_logwatch.py</span> and new <span class="code">aho/tests/test_log_review.py</span> cover event-shape variants.</li>
+</ul>
+<h4>3. Make Report Rows and Headings Unambiguous</h4>
+<p>Problem:</p>
+<ul>
+<li>Sysadmin and coding challenges both render as <span class="code">challenge-03</span>, making headings ambiguous.</li>
+<li>Completion status alone hides unverified completions and backend failures.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Carry category through <span class="code">run_challenge()</span> results as <span class="code">category: sysadmin|coding</span>.</li>
+<li>Render challenge keys as <span class="code">sysadmin/challenge-03</span> and <span class="code">coding/challenge-03</span> in tables and headings.</li>
+<li>Add columns:</li>
+<li><span class="code">FinalClass</span></li>
+<li><span class="code">Verified</span></li>
+<li><span class="code">Backend</span></li>
+<li><span class="code">LogDir</span></li>
+<li>Split status into:</li>
+<li><span class="code">completed</span></li>
+<li><span class="code">verified_completed</span></li>
+<li><span class="code">needs_human</span></li>
+<li><span class="code">backend_failed</span></li>
+<li><span class="code">timeout_after_progress</span></li>
+<li><span class="code">timeout_no_first_tool</span></li>
+<li><span class="code">tool_loop_timeout</span></li>
+<li><span class="code">failed</span></li>
+<li><span class="code">crashed</span></li>
+<li>Treat <span class="code">challenge_progress.verified_after_last_change=false</span> as a quality warning even when final status is completed.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Markdown contains no duplicate <span class="code">### challenge-03</span> headings.</li>
+<li>A completed coding run with <span class="code">verified_after_last_change=false</span> is not counted as <span class="code">verified_completed</span>.</li>
+<li><span class="code">1d2d5b35-20260525-130259</span> classifies as <span class="code">backend_failed</span>, not timeout spiral.</li>
+<li><span class="code">d8eab62b-20260525-134642</span> classifies as <span class="code">timeout_no_first_tool</span> or <span class="code">model_pre_tool_stall</span>.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Phase 2 - Add Terminal-State Breakers" data-kicker="06" id="phase-2-add-terminal-state-breakers">
+        <div class="doc-card"><h3>Phase 2 - Add Terminal-State Breakers</h3>
+<h4>4. Completion Decision After Evidence and Artifact</h4>
+<p>Problem:</p>
+<ul>
+<li>Sysadmin runs such as <span class="code">23e96926</span>, <span class="code">33ef4951</span>, and <span class="code">8240234a</span> gathered enough evidence or were ready to write reports, then kept checking until timeout.</li>
+<li>The existing prompt says to call <span class="code">task_complete</span>, but there is no hard terminal policy for &quot;required artifact exists + post-write read/verification done + no failing verifier&quot;.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Add a terminal-state detector, likely in <span class="code">src/smallctl/challenge_progress.py</span> or a new <span class="code">src/smallctl/task_completion_policy.py</span>.</li>
+<li>It should evaluate:</li>
+<li>required output path exists, either from task target extraction or write-session target.</li>
+<li>a successful write was followed by one read/verification.</li>
+<li>current verifier is absent, passing, or explicitly waived.</li>
+<li>no active write session requires a next section or finalization.</li>
+<li>When true, suppress repeated exploratory read/list/status tools for one turn and inject a strong nudge:</li>
+<li>&quot;The required artifact exists and verification is complete. Next action must be <span class="code">task_complete</span> or <span class="code">task_fail</span> with a concrete blocker.&quot;</li>
+<li>If the same condition persists after one nudge, block nonterminal read-only tools with a <span class="code">ToolEnvelope</span> explaining the required terminal decision.</li>
+</ul>
+<p>Likely integration points:</p>
+<ul>
+<li><span class="code">src/smallctl/graph/chat_progress.py</span>: nudge text for repeated no-action/summary loops.</li>
+<li><span class="code">src/smallctl/graph/tool_loop_guards.py</span>: block repeated read/status calls after terminal readiness.</li>
+<li><span class="code">src/smallctl/tools/dispatcher.py</span>: last-resort block before dispatch.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Synthetic state with written <span class="code">./temp/sudo_audit.txt</span>, successful <span class="code">file_read</span>, and no failing verifier blocks another <span class="code">dir_list</span> or <span class="code">loop_status</span> and requires <span class="code">task_complete</span>.</li>
+<li>Coding state with <span class="code">verified_after_last_change=true</span> blocks redundant tests/read loops.</li>
+<li>State with an open write session does not trigger terminal completion.</li>
+</ul>
+<h4>5. Same-Conclusion Repetition Breaker</h4>
+<p>Problem:</p>
+<ul>
+<li>Logs show repeated conclusions equivalent to &quot;I have enough evidence&quot;, &quot;now write the report&quot;, and &quot;call task_complete&quot; without the actual terminal action.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Track normalized assistant-thought/assistant-text conclusion signatures in <span class="code">GraphRunState</span> or <span class="code">state.scratchpad</span>.</li>
+<li>Detect repetitions of phrases in these families:</li>
+<li>enough evidence / sufficient evidence / all evidence gathered</li>
+<li>now write report / prepare report / create artifact</li>
+<li>final answer ready / call task_complete / complete task</li>
+<li>After N repeats, inject a recovery message requiring the concrete next action:</li>
+<li>if artifact missing: <span class="code">file_write</span></li>
+<li>if artifact present and verified: <span class="code">task_complete</span></li>
+<li>if verifier failed: one focused repair or <span class="code">task_fail</span></li>
+<li>Keep this separate from generic repeated-thinking detection so the report can count it as <span class="code">terminal_state_breaker_count</span>.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Two repeated &quot;enough evidence&quot; turns with no tool call cause a terminal-state nudge.</li>
+<li>If the required artifact is missing, the nudge points to <span class="code">file_write</span>, not <span class="code">task_complete</span>.</li>
+</ul>
+<h4>6. Write-Session Deadline</h4>
+<p>Problem:</p>
+<ul>
+<li>Later coding runs repeatedly wrote or repaired script sections but did not converge within the 300s cap.</li>
+<li>Current write-session guidance is detailed, but the model can still keep patching or rechecking after a successful artifact write and one verifier/read.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Extend <span class="code">src/smallctl/challenge_progress.py</span>:</li>
+<li>track <span class="code">successful_artifact_write_step</span></li>
+<li>track <span class="code">first_post_write_verification_step</span></li>
+<li>track <span class="code">nonterminal_steps_after_verified_write</span></li>
+<li>After write + verification/read, require <span class="code">task_complete</span> unless:</li>
+<li>a verifier explicitly fails after the last change.</li>
+<li>a required output path is still missing.</li>
+<li>a write session is still open and finalizable.</li>
+<li>Report this as <span class="code">write_deadline_terminal_guard</span>.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>After <span class="code">file_write</span> of <span class="code">./temp/x.py</span> and passing unittest, another exploratory <span class="code">file_read</span> is blocked with terminal guidance.</li>
+<li>After a failing unittest, the guard allows a focused patch.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Phase 3 - Fix Local/Remote Routing Drift" data-kicker="07" id="phase-3-fix-local-remote-routing-drift">
+        <div class="doc-card"><h3>Phase 3 - Fix Local/Remote Routing Drift</h3>
+<h4>7. Hard Local Coding Tool Scope</h4>
+<p>Problem:</p>
+<ul>
+<li>Local coding tasks targeting <span class="code">./temp/*.py</span> were routed through SSH guidance or attempted <span class="code">ssh_file_write</span> / <span class="code">ssh_exec</span>.</li>
+<li>Existing <span class="code">remote_scope_is_active()</span> returns false when explicit local targets are present, but tools can still be exposed via profiles, retry exposures, stale handoffs, or prompt guidance.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Add a single predicate, for example <span class="code">task_is_local_coding_target(state, task)</span>, based on:</li>
+<li><span class="code">task_mode == local_execute</span></li>
+<li><span class="code">challenge_progress.task_category == coding</span></li>
+<li>required output path starts with <span class="code">./temp/</span> and ends with <span class="code">.py</span></li>
+<li>no explicit remote host/IP/SSH target in the current raw task</li>
+<li>Use it to suppress SSH tools in <span class="code">filter_tools_for_runtime_state()</span>:</li>
+<li>hide <span class="code">ssh_exec</span></li>
+<li>hide <span class="code">ssh_file_read</span></li>
+<li>hide <span class="code">ssh_file_write</span></li>
+<li>hide <span class="code">ssh_file_patch</span></li>
+<li>hide <span class="code">ssh_file_replace_between</span></li>
+<li>Also prevent <span class="code">_append_retry_tool_exposures()</span> from re-adding SSH tools for local coding tasks.</li>
+<li>Add a prompt line in <span class="code">src/smallctl/prompts.py</span> only when this predicate is true:</li>
+<li>&quot;LOCAL CODING TASK: use local file tools and shell_exec only; SSH tools are out of scope for this task.&quot;</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>A task that says &quot;Build a self-contained Python script at <span class="code">./temp/foo.py</span>&quot; exposes no SSH tools even if <span class="code">network</span> profile is active.</li>
+<li>A sysadmin task that says &quot;SSH to host ... write local report <span class="code">./temp/foo.txt</span>&quot; still exposes SSH tools and local <span class="code">file_write</span>.</li>
+<li>A local coding task with stale <span class="code">_last_task_handoff</span> remote metadata does not re-enable SSH tools.</li>
+</ul>
+<h4>8. Memory Retrieval Safety For Local Coding</h4>
+<p>Problem:</p>
+<ul>
+<li>Stale memories like <span class="code">requested_ssh_file_patch</span> appear to leak into local script generation.</li>
+<li><span class="code">memory_namespace.py</span> already scopes namespaces by task mode, but retrieved memories and working-memory next actions can still bias prompts.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>For local coding tasks, filter retrieved experience memories that contain remote-only tool intent unless the current task has an explicit remote target.</li>
+<li>Filter or demote next actions containing <span class="code">ssh_exec</span>, <span class="code">ssh_file_*</span>, or <span class="code">requested_ssh_file_patch</span> before rendering <span class="code">PromptStateFrame</span>.</li>
+<li>Add a runlog event when memory is suppressed:</li>
+<li><span class="code">remote_memory_suppressed_for_local_task</span></li>
+<li>include memory id, namespace, and reason.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Test in <span class="code">tests/test_task_intent_retrieval_tags.py</span> or a new prompt-frame test: local <span class="code">./temp/*.py</span> task does not render <span class="code">requested_ssh_file_patch</span>.</li>
+<li>Remote sysadmin task still renders relevant SSH memory.</li>
+</ul>
+<h4>9. Sysadmin Local Artifact Clarity</h4>
+<p>Problem:</p>
+<ul>
+<li>Sysadmin tasks need remote evidence collection but local report writes. The prompt contains guidance, but runtime/reporting should make this explicit.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>When <span class="code">task_mode == remote_execute</span> and task target paths include <span class="code">./temp/<em>.txt</span> or <span class="code">./temp/</em>.md</span>, record:</li>
+<li><span class="code">remote_evidence_required=true</span></li>
+<li><span class="code">local_artifact_paths=[...]</span></li>
+<li>Render this in the prompt state frame:</li>
+<li>&quot;Remote evidence collection, local artifact write.&quot;</li>
+<li>In tool guards, allow <span class="code">file_write</span> for those local artifacts even when remote scope is active.</li>
+<li>If the model attempts <span class="code">ssh_file_write</span> to a local artifact path, block with recovery action: use local <span class="code">file_write(path=&#x27;./temp/...&#x27;)</span>.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Sysadmin challenge can use <span class="code">ssh_exec</span> for evidence and <span class="code">file_write</span> for <span class="code">./temp/*.txt</span>.</li>
+<li><span class="code">ssh_file_write(path=&#x27;./temp/foo.txt&#x27;)</span> is blocked with an explicit local artifact correction.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Phase 4 - Improve Tool API Recovery" data-kicker="08" id="phase-4-improve-tool-api-recovery">
+        <div class="doc-card"><h3>Phase 4 - Improve Tool API Recovery</h3>
+<h4>10. File Write Error Messages</h4>
+<p>Problem:</p>
+<ul>
+<li>Logs show repeated wrong recovery after file-write failures, including existing-file and chunk-session confusion.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Audit direct <span class="code">file_write</span>, write-session <span class="code">file_write</span>, <span class="code">file_patch</span>, and <span class="code">ast_patch</span> failure messages.</li>
+<li>Ensure every failed write result has:</li>
+<li><span class="code">error_kind</span></li>
+<li><span class="code">next_required_tool</span></li>
+<li>exact required fields</li>
+<li>exact recovery action</li>
+<li>Add messages for:</li>
+<li>file exists: &quot;use overwrite/replace mode&quot; if that is the intended operation.</li>
+<li>active write session: &quot;continue session with <span class="code">write_session_id</span> and <span class="code">next_section_name</span>.&quot;</li>
+<li>patch-existing first chunk: &quot;use <span class="code">replace_strategy=&#x27;overwrite&#x27;</span> or narrow <span class="code">file_patch</span> / <span class="code">ast_patch</span>.&quot;</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Unit tests assert exact recovery hints for existing-file, active-session, and patch-existing first-chunk failures.</li>
+</ul>
+<h4>11. Expected Empty Results For SSH/Shell Probes</h4>
+<p>Problem:</p>
+<ul>
+<li>SSH command exits from <span class="code">grep</span>, <span class="code">find</span>, <span class="code">which</span>, package probes, and status checks can be valid negative evidence but are classified as generic failures.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Add a normalization helper in <span class="code">src/smallctl/tools/shell_support.py</span> or <span class="code">src/smallctl/graph/shell_outcomes.py</span>:</li>
+<li>classify expected miss commands as <span class="code">empty_result</span> when stdout/stderr semantics are clear.</li>
+<li>preserve nonzero exit code in metadata.</li>
+<li>mark result success for absence probes only when command shape is recognized.</li>
+<li>Extend prompt guidance and report parser to count <span class="code">empty_result</span> separately from failures.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li><span class="code">grep -q pattern missing-file</span> remains failure.</li>
+<li><span class="code">find /path -name thing -print -quit</span> with no output can be empty result when used as an absence check.</li>
+<li><span class="code">which missing_binary</span> can be empty result when the task asks whether it exists.</li>
+</ul>
+<h4>12. Safer SSH Command Quoting</h4>
+<p>Problem:</p>
+<ul>
+<li>The addendum notes quoting errors and large inline SSH commands.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Add a small command composition helper for generated benchmark sysadmin prompts or recovery guidance:</li>
+<li>prefer remote script upload plus bounded execution for long multi-line logic.</li>
+<li>prefer <span class="code">shlex.quote()</span> for interpolated remote paths and patterns.</li>
+<li>Add guidance in <span class="code">prompts.py</span> for remote report probes:</li>
+<li>batch read-only checks, but avoid deeply nested quoting.</li>
+<li>write a temporary remote script only when commands exceed a safe complexity threshold.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Tests cover generated SSH commands with paths containing spaces and quotes.</li>
+<li>Tool failures caused by shell quote parse errors are classified distinctly.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Phase 5 - Backend Failure Classification" data-kicker="09" id="phase-5-backend-failure-classification">
+        <div class="doc-card"><h3>Phase 5 - Backend Failure Classification</h3>
+<h4>13. Retry Incomplete Chunked Reads Once</h4>
+<p>Problem:</p>
+<ul>
+<li><span class="code">1d2d5b35-20260525-130259</span> failed with <span class="code">httpx.RemoteProtocolError</span>, which is not a model-control failure.</li>
+<li>Current stream handling has chunk-error fallback and stream-ended handling, but incomplete body/protocol failures need a separate benchmark class.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>In the client stream path, catch <span class="code">httpx.RemoteProtocolError</span> and equivalent incomplete-read exceptions.</li>
+<li>Retry once with the same conversation state if no tool dispatch has occurred for that model call.</li>
+<li>If retry fails, set final result:</li>
+<li><span class="code">status=failed</span></li>
+<li><span class="code">error_type=backend_stream_failure</span></li>
+<li>details include provider profile, attempt count, and exception type.</li>
+<li>Report this as <span class="code">backend_failed</span>, not <span class="code">timeout_after_progress</span>.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Unit test simulates a remote protocol error on first stream and success on retry.</li>
+<li>Unit test simulates two failures and verifies <span class="code">backend_stream_failure</span>.</li>
+</ul>
+<h4>14. Pre-Tool Stall Classification</h4>
+<p>Problem:</p>
+<ul>
+<li><span class="code">d8eab62b-20260525-134642</span> emitted initial assistant text but no completed tool dispatch before timeout.</li>
+</ul>
+<p>Implementation:</p>
+<ul>
+<li>Track per-run:</li>
+<li>first assistant token timestamp</li>
+<li>first assistant text timestamp</li>
+<li>first tool dispatch start timestamp</li>
+<li>first tool dispatch complete timestamp</li>
+<li>On timeout, classify:</li>
+<li><span class="code">timeout_no_first_tool</span>: no dispatch start.</li>
+<li><span class="code">timeout_pre_tool_after_text</span>: assistant text exists, no dispatch complete.</li>
+<li><span class="code">timeout_after_progress</span>: at least one successful tool dispatch or artifact/write progress.</li>
+<li><span class="code">tool_loop_timeout</span>: repeated similar failed/read-only calls dominate the tail.</li>
+<li>Store these in <span class="code">task_summary.json</span> and the AHO report.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Synthetic logs with assistant text and no tool dispatch classify as <span class="code">timeout_pre_tool_after_text</span>.</li>
+<li>Synthetic logs with successful tools and no completion classify as <span class="code">timeout_after_progress</span>.</li>
+</ul></div>
+      </section>
+    
+      <section class="page" data-title="Phase 6 - Scoring and Experiment Design" data-kicker="10" id="phase-6-scoring-and-experiment-design">
+        <div class="doc-card"><h3>Phase 6 - Scoring and Experiment Design</h3>
+<h4>15. Scoring Split</h4>
+<p>Implementation:</p>
+<ul>
+<li>Replace the single success/failure summary in <span class="code">aho/run_baseline.py</span> with:</li>
+<li>completed count</li>
+<li>verified completed count</li>
+<li>needs human count</li>
+<li>backend failed count</li>
+<li>timeout after progress count</li>
+<li>timeout no first tool count</li>
+<li>tool loop timeout count</li>
+<li>unverified completion warning count</li>
+<li>Keep raw status in the per-run data so historical comparisons are possible.</li>
+</ul>
+<p>Acceptance checks:</p>
+<ul>
+<li>Report summary has separate verified completion and backend failure lines.</li>
+<li>A completion with <span class="code">verified_after_last_change=false</span> increments quality warnings.</li>
+</ul>
+<h4>16. Re-Run Order</h4>
+<p>Run experiments in this order so causes stay separable:</p>
+<ol>
+<li>Report-only patch:</li>
+</ol>
+<ul>
+<li>log dir finalization</li>
+<li>category headings</li>
+<li>log-derived AskHuman/ToolFails/guard counts</li>
+<li>new final classification</li>
+</ul>
+<ol>
+<li>Routing-only patch:</li>
+</ol>
+<ul>
+<li>local coding suppresses SSH tools</li>
+<li>remote memory suppression for local coding</li>
+<li>sysadmin local artifact clarity</li>
+</ul>
+<ol>
+<li>Terminal-state breaker only:</li>
+</ol>
+<ul>
+<li>required artifact exists + one verification/read</li>
+<li>same-conclusion repetition breaker</li>
+<li>write-session deadline</li>
+</ul>
+<ol>
+<li>Backend classification only:</li>
+</ol>
+<ul>
+<li>one retry for incomplete stream</li>
+<li>backend/pre-tool timeout classes</li>
+</ul>
+<ol>
+<li>Retrieval ablation:</li>
+</ol>
+<ul>
+<li>disable retrieved memories for local coding tasks</li>
+<li>compare remote/local drift against the routing-only patch</li>
+</ul>
+<p>Each run should keep the 300s cap and the same 40-task input set so timeout movement is comparable to the baseline.</p></div>
+      </section>
+    
+      <section class="page" data-title="Test Plan" data-kicker="11" id="test-plan">
+        <div class="doc-card"><h3>Test Plan</h3>
+<p>Minimum tests before rerunning the full 40:</p>
+<ul>
+<li><span class="code">venv/bin/python -m pytest tests/test_task_intent_retrieval_tags.py tests/test_prompt_state_frame.py tests/test_context_aware_tool_gate.py</span></li>
+<li><span class="code">venv/bin/python -m pytest tests/test_small_model_freeze_guard.py tests/test_challenge_progress.py tests/test_client_stream_retry.py</span></li>
+<li><span class="code">venv/bin/python -m pytest tests/test_logwatch.py tests/test_tool_plan_eval_runner.py</span></li>
+<li>New tests:</li>
+<li><span class="code">aho/tests/test_log_review.py</span></li>
+<li><span class="code">tests/test_terminal_state_breaker.py</span></li>
+<li><span class="code">tests/test_local_coding_ssh_suppression.py</span></li>
+<li><span class="code">tests/test_backend_stream_failure_classification.py</span></li>
+</ul>
+<p>Then run a narrow benchmark smoke:</p>
+<pre><code>python aho/run_baseline.py --yes --skip-smoke-test --max-challenges 4 --timeout 300 --report temp/9b-repair-smoke.md</code></pre>
+<p>Then rerun the same 40-task baseline with a fresh report name.</p></div>
+      </section>
+    
+      <section class="page" data-title="Success Criteria" data-kicker="12" id="success-criteria">
+        <div class="doc-card"><h3>Success Criteria</h3>
+<ul>
+<li>Report rows link to actual log directories, not stale stdout prefixes.</li>
+<li>AskHuman, ToolFails, and guard counts agree with <span class="code">tools.jsonl</span>, <span class="code">harness.jsonl</span>, and <span class="code">task_summary.json</span>.</li>
+<li>Sysadmin and coding challenge headings are unambiguous.</li>
+<li>Backend failures are not counted as timeout spirals.</li>
+<li>Local <span class="code">./temp/*.py</span> coding tasks do not see or use SSH tools unless the task explicitly names a remote host.</li>
+<li>Sysadmin tasks can still collect remote evidence and write local <span class="code">./temp/*.txt</span> reports.</li>
+<li>Timeout-after-progress count drops after terminal-state breakers without increasing premature unverified completions.</li>
+<li>Verified completion is tracked separately from raw completion.</li>
+</ul></div>
+      </section>
+    
+      <p class="footer-note">Generated as a standalone single HTML file with local CSS and JavaScript only.</p>
+    </main>
+  </div>
+
+  <script>
+    const pages = Array.from(document.querySelectorAll('.page'));
+    const nav = document.getElementById('nav');
+    let current = 0;
+
+    pages.forEach((page, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'nav-btn' + (i === 0 ? ' active' : '');
+      btn.type = 'button';
+      btn.innerHTML = `<span>${page.dataset.title}</span><span>${page.dataset.kicker}</span>`;
+      btn.addEventListener('click', () => showPage(i));
+      nav.appendChild(btn);
+    });
+
+    function showPage(i) {
+      current = (i + pages.length) % pages.length;
+      pages.forEach((p, idx) => p.classList.toggle('active', idx === current));
+      Array.from(nav.children).forEach((b, idx) => b.classList.toggle('active', idx === current));
+      document.getElementById('pageCounter').textContent = `Page ${current + 1} / ${pages.length}`;
+      history.replaceState(null, '', '#' + pages[current].id);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    document.getElementById('prevBtn').addEventListener('click', () => showPage(current - 1));
+    document.getElementById('nextBtn').addEventListener('click', () => showPage(current + 1));
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') showPage(current + 1);
+      if (e.key === 'ArrowLeft') showPage(current - 1);
+    });
+    const hashIndex = pages.findIndex(p => '#' + p.id === location.hash);
+    if (hashIndex >= 0) showPage(hashIndex);
+  </script>
+</body>
+</html>

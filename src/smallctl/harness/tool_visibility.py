@@ -6,6 +6,20 @@ from typing import Any
 from ..remote_scope import remote_scope_is_active
 from ..state import json_safe_value
 from ..tools.fs_sessions import _write_session_can_finalize
+from .tool_visibility_support import (
+    _LOOPISH_TOOL_MODES,
+    _has_artifacts,
+    _has_background_jobs,
+    _has_finalizable_write_session,
+    _has_plan,
+    _has_planning_file_patch_context,
+    _has_runtime_code_index,
+    _normalize_turn_mode,
+    _schema_for_name,
+    _scratchpad,
+    _tool_name,
+    _tool_names,
+)
 
 _INDEX_QUERY_TOOL_NAMES = {
     "index_query_symbol",
@@ -25,7 +39,6 @@ _PLAN_DEPENDENT_TOOL_NAMES = {
 _BACKGROUND_JOB_TOOL_NAMES = {
     "process_kill",
 }
-_LOOPISH_TOOL_MODES = {"loop", "execute"}
 _LOCAL_CODING_SSH_TOOLS = {
     "ssh_exec", "ssh_file_read", "ssh_file_write",
     "ssh_file_patch", "ssh_file_replace_between",
@@ -44,50 +57,6 @@ _RETRYABLE_HIDDEN_TOOL_NAMES = {
     "finalize_write_session",
     "web_fetch",
 }
-
-
-def _tool_name(entry: dict[str, Any]) -> str:
-    function = entry.get("function") if isinstance(entry, dict) else None
-    if not isinstance(function, dict):
-        return ""
-    return str(function.get("name") or "").strip()
-
-
-def _normalize_turn_mode(mode: str) -> str:
-    normalized = str(mode or "").strip().lower()
-    if normalized in _LOOPISH_TOOL_MODES:
-        return "loop"
-    if normalized in {"chat", "planning", "indexer"}:
-        return normalized
-    return "loop"
-
-
-def _tool_names(tools: list[dict[str, Any]]) -> list[str]:
-    names: list[str] = []
-    for entry in tools:
-        name = _tool_name(entry)
-        if name:
-            names.append(name)
-    return names
-
-
-def _schema_for_name(name: str) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": "",
-            "parameters": {},
-        },
-    }
-
-
-def _scratchpad(state: Any) -> dict[str, Any]:
-    scratchpad = getattr(state, "scratchpad", None)
-    if not isinstance(scratchpad, dict):
-        scratchpad = {}
-        state.scratchpad = scratchpad
-    return scratchpad
 
 
 def recent_hidden_tool_recovery_artifact_id(
@@ -294,56 +263,6 @@ def _append_retry_tool_exposures(
         merged.append(schema)
         existing_names.add(tool_name)
     return merged
-
-
-def _has_runtime_code_index(cwd: str | None) -> bool:
-    if not str(cwd or "").strip():
-        return False
-    return (Path(str(cwd)) / ".smallctl" / "index.db").exists()
-
-
-def _has_finalizable_write_session(state: Any) -> bool:
-    session = getattr(state, "write_session", None)
-    if session is None:
-        return False
-    if str(getattr(session, "status", "") or "").strip().lower() == "complete":
-        return False
-    if not _write_session_can_finalize(session):
-        return False
-    if not bool(getattr(session, "write_sections_completed", None)):
-        return False
-    if str(getattr(session, "write_next_section", "") or "").strip():
-        return False
-    return str(getattr(session, "status", "open") or "open").strip().lower() in {"open", "verifying"}
-
-
-def _has_artifacts(state: Any) -> bool:
-    artifacts = getattr(state, "artifacts", None)
-    return isinstance(artifacts, dict) and bool(artifacts)
-
-
-def _has_plan(state: Any) -> bool:
-    return getattr(state, "draft_plan", None) is not None or getattr(state, "active_plan", None) is not None
-
-
-def _has_background_jobs(state: Any) -> bool:
-    jobs = getattr(state, "background_processes", None)
-    return isinstance(jobs, dict) and bool(jobs)
-
-
-def _has_planning_file_patch_context(state: Any) -> bool:
-    records = getattr(state, "tool_execution_records", None)
-    if not isinstance(records, dict):
-        return False
-    for record in records.values():
-        if not isinstance(record, dict):
-            continue
-        if str(record.get("tool_name") or "").strip() not in {"file_read", "file_write"}:
-            continue
-        result = record.get("result")
-        if isinstance(result, dict) and bool(result.get("success")):
-            return True
-    return False
 
 
 def filter_tools_for_runtime_state(

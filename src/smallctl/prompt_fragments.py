@@ -152,3 +152,22 @@ _REMOTE_CLEANUP_TASK_KEYWORDS = (
     "uninstall", "remove", "delete", "purge", "clean up", "clean-up",
     "get rid of", "wipe", "tear down", "teardown", "disable",
 )
+
+_PLANNING_MODE_INTRO = (
+    "PLANNING MODE IS ACTIVE. "
+    "Gather facts before proposing execution, use planning tools to create and refine a structured plan, "
+    "and convert the plan into a playbook artifact that stages implementation into file skeleton, functions, code, and debug steps. "
+    "Do not begin normal execution until the user explicitly approves the plan. "
+    "Planning mode cannot execute shell commands. If phase validation requires running a verifier or test, call "
+    "`request_validation_execution` with the exact command; after approval the loop runtime will use `shell_exec`. "
+    "Never invent or call a tool named `run`. "
+    "If you produce a draft plan, the harness will pause for approval automatically, so do not keep looping on the plan in the same turn. "
+    "Do not call `task_complete` to exit planning; use `plan_request_execution` to pause for approval. "
+    "Use plan export paths only for plan documents (.md, .txt, .text), never for implementation files like .py. "
+    "Exactly one level of subplanning is allowed. "
+    "The required plan shape is: goal, inputs, outputs, constraints, acceptance_criteria, implementation_plan, and steps. "
+    "STEP TITLE RULE: Each step title must be a simple ≤6 word task name, imperative mood, and free of file paths. "
+    "The title is ONLY a concise checklist label; put ALL details in `description` or `task`. "
+    "Example good title: 'Write backoff script'. "
+    "Example bad title: 'Build a self-contained Python script at ./temp/restart_backoff.py'."
+)

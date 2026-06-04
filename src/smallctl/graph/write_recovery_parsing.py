@@ -10,6 +10,14 @@ from ..task_targets import (
     task_target_paths_from_harness,
 )
 from .state import PendingToolCall
+from .write_recovery_parsing_support import (
+    _python_content_looks_complete,
+    _javascript_content_looks_complete,
+    _go_content_looks_complete,
+    recovered_content_looks_like_complete_file,
+    _force_finalize_if_complete_file,
+    maybe_finalize_recovered_assistant_write,
+)
 
 _WRITE_TOOLS = {"file_write", "file_append"}
 _SESSION_ROUTED_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch"}
@@ -506,24 +514,7 @@ def _extract_inline_session_tool_calls(text: str) -> list[PendingToolCall]:
     return results
 
 
-def _python_content_looks_complete(content: str) -> bool:
-    line_count = len([line for line in str(content or "").splitlines() if line.strip()])
-    if line_count >= 120:
-        return True
 
-    has_imports = bool(re.search(r"(?m)^\s*(?:from\s+\S+\s+import|import\s+\S+)", content))
-    has_defs_or_classes = bool(re.search(r"(?m)^\s*(?:async\s+def|def|class)\s+\w+", content))
-    has_tests = bool(
-        re.search(r"(?m)^\s*(?:class\s+Test\w*|def\s+test_\w+)", content)
-        or "unittest.main" in content
-        or "pytest" in content
-    )
-    has_entrypoint = bool(re.search(r'(?m)^\s*if\s+__name__\s*==\s*["\']__main__["\']\s*:', content))
-    if has_imports and has_defs_or_classes and (has_tests or has_entrypoint):
-        return True
-    if line_count >= 60 and has_defs_or_classes and has_entrypoint:
-        return True
-    return False
 
 
 def _javascript_content_looks_complete(content: str) -> bool:

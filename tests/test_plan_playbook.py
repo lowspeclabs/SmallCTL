@@ -465,30 +465,8 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
     target = tmp_path / "example.txt"
     target.write_text("original\n", encoding="utf-8")
 
-    blocked = asyncio.run(
-        fs.file_patch(
-            path=str(target),
-            target_text="original",
-            replacement_text="patched",
-            cwd=str(tmp_path),
-            state=state,
-        )
-    )
-    assert blocked["success"] is False
-    assert "reading the target file before patching" in blocked["error"]
-    assert blocked["metadata"]["error_kind"] == "repair_cycle_read_required"
-    assert blocked["metadata"]["recovery_hint"].startswith("This is a new repair-cycle read requirement")
-    assert "even if the file is currently missing" in blocked["metadata"]["recovery_hint"]
-    assert blocked["metadata"]["next_required_tool"] == {
-        "tool_name": "file_read",
-        "required_arguments": {"path": str(target)},
-        "reason": "new_repair_cycle_requires_fresh_disk_snapshot",
-        "system_repair_cycle_id": "repair-1",
-    }
-
-    read_back = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
-    assert read_back["success"] is True
-
+    # Auto-read enhancement: when file exists and is readable, patch is allowed
+    # and the file is silently recorded as read.
     allowed = asyncio.run(
         fs.file_patch(
             path=str(target),
@@ -499,6 +477,11 @@ def test_repair_cycle_requires_read_before_patch(tmp_path: Path) -> None:
         )
     )
     assert allowed["success"] is True
+    # Verify the file was auto-recorded as read
+    assert str(target.resolve()) in state.scratchpad.get("_repair_cycle_reads", [])
+
+    read_back = asyncio.run(fs.file_read(path=str(target), cwd=str(tmp_path), state=state))
+    assert read_back["success"] is True
     assert allowed["metadata"]["occurrence_count"] == 1
     assert str(target.resolve()) in state.files_changed_this_cycle
     assert target.read_text(encoding="utf-8") == "patched\n"
@@ -3879,7 +3862,7 @@ def test_phase_contract_update_persists_and_exposes_status(tmp_path: Path) -> No
         },
     }
 
-    result = asyncio.run(control.phase_contract_update(contract=contract, state=state))
+    result = asyncio.run(control.phase_contract_update(contract=contract, state=state, persist=True))
 
     assert result["success"] is True
     assert state.scratchpad["_phase_contract"]["active_phase"] == "phase_3"

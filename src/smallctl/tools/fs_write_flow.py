@@ -277,7 +277,7 @@ def handle_file_write_session(
                     "write_session_intent": session.write_session_intent,
                     "replace_strategy": strategy,
                     "staged_only": True,
-                    "error_kind": "patch_existing_first_chunk",
+                    "error_kind": "patch_existing_requires_explicit_replace_strategy",
                     "next_required_tool": {
                         "tool_name": "file_write",
                         "required_fields": ["path", "content", "write_session_id", "replace_strategy"],

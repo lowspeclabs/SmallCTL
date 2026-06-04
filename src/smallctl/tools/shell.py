@@ -6,39 +6,25 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 from typing import Any
 
-from .. import shell_utils as _shell_attempts
-from ..models.events import UIEvent, UIEventType
 from ..state import LoopState
-from ..risk_policy import evaluate_risk_policy
-from .common import fail, needs_human, ok
+from .common import fail
 from .installer_preflight import run_installer_preflight_probes
-from .process_lifecycle import stop_process, truncate_output
+from .process_lifecycle import register_process
 from .shell_processes import cwd_get, cwd_set, env_get, env_set, process_kill, shell_job_launch, shell_job_status
-from .shell_foreground import shell_exec_foreground, _command_uses_leading_sudo
-from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
+from .shell_foreground import shell_exec_foreground
 from .shell_support import (
     _apt_deb822_preflight_guard,
-    _build_argparse_missing_args_question,
-    _build_shell_status_update,
-    _detect_unsupported_shell_syntax,
     _expose_interactive_session_tools,
-    _extract_missing_argparse_arguments,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
     _mark_remote_installer_preflight_clean,
-    _remote_installer_cwd_and_script,
     _remote_installer_preflight_guard,
-    _shell_execution_authoring_guard,
-    _shell_status_update_interval,
     _shell_workspace_destructive_delete_guard,
     _shell_write_session_artifact_delete_guard,
     _shell_write_session_target_path_guard,
-    _shell_workspace_relative_hint,
 )
-from .ui_streaming import BufferedUIEventEmitter
 
 
 def _local_user() -> str:
@@ -49,6 +35,7 @@ async def _run_local_installer_preflight_probes(
     command: str,
     *,
     state: LoopState | None = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     """Run automated local probes to discover installer environment state."""
 
@@ -59,6 +46,7 @@ async def _run_local_installer_preflight_probes(
         command=command,
         state=state,
         create_process=_create_process,
+        harness=harness,
         host="localhost",
         user=_local_user(),
         build_probe_command=_build_probe_command,
@@ -140,7 +128,7 @@ async def shell_exec(
             preflight_guard["metadata"] = metadata
             return preflight_guard
 
-        probes = await _run_local_installer_preflight_probes(command, state=state)
+        probes = await _run_local_installer_preflight_probes(command, state=state, harness=harness)
         metadata["preflight_probes"] = probes
         metadata["suggested_tool_after_preflight"] = (
             "shell_exec" if not probes.get("is_interactive") else "interactive_session_unavailable"
@@ -220,7 +208,7 @@ async def create_process(
         last_error: Exception | None = None
         for candidate in windows_commands:
             try:
-                return await asyncio.create_subprocess_exec(
+                proc = await asyncio.create_subprocess_exec(
                     *candidate,
                     cwd=cwd,
                     env=env,
@@ -228,9 +216,10 @@ async def create_process(
                     stderr=stderr,
                     stdin=stdin,
                 )
+                break
             except (FileNotFoundError, PermissionError) as exc:
                 last_error = exc
-        if proc is None: # If no async process was created, try Popen
+        if proc is None:  # If no async process was created, try Popen
             try:
                 proc = _PopenProcessAdapter(
                     subprocess.Popen(
@@ -257,11 +246,7 @@ async def create_process(
             stdin=stdin,
         )
 
-    if harness and hasattr(harness, "_active_processes"):
-        harness._active_processes.add(proc)
-        # We don't want to leak memory, but we need to remove it when done.
-        # However, create_process is a low-level helper.
-        # The caller (shell_exec in foreground/background mode) should handle the removal or teardown.
+    register_process(harness, proc)
 
     return proc
 

@@ -17,7 +17,9 @@ from ..runtime_error_repair import current_reported_runtime_error
 from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
 from ..task_targets import primary_task_target_path
 from ..harness.tool_visibility import (
+    hidden_tool_reason,
     resolve_turn_tool_exposure,
+    schedule_retry_tool_exposure,
 )
 from .recovery_context import build_goal_recap
 from ..write_session_fsm import new_write_session, record_write_session_event

@@ -11,7 +11,8 @@ from smallctl.docker_retry_normalization import (
 from smallctl.graph.state import PendingToolCall, ToolExecutionRecord
 from smallctl.graph.tool_execution_recovery_helpers import _maybe_emit_repair_recovery_nudge
 from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop
-from smallctl.harness.tool_result_verification import _classify_execution_failure, _store_verifier_verdict
+from smallctl.harness.tool_result_verification import _store_verifier_verdict
+from smallctl.harness.tool_result_verification_helpers import classify_execution_failure as _classify_execution_failure
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
 

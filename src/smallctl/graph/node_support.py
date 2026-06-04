@@ -471,33 +471,6 @@ def model_uses_gpt_oss_commentary_rules(harness: Any) -> bool:
     )
 
 
-def recent_assistant_texts(harness: Any, *, limit: int = 2) -> list[str]:
-    texts: list[str] = []
-    for message in reversed(getattr(harness.state, "recent_messages", [])):
-        if getattr(message, "role", "") != "assistant":
-            continue
-        content = str(getattr(message, "content", "") or "").strip()
-        if not content:
-            continue
-        texts.append(content)
-        if len(texts) >= limit:
-            break
-    return texts
-
-
-def looks_like_freeze_or_hang(harness: Any, assistant_text: str) -> bool:
-    text = str(assistant_text or "").strip()
-    if not text:
-        return False
-    recent = recent_assistant_texts(harness, limit=3)
-    if not recent:
-        return False
-    historical = recent[1:] if recent and recent[0] == text else recent
-    if text in historical:
-        return True
-    return False
-
-
 def build_authoring_budget_message(harness: Any, phase: str, pending_tool_name: str) -> str:
     phase_label = phase or "author"
     return (

@@ -24,6 +24,8 @@ from ..chat_sessions import (
 from .app_approvals import handle_approval_prompt
 from .app_approvals import handle_sudo_password_prompt
 from .app_approvals import maybe_handle_plan_approval_result
+from .app_flow_commands import handle_slash_command
+from .app_flow_input import handle_input_pane_submitted
 from .app_flow_utils import _extract_terminal_result_text, _harness_event_message_type
 from .console import ConsolePane
 from .display import (
@@ -44,36 +46,7 @@ from .statusbar import StatusBar
 
 class SmallctlAppFlowMixin:
     async def on_input_pane_submitted(self, event: InputPane.Submitted) -> None:
-        task = event.value.strip()
-        input_widget = self.query_one(InputPane)
-        input_widget.text = ""
-        if not task:
-            return
-        if task.startswith("/"):
-            handled = await self._handle_slash_command(task)
-            if handled:
-                return
-        if self.active_task and not self.active_task.done():
-            console = self._get_console()
-            if console is not None:
-                await self._append_system_line("Task already running.")
-            return
-        self.task_history.append(task)
-        self.history_index = len(self.task_history)
-        console = self._get_console()
-        if console is not None:
-            self._pending_user_echo = task
-            await console.append_event(
-                UIEvent(event_type=UIEventType.USER, content=task)
-            )
-            await console.begin_assistant_turn()
-        else:
-            self._pending_user_echo = None
-        self._record_chat_session_prompt(task)
-        self._set_activity("thinking...")
-        self._refresh_status(step_override="running")
-        self.active_task = asyncio.create_task(self._run_harness_task(task))
-        log_kv(self._app_logger, logging.INFO, "ui_task_started", task=task)
+        await handle_input_pane_submitted(self, event)
 
     def on_text_selected(self, event: events.TextSelected) -> None:
         selected_text = self._get_selected_screen_text()
@@ -82,67 +55,7 @@ class SmallctlAppFlowMixin:
         self._copy_selection_to_clipboard(selected_text)
 
     async def _handle_slash_command(self, task: str) -> bool:
-        harness = self.harness
-        command = task.strip().lower()
-        if harness is None:
-            return False
-        if command == "/plan-mode":
-            bridge = getattr(self, "_harness_bridge", None)
-            if bridge is not None:
-                snapshot = await bridge.set_planning_mode(True)
-            else:
-                setter = getattr(harness, "set_planning_mode", None)
-                if callable(setter):
-                    snapshot = setter(True)
-                else:
-                    harness.state.planning_mode_enabled = True
-                    harness.state.planner_resume_target_mode = "loop"
-                    harness.state.touch()
-                    snapshot = self._capture_status_snapshot_from_harness()
-            self._set_activity("planning mode active")
-            self._refresh_status(snapshot=snapshot)
-            await self._append_system_line("Planning mode enabled.", force=True)
-            await self.on_harness_event(
-                UIEvent(
-                    event_type=UIEventType.ALERT,
-                    content="Planning mode enabled.",
-                    data={"status_activity": "planning mode active"},
-                )
-            )
-            return True
-        if command == "/exit-plan-mode":
-            pending = harness.get_pending_interrupt() or {}
-            if str(pending.get("kind") or "") == "plan_execute_approval":
-                await self._append_system_line(
-                    "Planning mode is awaiting approval; finish that prompt before exiting.",
-                    force=True,
-                )
-                return True
-            bridge = getattr(self, "_harness_bridge", None)
-            if bridge is not None:
-                snapshot = await bridge.set_planning_mode(False)
-            else:
-                setter = getattr(harness, "set_planning_mode", None)
-                if callable(setter):
-                    snapshot = setter(False)
-                else:
-                    harness.state.planning_mode_enabled = False
-                    harness.state.planner_requested_output_path = ""
-                    harness.state.planner_requested_output_format = ""
-                    harness.state.touch()
-                    snapshot = self._capture_status_snapshot_from_harness()
-            self._set_activity("planning mode off")
-            self._refresh_status(snapshot=snapshot)
-            await self._append_system_line("Planning mode disabled.", force=True)
-            await self.on_harness_event(
-                UIEvent(
-                    event_type=UIEventType.ALERT,
-                    content="Planning mode disabled.",
-                    data={"status_activity": "planning mode off"},
-                )
-            )
-            return True
-        return False
+        return await handle_slash_command(self, task)
 
     async def _run_harness_task(self, task: str) -> None:
         assert self.harness is not None

@@ -89,10 +89,188 @@ def _normalize_run_mode(value: Any) -> str:
     return mode if mode in {"auto", "chat", "loop", "planning", "indexer", "tool_plan"} else "auto"
 
 
-def _env_config() -> dict[str, Any]:
-    dotenv = _read_dotenv(Path.cwd() / ".env")
-    env_or_dotenv = lambda key: os.getenv(key) or dotenv.get(key)
-    raw = {
+_BOOL_CONFIG_KEYS = {
+    "debug",
+    "thinking_visibility",
+    "checkpoint_on_exit",
+    "restore_graph_state",
+    "runtime_context_probe",
+    "fresh_run",
+    "planning_mode",
+    "contract_flow_ui",
+    "staged_reasoning",
+    "staged_execution_enabled",
+    "indexer",
+    "enable_write_intent_recovery",
+    "enable_assistant_code_write_recovery",
+    "write_recovery_allow_raw_text_targets",
+    "chunk_mode_new_file_only",
+    "allow_multi_section_turns_for_small_edits",
+    "loop_guard_enabled",
+    "loop_guard_cumulative_write_gate",
+    "loop_guard_checkpoint_gate",
+    "loop_guard_diff_gate",
+    "fama_enabled",
+    "fama_done_gate_on_failure",
+    "fama_llm_judge_enabled",
+    "reflexion_enabled",
+    "reflexion_persist_cross_task",
+    "subtask_ledger_enabled",
+    "tool_plan_runtime_enabled",
+    "tool_plan_auto_select",
+    "tool_plan_readonly_only",
+    "tool_plan_allow_web",
+    "tool_plan_allow_artifact_read",
+    "tool_plan_allow_git",
+    "tool_plan_fallback_to_loop_on_invalid_plan",
+    "tool_dag_enabled",
+    "tool_dag_preserve_result_order",
+    "solver_refine_enabled",
+    "solver_refine_on_final_answer",
+    "solver_refine_on_patch_plan",
+    "solver_refine_on_task_complete",
+    "rewoo_lane_frames_enabled",
+    "rewoo_planner_frame_enabled",
+    "rewoo_solver_frame_enabled",
+    "rewoo_refiner_frame_enabled",
+    "test_time_scaling_enabled",
+    "test_time_scaling_mutating_parallel_enabled",
+    "escalation_enabled",
+    "escalation_expose_tool",
+    "escalation_auto_trigger",
+    "escalation_require_tool_plan_evidence",
+    "escalation_redact_secrets",
+}
+
+_INT_ALLOW_ZERO_CONFIG_KEYS = {"fresh_run_turns"}
+
+_INT_CONFIG_KEYS = {
+    "context_limit",
+    "max_prompt_tokens",
+    "reserve_completion_tokens",
+    "reserve_tool_tokens",
+    "first_token_timeout_sec",
+    "startup_grace_period_sec",
+    "max_restarts_per_hour",
+    "backend_healthcheck_timeout_sec",
+    "backend_restart_grace_sec",
+    "graph_node_timeout_sec",
+    "graph_model_call_timeout_sec",
+    "graph_dispatch_tools_timeout_sec",
+    "graph_idle_watchdog_sec",
+    "graph_recursion_limit",
+    "graph_coding_recursion_limit",
+    "needs_human_timeout_sec",
+    "recent_message_limit",
+    "max_summary_items",
+    "max_artifact_snippets",
+    "artifact_snippet_token_limit",
+    "multi_file_artifact_snippet_limit",
+    "multi_file_primary_file_limit",
+    "remote_task_artifact_snippet_limit",
+    "remote_task_primary_file_limit",
+    "min_exploration_steps",
+    "artifact_summarization_threshold",
+    "chunk_mode_min_bytes",
+    "small_model_soft_write_chars",
+    "small_model_hard_write_chars",
+    "new_file_chunk_mode_line_estimate",
+    "failed_local_patch_limit",
+    "loop_guard_stagnation_threshold",
+    "loop_guard_level2_threshold",
+    "loop_guard_recent_writes_limit",
+    "loop_guard_tail_lines",
+    "staged_step_prompt_tokens",
+    "fama_default_ttl_steps",
+    "fama_max_active_mitigations",
+    "fama_signal_window",
+    "fama_capsule_token_budget",
+    "fama_llm_judge_min_severity",
+    "reflexion_max_items",
+    "reflexion_inject_top_k",
+    "subtask_max_active",
+    "subtask_max_history",
+    "subtask_inject_completed_limit",
+    "tool_plan_max_steps",
+    "tool_plan_max_repair_attempts",
+    "schema_validation_max_repair_attempts",
+    "tool_plan_observation_token_limit",
+    "tool_plan_max_observation_chars_per_step",
+    "tool_plan_solver_fresh_output_limit",
+    "tool_dag_max_parallel",
+    "tool_dag_timeout_sec",
+    "solver_refine_max_passes",
+    "solver_refine_token_budget",
+    "rewoo_frame_token_budget",
+    "test_time_scaling_max_candidates",
+    "test_time_scaling_min_candidates",
+    "test_time_scaling_parallel_max",
+    "test_time_scaling_timeout_sec",
+    "escalation_max_prompt_chars",
+    "escalation_max_response_tokens",
+    "escalation_timeout_sec",
+    "escalation_max_per_task",
+    "escalation_cooldown_turns",
+    "escalation_repeated_failure_threshold",
+}
+
+_FLOAT_CONFIG_KEYS = {
+    "summarize_at_ratio",
+    "loop_guard_similarity_threshold",
+    "test_time_scaling_score_threshold",
+    "escalation_temperature",
+}
+
+_COMMA_LIST_CONFIG_KEYS = {"test_time_scaling_runtimes", "chunk_mode_supported_models"}
+
+
+def _apply_typed_config_values(values: dict[str, Any]) -> None:
+    for key in _BOOL_CONFIG_KEYS:
+        if key in values:
+            values[key] = _to_bool(values[key])
+    for key in _INT_ALLOW_ZERO_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_int_allow_zero(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _INT_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_int(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _FLOAT_CONFIG_KEYS:
+        if key in values:
+            parsed = _to_float(values[key])
+            if parsed is None:
+                values.pop(key, None)
+            else:
+                values[key] = parsed
+    for key in _COMMA_LIST_CONFIG_KEYS:
+        if key in values and isinstance(values[key], str):
+            values[key] = [item.strip() for item in values[key].split(",") if item.strip()]
+
+
+def _apply_config_aliases(values: dict[str, Any]) -> None:
+    if "run_mode" in values:
+        values["run_mode"] = _normalize_run_mode(values["run_mode"])
+    if "graph_checkpointer" in values:
+        values["graph_checkpointer"] = _normalize_graph_checkpointer(values["graph_checkpointer"])
+    if "graph_checkpoint_path" in values and "graph_checkpointer" not in values:
+        values["graph_checkpointer"] = "file"
+    if "healthcheck_url" not in values and "backend_healthcheck_url" in values:
+        values["healthcheck_url"] = values["backend_healthcheck_url"]
+    if "restart_command" not in values and "backend_restart_command" in values:
+        values["restart_command"] = values["backend_restart_command"]
+    if "startup_grace_period_sec" not in values and "backend_restart_grace_sec" in values:
+        values["startup_grace_period_sec"] = values["backend_restart_grace_sec"]
+
+
+def _env_raw_config(env_or_dotenv: Any) -> dict[str, Any]:
+    return {
         "endpoint": env_or_dotenv(f"{ENV_PREFIX}ENDPOINT"),
         "model": env_or_dotenv(f"{ENV_PREFIX}MODEL"),
         "phase": env_or_dotenv(f"{ENV_PREFIX}PHASE"),
@@ -112,6 +290,8 @@ def _env_config() -> dict[str, Any]:
         "graph_model_call_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}GRAPH_MODEL_CALL_TIMEOUT_SEC"),
         "graph_dispatch_tools_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}GRAPH_DISPATCH_TOOLS_TIMEOUT_SEC"),
         "graph_idle_watchdog_sec": env_or_dotenv(f"{ENV_PREFIX}GRAPH_IDLE_WATCHDOG_SEC"),
+        "graph_recursion_limit": env_or_dotenv(f"{ENV_PREFIX}GRAPH_RECURSION_LIMIT"),
+        "graph_coding_recursion_limit": env_or_dotenv(f"{ENV_PREFIX}GRAPH_CODING_RECURSION_LIMIT"),
         "needs_human_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}NEEDS_HUMAN_TIMEOUT_SEC"),
         "restore_graph_state": env_or_dotenv(f"{ENV_PREFIX}RESTORE_GRAPH_STATE"),
         "graph_thread_id": env_or_dotenv(f"{ENV_PREFIX}GRAPH_THREAD_ID"),
@@ -209,6 +389,7 @@ def _env_config() -> dict[str, Any]:
         "multi_file_primary_file_limit": env_or_dotenv(f"{ENV_PREFIX}MULTI_FILE_PRIMARY_FILE_LIMIT"),
         "remote_task_artifact_snippet_limit": env_or_dotenv(f"{ENV_PREFIX}REMOTE_TASK_ARTIFACT_SNIPPET_LIMIT"),
         "remote_task_primary_file_limit": env_or_dotenv(f"{ENV_PREFIX}REMOTE_TASK_PRIMARY_FILE_LIMIT"),
+        "runtime_context_probe": env_or_dotenv(f"{ENV_PREFIX}RUNTIME_CONTEXT_PROBE"),
         "summarizer_endpoint": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_ENDPOINT"),
         "summarizer_model": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_MODEL"),
         "summarizer_api_key": env_or_dotenv(f"{ENV_PREFIX}SUMMARIZER_API_KEY"),
@@ -254,192 +435,19 @@ def _env_config() -> dict[str, Any]:
         "subtask_max_history": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_HISTORY"),
         "subtask_inject_completed_limit": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_INJECT_COMPLETED_LIMIT"),
     }
+
+
+def _env_config_key_names() -> set[str]:
+    return set(_env_raw_config(lambda _key: None).keys())
+
+
+def _env_config() -> dict[str, Any]:
+    dotenv = _read_dotenv(Path.cwd() / ".env")
+    env_or_dotenv = lambda key: os.getenv(key) or dotenv.get(key)
+    raw = _env_raw_config(env_or_dotenv)
     cfg = {k: v for k, v in raw.items() if v not in (None, "")}
     if "tool_profiles" in cfg:
         cfg["tool_profiles"] = parse_public_profiles(cfg["tool_profiles"])
-    if "debug" in cfg:
-        cfg["debug"] = _to_bool(cfg["debug"])
-    if "thinking_visibility" in cfg:
-        cfg["thinking_visibility"] = _to_bool(cfg["thinking_visibility"])
-    if "checkpoint_on_exit" in cfg:
-        cfg["checkpoint_on_exit"] = _to_bool(cfg["checkpoint_on_exit"])
-    if "restore_graph_state" in cfg:
-        cfg["restore_graph_state"] = _to_bool(cfg["restore_graph_state"])
-    if "fresh_run" in cfg:
-        cfg["fresh_run"] = _to_bool(cfg["fresh_run"])
-    if "fresh_run_turns" in cfg:
-        cfg["fresh_run_turns"] = _to_int_allow_zero(cfg["fresh_run_turns"])
-    if "planning_mode" in cfg:
-        cfg["planning_mode"] = _to_bool(cfg["planning_mode"])
-    if "contract_flow_ui" in cfg:
-        cfg["contract_flow_ui"] = _to_bool(cfg["contract_flow_ui"])
-    if "staged_reasoning" in cfg:
-        cfg["staged_reasoning"] = _to_bool(cfg["staged_reasoning"])
-    if "staged_execution_enabled" in cfg:
-        cfg["staged_execution_enabled"] = _to_bool(cfg["staged_execution_enabled"])
-    if "indexer" in cfg:
-        cfg["indexer"] = _to_bool(cfg["indexer"])
-    if "run_mode" in cfg:
-        cfg["run_mode"] = _normalize_run_mode(cfg["run_mode"])
-    if "chunk_mode_new_file_only" in cfg:
-        cfg["chunk_mode_new_file_only"] = _to_bool(cfg["chunk_mode_new_file_only"])
-    if "allow_multi_section_turns_for_small_edits" in cfg:
-        cfg["allow_multi_section_turns_for_small_edits"] = _to_bool(cfg["allow_multi_section_turns_for_small_edits"])
-    if "enable_write_intent_recovery" in cfg:
-        cfg["enable_write_intent_recovery"] = _to_bool(cfg["enable_write_intent_recovery"])
-    if "enable_assistant_code_write_recovery" in cfg:
-        cfg["enable_assistant_code_write_recovery"] = _to_bool(cfg["enable_assistant_code_write_recovery"])
-    if "write_recovery_allow_raw_text_targets" in cfg:
-        cfg["write_recovery_allow_raw_text_targets"] = _to_bool(cfg["write_recovery_allow_raw_text_targets"])
-    for key in (
-        "loop_guard_enabled",
-        "loop_guard_cumulative_write_gate",
-        "loop_guard_checkpoint_gate",
-        "loop_guard_diff_gate",
-        "fama_enabled",
-        "fama_done_gate_on_failure",
-        "fama_llm_judge_enabled",
-        "reflexion_enabled",
-        "reflexion_persist_cross_task",
-        "subtask_ledger_enabled",
-        "tool_plan_runtime_enabled",
-        "tool_plan_auto_select",
-        "tool_plan_readonly_only",
-        "tool_plan_allow_web",
-        "tool_plan_allow_git",
-        "tool_plan_allow_artifact_read",
-        "tool_plan_fallback_to_loop_on_invalid_plan",
-        "tool_dag_enabled",
-        "tool_dag_preserve_result_order",
-        "rewoo_lane_frames_enabled",
-        "rewoo_planner_frame_enabled",
-        "rewoo_solver_frame_enabled",
-        "rewoo_refiner_frame_enabled",
-        "test_time_scaling_enabled",
-        "test_time_scaling_mutating_parallel_enabled",
-        "escalation_enabled",
-        "escalation_expose_tool",
-        "escalation_auto_trigger",
-        "escalation_require_tool_plan_evidence",
-        "escalation_redact_secrets",
-    ):
-        if key in cfg:
-            cfg[key] = _to_bool(cfg[key])
-    if "chunk_mode_supported_models" in cfg:
-        cfg["chunk_mode_supported_models"] = [s.strip() for s in str(cfg["chunk_mode_supported_models"]).split(",") if s.strip()]
-    if "test_time_scaling_runtimes" in cfg and isinstance(cfg["test_time_scaling_runtimes"], str):
-        cfg["test_time_scaling_runtimes"] = [
-            s.strip()
-            for s in cfg["test_time_scaling_runtimes"].split(",")
-            if s.strip()
-        ]
-    if "graph_checkpointer" in cfg:
-        cfg["graph_checkpointer"] = _normalize_graph_checkpointer(cfg["graph_checkpointer"])
-    if "graph_checkpoint_path" in cfg and "graph_checkpointer" not in cfg:
-        cfg["graph_checkpointer"] = "file"
-    if "context_limit" in cfg:
-        parsed_limit = _to_int(cfg["context_limit"])
-        if parsed_limit is None:
-            cfg.pop("context_limit", None)
-        else:
-            cfg["context_limit"] = parsed_limit
-    for key in (
-        "max_prompt_tokens",
-        "reserve_completion_tokens",
-        "reserve_tool_tokens",
-        "first_token_timeout_sec",
-        "startup_grace_period_sec",
-        "max_restarts_per_hour",
-        "backend_healthcheck_timeout_sec",
-        "backend_restart_grace_sec",
-        "graph_node_timeout_sec",
-        "graph_model_call_timeout_sec",
-        "graph_dispatch_tools_timeout_sec",
-        "graph_idle_watchdog_sec",
-        "needs_human_timeout_sec",
-        "recent_message_limit",
-        "max_summary_items",
-        "max_artifact_snippets",
-        "artifact_snippet_token_limit",
-        "multi_file_artifact_snippet_limit",
-        "multi_file_primary_file_limit",
-        "remote_task_artifact_snippet_limit",
-        "remote_task_primary_file_limit",
-        "artifact_summarization_threshold",
-        "chunk_mode_min_bytes",
-        "small_model_soft_write_chars",
-        "small_model_hard_write_chars",
-        "new_file_chunk_mode_line_estimate",
-        "failed_local_patch_limit",
-        "loop_guard_stagnation_threshold",
-        "loop_guard_level2_threshold",
-        "loop_guard_recent_writes_limit",
-        "loop_guard_tail_lines",
-        "staged_step_prompt_tokens",
-        "fama_default_ttl_steps",
-        "fama_max_active_mitigations",
-        "fama_signal_window",
-        "fama_capsule_token_budget",
-        "fama_llm_judge_min_severity",
-        "reflexion_max_items",
-        "reflexion_inject_top_k",
-        "subtask_max_active",
-        "subtask_max_history",
-        "subtask_inject_completed_limit",
-        "tool_plan_max_steps",
-        "tool_plan_max_repair_attempts",
-        "schema_validation_max_repair_attempts",
-        "tool_plan_observation_token_limit",
-        "tool_plan_max_observation_chars_per_step",
-        "tool_plan_solver_fresh_output_limit",
-        "tool_dag_max_parallel",
-        "tool_dag_timeout_sec",
-        "rewoo_frame_token_budget",
-        "test_time_scaling_max_candidates",
-        "test_time_scaling_min_candidates",
-        "test_time_scaling_parallel_max",
-        "test_time_scaling_timeout_sec",
-        "escalation_max_prompt_chars",
-        "escalation_max_response_tokens",
-        "escalation_timeout_sec",
-        "escalation_max_per_task",
-        "escalation_cooldown_turns",
-        "escalation_repeated_failure_threshold",
-    ):
-        if key in cfg:
-            parsed_limit = _to_int(cfg[key])
-            if parsed_limit is None:
-                cfg.pop(key, None)
-            else:
-                cfg[key] = parsed_limit
-    if "test_time_scaling_score_threshold" in cfg:
-        parsed_ratio = _to_float(cfg["test_time_scaling_score_threshold"])
-        if parsed_ratio is None:
-            cfg.pop("test_time_scaling_score_threshold", None)
-        else:
-            cfg["test_time_scaling_score_threshold"] = parsed_ratio
-    if "escalation_temperature" in cfg:
-        parsed_ratio = _to_float(cfg["escalation_temperature"])
-        if parsed_ratio is None:
-            cfg.pop("escalation_temperature", None)
-        else:
-            cfg["escalation_temperature"] = parsed_ratio
-    if "summarize_at_ratio" in cfg:
-        parsed_ratio = _to_float(cfg["summarize_at_ratio"])
-        if parsed_ratio is None:
-            cfg.pop("summarize_at_ratio", None)
-        else:
-            cfg["summarize_at_ratio"] = parsed_ratio
-    if "loop_guard_similarity_threshold" in cfg:
-        parsed_ratio = _to_float(cfg["loop_guard_similarity_threshold"])
-        if parsed_ratio is None:
-            cfg.pop("loop_guard_similarity_threshold", None)
-        else:
-            cfg["loop_guard_similarity_threshold"] = parsed_ratio
-    if "healthcheck_url" not in cfg and "backend_healthcheck_url" in cfg:
-        cfg["healthcheck_url"] = cfg["backend_healthcheck_url"]
-    if "restart_command" not in cfg and "backend_restart_command" in cfg:
-        cfg["restart_command"] = cfg["backend_restart_command"]
-    if "startup_grace_period_sec" not in cfg and "backend_restart_grace_sec" in cfg:
-        cfg["startup_grace_period_sec"] = cfg["backend_restart_grace_sec"]
+    _apply_typed_config_values(cfg)
+    _apply_config_aliases(cfg)
     return cfg

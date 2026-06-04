@@ -101,7 +101,7 @@ def test_non_runtime_context_update_does_not_expand_stale_lower_limit() -> None:
 
     new_limit = apply_server_context_limit(harness, 16384, source="stream_context_overflow")
 
-    assert new_limit == 6144
+    assert new_limit == 7168
     assert harness.server_context_limit == 8192
     assert harness.discovered_server_context_limit == 8192
 
@@ -199,11 +199,11 @@ def test_runtime_probe_can_expand_non_explicit_prompt_budget_to_server_budget() 
 
     new_limit = apply_server_context_limit(harness, 256000, source="runtime_probe")
 
-    assert new_limit == 253952
+    assert new_limit == 251904
     assert harness.server_context_limit == 256000
-    assert harness.context_policy.max_prompt_tokens == 253952
-    assert harness.context_policy.hot_message_limit == 253
-    assert harness.context_policy.recent_message_limit == 253
+    assert harness.context_policy.max_prompt_tokens == 251904
+    assert harness.context_policy.hot_message_limit == 251
+    assert harness.context_policy.recent_message_limit == 251
 
 
 def test_large_prompt_budget_scales_inline_limits() -> None:

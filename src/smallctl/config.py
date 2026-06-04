@@ -6,13 +6,13 @@ from typing import Any
 
 from .config_support import (
     LOCAL_CONFIG,
+    _apply_config_aliases,
+    _apply_typed_config_values,
     _env_config,
     _normalize_graph_checkpointer,
+    _normalize_run_mode,
     _read_yaml,
     _to_bool,
-    _to_float,
-    _to_int,
-    _to_int_allow_zero,
 )
 from .phases import normalize_phase
 from .presets import get_preset_defaults
@@ -229,170 +229,6 @@ class SmallctlConfig:
         return asdict(self)
 
 
-_BOOL_CONFIG_KEYS = {
-    "debug",
-    "thinking_visibility",
-    "checkpoint_on_exit",
-    "restore_graph_state",
-    "fresh_run",
-    "planning_mode",
-    "contract_flow_ui",
-    "staged_reasoning",
-    "staged_execution_enabled",
-    "indexer",
-    "enable_write_intent_recovery",
-    "enable_assistant_code_write_recovery",
-    "write_recovery_allow_raw_text_targets",
-    "chunk_mode_new_file_only",
-    "allow_multi_section_turns_for_small_edits",
-    "loop_guard_enabled",
-    "loop_guard_cumulative_write_gate",
-    "loop_guard_checkpoint_gate",
-    "loop_guard_diff_gate",
-    "fama_enabled",
-    "fama_done_gate_on_failure",
-    "fama_llm_judge_enabled",
-    "reflexion_enabled",
-    "reflexion_persist_cross_task",
-    "subtask_ledger_enabled",
-    "tool_plan_runtime_enabled",
-    "tool_plan_auto_select",
-    "tool_plan_readonly_only",
-    "tool_plan_allow_web",
-    "tool_plan_allow_artifact_read",
-    "tool_plan_allow_git",
-    "tool_plan_fallback_to_loop_on_invalid_plan",
-    "tool_dag_enabled",
-    "tool_dag_preserve_result_order",
-    "solver_refine_enabled",
-    "solver_refine_on_final_answer",
-    "solver_refine_on_patch_plan",
-    "solver_refine_on_task_complete",
-    "rewoo_lane_frames_enabled",
-    "rewoo_planner_frame_enabled",
-    "rewoo_solver_frame_enabled",
-    "rewoo_refiner_frame_enabled",
-    "test_time_scaling_enabled",
-    "test_time_scaling_mutating_parallel_enabled",
-    "escalation_enabled",
-    "escalation_expose_tool",
-    "escalation_auto_trigger",
-    "escalation_require_tool_plan_evidence",
-    "escalation_redact_secrets",
-}
-
-_INT_ALLOW_ZERO_CONFIG_KEYS = {"fresh_run_turns"}
-
-_INT_CONFIG_KEYS = {
-    "context_limit",
-    "max_prompt_tokens",
-    "reserve_completion_tokens",
-    "reserve_tool_tokens",
-    "first_token_timeout_sec",
-    "startup_grace_period_sec",
-    "max_restarts_per_hour",
-    "backend_healthcheck_timeout_sec",
-    "backend_restart_grace_sec",
-    "graph_node_timeout_sec",
-    "graph_model_call_timeout_sec",
-    "graph_dispatch_tools_timeout_sec",
-    "graph_idle_watchdog_sec",
-    "graph_recursion_limit",
-    "graph_coding_recursion_limit",
-    "needs_human_timeout_sec",
-    "recent_message_limit",
-    "max_summary_items",
-    "max_artifact_snippets",
-    "artifact_snippet_token_limit",
-    "multi_file_artifact_snippet_limit",
-    "multi_file_primary_file_limit",
-    "remote_task_artifact_snippet_limit",
-    "remote_task_primary_file_limit",
-    "min_exploration_steps",
-    "artifact_summarization_threshold",
-    "chunk_mode_min_bytes",
-    "small_model_soft_write_chars",
-    "small_model_hard_write_chars",
-    "new_file_chunk_mode_line_estimate",
-    "failed_local_patch_limit",
-    "loop_guard_stagnation_threshold",
-    "loop_guard_level2_threshold",
-    "loop_guard_recent_writes_limit",
-    "loop_guard_tail_lines",
-    "staged_step_prompt_tokens",
-    "fama_default_ttl_steps",
-    "fama_max_active_mitigations",
-    "fama_signal_window",
-    "fama_capsule_token_budget",
-    "fama_llm_judge_min_severity",
-    "reflexion_max_items",
-    "reflexion_inject_top_k",
-    "subtask_max_active",
-    "subtask_max_history",
-    "subtask_inject_completed_limit",
-    "tool_plan_max_steps",
-    "tool_plan_max_repair_attempts",
-    "schema_validation_max_repair_attempts",
-    "tool_plan_observation_token_limit",
-    "tool_plan_max_observation_chars_per_step",
-    "tool_plan_solver_fresh_output_limit",
-    "tool_dag_max_parallel",
-    "tool_dag_timeout_sec",
-    "solver_refine_max_passes",
-    "solver_refine_token_budget",
-    "rewoo_frame_token_budget",
-    "test_time_scaling_max_candidates",
-    "test_time_scaling_min_candidates",
-    "test_time_scaling_parallel_max",
-    "test_time_scaling_timeout_sec",
-    "escalation_max_prompt_chars",
-    "escalation_max_response_tokens",
-    "escalation_timeout_sec",
-    "escalation_max_per_task",
-    "escalation_cooldown_turns",
-    "escalation_repeated_failure_threshold",
-}
-
-_FLOAT_CONFIG_KEYS = {
-    "summarize_at_ratio",
-    "loop_guard_similarity_threshold",
-    "test_time_scaling_score_threshold",
-    "escalation_temperature",
-}
-
-_COMMA_LIST_CONFIG_KEYS = {"test_time_scaling_runtimes", "chunk_mode_supported_models"}
-
-
-def _apply_typed_config_values(values: dict[str, Any]) -> None:
-    for key in _BOOL_CONFIG_KEYS:
-        if key in values:
-            values[key] = _to_bool(values[key])
-    for key in _INT_ALLOW_ZERO_CONFIG_KEYS:
-        if key in values:
-            parsed = _to_int_allow_zero(values[key])
-            if parsed is None:
-                values.pop(key, None)
-            else:
-                values[key] = parsed
-    for key in _INT_CONFIG_KEYS:
-        if key in values:
-            parsed = _to_int(values[key])
-            if parsed is None:
-                values.pop(key, None)
-            else:
-                values[key] = parsed
-    for key in _FLOAT_CONFIG_KEYS:
-        if key in values:
-            parsed = _to_float(values[key])
-            if parsed is None:
-                values.pop(key, None)
-            else:
-                values[key] = parsed
-    for key in _COMMA_LIST_CONFIG_KEYS:
-        if key in values and isinstance(values[key], str):
-            values[key] = [item.strip() for item in values[key].split(",") if item.strip()]
-
-
 def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     # Source precedence (before provider defaults):
     # user config path -> local config -> env/.env -> CLI
@@ -416,18 +252,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
 
         cli_clean["tool_profiles"] = parse_public_profiles(cli_clean["tool_profiles"])
     _apply_typed_config_values(cli_clean)
-    if "run_mode" in cli_clean:
-        cli_clean["run_mode"] = _normalize_run_mode(cli_clean["run_mode"])
-    if "graph_checkpointer" in cli_clean:
-        cli_clean["graph_checkpointer"] = _normalize_graph_checkpointer(cli_clean["graph_checkpointer"])
-    if "graph_checkpoint_path" in cli_clean and "graph_checkpointer" not in cli_clean:
-        cli_clean["graph_checkpointer"] = "file"
-    if "healthcheck_url" not in cli_clean and "backend_healthcheck_url" in cli_clean:
-        cli_clean["healthcheck_url"] = cli_clean["backend_healthcheck_url"]
-    if "restart_command" not in cli_clean and "backend_restart_command" in cli_clean:
-        cli_clean["restart_command"] = cli_clean["backend_restart_command"]
-    if "startup_grace_period_sec" not in cli_clean and "backend_restart_grace_sec" in cli_clean:
-        cli_clean["startup_grace_period_sec"] = cli_clean["backend_restart_grace_sec"]
+    _apply_config_aliases(cli_clean)
 
     explicit_merged: dict[str, Any] = {}
     explicit_merged.update(user_cfg)
@@ -446,6 +271,7 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     if preset_name:
         merged["preset"] = preset_name
     _apply_typed_config_values(merged)
+    _apply_config_aliases(merged)
     if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
         merged["staged_execution_enabled"] = True
 
@@ -524,8 +350,3 @@ def _apply_provider_profile(
     for key, value in profile_defaults.items():
         if key not in explicit_merged:
             merged[key] = value
-
-
-def _normalize_run_mode(value: Any) -> str:
-    mode = str(value or "auto").strip().lower().replace("-", "_")
-    return mode if mode in {"auto", "chat", "loop", "planning", "indexer", "tool_plan"} else "auto"

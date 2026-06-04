@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .phase_contracts_support import (
+    _file_has_symbol,
+    _node_defines_name,
+)
 
 _QUALITY_SCORES = {
     "none": 0,
@@ -86,12 +90,6 @@ def _phase_spec_path(cwd: Path, task_text: str) -> Path | None:
     path_matches = re.findall(r"(?:\./)?[\w./-]*(?:spec|roadmap|plan)[\w./-]*\.md", task_text, flags=re.IGNORECASE)
     for raw in path_matches:
         candidate = cwd / raw.lstrip("./")
-        if candidate.exists() and candidate.is_file():
-            return candidate
-    candidates = sorted((cwd / "temp").glob("*spec*.md")) if (cwd / "temp").exists() else []
-    candidates.extend(sorted(cwd.glob("*spec*.md")))
-    candidates.extend(sorted((cwd / "temp").glob("*roadmap*.md")) if (cwd / "temp").exists() else [])
-    for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
@@ -219,6 +217,12 @@ def phase_contract_completion_block(
     verifier_verdict: dict[str, Any] | None,
     verifier_quality: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    contract = phase_contract_for_state(state)
+    if not contract:
+        return None
+    # Only enforce explicit phase contracts; inferred contracts are hints, not requirements.
+    if str(contract.get("source") or "").strip() == "inferred":
+        return None
     status = phase_contract_status(
         state,
         verifier_verdict=verifier_verdict,
@@ -288,33 +292,6 @@ def _missing_required_symbols(cwd: Path, phase: dict[str, Any]) -> list[str]:
         if not any(_file_has_symbol(path, symbol) for path in files):
             missing.append(symbol)
     return missing
-
-
-def _file_has_symbol(path: Path, symbol: str) -> bool:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, UnicodeDecodeError):
-        return False
-    parts = [part for part in str(symbol or "").split(".") if part]
-    if not parts:
-        return False
-    if len(parts) == 1:
-        return any(_node_defines_name(node, parts[0]) for node in tree.body)
-    class_name, member = parts[0], parts[1]
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return any(_node_defines_name(child, member) for child in node.body)
-    return False
-
-
-def _node_defines_name(node: ast.AST, name: str) -> bool:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return node.name == name
-    if isinstance(node, ast.Assign):
-        return any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
-    if isinstance(node, ast.AnnAssign):
-        return isinstance(node.target, ast.Name) and node.target.id == name
-    return False
 
 
 def _checks_preview(phase: dict[str, Any]) -> list[dict[str, Any]]:

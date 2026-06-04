@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 from typing import Any
 
 from ..docker_retry_normalization import docker_retry_family
-from ..guards import is_four_b_or_under_model_name, is_seven_b_or_under_model_name
 from ..repeat_loop_policy import strict_identical_limit, strict_window_limit
 from ..state import json_safe_value
 from .state import PendingToolCall
@@ -32,7 +30,6 @@ from .tool_loop_guard_constants import (
 )
 from .tool_loop_guard_progress import (
     _artifact_read_line_progress_is_progress,
-    _coerce_int_or_none,
     _dir_list_exploration_progress_is_progress,
     _dir_list_repeat_has_intervening_progress,
     _dir_list_same_path_repeat_is_loop,
@@ -41,19 +38,30 @@ from .tool_loop_guard_progress import (
     _file_read_line_progress_is_progress,
     _is_strict_subpath,
     _model_is_exact_small_gemma_4_it,
-    _requested_artifact_read_target,
     _requested_file_read_range,
     _resolve_dir_list_path,
     _resolve_file_read_path,
     _tool_attempt_history,
 )
-
-
-def _normalize_token(value: Any) -> str:
-    import re
-
-    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
-    return normalized.strip("_")
+from .tool_loop_guard_read_predicates import (
+    _artifact_read_past_eof_is_loop,
+    _artifact_read_targets_mutation_result_loop,
+    _ssh_file_read_after_remote_mutation_is_progress,
+)
+from .tool_loop_guards_support import (
+    _directive_hint_for_repeated_tool,
+    _normalize_token,
+    _placeholder_token,
+    _placeholder_value_looks_generic,
+    _tool_call_fingerprint,
+    _semantic_tool_call_fingerprint,
+    _cwd_for_fingerprint,
+    _normalize_tool_args,
+    _normalize_shell_command,
+    _normalize_path_token,
+    _normalize_local_path_for_fingerprint,
+    _normalize_json_like,
+)
 
 
 def _timeout_recovered_incomplete_tool_call_context(harness: Any, pending: PendingToolCall) -> dict[str, Any] | None:
@@ -178,73 +186,6 @@ def _repeat_loop_limits(harness: Any, pending: PendingToolCall) -> tuple[int, in
     return (identical_limit, window_limit, unique_limit)
 
 
-def _model_name_for_loop_guard(harness: Any) -> str:
-    client_model = str(getattr(getattr(harness, "client", None), "model", "") or "").strip()
-    if client_model:
-        return client_model
-    state = getattr(harness, "state", None)
-    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
-    if isinstance(scratchpad, dict):
-        return str(scratchpad.get("_model_name") or "").strip()
-    return ""
-
-
-def _directive_hint_for_repeated_tool(harness: Any, pending: PendingToolCall) -> str:
-    model_name = _model_name_for_loop_guard(harness)
-    is_small = is_seven_b_or_under_model_name(model_name)
-    if not is_small and not is_four_b_or_under_model_name(model_name):
-        return ""
-
-    args = dict(getattr(pending, "args", {}) or {})
-    tool_name = str(getattr(pending, "tool_name", "") or "").strip()
-    path = str(args.get("path") or args.get("target_path") or "").strip()
-    artifact_id = str(args.get("artifact_id") or args.get("id") or "").strip()
-    path_note = f" for `{path}`" if path else ""
-    artifact_note = f" `{artifact_id}`" if artifact_id else ""
-
-    if tool_name == "file_read":
-        return (
-            f"Directive Hint: Stop rereading the same file{path_note}. Use the evidence already in Working Memory. "
-            "If an edit is needed, call `file_patch` or `ast_patch`; if proof is needed, call `shell_exec` with a focused verifier; "
-            "if the answer is ready, call `task_complete`."
-        )
-    if tool_name == "dir_list":
-        return (
-            f"Directive Hint: Stop listing the same directory{path_note}. Pick the visible target path and move to `file_read`, "
-            "`file_patch`, or `shell_exec` for the next concrete step."
-        )
-    if tool_name in {"artifact_read", "artifact_print", "artifact_grep"}:
-        return (
-            f"Directive Hint: Stop repeating `{tool_name}` on artifact{artifact_note}. Use the pinned evidence table and current artifact summary. "
-            "Only call `artifact_read` again with a higher `start_line` when you need unseen lines; otherwise patch, use a different source/query, "
-            "call `loop_status`, ask for help if the required tool is unavailable, or complete."
-        )
-    if tool_name in {"file_patch", "ast_patch"}:
-        return (
-            f"Directive Hint: Stop retrying the same patch{path_note}. Change the patch arguments based on the last failure, "
-            "read the target once for exact context, or run `shell_exec` to verify the current state."
-        )
-    if tool_name == "shell_exec":
-        return (
-            "Directive Hint: Stop rerunning the same command. Use the existing command output or artifact; "
-            "only run a different focused command if it will produce new evidence."
-        )
-    if tool_name == "ssh_exec":
-        return (
-            "Directive Hint: Stop rerunning similar SSH commands. Combine remaining discovery into a single `ssh_exec` using `&&` or `;`. "
-            "Prefer `ssh_file_read` over `ssh_exec cat` for reading remote files. Then synthesize findings and move forward."
-        )
-    if tool_name == "ssh_file_read":
-        return (
-            f"Directive Hint: Stop re-reading the same remote file{path_note}. Use the evidence already in Working Memory. "
-            "If you need to verify state, run one focused `ssh_exec` command. Otherwise synthesize and proceed."
-        )
-    return (
-        f"Directive Hint: Stop repeating `{tool_name}` with near-identical arguments. Use the current evidence and choose a different next action: "
-        "`file_patch`, `ast_patch`, `shell_exec`, or `task_complete` as appropriate."
-    )
-
-
 def _format_repeated_tool_loop_message(harness: Any, pending: PendingToolCall, message: str) -> str:
     hint = _directive_hint_for_repeated_tool(harness, pending)
     parts = [message]
@@ -263,195 +204,6 @@ def _format_repeated_tool_loop_message(harness: Any, pending: PendingToolCall, m
         "Choose exactly one: A. Explain the blocker and stop. B. Try a different specific fix. C. Ask for missing information."
     )
     return " ".join(parts)
-
-
-def _artifact_record_for_pending_read(harness: Any, pending: PendingToolCall) -> Any | None:
-    if pending.tool_name != "artifact_read":
-        return None
-    artifact_id = _requested_artifact_read_target(pending.args)
-    if not artifact_id:
-        return None
-    artifacts = getattr(getattr(harness, "state", None), "artifacts", {})
-    if not isinstance(artifacts, dict):
-        return None
-    return artifacts.get(artifact_id)
-
-
-def _artifact_read_targets_mutation_result_loop(harness: Any, pending: PendingToolCall) -> bool:
-    artifact = _artifact_record_for_pending_read(harness, pending)
-    if artifact is None:
-        return False
-    tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
-    if tool_name not in {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
-        return False
-    artifact_id = _requested_artifact_read_target(pending.args)
-    if not artifact_id:
-        return False
-    prior_reads = 0
-    for item in reversed(_tool_attempt_history(harness)[-6:]):
-        if str(item.get("tool_name", "")) != "artifact_read":
-            continue
-        args = _extract_args_from_fingerprint(str(item.get("fingerprint", "")))
-        if isinstance(args, dict) and _requested_artifact_read_target(args) == artifact_id:
-            prior_reads += 1
-    return prior_reads >= 1
-
-
-def _artifact_read_past_eof_is_loop(harness: Any, pending: PendingToolCall) -> bool:
-    artifact = _artifact_record_for_pending_read(harness, pending)
-    if artifact is None:
-        return False
-    start_line, _end_line = _requested_file_read_range(pending.args)
-    if start_line is None or start_line <= 0:
-        return False
-    total_lines = None
-    metadata = getattr(artifact, "metadata", {})
-    if isinstance(metadata, dict):
-        raw_total = metadata.get("total_lines") or metadata.get("artifact_total_lines")
-        total_lines = _coerce_int_or_none(raw_total)
-    if total_lines is None:
-        content_path = str(getattr(artifact, "content_path", "") or "").strip()
-        if content_path:
-            try:
-                total_lines = len(Path(content_path).read_text(encoding="utf-8").splitlines())
-            except OSError:
-                total_lines = None
-    if total_lines is None or start_line <= total_lines:
-        return False
-    artifact_id = _requested_artifact_read_target(pending.args)
-    for item in reversed(_tool_attempt_history(harness)[-6:]):
-        if str(item.get("tool_name", "")) != "artifact_read":
-            continue
-        args = _extract_args_from_fingerprint(str(item.get("fingerprint", "")))
-        if not isinstance(args, dict) or _requested_artifact_read_target(args) != artifact_id:
-            continue
-        prior_start, _prior_end = _requested_file_read_range(args)
-        if prior_start is not None and prior_start > total_lines:
-            return True
-    return False
-
-
-def _ssh_file_read_after_remote_mutation_is_progress(
-    harness: Any, pending: PendingToolCall
-) -> bool:
-    """Allow ssh_file_read right after a successful ssh_file_patch/write/replace_between
-    on the same remote path — the model needs to see the mutated state."""
-    if pending.tool_name != "ssh_file_read":
-        return False
-    read_path = str(pending.args.get("path") or "").strip()
-    read_host = str(pending.args.get("host") or "").strip().lower()
-    if not read_path:
-        return False
-    # Look back for a recent successful remote mutation on the same path.
-    # We check the last 6 attempts; if the most recent non-read attempt was a
-    # mutation on the same path/host, treat this read as progress.
-    for item in reversed(_tool_attempt_history(harness)[-6:]):
-        tool_name = str(item.get("tool_name", ""))
-        if tool_name == "ssh_file_read":
-            continue
-        if tool_name not in {"ssh_file_patch", "ssh_file_replace_between", "ssh_file_write"}:
-            continue
-        args = _extract_args_from_fingerprint(str(item.get("fingerprint", "")))
-        if not isinstance(args, dict):
-            continue
-        mutated_path = str(args.get("path") or "").strip()
-        mutated_host = str(args.get("host") or "").strip().lower()
-        if mutated_path == read_path and (not read_host or mutated_host == read_host):
-            return True
-    return False
-
-
-def _placeholder_token(value: Any) -> str:
-    return _normalize_token(value)
-
-
-def _placeholder_value_looks_generic(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str):
-        token = _placeholder_token(value)
-        return token in _PLACEHOLDER_ARG_VALUE_TOKENS or token.startswith("placeholder")
-    if isinstance(value, dict):
-        if not value:
-            return True
-        return all(
-            _placeholder_token(key) in _PLACEHOLDER_ARG_KEY_TOKENS
-            and _placeholder_value_looks_generic(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return bool(value) and all(_placeholder_value_looks_generic(item) for item in value)
-    return False
-
-
-def _tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> str:
-    normalized_args = _normalize_tool_args(tool_name, args, cwd=cwd)
-    return json.dumps({"tool_name": tool_name, "args": normalized_args}, sort_keys=True, ensure_ascii=True)
-
-
-def _semantic_tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> str:
-    return _tool_call_fingerprint(tool_name, args, cwd=cwd)
-
-
-def _cwd_for_fingerprint(harness: Any) -> str | None:
-    cwd = getattr(getattr(harness, "state", None), "cwd", None)
-    return str(cwd) if isinstance(cwd, str) and cwd else None
-
-
-def _normalize_tool_args(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> Any:
-    if not isinstance(args, dict):
-        return args
-    normalized = {str(key): _normalize_json_like(value) for key, value in args.items()}
-    if tool_name in {"shell_exec", "bash_exec", "ssh_exec"} and "command" in normalized:
-        normalized["command"] = _normalize_shell_command(str(normalized["command"]))
-    if tool_name in {
-        "file_read",
-        "dir_list",
-        "dir_tree",
-        "file_write",
-        "file_append",
-        "file_patch",
-        "ast_patch",
-        "file_delete",
-    }:
-        for key in ("path", "target_path"):
-            value = normalized.get(key)
-            if isinstance(value, str) and value.strip():
-                normalized[key] = _normalize_local_path_for_fingerprint(value, cwd=cwd)
-    return normalized
-
-
-def _normalize_shell_command(command: str) -> str:
-    import re
-
-    command = str(command or "").strip()
-    command = re.sub(r"\s+", " ", command)
-    return command
-
-
-def _normalize_path_token(value: str) -> str:
-    return str(value or "").strip()
-
-
-def _normalize_local_path_for_fingerprint(value: str, *, cwd: str | None = None) -> str:
-    candidate = Path(str(value or "").strip() or ".")
-    if not candidate.is_absolute():
-        base = Path(cwd) if cwd else Path.cwd()
-        candidate = base / candidate
-    try:
-        return str(candidate.resolve())
-    except Exception:
-        return str(candidate)
-
-
-def _normalize_json_like(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _normalize_json_like(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_normalize_json_like(item) for item in value]
-    if isinstance(value, tuple):
-        return [_normalize_json_like(item) for item in value]
-    return value
 
 
 def _detect_placeholder_tool_call(harness: Any, pending: PendingToolCall) -> tuple[str, dict[str, Any]] | None:

@@ -203,11 +203,7 @@ def register_mock_tool(
     properties: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> None:
-    """Helper for registering mock tools with common patterns.
-
-    This function consolidates the schema building patterns used in AHO,
-    reducing code duplication and ensuring consistency with core tool registration.
-    """
+    """Register AHO/mock tools with the same schema defaults as core tools."""
     registry.register(
         ToolSpec(
             name=name,
@@ -223,4 +219,3 @@ def register_mock_tool(
             **kwargs,
         )
     )
-

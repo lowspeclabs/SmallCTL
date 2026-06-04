@@ -177,7 +177,7 @@ def test_ssh_exec_auto_extends_default_timeout_for_installer_like_command(monkey
         return _DoneProcess()
 
     monkeypatch.setattr(network, "create_process", _fake_create_process)
-
+    
     result = asyncio.run(
         network.run_ssh_command(
             host="192.0.2.10",
@@ -216,6 +216,7 @@ def test_ssh_exec_requires_remote_installer_preflight_before_installfog(monkeypa
         return _ProbeProcess(probe_stdout)
 
     monkeypatch.setattr(network, "create_process", _fake_create_process)
+    monkeypatch.setattr(shell, "create_process", _fake_create_process)
 
     result = asyncio.run(
         network.run_ssh_command(
@@ -376,7 +377,7 @@ def test_ssh_session_start_returns_prompt_state_and_accepts_input(monkeypatch) -
     async def _fake_create_process(**_kwargs):
         return proc
 
-    monkeypatch.setattr(network, "create_process", _fake_create_process)
+    monkeypatch.setattr(shell, "create_process", _fake_create_process)
 
     start = asyncio.run(
         network.ssh_session_start(

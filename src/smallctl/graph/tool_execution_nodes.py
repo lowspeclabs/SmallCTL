@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -22,7 +21,6 @@ from ..state import json_safe_value
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.planning import _refresh_plan_playbook_artifact
 from ..tools.fs import infer_write_session_intent, new_write_session_id
-from ..tools.fs_loop_guard import outline_mode_violation
 from ..write_session_fsm import new_write_session, record_write_session_event
 from .display import format_tool_result_display
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
@@ -54,6 +52,10 @@ from .tool_execution_support import (
     _tool_envelope_from_dict,
 )
 from .hidden_tool_helpers import _validation_handoff_hint_for_blocked_tool
+from .tool_execution_node_guards import (
+    _block_long_running_remote_timeout_write,
+    _block_outline_mode_violation,
+)
 
 
 _TOOL_NOT_EXPOSED_REASON_LABELS = {
@@ -63,58 +65,6 @@ _TOOL_NOT_EXPOSED_REASON_LABELS = {
     "no_background_jobs": "no background jobs",
     "write_session_not_finalizable": "write session not finalizable",
 }
-
-_FILE_WRITE_TOOLS = {
-    "file_write",
-    "file_append",
-    "file_patch",
-    "ast_patch",
-    "ssh_file_write",
-    "ssh_file_patch",
-    "ssh_file_replace_between",
-}
-
-
-_EXPLICIT_FILE_EDIT_TASK_RE = re.compile(
-    r"\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix)\b.*\b(?:file|path|script|config|document)\b"
-    r"|"
-    r"\b(?:file|path|script|config|document)\b.*\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix)\b"
-    r"|"
-    r"\b(?:ssh_file_write|file_write|file_patch|ast_patch)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _task_explicitly_requests_file_edit(state: Any) -> bool:
-    run_brief = getattr(state, "run_brief", None)
-    task = str(getattr(run_brief, "original_task", "") or "").strip()
-    if not task:
-        wm = getattr(state, "working_memory", None)
-        task = str(getattr(wm, "current_goal", "") or "").strip()
-    return bool(task and _EXPLICIT_FILE_EDIT_TASK_RE.search(task))
-
-
-def _long_running_remote_timeout_write_guard(state: Any, pending: PendingToolCall) -> str | None:
-    if pending.tool_name not in _FILE_WRITE_TOOLS:
-        return None
-    scratchpad = getattr(state, "scratchpad", None)
-    timeout_context = scratchpad.get("_last_long_running_remote_command_timeout") if isinstance(scratchpad, dict) else None
-    if not isinstance(timeout_context, dict):
-        return None
-    if _task_explicitly_requests_file_edit(state):
-        return None
-    command = str(timeout_context.get("command") or "").strip()
-    host = str(timeout_context.get("host") or "").strip()
-    target = str(pending.args.get("path") or pending.args.get("target_path") or "").strip()
-    remote = f" on {host}" if host else ""
-    target_text = f" Target attempted: {target}." if target else ""
-    return (
-        "Blocked file-write repair after a long-running remote SSH command timed out. "
-        f"The prior command{remote} was still making installer/service progress: `{command}`. "
-        "Continue the remote command with a larger `timeout_sec`, or run it detached with output redirected to a log and verify that log/service state."
-        + target_text
-    )
-
 
 async def _block_empty_file_write_before_dispatch(
     graph_state: GraphRunState,
@@ -239,42 +189,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         if intercepted_result is None:
             pending.tool_name = normalized_tool_name
             pending.args = normalized_args
-            remote_timeout_write_guard = _long_running_remote_timeout_write_guard(harness.state, pending)
-            if remote_timeout_write_guard is not None:
-                harness.state.recent_errors.append(remote_timeout_write_guard)
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=remote_timeout_write_guard,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "long_running_remote_command",
-                            "tool_name": pending.tool_name,
-                            "tool_call_id": pending.tool_call_id,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "long_running_remote_timeout_write_guard",
-                    "blocked file-write repair after remote installer timeout",
-                    step=harness.state.step_count,
-                    tool_name=pending.tool_name,
-                    arguments=json_safe_value(pending.args),
-                )
-                await harness._emit(
-                    deps.event_handler,
-                    UIEvent(
-                        event_type=UIEventType.ALERT,
-                        content=remote_timeout_write_guard,
-                        data={
-                            "repair_kind": "long_running_remote_command",
-                            "tool_name": pending.tool_name,
-                            "tool_call_id": pending.tool_call_id,
-                        },
-                    ),
-                )
-                graph_state.pending_tool_calls = []
-                graph_state.last_tool_results = []
+            if await _block_long_running_remote_timeout_write(graph_state=graph_state, deps=deps, pending=pending):
                 return
             _nodes._apply_declared_read_before_write_reroute(
                 graph_state,
@@ -284,50 +199,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             )
             if await _block_empty_file_write_before_dispatch(graph_state, deps, pending):
                 return
-            outline_violation = outline_mode_violation(
-                harness.state,
-                tool_name=pending.tool_name,
-                args=pending.args,
-            )
-            if outline_violation is not None:
-                message = str(outline_violation.get("message") or "").strip()
-                harness.state.recent_errors.append(message)
-                harness.state.append_message(
-                    ConversationMessage(
-                        role="system",
-                        content=message,
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "chunked_write_loop_guard_outline",
-                            "target_path": outline_violation.get("path"),
-                            "write_session_id": outline_violation.get("write_session_id"),
-                            "tool_name": pending.tool_name,
-                            "tool_call_id": pending.tool_call_id,
-                        },
-                    )
-                )
-                harness._runlog(
-                    "chunked_write_loop_guard_outline_violation",
-                    "blocked tool while loop guard outline mode was active",
-                    tool_name=pending.tool_name,
-                    tool_call_id=pending.tool_call_id,
-                    target_path=outline_violation.get("path"),
-                )
-                await harness._emit(
-                    deps.event_handler,
-                    UIEvent(
-                        event_type=UIEventType.ALERT,
-                        content=message,
-                        data={
-                            "repair_kind": "chunked_write_loop_guard_outline",
-                            "tool_name": pending.tool_name,
-                            "tool_call_id": pending.tool_call_id,
-                            "target_path": outline_violation.get("path"),
-                        },
-                    ),
-                )
-                graph_state.pending_tool_calls = []
-                graph_state.last_tool_results = []
+            if await _block_outline_mode_violation(graph_state=graph_state, deps=deps, pending=pending):
                 return
             contract_violation = _detect_patch_existing_stage_read_contract_violation(harness, pending)
             if contract_violation is not None:

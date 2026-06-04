@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from smallctl.state import LoopState
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.harness import tool_result_artifact_updates
+from smallctl.harness.remote_mutation_parsing import guess_remote_mutation_paths
 from smallctl.state_schema import ArtifactRecord
 from smallctl.tools.control import task_complete
 from smallctl.tools import ssh_files
@@ -868,7 +869,7 @@ rm -f /etc/init.d/nginx 2>/dev/null || true
 def test_remote_deletion_path_guessing_keeps_concrete_rm_targets() -> None:
     command = "rm -rf /var/www/demo-site /var/www/html/test-1 2>/dev/null && echo done"
 
-    guessed_paths = tool_result_artifact_updates._guess_remote_mutation_paths(command, deletion=True)
+    guessed_paths = guess_remote_mutation_paths(command, deletion=True)
 
     assert guessed_paths == ["/var/www/demo-site", "/var/www/html/test-1"]
 
@@ -1044,7 +1045,7 @@ def test_remote_mutation_requirement_ignores_quoted_paths_in_echo_payload() -> N
 
 
 def test_remote_mutation_path_guessing_skips_known_directory_operands() -> None:
-    guessed_paths = tool_result_artifact_updates._guess_remote_mutation_paths(
+    guessed_paths = guess_remote_mutation_paths(
         'echo "probe /etc" > /etc',
         deletion=False,
     )

@@ -219,17 +219,17 @@ def test_reused_small_complete_artifact_inlines_content(tmp_path: Path) -> None:
     content_path.write_text("SHELL=/bin/sh\n24 * * * * root run-parts /etc/cron.hourly\n", encoding="utf-8")
     artifact = ArtifactRecord(
         artifact_id="A0027",
-        kind="ssh_file_read",
-        source="/etc/crontab",
+        kind="web_fetch",
+        source="https://example.com/crontab",
         created_at="2026-05-12T00:00:00+00:00",
         size_bytes=62,
         summary="crontab full file (2 lines)",
-        tool_name="ssh_file_read",
+        tool_name="web_fetch",
         content_path=str(content_path),
         metadata={"complete_file": True, "path": "/etc/crontab", "truncated": False},
     )
 
-    message = format_reused_artifact_message(artifact, tool_name="ssh_file_read")
+    message = format_reused_artifact_message(artifact, tool_name="web_fetch")
 
     assert "Full cached content is visible below" in message
     assert "24 * * * * root run-parts /etc/cron.hourly" in message

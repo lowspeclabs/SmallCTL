@@ -88,3 +88,80 @@ def mark_remote_mutation_directory_verified(requirement: dict[str, Any], path: s
     verified = set(requirement.get("verified_directory_empty_checks", []))
     verified.add(path)
     requirement["verified_directory_empty_checks"] = list(verified)
+
+
+def readback_content_satisfies_requirement(requirement: dict[str, Any], content: str) -> bool:
+    patterns = requirement.get("verification_patterns")
+    if not isinstance(patterns, dict):
+        return False
+    old_absent = [str(item) for item in patterns.get("old_absent", []) if str(item)]
+    new_present = [str(item) for item in patterns.get("new_present", []) if str(item)]
+    if not old_absent and not new_present:
+        return False
+    if any(marker in content for marker in old_absent):
+        return False
+    if any(marker not in content for marker in new_present):
+        return False
+    return True
+
+
+def tool_result_path_host(result: Any, arguments: dict[str, Any] | None) -> tuple[str, str]:
+    path = ""
+    host = ""
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, dict):
+        path = str(metadata.get("path") or "").strip()
+        host = str(metadata.get("host") or "").strip().lower()
+    if not path and isinstance(arguments, dict):
+        path = str(arguments.get("path") or "").strip()
+    if not host and isinstance(arguments, dict):
+        host = str(arguments.get("host") or arguments.get("target") or "").strip().lower()
+    return path, host
+
+
+def remote_mutation_target_matches(requirement: dict[str, Any], *, path: str, host: str) -> bool:
+    requirement_host = str(requirement.get("host") or "").strip().lower()
+    if requirement_host and host and host != requirement_host:
+        return False
+    guessed_paths = [str(item) for item in requirement.get("guessed_paths", []) if str(item).strip()]
+    return not (guessed_paths and path and path not in guessed_paths)
+
+
+def remote_mutation_guessed_paths(requirement: dict[str, Any]) -> list[str]:
+    return [str(item) for item in requirement.get("guessed_paths", []) if str(item).strip()]
+
+
+def remote_missing_file_markers(result: Any) -> str:
+    metadata = getattr(result, "metadata", None)
+    return " ".join(
+        [
+            str(getattr(result, "error", None) or ""),
+            str((metadata or {}).get("message") or "") if isinstance(metadata, dict) else "",
+            str((metadata or {}).get("error_kind") or "") if isinstance(metadata, dict) else "",
+        ]
+    ).lower()
+
+
+def bounded_region_not_found(result: Any) -> bool:
+    metadata = getattr(result, "metadata", None)
+    error_kind = str(metadata.get("error_kind") or "").strip() if isinstance(metadata, dict) else ""
+    error_message = str(getattr(result, "error", None) or "").strip()
+    return error_kind == "bounded_region_not_found" or "Remote bounded region was not found" in error_message
+
+
+def should_emit_small_file_rewrite_nudge(
+    *,
+    path: str,
+    recent_read_size: int | None,
+    replacement_text: str,
+    small_file_threshold: int = 1024,
+) -> bool:
+    if not path:
+        return False
+    if recent_read_size is None or recent_read_size == 0:
+        return False
+    if recent_read_size >= small_file_threshold:
+        return False
+    if not replacement_text:
+        return False
+    return len(replacement_text.encode("utf-8")) > recent_read_size * 0.5

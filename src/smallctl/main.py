@@ -59,6 +59,7 @@ def build_harness_config_kwargs(
         "thinking_start_tag": config.thinking_start_tag,
         "thinking_end_tag": config.thinking_end_tag,
         "chat_endpoint": config.chat_endpoint,
+        "runtime_context_probe": getattr(config, "runtime_context_probe", True),
         "checkpoint_on_exit": config.checkpoint_on_exit,
         "checkpoint_path": config.checkpoint_path,
         "graph_checkpointer": config.graph_checkpointer,
@@ -72,6 +73,7 @@ def build_harness_config_kwargs(
         "needs_human_timeout_sec": getattr(config, "needs_human_timeout_sec", 600),
         "fresh_run": config.fresh_run,
         "fresh_run_turns": config.fresh_run_turns,
+        "planning_mode": config.planning_mode,
         "contract_flow_ui": config.contract_flow_ui,
         "strategy": strategy,
         "context_limit": config.context_limit,
@@ -99,6 +101,9 @@ def build_harness_config_kwargs(
         "multi_file_primary_file_limit": config.multi_file_primary_file_limit,
         "remote_task_artifact_snippet_limit": config.remote_task_artifact_snippet_limit,
         "remote_task_primary_file_limit": config.remote_task_primary_file_limit,
+        "summarizer_endpoint": getattr(config, "summarizer_endpoint", None),
+        "summarizer_model": getattr(config, "summarizer_model", None),
+        "summarizer_api_key": getattr(config, "summarizer_api_key", None),
         "indexer": config.indexer,
         "run_mode": getattr(config, "run_mode", "auto"),
         "tool_plan_runtime_enabled": getattr(config, "tool_plan_runtime_enabled", False),
@@ -167,6 +172,24 @@ def build_harness_config_kwargs(
         "fama_capsule_token_budget": getattr(config, "fama_capsule_token_budget", 180),
         "fama_llm_judge_enabled": getattr(config, "fama_llm_judge_enabled", False),
         "fama_llm_judge_min_severity": getattr(config, "fama_llm_judge_min_severity", 3),
+        "loop_guard_enabled": getattr(config, "loop_guard_enabled", True),
+        "loop_guard_stagnation_threshold": getattr(config, "loop_guard_stagnation_threshold", 3),
+        "loop_guard_level2_threshold": getattr(config, "loop_guard_level2_threshold", 5),
+        "loop_guard_recent_writes_limit": getattr(config, "loop_guard_recent_writes_limit", 5),
+        "loop_guard_tail_lines": getattr(config, "loop_guard_tail_lines", 50),
+        "loop_guard_similarity_threshold": getattr(config, "loop_guard_similarity_threshold", 0.9),
+        "loop_guard_cumulative_write_gate": getattr(config, "loop_guard_cumulative_write_gate", True),
+        "loop_guard_checkpoint_gate": getattr(config, "loop_guard_checkpoint_gate", True),
+        "loop_guard_diff_gate": getattr(config, "loop_guard_diff_gate", True),
+        "reflexion_enabled": getattr(config, "reflexion_enabled", True),
+        "reflexion_max_items": getattr(config, "reflexion_max_items", 5),
+        "reflexion_inject_top_k": getattr(config, "reflexion_inject_top_k", 3),
+        "reflexion_persist_cross_task": getattr(config, "reflexion_persist_cross_task", False),
+        "reflexion_min_failure_severity": getattr(config, "reflexion_min_failure_severity", "warning"),
+        "subtask_ledger_enabled": getattr(config, "subtask_ledger_enabled", True),
+        "subtask_max_active": getattr(config, "subtask_max_active", 1),
+        "subtask_max_history": getattr(config, "subtask_max_history", 12),
+        "subtask_inject_completed_limit": getattr(config, "subtask_inject_completed_limit", 3),
         **({"task": task} if task is not None else {}),
     }
 
@@ -478,7 +501,6 @@ def cli(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "failed", "reason": f"TUI unavailable: {exc}"}, indent=2))
             return 1
         harness_kwargs = build_harness_config_kwargs(config, run_logger=run_logger, task=config.task)
-        harness_kwargs["planning_mode"] = config.planning_mode
         harness_kwargs["restore_graph_state_on_startup"] = config.restore_graph_state
         harness_kwargs["restore_thread_id"] = config.graph_thread_id
         app = SmallctlApp(harness_kwargs=harness_kwargs)

@@ -4,6 +4,16 @@ import asyncio
 from typing import Any
 
 
+def register_process(harness: Any, proc: Any) -> None:
+    active_processes = getattr(harness, "_active_processes", None)
+    if active_processes is None or proc is None:
+        return
+    try:
+        active_processes.add(proc)
+    except Exception:
+        pass
+
+
 def unregister_process(harness: Any, proc: Any) -> None:
     active_processes = getattr(harness, "_active_processes", None)
     if active_processes is None or proc is None:
@@ -31,6 +41,35 @@ def truncate_output(text: str, *, max_bytes: int = 256 * 1024, suffix: str = "\n
     if len(text) > max_bytes:
         return text[:max_bytes] + suffix
     return text
+
+
+def build_process_output(
+    *,
+    stdout: str,
+    stderr: str,
+    exit_code: int | None,
+    metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {
+        "stdout": truncate_output(stdout),
+        "stderr": truncate_output(stderr),
+        "exit_code": exit_code,
+    }
+    if metrics is not None:
+        output["metrics"] = metrics
+    return output
+
+
+async def cancel_tasks(tasks: list[Any]) -> None:
+    cancellable = [task for task in tasks if hasattr(task, "cancel") and hasattr(task, "done")]
+    for task in cancellable:
+        try:
+            if not task.done():
+                task.cancel()
+        except Exception:
+            pass
+    if cancellable:
+        await asyncio.gather(*cancellable, return_exceptions=True)
 
 
 async def stop_process(proc: Any, *, harness: Any = None, timeout: float = 1.0) -> None:

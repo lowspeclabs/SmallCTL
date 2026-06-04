@@ -6,44 +6,27 @@ from typing import Any
 
 from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
 from .state import PendingToolCall
-
-
-_GLM_BOX_MODEL_MARKERS = (
-    "zai-org/glm-4.6v-flash",
-    "glm-4.6v-flash",
-    "zai-org/glm",
+from .tool_model_rules_model_detection import (
+    _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES,
+    _EXACT_QWEN_25_7B_INSTRUCT_MODELS,
+    _GEMMA_MODEL_MARKERS,
+    _GLM_BOX_MODEL_MARKERS,
+    _GPT_OSS_MODEL_MARKERS,
+    _QWEN_MODEL_MARKERS,
+    _model_is_exact_qwen_25_7b_instruct,
+    _model_is_exact_small_gemma_4_it,
+    _model_uses_gemma_rules,
+    _model_uses_glm_box_rules,
+    _model_uses_gpt_oss_rules,
+    _model_uses_qwen_rules,
 )
+
 _GLM_BOX_TAGS = (
     "<|begin_of_box|>",
     "<|end_of_box|>",
     "<|begin_of_thought|>",
     "<|end_of_thought|>",
 )
-_GPT_OSS_MODEL_MARKERS = (
-    "openai/gpt-oss-20b",
-    "gpt-oss-20b",
-    "openai/gpt-oss",
-)
-_QWEN_MODEL_MARKERS = (
-    "qwen/",
-    "qwen2.5",
-    "qwen-2.5",
-    "qwen3",
-    "qwen-3",
-    "qwen3.5",
-    "qwen-3.5",
-)
-_EXACT_QWEN_25_7B_INSTRUCT_MODELS = (
-    "qwen/qwen-2.5-7b-instruct",
-    "qwen-2.5-7b-instruct",
-    "qwen2.5-7b-instruct",
-)
-_EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
-    "gemma-4-e2b-it",
-    "gemma-4-e4b-it",
-)
-_RAW_FUNCTION_VALUE_PATTERN = r"(?:'[^']*'|\"[^\"]*\"|[0-9.]+)"
-_RAW_FUNCTION_ESCAPED_VALUE_PATTERN = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|[0-9.]+)"
 _GPT_OSS_TAGS = (
     "<|channel|>",
     "<|constrain|>",
@@ -51,19 +34,14 @@ _GPT_OSS_TAGS = (
     "<think",
     "<think<|message|>",
 )
-_GEMMA_MODEL_MARKERS = (
-    "google_gemma-4",
-    "google_gemma",
-    "gemma-4",
-    "gemma-3",
-    "gemma/",
-)
 _GEMMA_TAGS = (
     "<channel|>",
     "<thought>",
     "<|channel|>",
     "<|thought|>",
 )
+_RAW_FUNCTION_VALUE_PATTERN = r"(?:'[^']*'|\"[^\"]*\"|[0-9.]+)"
+_RAW_FUNCTION_ESCAPED_VALUE_PATTERN = r"(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|[0-9.]+)"
 
 
 def _clean_reasoning_fallback_text(text: str) -> str:
@@ -166,42 +144,6 @@ def _looks_like_reasoning_trace(text: str) -> bool:
     return bool(
         re.search(r"(?m)^\s*\d+\.\s", str(text or ""))
         or re.search(r"(?m)^\s*[*-]\s+", str(text or ""))
-    )
-
-
-def _model_uses_glm_box_rules(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(normalized and any(marker in normalized for marker in _GLM_BOX_MODEL_MARKERS))
-
-
-def _model_uses_gpt_oss_rules(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(normalized and any(marker in normalized for marker in _GPT_OSS_MODEL_MARKERS))
-
-
-def _model_uses_gemma_rules(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
-
-
-def _model_uses_qwen_rules(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(normalized and any(marker in normalized for marker in _QWEN_MODEL_MARKERS))
-
-
-def _model_is_exact_qwen_25_7b_instruct(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return normalized in _EXACT_QWEN_25_7B_INSTRUCT_MODELS
-
-
-def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(
-        normalized
-        and any(
-            normalized == suffix or normalized.endswith(f"/{suffix}")
-            for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
-        )
     )
 
 

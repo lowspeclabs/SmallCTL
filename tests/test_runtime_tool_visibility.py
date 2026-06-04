@@ -99,7 +99,7 @@ def test_select_loop_tools_hides_runtime_gated_tools_without_index_or_write_sess
 def test_select_loop_tools_exposes_runtime_gated_tools_when_ready(tmp_path) -> None:
     smallctl_dir = tmp_path / ".smallctl"
     smallctl_dir.mkdir()
-    (smallctl_dir / "index.db").write_text("", encoding="utf-8")
+    (smallctl_dir / "code_index.json").write_text("{}", encoding="utf-8")
 
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
@@ -110,7 +110,7 @@ def test_select_loop_tools_exposes_runtime_gated_tools_when_ready(tmp_path) -> N
         goal="ship feature",
         steps=[],
     )
-    state.background_processes = {"123": {"pid": 123, "status": "running"}}
+    state.background_jobs = [{"pid": 123, "status": "running"}]
     state.write_session = WriteSession(
         write_session_id="ws_ready",
         write_target_path="src/app.py",

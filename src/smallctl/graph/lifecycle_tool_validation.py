@@ -17,18 +17,19 @@ async def _validate_pending_tool_calls(harness: Any, graph_state: Any, deps: Any
     or chunk mode was triggered).
     """
     from . import node_support as _nodes
-    from .tool_call_parser import (
+    from .node_support import get_suggested_sections as _get_suggested_sections
+    from .tool_call_parser_support import (
         _detect_empty_file_write_payload,
         _detect_missing_required_tool_arguments,
+        _detect_patch_existing_stage_read_contract_violation,
+        _repair_empty_target_file_patch_to_file_write,
+    )
+    from .tool_loop_guards import _detect_placeholder_tool_call
+    from .tool_write_session_policy import _ensure_chunk_write_session, _should_enter_chunk_mode
+    from .tool_write_session_support import (
         _detect_oversize_patch_payload,
         _detect_oversize_write_payload,
-        _detect_patch_existing_stage_read_contract_violation,
-        _detect_placeholder_tool_call,
-        _ensure_chunk_write_session,
-        _get_suggested_sections,
         _repair_active_write_session_args,
-        _repair_empty_target_file_patch_to_file_write,
-        _should_enter_chunk_mode,
     )
 
     for pending in graph_state.pending_tool_calls:

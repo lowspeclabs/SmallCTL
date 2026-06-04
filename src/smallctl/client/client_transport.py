@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator
 from urllib.parse import quote
 
@@ -39,12 +36,16 @@ from .transport_error_classification import (
     _is_llamacpp_jinja_system_message_error,
     _is_llamacpp_malformed_tool_call_json_error,
     _is_llamacpp_model_unloaded_chunk_error,
+    _llamacpp_context_overflow_chunk_error_details,
+    _llamacpp_malformed_tool_call_chunk_error_details,
     _is_tool_call_continuation_timeout,
     _log_http_error,
     _log_transport_error,
     _openrouter_auth_failure_details,
     _openrouter_auth_failure_message,
     _openrouter_error_message_from_body,
+    _provider_400_chunk_error_details,
+    _provider_400_error_message,
     _summarize_http_error_body,
     _transport_error_details,
 )
@@ -54,361 +55,40 @@ from .llamacpp_preflight import (
     _llamacpp_budget_preflight,
 )
 from .openrouter_preflight import (
+    _build_openrouter_recovery_payload,
     _message_role_counts,
     _normalize_openrouter_tool_calls,
     _normalize_tool_schemas_for_openrouter,
     _preflight_openrouter_payload,
     _summarize_400_payload,
-    _tool_name,
 )
+from .client_transport_helpers import (
+    context_pressure_diagnostics as _context_pressure_diagnostics,
+    extract_available_tool_names as _extract_available_tool_names,
+    latest_user_message_audit as _latest_user_message_audit,
+    llamacpp_model_unloaded_details as _llamacpp_model_unloaded_details,
+    parse_retry_after_seconds as _parse_retry_after_seconds,
+    provider_root as _provider_root,
+    request_first_token_timeout_sec as _request_first_token_timeout_sec,
+    tool_name as _tool_name,
+)
+from .client_transport_client_lifecycle import (
+    _client_key,
+    _get_async_client,
+    _reset_async_client,
+)
+from .client_transport_llamacpp_repair import _repair_llamacpp_system_messages_for_transport
+from .client_transport_context_limits import (
+    _client_context_limit,
+    _json_size_bytes,
+    _approx_token_count,
+    _remember_context_limit,
+)
+from .client_transport_model_metadata import _remember_model_metadata
+from .client_transport_openrouter_preflight import _preflight_openrouter_auth
+from .client_transport_audit import _log_request_audit
 from .usage import extract_context_limit, extract_max_completion_tokens, extract_runtime_context_limit
 from .usage import extract_supported_parameters
-
-
-def _client_key(client: Any) -> tuple[str, str]:
-    return (client.base_url, client.api_key)
-
-
-def _get_async_client(client: Any) -> Any:
-    if httpx is None:
-        raise RuntimeError("Dependency missing: httpx")
-    key = _client_key(client)
-    shared_clients = client._shared_clients
-    async_client = shared_clients.get(key)
-    if async_client is None:
-        async_client = httpx.AsyncClient(timeout=None)
-        shared_clients[key] = async_client
-    return async_client
-
-
-async def _reset_async_client(client: Any) -> None:
-    key = _client_key(client)
-    async_client = client._shared_clients.pop(key, None)
-    if async_client is None:
-        return
-    try:
-        await async_client.aclose()
-    except Exception:
-        pass
-
-
-def _request_first_token_timeout_sec(client: Any, tools: list[dict[str, Any]]) -> float:
-    timeout = float(client.first_token_timeout_sec)
-    if client.provider_profile != "lmstudio":
-        return timeout
-    if client.is_small_model and not tools:
-        return timeout
-
-    tool_count = len(tools)
-    if tool_count >= 12:
-        return max(timeout, 60.0)
-    if tool_count > 0:
-        normalized_model = str(client.model or "").strip().lower()
-        if "gemma" in normalized_model:
-            return max(timeout, 60.0)
-    return timeout
-
-
-def _llamacpp_model_unloaded_details(
-    client: Any,
-    event: dict[str, Any],
-    *,
-    attempt: int,
-    recovery: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    details = event.get("details")
-    normalized = dict(details) if isinstance(details, dict) else {}
-    normalized.update(
-        {
-            "type": "model_unloaded",
-            "reason": "model_unloaded",
-            "provider_profile": client.provider_profile,
-            "model": client.model,
-            "attempt": attempt,
-            "message": str(
-                normalized.get("message")
-                or normalized.get("error")
-                or event.get("error")
-                or "Model is unloaded."
-            ),
-        }
-    )
-    if recovery:
-        normalized["recovery"] = recovery
-    return normalized
-
-
-def _parse_retry_after_seconds(response: Any) -> float | None:
-    try:
-        raw_value = response.headers.get("Retry-After")
-    except Exception:
-        return None
-    if raw_value is None:
-        return None
-    value = str(raw_value).strip()
-    if not value:
-        return None
-    try:
-        retry_after = float(value)
-    except Exception:
-        retry_after = None
-    if retry_after is not None:
-        return max(0.0, retry_after)
-    try:
-        retry_at = parsedate_to_datetime(value)
-    except Exception:
-        return None
-    if retry_at.tzinfo is None:
-        retry_at = retry_at.replace(tzinfo=timezone.utc)
-    delta = (retry_at - datetime.now(timezone.utc)).total_seconds()
-    return max(0.0, delta)
-
-
-def _repair_llamacpp_system_messages_for_transport(
-    client: Any,
-    messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if client.provider_profile != "llamacpp":
-        return messages
-
-    system_positions = [
-        index
-        for index, message in enumerate(messages)
-        if str(message.get("role") or "").strip().lower() == "system"
-    ]
-    if not system_positions:
-        return messages
-    if (
-        system_positions == [0]
-        and str(messages[0].get("role") or "").strip() == "system"
-    ):
-        return messages
-
-    repaired = merge_system_messages_for_single_system_providers(messages)
-    log_kv(
-        client.log,
-        logging.WARNING,
-        "llamacpp_system_messages_repaired",
-        system_count=len(system_positions),
-        system_positions=system_positions,
-    )
-    if client.run_logger:
-        client.run_logger.log(
-            "chat",
-            "llamacpp_system_messages_repaired",
-            "repaired llama.cpp system message order before transport",
-            system_count=len(system_positions),
-            system_positions=system_positions,
-        )
-    return repaired
-
-
-def _extract_available_tool_names(tools: list[dict[str, Any]]) -> set[str]:
-    names: set[str] = set()
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        function = tool.get("function")
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name") or "").strip()
-        if name:
-            names.add(name)
-    return names
-
-
-def _tool_name(tool: Any) -> str:
-    if not isinstance(tool, dict):
-        return ""
-    function = tool.get("function")
-    if not isinstance(function, dict):
-        return ""
-    return str(function.get("name") or "").strip()
-
-
-def _json_size_bytes(value: Any) -> int:
-    return _budget_json_size_bytes(value)
-
-
-def _approx_token_count(value: Any) -> int:
-    return _budget_approx_token_count(value)
-
-
-def _client_context_limit(client: Any) -> int | None:
-    return _budget_client_context_limit(client)
-
-
-def _context_pressure_diagnostics(payload: dict[str, Any], *, context_limit: int | None) -> dict[str, Any]:
-    estimated_payload_tokens = _approx_token_count(payload)
-    estimated_tool_schema_tokens = _approx_token_count(payload.get("tools", []))
-    diagnostics: dict[str, Any] = {
-        "estimated_payload_tokens": estimated_payload_tokens,
-        "estimated_tool_schema_tokens": estimated_tool_schema_tokens,
-    }
-    if context_limit is not None:
-        diagnostics["known_context_limit"] = context_limit
-        diagnostics["estimated_context_tokens_remaining"] = context_limit - estimated_payload_tokens
-        if estimated_payload_tokens >= context_limit:
-            diagnostics["likely_provider_rejection"] = "context_overflow"
-    return diagnostics
-
-
-def _remember_context_limit(client: Any, limit: int | None) -> int | None:
-    if limit is None:
-        return None
-    try:
-        normalized = int(limit)
-    except Exception:
-        return None
-    if normalized <= 0:
-        return None
-    try:
-        client.runtime_context_limit = normalized
-    except Exception:
-        pass
-    return normalized
-
-
-def _remember_model_metadata(client: Any, payload: Any, *, source: str) -> int | None:
-    if isinstance(payload, dict):
-        try:
-            client.model_metadata = dict(payload)
-        except Exception:
-            pass
-        try:
-            client.model_metadata_source = source
-        except Exception:
-            pass
-
-        max_completion_tokens = extract_max_completion_tokens(payload)
-        if max_completion_tokens is not None:
-            try:
-                client.model_max_completion_tokens = int(max_completion_tokens)
-            except Exception:
-                pass
-
-        supported_parameters = extract_supported_parameters(payload)
-        if supported_parameters is not None:
-            try:
-                client.model_supported_parameters = list(supported_parameters)
-            except Exception:
-                pass
-
-    return _remember_context_limit(client, extract_context_limit(payload))
-
-
-def _provider_root(base_url: str) -> str:
-    normalized = str(base_url or "").strip().rstrip("/")
-    if normalized.endswith("/v1"):
-        return normalized[: -len("/v1")]
-    return normalized
-
-
-async def _preflight_openrouter_auth(client: Any, async_client: Any) -> dict[str, Any] | None:
-    if client.provider_profile != "openrouter":
-        return None
-    normalized_base = str(client.base_url or "").strip().rstrip("/")
-    if normalized_base.endswith("/api/v1"):
-        credits_url = f"{normalized_base}/credits"
-    else:
-        credits_url = f"{_provider_root(normalized_base)}/api/v1/credits"
-    headers = client.adapter.mutate_headers(
-        {
-            "Authorization": f"Bearer {client.api_key}",
-            "Content-Type": "application/json",
-        }
-    )
-    try:
-        response = await async_client.get(credits_url, headers=headers)
-    except Exception as exc:
-        log_kv(
-            client.log,
-            logging.WARNING,
-            "openrouter_auth_preflight_error",
-            error=str(exc),
-            url=credits_url,
-        )
-        if client.run_logger:
-            client.run_logger.log(
-                "chat",
-                "openrouter_auth_preflight_error",
-                "OpenRouter auth preflight could not be completed",
-                error=str(exc),
-                url=credits_url,
-            )
-        return None
-    if int(response.status_code) != 401:
-        return None
-    body = str(getattr(response, "text", "") or "")[:1000]
-    details = _openrouter_auth_failure_details(
-        client,
-        status_code=401,
-        body=body,
-        phase="auth_preflight",
-    )
-    log_kv(client.log, logging.ERROR, "openrouter_auth_failed", **details)
-    if client.run_logger:
-        client.run_logger.log(
-            "chat",
-            "openrouter_auth_failed",
-            "OpenRouter authentication failed during preflight",
-            **details,
-        )
-    return details
-
-
-def _latest_user_message_audit(messages: Any) -> dict[str, Any]:
-    if not isinstance(messages, list):
-        return {"latest_user_present": False}
-    for message in reversed(messages):
-        if not isinstance(message, dict):
-            continue
-        if str(message.get("role") or "").strip() != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, list):
-            text_parts = [
-                str(item.get("text") or "")
-                for item in content
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
-            ]
-            text = "\n".join(text_parts)
-        else:
-            text = str(content or "")
-        encoded = text.encode("utf-8", errors="replace")
-        preview = redact_sensitive_text(text).replace("\n", "\\n")[:240]
-        return {
-            "latest_user_present": bool(text.strip()),
-            "latest_user_sha256": hashlib.sha256(encoded).hexdigest()[:12] if text else "",
-            "latest_user_chars": len(text),
-            "latest_user_preview": preview,
-        }
-    return {"latest_user_present": False}
-
-
-def _log_request_audit(client: Any, *, payload: dict[str, Any], tools: list[dict[str, Any]], stage: str) -> None:
-    messages = payload.get("messages")
-    payload_tools = payload.get("tools")
-    active_tools = payload_tools if isinstance(payload_tools, list) else tools
-    tool_names = [_tool_name(tool) for tool in active_tools if _tool_name(tool)]
-    details = {
-        "stage": stage,
-        "provider_profile": client.provider_profile,
-        "model": client.model,
-        "message_count": len(messages) if isinstance(messages, list) else 0,
-        "role_counts": _message_role_counts(messages),
-        "tool_count": len(active_tools),
-        "tool_names": tool_names,
-        **_latest_user_message_audit(messages),
-    }
-    log_kv(client.log, logging.INFO, "chat_request_payload_audit", **details)
-    if client.run_logger:
-        client.run_logger.log(
-            "chat",
-            "request_payload_audit",
-            "chat request payload audit",
-            **details,
-        )
 
 
 async def stream_chat(

@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from ..guards import check_guards, is_seven_b_or_under_model_name
+from ..guards import check_guards
 from ..interrupt_replies import interrupt_response_action
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
@@ -19,8 +19,9 @@ from ..task_targets import primary_task_target_path
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.fs_loop_guard import clear_loop_guard_outline_requirement
 from ..tools.planning import _refresh_plan_playbook_artifact
-from ..write_session_fsm import archive_terminal_write_session, new_write_session, record_write_session_event
+from ..write_session_fsm import new_write_session, record_write_session_event
 from ..tools.fs import infer_write_session_intent, new_write_session_id
+from ..graph.tool_write_session_policy import _ensure_chunk_write_session
 from . import node_support as _nodes
 from .deps import GraphRuntimeDeps
 from .routing import LoopRoute
@@ -40,6 +41,13 @@ from .lifecycle_guard_recovery import (
     _inject_artifact_read_recovery_nudge,
 )
 from .lifecycle_tool_validation import _validate_pending_tool_calls
+from .lifecycle_nodes_support import (
+    _apply_continue_task_state_reset,
+    _apply_small_model_remote_constraints,
+    _handle_cancel_requested,
+    _initialize_chat_mode_scratchpad,
+    _resolve_followup_task,
+)
 from .tool_call_parser import (
     _artifact_read_recovery_hint,
     _artifact_read_synthesis_hint,
@@ -103,63 +111,12 @@ async def initialize_loop_run(
     task: str,
 ) -> None:
     harness = deps.harness
-    if harness._cancel_requested:
-        await harness._emit(
-            deps.event_handler,
-            UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
-        )
-        graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
+    if await _handle_cancel_requested(graph_state, deps):
         return
-    if graph_state.run_mode == "chat":
-        harness.state.scratchpad["_chat_rounds"] = 0
-        harness.state.scratchpad.pop("_chat_progress_guard", None)
-    else:
-        harness.state.scratchpad.pop("_chat_rounds", None)
-        harness.state.scratchpad.pop("_chat_progress_guard", None)
-    resolved_task = task
-    resolve_followup = getattr(harness, "_resolve_followup_task", None)
-    if callable(resolve_followup):
-        candidate = str(resolve_followup(task) or "").strip()
-        if candidate:
-            resolved_task = candidate
-    is_continue_check = getattr(harness, "_is_continue_like_followup", None)
-    is_continue_task = callable(is_continue_check) and is_continue_check(task)
+    _initialize_chat_mode_scratchpad(harness, graph_state.run_mode)
+    resolved_task, is_continue_task = _resolve_followup_task(harness, task)
     if is_continue_task:
-        archived_session = archive_terminal_write_session(
-            harness.state,
-            reason="continue_like_task",
-        )
-        # "continue" means continue the current task: preserve the usable
-        # context, while clearing terminal active handles that cannot be reused.
-        harness._runlog(
-            "task_continue",
-            "continuing current task, skipping state reset",
-            raw_task=task,
-            resolved_task=resolved_task[:80] if resolved_task else "",
-            old_step_count=harness.state.step_count,
-            archived_write_session_id=(
-                archived_session.get("write_session_id") if archived_session else ""
-            ),
-        )
-        harness.state.step_count = 0
-        harness.state.inactive_steps = 0
-        # Prevent stale stagnation counters from tripping the guard
-        # immediately on the first step of a continued task.
-        harness.state.stagnation_counters.pop("no_actionable_progress", None)
-        harness.state.scratchpad.pop("_progress_read_history", None)
-        harness.state.scratchpad.pop("_progress_ssh_observation_history", None)
-        harness.state.scratchpad.pop("_progress_prior_verdict", None)
-        harness.state.scratchpad.pop("_progress_prior_plan_step", None)
-        harness.state.scratchpad.pop("_ssh_auth_recovery_state", None)
-        # Clear stale repair-cycle locks and FAMA suppression state so a
-        # failed prior task cannot deadlock the continued run.
-        harness.state.repair_cycle_id = ""
-        harness.state.scratchpad.pop("_repair_cycle_reads", None)
-        _fama_state = harness.state.scratchpad.get("_fama_state")
-        if isinstance(_fama_state, dict):
-            for key in list(_fama_state.keys()):
-                if key.startswith("_fama_loop_guard_suppression_count:") or key.startswith("_fama_verifier_suppression_count:"):
-                    _fama_state.pop(key, None)
+        _apply_continue_task_state_reset(harness, task=task, resolved_task=resolved_task)
     else:
         maybe_reset = getattr(harness, "_maybe_reset_for_new_task", None)
         if callable(maybe_reset):
@@ -183,35 +140,7 @@ async def initialize_loop_run(
     harness._initialize_run_brief(resolved_task, raw_task=task)
     harness._activate_tool_profiles(resolved_task)
 
-    # Small-model compound-remote-task gating: inject constraints that help ≤7B
-    # models avoid getting lost in multi-phase SSH work.
-    model_name = str(
-        getattr(harness.state, "scratchpad", {}).get("_model_name")
-        or getattr(getattr(harness, "client", None), "model", "")
-        or ""
-    ).strip()
-    if is_seven_b_or_under_model_name(model_name):
-        active_profiles = set(getattr(harness.state, "active_tool_profiles", []) or [])
-        task_lower = resolved_task.lower()
-        is_remote = any(k in task_lower for k in ("ssh", "remote", "server", "host"))
-        is_compound = any(k in task_lower for k in (
-            "inspect", "compare", "determine", "analyze", "summarize",
-            "write", "generate", "create", "build", "report",
-        ))
-        if is_remote and is_compound:
-            harness.state.run_brief.constraints = list(
-                dict.fromkeys(
-                    harness.state.run_brief.constraints
-                    + ["compound_remote_task: break into gather→analyze→synthesize phases"]
-                )
-            )
-        if active_profiles & {"network", "network_read"}:
-            harness.state.run_brief.constraints = list(
-                dict.fromkeys(
-                    harness.state.run_brief.constraints
-                    + ["batch_ssh_discovery: combine multiple commands into one ssh_exec using && or ;"]
-                )
-            )
+    _apply_small_model_remote_constraints(harness, resolved_task)
 
     harness.state.append_message(ConversationMessage(role="user", content=task))
     maybe_record_reported_runtime_error(harness.state, task)
@@ -639,10 +568,11 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     harness.state.step_count += 1
 
-    # Hard step-budget safety net for small models: if we've burned >40 steps
-    # without convergence, force a synthesize-and-exit directive.
-    if harness.state.step_count > 40:
-        from .lifecycle_step_budget import _maybe_inject_step_budget_nudge
+    from .lifecycle_step_budget import STEP_BUDGET_NUDGE_THRESHOLD, _maybe_inject_step_budget_nudge
+
+    # Hard step-budget safety net for small models: if we've burned past the
+    # threshold without convergence, force a synthesize-and-exit directive.
+    if harness.state.step_count > STEP_BUDGET_NUDGE_THRESHOLD:
         _maybe_inject_step_budget_nudge(harness, graph_state)
 
     harness.state.decay_experiences()

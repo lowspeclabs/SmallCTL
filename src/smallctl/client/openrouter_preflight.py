@@ -299,3 +299,28 @@ def _preflight_openrouter_payload(client: Any, payload: dict[str, Any], *, stage
                 **diagnostics,
             )
     return repaired
+
+
+def _build_openrouter_recovery_payload(
+    client: Any,
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    reduced_features: bool = False,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": client.model,
+        "messages": messages,
+        "stream": True,
+    }
+    request_max_tokens = client._request_max_completion_tokens(tools)
+    if request_max_tokens is not None:
+        payload["max_tokens"] = int(request_max_tokens)
+    if getattr(client, "temperature", None) is not None:
+        payload["temperature"] = float(getattr(client, "temperature"))
+    if tools and not reduced_features:
+        payload["tools"] = tools
+    if client.adapter.stream_policy.supports_stream_options:
+        payload["stream_options"] = {"include_usage": True}
+    payload = client.adapter.mutate_payload(payload)
+    return payload

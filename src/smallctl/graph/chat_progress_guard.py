@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..harness.tool_result_verification import _classify_execution_failure
+from ..harness.tool_result_verification_helpers import classify_execution_failure as _classify_execution_failure
 from ..state import clip_text_value, json_safe_value
 from .tool_execution_support import _get_tool_execution_record
 

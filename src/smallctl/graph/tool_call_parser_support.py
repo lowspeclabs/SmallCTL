@@ -20,13 +20,8 @@ from .tool_artifact_recovery import (
     _should_suppress_resolved_plan_artifact_read,
     _choose_artifact_grep_query,
 )
-from .tool_loop_guards import (
+from .tool_loop_guard_progress import (
     _coerce_int_or_none,
-    _consume_repeat_guard_one_shot_allowance,
-    _detect_timeout_recovered_incomplete_tool_call,
-    _detect_hallucinated_tool_call,
-    _detect_placeholder_tool_call,
-    _detect_repeated_tool_loop,
     _dir_list_exploration_progress_is_progress,
     _dir_list_repeat_has_intervening_progress,
     _dir_list_same_path_repeat_is_loop,
@@ -34,6 +29,24 @@ from .tool_loop_guards import (
     _extract_path_from_fingerprint,
     _file_read_line_progress_is_progress,
     _is_strict_subpath,
+    _requested_artifact_read_target,
+    _requested_file_read_range,
+    _resolve_dir_list_path,
+    _resolve_file_read_path,
+    _tool_attempt_history,
+)
+from .tool_loop_guards import (
+    _consume_repeat_guard_one_shot_allowance,
+    _detect_timeout_recovered_incomplete_tool_call,
+    _detect_hallucinated_tool_call,
+    _detect_placeholder_tool_call,
+    _detect_repeated_tool_loop,
+    _record_tool_attempt,
+    _repeat_loop_limits,
+    _clear_tool_attempt_history,
+    allow_repeated_tool_call_once,
+)
+from .tool_loop_guards_support import (
     _normalize_json_like,
     _normalize_path_token,
     _normalize_shell_command,
@@ -41,16 +54,7 @@ from .tool_loop_guards import (
     _normalize_token,
     _placeholder_token,
     _placeholder_value_looks_generic,
-    _record_tool_attempt,
-    _repeat_loop_limits,
-    _requested_artifact_read_target,
-    _requested_file_read_range,
-    _resolve_dir_list_path,
-    _resolve_file_read_path,
-    _tool_attempt_history,
     _tool_call_fingerprint,
-    _clear_tool_attempt_history,
-    allow_repeated_tool_call_once,
 )
 from .tool_write_session_policy import (
     _active_write_session_for_target,

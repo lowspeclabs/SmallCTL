@@ -30,7 +30,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
         root = client.base_url[: -len("/v1")]
         runtime_urls.extend([f"{root}/props", f"{root}/slots"])
 
-    log_kv(client.log, log_level=10, event="context_probe_start", model=model_id, base_url=client.base_url)
+    log_kv(client.log, 10, "context_probe_start", model=model_id, base_url=client.base_url)
     for runtime_url in runtime_urls:
         try:
             response = await async_client.get(runtime_url, headers=headers, timeout=10.0)
@@ -38,7 +38,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
                 runtime_payload = response.json()
                 runtime_limit = extract_runtime_context_limit(runtime_payload)
                 if runtime_limit:
-                    log_kv(client.log, log_level=20, event="context_probe_success", source="runtime", limit=runtime_limit)
+                    log_kv(client.log, 20, "context_probe_success", source="runtime", limit=runtime_limit)
                     return _remember_context_limit(client, runtime_limit)
         except Exception:
             pass
@@ -48,7 +48,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
             payload = response.json()
             limit = _remember_model_metadata(client, payload, source="model_metadata")
             if limit:
-                log_kv(client.log, log_level=20, event="context_probe_success", source="model_metadata", limit=limit)
+                log_kv(client.log, 20, "context_probe_success", source="model_metadata", limit=limit)
                 return limit
     except Exception:
         pass

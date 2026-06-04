@@ -13,7 +13,6 @@ log = logging.getLogger("smallctl.tools.artifact")
 DEFAULT_MAX_LINES = 500
 DEFAULT_MAX_CHARS = 20_000
 MAX_LINES_PER_READ = 1000
-MAX_CHARS_PER_READ = 50_000
 MAX_PRINT_CHARS = 100_000
 _ARTIFACT_TOKEN_RE = re.compile(r"\bA\d+\b", re.IGNORECASE)
 

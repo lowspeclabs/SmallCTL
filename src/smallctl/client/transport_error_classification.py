@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from ..logging_utils import log_kv
@@ -54,6 +55,117 @@ def _is_llamacpp_malformed_tool_call_json_error(client: Any, exc: Any) -> bool:
         and "json.exception.parse_error" in body
         and ("missing closing quote" in body or "invalid string" in body)
     )
+
+
+def _llamacpp_malformed_tool_call_chunk_error_details(
+    client: Any,
+    *,
+    payload: dict[str, Any] | None,
+    exc: Any,
+    attempt: int,
+) -> dict[str, Any]:
+    body = _http_error_body(exc, limit=2000)
+    tool_name_hint = ""
+    # Try to find tool name in error body first
+    tool_match = re.search(r'"name"\s*:\s*"([^"]+)"', body)
+    if tool_match:
+        tool_name_hint = tool_match.group(1)
+    # Fallback: extract from payload tools
+    if not tool_name_hint and isinstance(payload, dict):
+        tools = payload.get("tools") or []
+        if isinstance(tools, list) and tools:
+            first_tool = tools[0]
+            if isinstance(first_tool, dict):
+                tool_name_hint = str(first_tool.get("name") or first_tool.get("function", {}).get("name") or "").strip()
+    # Extract partial tool call arguments from error message
+    partial_preview = ""
+    json_match = re.search(r'last read:\s*\'([^\']+)\'', body)
+    if json_match:
+        partial_preview = json_match.group(1)
+    estimated_payload_tokens = 0
+    if isinstance(payload, dict):
+        try:
+            import json
+            estimated_payload_tokens = len(json.dumps(payload)) // 4
+        except Exception:
+            pass
+    estimated_context_tokens_remaining = 0
+    if hasattr(client, "context_limit") and client.context_limit:
+        try:
+            estimated_context_tokens_remaining = max(0, client.context_limit - estimated_payload_tokens)
+        except Exception:
+            pass
+    return {
+        "type": "malformed_tool_call_json",
+        "reason": "tool_call_continuation_timeout",
+        "recoverable": True,
+        "tool_name_hint": tool_name_hint,
+        "partial_tool_call_arguments_preview": partial_preview,
+        "estimated_payload_tokens": estimated_payload_tokens,
+        "estimated_context_tokens_remaining": estimated_context_tokens_remaining,
+        "attempt": attempt,
+        "error_kind": "llamacpp_malformed_tool_call_json",
+    }
+
+
+def _llamacpp_context_overflow_chunk_error_details(
+    client: Any,
+    *,
+    payload: dict[str, Any] | None,
+    body_summary: dict[str, Any],
+    status_code: int,
+    attempt: int,
+) -> dict[str, Any]:
+    return {
+        "type": "context_budget_exceeded",
+        "reason": "context_overflow",
+        "request_tokens": body_summary.get("request_tokens", 0),
+        "context_limit": body_summary.get("context_limit", 0),
+        "recoverable": True,
+        "attempt": attempt,
+        "status_code": status_code,
+        "error_kind": "llamacpp_context_overflow",
+    }
+
+
+def _provider_400_chunk_error_details(
+    client: Any,
+    *,
+    payload: dict[str, Any],
+    exc: Any,
+    attempt: int,
+    recovery_stages_attempted: int = 0,
+) -> dict[str, Any]:
+    body = _http_error_body(exc, limit=2000)
+    body_summary = _summarize_http_error_body(body)
+    role_counts: dict[str, int] = {}
+    messages = payload.get("messages", [])
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                role = str(msg.get("role", "")).strip() or "unknown"
+                role_counts[role] = role_counts.get(role, 0) + 1
+    return {
+        "status_code": 400,
+        "provider_profile": client.provider_profile,
+        "upstream_provider": body_summary.get("upstream_provider", ""),
+        "provider_error": body_summary.get("provider_error", ""),
+        "model": client.model,
+        "role_counts": role_counts,
+        "attempt": attempt,
+        "recovery_stages_attempted": recovery_stages_attempted,
+        "error_kind": "provider_400_exhausted",
+    }
+
+
+def _provider_400_error_message(details: dict[str, Any]) -> str:
+    profile = str(details.get("provider_profile") or "").strip()
+    upstream = str(details.get("upstream_provider") or "").strip()
+    provider_error = str(details.get("provider_error") or "").strip()
+    parts = [f"{profile}/{upstream} input validation failed" if upstream else f"{profile} input validation failed"]
+    if provider_error:
+        parts.append(f": {provider_error}")
+    return "".join(parts)
 
 
 def _http_error_body(exc: Any, *, limit: int = 1000) -> str:

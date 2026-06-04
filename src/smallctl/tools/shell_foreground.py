@@ -9,7 +9,7 @@ from ..models.events import UIEvent, UIEventType
 from ..risk_policy import evaluate_risk_policy
 from ..state import LoopState
 from .common import fail, needs_human, ok
-from .process_lifecycle import stop_process, truncate_output, unregister_process
+from .process_lifecycle import build_process_output, cancel_tasks, stop_process, unregister_process
 from .process_streams import read_stream_chunks
 from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
 from .shell_support import (
@@ -241,38 +241,28 @@ async def shell_exec_foreground(
                     try:
                         await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task), timeout=1.0)
                     except Exception:
-                        for task in (stdout_task, stderr_task):
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                        await cancel_tasks([stdout_task, stderr_task])
                     if not wait_task.done():
                         try:
                             await asyncio.wait_for(wait_task, timeout=1.0)
                         except Exception:
-                            wait_task.cancel()
-                            await asyncio.gather(wait_task, return_exceptions=True)
+                            await cancel_tasks([wait_task])
                 if timed_out:
                     raise asyncio.TimeoutError
-                final_stdout = "".join(stdout_data)
-                final_stderr = "".join(stderr_data)
-
-                final_stdout = truncate_output(final_stdout)
-                final_stderr = truncate_output(final_stderr)
-
-                output = {
-                    "stdout": final_stdout,
-                    "stderr": final_stderr,
-                    "exit_code": proc.returncode,
-                }
+                output = build_process_output(
+                    stdout="".join(stdout_data),
+                    stderr="".join(stderr_data),
+                    exit_code=proc.returncode,
+                )
                 if progress_updates:
                     output["progress_updates"] = progress_updates
             else:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-                output = {
-                    "stdout": stdout.decode("utf-8", errors="replace"),
-                    "stderr": stderr.decode("utf-8", errors="replace"),
-                    "exit_code": proc.returncode,
-                }
+                output = build_process_output(
+                    stdout=stdout.decode("utf-8", errors="replace"),
+                    stderr=stderr.decode("utf-8", errors="replace"),
+                    exit_code=proc.returncode,
+                )
                 stdout_txt = output.get("stdout", "") if isinstance(output.get("stdout"), str) else ""
                 stderr_txt = output.get("stderr", "") if isinstance(output.get("stderr"), str) else ""
                 msg = stdout_txt + stderr_txt

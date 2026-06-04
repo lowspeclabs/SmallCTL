@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state import LoopState
-from ..shell_utils import is_read_only_shell_evidence_action
+from ..shell_utils import is_read_only_shell_evidence_action, shell_tokens
 
 
 def _normalize_section_name(section_name: str | None, section_id: str | None) -> str:
@@ -294,14 +294,14 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
     normalized = str(path.resolve()) if hasattr(path, "resolve") else str(path)
     if normalized in reads:
         return True
-    # If the target file does not exist, the repair-cycle read requirement is
-    # impossible to satisfy and is likely stale state carried over from a
-    # prior failed task. Clear it and allow the write/patch to proceed.
+    # If the target file does not exist BUT was previously recorded as read,
+    # the repair-cycle read requirement is likely stale state carried over from
+    # a prior failed task. Clear it and allow the write/patch to proceed.
+    # For files that were never read, the normal read requirement still applies.
     try:
-        if not path.exists():
-            if normalized in reads:
-                reads.discard(normalized)
-                state.scratchpad["_repair_cycle_reads"] = list(reads)
+        if not path.exists() and normalized in reads:
+            reads.discard(normalized)
+            state.scratchpad["_repair_cycle_reads"] = list(reads)
             return True
     except OSError:
         pass
@@ -319,25 +319,52 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
                 if isinstance(args, dict):
                     command = str(args.get("command") or "").strip()
                     if command and _shell_command_targets_path(command, path, getattr(state, "cwd", None)):
-                        # Allow patch after ANY test run, success or failure
-                        if "unittest" in command or "pytest" in command or "python3" in command:
+                        # Allow patch after ANY test run, success or failure.
+                        # Use token-level matching so a path containing "pytest"
+                        # (e.g. /tmp/pytest-of-user/…) does not trigger a false positive.
+                        tokens = shell_tokens(command)
+                        lowered = [t.lower() for t in tokens]
+                        is_test_run = (
+                            "unittest" in lowered
+                            or "pytest" in lowered
+                            or ("python3" in lowered and "-m" in lowered and "pytest" in lowered)
+                            or ("python" in lowered and "-m" in lowered and "pytest" in lowered)
+                        )
+                        if is_test_run:
                             return True
+                        # If the shell command targets this path and is NOT read-only,
+                        # the file may have been modified. Require a re-read.
+                        if not is_read_only_shell_evidence_action(command):
+                            return False
                 continue
             # Stop at the first file-related tool
             if tool_name in {"file_read", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}:
                 break
 
-    # Auto-read enhancement: if the file exists and is readable, silently read it
-    # and record the read rather than blocking the patch. This avoids wasting a turn.
+    result = _latest_path_evidence_allows_repair_patch(state, path)
+    if result:
+        return True
+
+    # Auto-read enhancement: if the target file exists and is readable,
+    # silently record it as read and allow the patch. This avoids forcing
+    # an explicit file_read for files that are already on disk.
+    # Only apply when there are no conflicting tool records for this path
+    # (e.g. failed patches, mutating shell commands) in the current cycle.
+    records = getattr(state, "tool_execution_records", None)
+    has_path_records = False
+    if isinstance(records, dict) and records:
+        for record in records.values():
+            if isinstance(record, dict) and _record_targets_path(record, path, getattr(state, "cwd", None)):
+                has_path_records = True
+                break
     try:
-        if path.exists() and path.is_file():
-            _ = path.read_text(encoding="utf-8")
+        if not has_path_records and path.exists() and path.is_file():
             _record_repair_cycle_read(state, path)
             return True
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         pass
 
-    return _latest_path_evidence_allows_repair_patch(state, path)
+    return False
 
 
 def _shell_command_targets_path(command: str, path: Path, cwd: str | None) -> bool:

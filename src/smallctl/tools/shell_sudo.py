@@ -5,6 +5,7 @@ import re
 from typing import Any, Awaitable, Callable
 
 from .common import fail, needs_human
+from .process_lifecycle import stop_process, unregister_process
 
 SUDO_PROMPT_PATTERNS = [
     re.compile(r"\[sudo\] password for", re.IGNORECASE),
@@ -91,20 +92,12 @@ async def run_sudo_validation(
         }
     except asyncio.TimeoutError:
         if proc and proc.returncode is None:
-            try:
-                proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            except Exception:
-                pass
+            await stop_process(proc, harness=harness, timeout=1.0)
         return {"status": "error", "error": f"sudo validation timed out after {max(1, timeout_sec)}s"}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        if harness and proc and hasattr(harness, "_active_processes"):
-            try:
-                harness._active_processes.discard(proc)
-            except Exception:
-                pass
+        unregister_process(harness, proc)
 
 
 async def ensure_sudo_credentials(

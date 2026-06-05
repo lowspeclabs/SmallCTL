@@ -44,7 +44,7 @@ class ConsolePane(VerticalScroll):
         emitting thinking output first.
         """
         turn = await self._ensure_assistant_turn()
-        await turn.show_thinking_indicator(0)
+        await turn.show_thinking_indicator()
 
     async def append_event(self, event: UIEvent) -> None:
         speaker = _coerce_speaker(event.data.get("speaker"))
@@ -214,9 +214,9 @@ class ConsolePane(VerticalScroll):
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
 
-    async def update_thinking_indicator(self, frame: int) -> None:
+    async def update_thinking_indicator(self) -> None:
         if self._active_assistant_turn is not None:
-            await self._active_assistant_turn.show_thinking_indicator(frame)
+            await self._active_assistant_turn.show_thinking_indicator()
 
     def get_last_system_message(self) -> str:
         return self._last_system_message

@@ -36,7 +36,6 @@ async def handle_input_pane_submitted(app: Any, event: InputPane.Submitted) -> N
     else:
         app._pending_user_echo = None
     app._record_chat_session_prompt(task)
-    app._thinking_frame = 0
     app._set_activity("[thinking...]")
     app._refresh_status(step_override="running")
     app.active_task = asyncio.create_task(app._run_harness_task(task))

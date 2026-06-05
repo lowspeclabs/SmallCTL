@@ -81,7 +81,6 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self.closed_by_ctrl_c = False
         self._task_start_time: float | None = None
         self._activity_timer: Any | None = None
-        self._thinking_frame: int = 0
         self._shell_approval_session_default = bool(self.harness_config.shell_approval_session_default)
         self._model_bar_layout = "bottom"
 

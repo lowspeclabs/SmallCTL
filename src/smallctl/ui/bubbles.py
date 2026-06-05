@@ -342,6 +342,8 @@ class AssistantTurnWidget(Vertical):
         self._current_tool_calls_container: ToolCallsContainerWidget | None = None
         self._task_checklist_widget: TaskChecklistWidget | None = None
         self._thinking_indicator: Static | None = None
+        self._thinking_start_time: float | None = None
+        self._thinking_chars: int = 0
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -406,24 +408,36 @@ class AssistantTurnWidget(Vertical):
     def _build_label_text(self) -> str:
         return KIND_LABEL.get(self._speaker, self._speaker.upper())
 
-    def _get_thinking_text(self, frame: int) -> str:
-        dots = "." * (3 - frame)
-        pct = (frame + 1) * 30
-        return f"[thinking{dots}{pct}%]"
+    def _get_thinking_text(self) -> str:
+        elapsed = 0.0
+        if self._thinking_start_time is not None:
+            import time
+            elapsed = time.monotonic() - self._thinking_start_time
+        elapsed_str = f"{elapsed:.1f}s"
+        chars = self._thinking_chars
+        if chars < 1000:
+            size_str = f"{chars}ch"
+        else:
+            size_str = f"{chars/1000:.1f}k"
+        return f"[thinking {elapsed_str} | {size_str}]"
 
-    async def show_thinking_indicator(self, frame: int = 0) -> None:
+    async def show_thinking_indicator(self) -> None:
+        import time
+        if self._thinking_start_time is None:
+            self._thinking_start_time = time.monotonic()
         if self._thinking_indicator is None:
             self._thinking_indicator = Static(
-                self._get_thinking_text(frame),
+                self._get_thinking_text(),
                 classes="thinking-indicator",
             )
             await self._main_body().mount(self._thinking_indicator)
         else:
-            self._thinking_indicator.update(self._get_thinking_text(frame))
+            self._thinking_indicator.update(self._get_thinking_text())
 
     def hide_thinking_indicator(self) -> None:
         if self._thinking_indicator is not None:
             self._thinking_indicator.display = False
+            self._thinking_start_time = None
 
     async def append_assistant_text(self, text: str) -> None:
         if not text:
@@ -464,6 +478,7 @@ class AssistantTurnWidget(Vertical):
     async def append_thinking_text(self, text: str) -> None:
         if not text:
             return
+        self._thinking_chars += len(text)
         if self._last_thinking_detail is None:
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
@@ -477,6 +492,7 @@ class AssistantTurnWidget(Vertical):
         if self._last_thinking_detail is None:
             if not text:
                 return
+            self._thinking_chars = len(text)
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()

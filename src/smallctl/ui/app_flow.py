@@ -59,7 +59,6 @@ class SmallctlAppFlowMixin:
 
     async def _run_harness_task(self, task: str) -> None:
         assert self.harness is not None
-        self._thinking_frame = 0
         self._set_activity("[thinking...]")
         self._refresh_status(step_override="running")
         self._task_start_time = time.monotonic()
@@ -648,14 +647,13 @@ class SmallctlAppFlowMixin:
     def _tick_activity_timer(self) -> None:
         if self._task_start_time is None:
             return
-        self._thinking_frame = (self._thinking_frame + 1) % 3
-        dots = "." * (3 - self._thinking_frame)
-        self._set_activity(f"[thinking{dots}]")
+        elapsed = time.monotonic() - self._task_start_time
+        self._set_activity(f"[thinking {elapsed:.1f}s]")
         self._refresh_status()
         console = self._get_console()
         if console is not None:
             import asyncio
-            asyncio.create_task(console.update_thinking_indicator(self._thinking_frame))
+            asyncio.create_task(console.update_thinking_indicator())
 
     def _set_shell_approval_session_default(self, enabled: bool) -> None:
         self._shell_approval_session_default = bool(enabled)

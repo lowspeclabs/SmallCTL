@@ -20,6 +20,7 @@ _INVALID_INPUT_MARKERS = (
     "answer not recognized",
 )
 _REMOTE_INSTALLER_PREFLIGHT_KEY = "_remote_installer_preflight"
+_DEB822_PREFLIGHT_KEY = "_deb822_preflight"
 _DEB822_FIELDS = ("Types:", "URIs:", "Suites:", "Components:")
 _SHELL_CONTROL_TOKENS = {"&&", ";", "||", "|"}
 _DISPOSABLE_PATH_NAMES = {

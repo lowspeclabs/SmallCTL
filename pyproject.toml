@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+debian = [
+  "python-debian>=0.1.49",
+]
 dev = [
   "mypy",
   "pytest",

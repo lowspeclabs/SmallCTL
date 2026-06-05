@@ -152,9 +152,13 @@ from smallctl.tools.shell_support import (
     _apt_deb822_preflight_guard,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
+    _is_deb822_preflight_clean,
+    _looks_like_deb822_validator,
+    _mark_deb822_preflight_clean,
     _remote_installer_preflight_guard,
     _shell_execution_authoring_guard,
     guard_fail,
+    validate_sources_file,
 )
 from smallctl.tools.web import _resolve_fetch_selector
 from smallctl.tools.web_artifact_refs import resolve_search_result_from_artifact_reference
@@ -669,6 +673,91 @@ def test_apt_deb822_preflight_guard_uses_consistent_metadata() -> None:
     assert result["metadata"]["command"] == "apt-get update"
     assert result["metadata"]["required_fields"] == ["Types:", "URIs:", "Suites:", "Components:"]
     assert result["metadata"]["next_required_action"]["tool_name"] == "shell_exec"
+    # One-liner validator (no heredoc) so it can be chained with &&
+    validator = result["metadata"]["next_required_action"]["required_arguments"]["command"]
+    assert "python3 -c" in validator
+    assert "<<'PY'" not in validator
+
+
+def test_apt_deb822_preflight_allows_after_session_validation() -> None:
+    state = LoopState(cwd="/tmp")
+    # Initially blocked
+    result = _apt_deb822_preflight_guard(
+        "apt-get update",
+        tool_name="shell_exec",
+        state=state,
+        host="localhost",
+        user="root",
+    )
+    assert result is not None
+    assert result["success"] is False
+
+    # Mark clean
+    _mark_deb822_preflight_clean(state, host="localhost", user="root")
+
+    # Now allowed
+    result2 = _apt_deb822_preflight_guard(
+        "apt-get update",
+        tool_name="shell_exec",
+        state=state,
+        host="localhost",
+        user="root",
+    )
+    assert result2 is None
+
+
+def test_apt_deb822_preflight_respects_host_user_isolation() -> None:
+    state = LoopState(cwd="/tmp")
+    _mark_deb822_preflight_clean(state, host="host-a", user="root")
+
+    # Different host still blocked
+    result = _apt_deb822_preflight_guard(
+        "apt-get update",
+        tool_name="ssh_exec",
+        state=state,
+        host="host-b",
+        user="root",
+    )
+    assert result is not None
+    assert result["success"] is False
+
+    # Different user still blocked
+    result2 = _apt_deb822_preflight_guard(
+        "apt-get update",
+        tool_name="ssh_exec",
+        state=state,
+        host="host-a",
+        user="other",
+    )
+    assert result2 is not None
+    assert result2["success"] is False
+
+
+def test_looks_like_deb822_validator() -> None:
+    assert _looks_like_deb822_validator(
+        "python3 -c \"from pathlib import Path; p = Path('/etc/apt/sources.list.d/debian.sources'); print('deb822 OK')\""
+    )
+    assert not _looks_like_deb822_validator("apt-get update")
+    assert not _looks_like_deb822_validator("python3 -c 'print(1)'")
+
+
+def test_validate_sources_file_with_debian_deb822() -> None:
+    valid = """Types: deb
+URIs: http://deb.debian.org/debian
+Suites: stable
+Components: main
+"""
+    result = validate_sources_file(valid)
+    assert result["valid"] is True
+
+    missing_fields = """Types: deb
+URIs: http://deb.debian.org/debian
+"""
+    result2 = validate_sources_file(missing_fields)
+    assert result2["valid"] is False
+    assert "missing" in result2["error"].lower()
+    assert "Suites:" in result2.get("missing_fields", [])
+    assert "Components:" in result2.get("missing_fields", [])
 
 
 def test_remote_installer_preflight_guard_uses_consistent_metadata() -> None:

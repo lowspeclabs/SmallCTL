@@ -19,6 +19,8 @@ from .shell_support import (
     _expose_interactive_session_tools,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
+    _looks_like_deb822_validator,
+    _mark_deb822_preflight_clean,
     _mark_remote_installer_preflight_clean,
     _remote_installer_preflight_guard,
     _shell_workspace_destructive_delete_guard,
@@ -113,7 +115,13 @@ async def shell_exec(
     yes_pipe_guard = _interactive_installer_yes_pipe_guard(command, tool_name="shell_exec")
     if yes_pipe_guard is not None:
         return yes_pipe_guard
-    apt_guard = _apt_deb822_preflight_guard(command, tool_name="shell_exec")
+    apt_guard = _apt_deb822_preflight_guard(
+        command,
+        tool_name="shell_exec",
+        state=state,
+        host="localhost",
+        user=_local_user(),
+    )
     if apt_guard is not None:
         return apt_guard
     preflight_guard = _remote_installer_preflight_guard(
@@ -177,13 +185,16 @@ async def shell_exec(
         error_text = "\n".join(parts)
         return fail(error_text, metadata=metadata)
 
-    return await shell_exec_foreground(
+    result = await shell_exec_foreground(
         command,
         state=state,
         timeout_sec=timeout_sec,
         harness=harness,
         create_process=_create_process,
     )
+    if result.get("success") and _looks_like_deb822_validator(command):
+        _mark_deb822_preflight_clean(state, host="localhost", user=_local_user())
+    return result
 
 
 async def create_process(

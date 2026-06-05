@@ -44,6 +44,8 @@ from .shell_support import (
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
     _installer_command_suggested_timeout,
+    _looks_like_deb822_validator,
+    _mark_deb822_preflight_clean,
     _mark_remote_installer_preflight_clean,
     _remote_installer_cwd_and_script,
     _remote_installer_preflight_guard,
@@ -254,7 +256,9 @@ async def run_ssh_command(
         foreground_guard["metadata"] = metadata
         return foreground_guard
 
-    apt_guard = _apt_deb822_preflight_guard(command, tool_name="ssh_exec")
+    apt_guard = _apt_deb822_preflight_guard(
+        command, tool_name="ssh_exec", state=state, host=host, user=user
+    )
     if apt_guard is not None:
         metadata = dict(apt_guard.get("metadata") or {})
         metadata.update({"host": host, "user": user})
@@ -581,6 +585,8 @@ async def run_ssh_command(
                 int(proc.returncode) == 1
                 and _ssh_diagnostic_not_found(command, output)
             ):
+                if _looks_like_deb822_validator(command):
+                    _mark_deb822_preflight_clean(state, host=host, user=user)
                 return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
             failure_kind = _ssh_failure_kind(
                 exit_code=int(proc.returncode),

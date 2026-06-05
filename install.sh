@@ -28,6 +28,29 @@ fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip wheel setuptools
 "$VENV_DIR/bin/python" -m pip install -e "$BUNDLE_ROOT"
 
+# Ensure optional but recommended system packages are available.
+# These are used by apt/deb822 validation guards.
+ensure_python_package() {
+  local pkg="$1"
+  local import_name="${2:-$pkg}"
+  if ! "$VENV_DIR/bin/python" -c "import $import_name" 2>/dev/null; then
+    echo "Package '$pkg' (import: $import_name) not found. Attempting install..."
+    if "$VENV_DIR/bin/python" -m pip install "$pkg" 2>/dev/null; then
+      echo "  -> installed $pkg via pip"
+    else
+      echo "  -> pip install failed for $pkg. You may need to install it via your system package manager:"
+      echo "       apt-get install python3-${pkg#python-}   # Debian/Ubuntu"
+      echo "       dnf install python3-$pkg                 # Fedora/RHEL"
+    fi
+  fi
+}
+
+ensure_python_package "python-debian" "debian.deb822"
+# python-apt is typically a system package; warn if absent.
+if ! "$VENV_DIR/bin/python" -c "import apt_pkg" 2>/dev/null; then
+  echo "Note: 'python-apt' is not available. Install it via: apt-get install python3-apt"
+fi
+
 cat <<EOF
 smallctl is installed in: $VENV_DIR
 

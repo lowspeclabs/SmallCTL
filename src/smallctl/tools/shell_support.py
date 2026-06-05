@@ -91,7 +91,11 @@ from .shell_support_misc import (
 )
 from .shell_support_apt_and_outcome import (
     _apt_deb822_preflight_guard,
+    _is_deb822_preflight_clean,
+    _looks_like_deb822_validator,
+    _mark_deb822_preflight_clean,
     classify_shell_outcome,
+    validate_sources_file,
 )
 
 

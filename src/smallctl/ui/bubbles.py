@@ -341,6 +341,7 @@ class AssistantTurnWidget(Vertical):
         self._tool_call_details: list[ToolCallDetailWidget] = []
         self._current_tool_calls_container: ToolCallsContainerWidget | None = None
         self._task_checklist_widget: TaskChecklistWidget | None = None
+        self._thinking_indicator: Static | None = None
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -405,9 +406,29 @@ class AssistantTurnWidget(Vertical):
     def _build_label_text(self) -> str:
         return KIND_LABEL.get(self._speaker, self._speaker.upper())
 
+    def _get_thinking_text(self, frame: int) -> str:
+        dots = "." * (3 - frame)
+        pct = (frame + 1) * 30
+        return f"[thinking{dots}{pct}%]"
+
+    async def show_thinking_indicator(self, frame: int = 0) -> None:
+        if self._thinking_indicator is None:
+            self._thinking_indicator = Static(
+                self._get_thinking_text(frame),
+                classes="thinking-indicator",
+            )
+            await self._main_body().mount(self._thinking_indicator)
+        else:
+            self._thinking_indicator.update(self._get_thinking_text(frame))
+
+    def hide_thinking_indicator(self) -> None:
+        if self._thinking_indicator is not None:
+            self._thinking_indicator.display = False
+
     async def append_assistant_text(self, text: str) -> None:
         if not text:
             return
+        self.hide_thinking_indicator()
         if self._last_assistant_block is None:
             text = _trim_leading_blank_lines(text)
             if not text:

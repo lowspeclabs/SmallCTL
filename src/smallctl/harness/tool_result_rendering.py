@@ -75,6 +75,28 @@ def _inline_file_read_status(result: ToolEnvelope) -> str:
     return "\n".join(lines)
 
 
+def _format_recovery_hint(metadata: dict[str, Any]) -> str:
+    """Append recovery instructions from guard metadata so the model can act on them."""
+    next_action = metadata.get("next_required_action")
+    next_tool = metadata.get("next_required_tool")
+    if not next_action and not next_tool:
+        return ""
+    hints: list[str] = []
+    if next_action:
+        if isinstance(next_action, dict):
+            action_text = json.dumps(next_action, indent=2, ensure_ascii=False)
+        else:
+            action_text = str(next_action)
+        hints.append(f"Next required action: {action_text}")
+    if next_tool:
+        if isinstance(next_tool, dict):
+            tool_text = json.dumps(next_tool, indent=2, ensure_ascii=False)
+        else:
+            tool_text = str(next_tool)
+        hints.append(f"Next required tool: {tool_text}")
+    return "\n\nRecovery hint:\n" + "\n".join(hints)
+
+
 async def build_tool_result_message(
     service: Any,
     *,
@@ -83,8 +105,6 @@ async def build_tool_result_message(
     artifact: Any,
     tool_call_id: str | None,
 ) -> ConversationMessage:
-    from ..context.policy import estimate_text_tokens
-
     request_text = service.harness.state.run_brief.original_task or service.harness._current_user_task()
     compact_full_file = _is_small_model(service.harness)
     preview_chars = max(180, int(service.harness.context_policy.tool_result_inline_token_limit * 2))
@@ -130,6 +150,11 @@ async def build_tool_result_message(
                 else str(result.output)
             )
         )
+
+    if not result.success:
+        recovery_hint = _format_recovery_hint(result.metadata if isinstance(result.metadata, dict) else {})
+        if recovery_hint:
+            compact_content = f"{compact_content}{recovery_hint}"
 
     if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
         playbook_artifact_id = str(result.metadata.get("artifact_id", "") or "").strip()

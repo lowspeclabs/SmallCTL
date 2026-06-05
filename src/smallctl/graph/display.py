@@ -12,6 +12,28 @@ _UI_ARTIFACT_READ_PREVIEW_LIMIT = 900
 _DIR_LIST_PREVIEW_ENTRY_LIMIT = 50
 
 
+def _format_recovery_hint(metadata: dict[str, Any]) -> str:
+    """Append recovery instructions from guard metadata so the UI shows actionable hints."""
+    next_action = metadata.get("next_required_action")
+    next_tool = metadata.get("next_required_tool")
+    if not next_action and not next_tool:
+        return ""
+    hints: list[str] = []
+    if next_action:
+        if isinstance(next_action, dict):
+            action_text = json.dumps(next_action, indent=2, ensure_ascii=False)
+        else:
+            action_text = str(next_action)
+        hints.append(f"Next required action: {action_text}")
+    if next_tool:
+        if isinstance(next_tool, dict):
+            tool_text = json.dumps(next_tool, indent=2, ensure_ascii=False)
+        else:
+            tool_text = str(next_tool)
+        hints.append(f"Next required tool: {tool_text}")
+    return "\n\nRecovery hint:\n" + "\n".join(hints)
+
+
 def _trim_head_clip_boundary(text: str, *, scan: int = 32) -> str:
     trimmed = text.rstrip()
     if not trimmed:
@@ -83,6 +105,9 @@ def format_tool_result_display(
             failure_mode = str(metadata.get("failure_mode") or metadata.get("ssh_error_class") or "").strip()
             if failure_mode == "remote_exit_nonzero":
                 error_text = f"SSH reached the remote host; remote command exited non-zero. {error_text}"
+        recovery_hint = _format_recovery_hint(metadata)
+        if recovery_hint:
+            error_text = f"{error_text}\n\n{recovery_hint}"
         return _clip_error_display(error_text, limit=400)
 
     if tool_name == "artifact_read":

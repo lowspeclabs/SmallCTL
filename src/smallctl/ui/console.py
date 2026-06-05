@@ -43,7 +43,8 @@ class ConsolePane(VerticalScroll):
         assistant token arrives, which is useful when the model spends a while
         emitting thinking output first.
         """
-        await self._ensure_assistant_turn()
+        turn = await self._ensure_assistant_turn()
+        await turn.show_thinking_indicator(0)
 
     async def append_event(self, event: UIEvent) -> None:
         speaker = _coerce_speaker(event.data.get("speaker"))
@@ -212,6 +213,10 @@ class ConsolePane(VerticalScroll):
         elif speaker:
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
+
+    async def update_thinking_indicator(self, frame: int) -> None:
+        if self._active_assistant_turn is not None:
+            await self._active_assistant_turn.show_thinking_indicator(frame)
 
     def get_last_system_message(self) -> str:
         return self._last_system_message

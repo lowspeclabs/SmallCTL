@@ -421,3 +421,74 @@ def test_shell_exec_failure_summary_precedes_long_unittest_transcript() -> None:
     assert "ERROR: test_print_verdict_allowed" in rendered
     assert "AttributeError: 'list' object has no attribute 'write'" in rendered
     assert rendered.index("FAILED (errors=3)") < rendered.index("test_ok_0")
+
+
+def test_format_tool_result_display_includes_next_required_action() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="Tool blocked.",
+        metadata={
+            "next_required_action": {
+                "tool_name": "ssh_exec",
+                "required_arguments": {"command": "echo ok"},
+                "notes": ["Run validator first."],
+            }
+        },
+    )
+
+    rendered = format_tool_result_display(tool_name="ssh_exec", result=result)
+
+    assert "Recovery hint:" in rendered
+    assert "Next required action:" in rendered
+    assert '"tool_name": "ssh_exec"' in rendered
+    assert "Run validator first." in rendered
+
+
+def test_format_tool_result_display_includes_next_required_tool() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="Tool blocked.",
+        metadata={
+            "next_required_tool": {
+                "tool_name": "file_read",
+                "required_arguments": {"path": "/etc/apt/sources.list"},
+            }
+        },
+    )
+
+    rendered = format_tool_result_display(tool_name="shell_exec", result=result)
+
+    assert "Recovery hint:" in rendered
+    assert "Next required tool:" in rendered
+    assert '"tool_name": "file_read"' in rendered
+
+
+def test_format_tool_result_display_skips_recovery_hint_when_none() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="Simple failure.",
+        metadata={},
+    )
+
+    rendered = format_tool_result_display(tool_name="shell_exec", result=result)
+
+    assert "Recovery hint:" not in rendered
+    assert rendered == "Simple failure."
+
+
+def test_format_tool_result_display_includes_both_action_and_tool() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="Blocked.",
+        metadata={
+            "next_required_action": "fresh clone or clean reset",
+            "next_required_tool": {"tool_name": "git_status"},
+        },
+    )
+
+    rendered = format_tool_result_display(tool_name="shell_exec", result=result)
+
+    assert "Recovery hint:" in rendered
+    assert "Next required action: fresh clone or clean reset" in rendered
+    assert "Next required tool:" in rendered
+    assert '"tool_name": "git_status"' in rendered

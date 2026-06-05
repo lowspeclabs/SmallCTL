@@ -652,6 +652,10 @@ class SmallctlAppFlowMixin:
         dots = "." * (3 - self._thinking_frame)
         self._set_activity(f"[thinking{dots}]")
         self._refresh_status()
+        console = self._get_console()
+        if console is not None:
+            import asyncio
+            asyncio.create_task(console.update_thinking_indicator(self._thinking_frame))
 
     def _set_shell_approval_session_default(self, enabled: bool) -> None:
         self._shell_approval_session_default = bool(enabled)

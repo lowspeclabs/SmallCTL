@@ -1,14 +1,14 @@
 from __future__ import annotations
 from typing import Any
 
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 
 from ..models.events import UIEvent, UIEventType
 from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget
 from .display import format_test_time_scaling_event
 
 
-class ConsolePane(Vertical):
+class ConsolePane(VerticalScroll):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._active_assistant_turn: AssistantTurnWidget | None = None

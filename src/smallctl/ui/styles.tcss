@@ -158,12 +158,6 @@
   padding: 0 1;
 }
 
-.thinking-indicator {
-  color: #f59e0b;
-  text-style: bold;
-  padding: 0 1;
-}
-
 .assistant-detail {
   width: 1fr;
   height: auto;

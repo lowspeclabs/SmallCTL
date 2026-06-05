@@ -123,6 +123,11 @@ class AssistantDetailWidget(Collapsible):
         self._body_widget = Vertical(classes="assistant-detail-body")
         self._content_widget = TextBlockWidget(text, classes="assistant-detail-content")
         self._text = text
+        self._thinking_start_time: float | None = None
+        self._thinking_done_time: float | None = None
+        if kind == "thinking":
+            import time
+            self._thinking_start_time = time.monotonic()
         super().__init__(
             self._body_widget,
             title=self._build_title(text),
@@ -147,13 +152,47 @@ class AssistantDetailWidget(Collapsible):
     def append_text(self, value: str) -> None:
         self.set_text(f"{self._text}{value}")
 
+    def finalize_thinking(self) -> None:
+        """Call when thinking is done to show final duration."""
+        if self.kind == "thinking" and self._thinking_start_time is not None:
+            import time
+            self._thinking_done_time = time.monotonic()
+            self.title = self._build_title(self._text)
+
+    def update_thinking_timer(self) -> None:
+        """Update title with live timer while thinking."""
+        if self.kind == "thinking" and self._thinking_done_time is None:
+            self.title = self._build_title(self._text)
+
     def _build_title(self, text: str) -> str:
         label = KIND_LABEL.get(self.kind, self.kind.upper())
+        if self.kind == "thinking":
+            return self._build_thinking_title()
         preview = " ".join(text.split())
         if len(preview) > self.PREVIEW_LIMIT:
             preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
         preview = markup_escape(preview)
         return f"{label}: {preview}" if preview else label
+
+    def _build_thinking_title(self) -> str:
+        import time
+        if self._thinking_done_time is not None and self._thinking_start_time is not None:
+            duration = self._thinking_done_time - self._thinking_start_time
+            return f"Thought: {self._format_duration(duration)}"
+        if self._thinking_start_time is not None:
+            elapsed = time.monotonic() - self._thinking_start_time
+            return f"thinking {self._format_duration(elapsed)}..."
+        return "THINK"
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        if seconds < 1:
+            return f"{int(seconds * 1000)}ms"
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m{secs:.0f}s"
 
     async def add_child_widget(self, widget: Widget) -> None:
         await self._body_widget.mount(widget)
@@ -341,9 +380,6 @@ class AssistantTurnWidget(Vertical):
         self._tool_call_details: list[ToolCallDetailWidget] = []
         self._current_tool_calls_container: ToolCallsContainerWidget | None = None
         self._task_checklist_widget: TaskChecklistWidget | None = None
-        self._thinking_indicator: Static | None = None
-        self._thinking_start_time: float | None = None
-        self._thinking_chars: int = 0
 
     def has_assistant_text(self) -> bool:
         return self._last_assistant_block is not None and self._last_assistant_block.has_content()
@@ -408,41 +444,11 @@ class AssistantTurnWidget(Vertical):
     def _build_label_text(self) -> str:
         return KIND_LABEL.get(self._speaker, self._speaker.upper())
 
-    def _get_thinking_text(self) -> str:
-        elapsed = 0.0
-        if self._thinking_start_time is not None:
-            import time
-            elapsed = time.monotonic() - self._thinking_start_time
-        elapsed_str = f"{elapsed:.1f}s"
-        chars = self._thinking_chars
-        if chars < 1000:
-            size_str = f"{chars}ch"
-        else:
-            size_str = f"{chars/1000:.1f}k"
-        return f"[thinking {elapsed_str} | {size_str}]"
-
-    async def show_thinking_indicator(self) -> None:
-        import time
-        if self._thinking_start_time is None:
-            self._thinking_start_time = time.monotonic()
-        if self._thinking_indicator is None:
-            self._thinking_indicator = Static(
-                self._get_thinking_text(),
-                classes="thinking-indicator",
-            )
-            await self._main_body().mount(self._thinking_indicator)
-        else:
-            self._thinking_indicator.update(self._get_thinking_text())
-
-    def hide_thinking_indicator(self) -> None:
-        if self._thinking_indicator is not None:
-            self._thinking_indicator.display = False
-            self._thinking_start_time = None
-
     async def append_assistant_text(self, text: str) -> None:
         if not text:
             return
-        self.hide_thinking_indicator()
+        if self._last_thinking_detail is not None:
+            self._last_thinking_detail.finalize_thinking()
         if self._last_assistant_block is None:
             text = _trim_leading_blank_lines(text)
             if not text:
@@ -478,12 +484,12 @@ class AssistantTurnWidget(Vertical):
     async def append_thinking_text(self, text: str) -> None:
         if not text:
             return
-        self._thinking_chars += len(text)
         if self._last_thinking_detail is None:
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.append_text(text)
+        self._last_thinking_detail.update_thinking_timer()
         self._current_tool_calls_container = None
         self._last_assistant_block = None
         self._last_shell_stream = None
@@ -492,11 +498,11 @@ class AssistantTurnWidget(Vertical):
         if self._last_thinking_detail is None:
             if not text:
                 return
-            self._thinking_chars = len(text)
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
             await self._meta_body().mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.set_text(text)
+        self._last_thinking_detail.update_thinking_timer()
         self._current_tool_calls_container = None
         self._last_assistant_block = None
         self._last_shell_stream = None

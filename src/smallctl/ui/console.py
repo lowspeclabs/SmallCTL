@@ -1,19 +1,18 @@
 from __future__ import annotations
 from typing import Any
 
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 
 from ..models.events import UIEvent, UIEventType
-from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget, TaskChecklistWidget
+from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget
 from .display import format_test_time_scaling_event
 
 
-class ConsolePane(VerticalScroll):
+class ConsolePane(Vertical):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._active_assistant_turn: AssistantTurnWidget | None = None
         self._last_system_message: str = ""
-        self._autoscroll_scheduled = False
 
     async def on_mount(self) -> None:
         await self.mount(Vertical(id="bubble-stack"))
@@ -21,7 +20,6 @@ class ConsolePane(VerticalScroll):
     async def append_line(self, line: str) -> None:
         await self._add_bubble("system", line)
         self._last_system_message = line
-        self._schedule_autoscroll()
 
     async def clear_bubbles(self) -> None:
         stack = self.query_one("#bubble-stack", Vertical)
@@ -46,7 +44,6 @@ class ConsolePane(VerticalScroll):
         emitting thinking output first.
         """
         await self._ensure_assistant_turn()
-        self._schedule_autoscroll()
 
     async def append_event(self, event: UIEvent) -> None:
         speaker = _coerce_speaker(event.data.get("speaker"))
@@ -92,7 +89,6 @@ class ConsolePane(VerticalScroll):
                     data=event.data,
                 )
                 if nested:
-                    self._schedule_autoscroll()
                     return
 
         if event.event_type == UIEventType.SYSTEM and event.data.get("kind") == "test_time_scaling":
@@ -108,7 +104,6 @@ class ConsolePane(VerticalScroll):
                 title, len(content), not content.strip(),
             )
             await turn.set_task_checklist(content, title=f"📋 {title}")
-            self._schedule_autoscroll()
             return
 
         kind_map = {
@@ -132,41 +127,34 @@ class ConsolePane(VerticalScroll):
         await self._add_bubble(kind, text)
         if kind == "system":
             self._last_system_message = event.content
-        self._schedule_autoscroll()
 
     async def _append_assistant(self, text: str) -> None:
         if not text:
             return
         turn = await self._ensure_assistant_turn()
         await turn.append_assistant_text(text)
-        self._schedule_autoscroll()
 
     async def _replace_assistant(self, text: str) -> None:
         """Overwrite the streamed assistant text with the cleaned version.
         This is called after _extract_inline_tool_calls strips tool JSON."""
         if self._active_assistant_turn is not None:
             self._active_assistant_turn.replace_assistant_text(text)
-            self._schedule_autoscroll()
 
     async def _append_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.add_full_printout(text, artifact_id=artifact_id)
-        self._schedule_autoscroll()
 
     async def _append_thinking(self, text: str) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.append_thinking_text(text)
-        self._schedule_autoscroll()
 
     async def _replace_thinking(self, text: str) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.replace_thinking_text(text)
-        self._schedule_autoscroll()
 
     async def _append_shell_stream(self, text: str) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.append_shell_stream(text)
-        self._schedule_autoscroll()
 
     async def _append_tool_call(
         self,
@@ -177,7 +165,6 @@ class ConsolePane(VerticalScroll):
     ) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.add_tool_call(text, tool_name=tool_name, tool_call_id=tool_call_id)
-        self._schedule_autoscroll()
 
     async def _append_tool_result(
         self,
@@ -215,7 +202,6 @@ class ConsolePane(VerticalScroll):
         await stack.mount(panel)
         self._active_assistant_turn = None
         self._last_system_message = event.content
-        self._schedule_autoscroll()
 
     async def _ensure_assistant_turn(self, *, speaker: str | None = None) -> AssistantTurnWidget:
         if self._active_assistant_turn is None:
@@ -226,25 +212,6 @@ class ConsolePane(VerticalScroll):
         elif speaker:
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
-
-    def _schedule_autoscroll(self) -> None:
-        """
-        Smart autoscroll: only scroll to end if we are already at or near the bottom.
-        This prevents UI jumping while a user is manually scrolling up to read.
-        """
-        # If we are within 2 lines of the bottom, consider it 'at bottom' for autoscroll.
-        # We use a small threshold (e.g. 20 pixels or 2 lines) to account for layout jitter.
-        THRESHOLD = 2
-        if self.scroll_y < self.max_scroll_y - THRESHOLD:
-            return
-        if self._autoscroll_scheduled:
-            return
-        self._autoscroll_scheduled = True
-        self.call_after_refresh(self._run_scheduled_autoscroll)
-
-    def _run_scheduled_autoscroll(self) -> None:
-        self._autoscroll_scheduled = False
-        self.scroll_end(animate=False)
 
     def get_last_system_message(self) -> str:
         return self._last_system_message

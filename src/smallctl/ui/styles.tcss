@@ -522,11 +522,9 @@
   margin-top: 0;
 }
 
-.tool-calls-scroll-container {
+.tool-calls-container {
   height: auto;
   max-height: 24;
-  overflow-y: auto;
-  overflow-x: hidden;
 }
 
 .assistant-detail-checklist {
@@ -534,13 +532,6 @@
   border-right: none;
   border-bottom: none;
   border-left: thick #22c55e;
-}
-
-.task-checklist-scroll {
-  height: auto;
-  max-height: 16;
-  overflow-y: auto;
-  overflow-x: hidden;
 }
 
 #quit-confirm-dialog {

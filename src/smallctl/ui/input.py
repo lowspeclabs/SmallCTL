@@ -18,10 +18,6 @@ class InputPane(TextArea):
         ("enter", "submit", "Submit"),
         ("ctrl+shift+v", "paste", "Paste"),
         ("shift+insert", "paste", "Paste"),
-        ("pageup", "scroll_page_up", "Scroll Up"),
-        ("pagedown", "scroll_page_down", "Scroll Down"),
-        ("ctrl+up", "scroll_up", "Scroll Up"),
-        ("ctrl+down", "scroll_down", "Scroll Down"),
         ("up", "history_prev", "Prev History"),
         ("down", "history_next", "Next History"),
         ("escape", "cancel_pending", "Cancel Input"),
@@ -75,22 +71,6 @@ class InputPane(TextArea):
             self._raw_text_override = None
             self.text = self.app.history_next()
             self.cursor_location = self._end_location()
-
-    def action_scroll_up(self) -> None:
-        if hasattr(self.app, "_scroll_console"):
-            self.app._scroll_console(-3)
-
-    def action_scroll_down(self) -> None:
-        if hasattr(self.app, "_scroll_console"):
-            self.app._scroll_console(3)
-
-    def action_scroll_page_up(self) -> None:
-        if hasattr(self.app, "action_scroll_page_up"):
-            self.app.action_scroll_page_up()
-
-    def action_scroll_page_down(self) -> None:
-        if hasattr(self.app, "action_scroll_page_down"):
-            self.app.action_scroll_page_down()
 
     def action_copy(self) -> None:
         app = self.app

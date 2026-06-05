@@ -1,7 +1,7 @@
 import re
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from rich.text import Text
 from rich.markup import escape as markup_escape
 from textual.reactive import reactive
@@ -206,9 +206,8 @@ class TaskChecklistWidget(Collapsible):
         id: str | None = None,
     ) -> None:
         self._content_widget = TextBlockWidget(text)
-        scroll = VerticalScroll(self._content_widget, classes="task-checklist-scroll")
         super().__init__(
-            scroll,
+            self._content_widget,
             title=title,
             collapsed=True,
             id=id,
@@ -311,7 +310,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
 
 class ToolCallsContainerWidget(Collapsible):
     def __init__(self, *, id: str | None = None) -> None:
-        self._body_widget = VerticalScroll(classes="tool-calls-scroll-container")
+        self._body_widget = Vertical(classes="tool-calls-container")
         super().__init__(
             self._body_widget,
             title="🛠️ Tool Calls",

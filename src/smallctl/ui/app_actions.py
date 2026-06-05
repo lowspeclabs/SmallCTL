@@ -461,32 +461,6 @@ class SmallctlAppActionsMixin:
             force=True,
         )
 
-    def _scroll_console(self, delta: int) -> None:
-        console = self._get_console()
-        if console is None:
-            return
-        console.scroll_relative(y=delta, animate=False)
-
-    def action_scroll_up(self) -> None:
-        self._scroll_console(-3)
-
-    def action_scroll_down(self) -> None:
-        self._scroll_console(3)
-
-    def action_scroll_page_up(self) -> None:
-        console = self._get_console()
-        if console is None:
-            return
-        step = max(1, console.size.height - 2)
-        self._scroll_console(-step)
-
-    def action_scroll_page_down(self) -> None:
-        console = self._get_console()
-        if console is None:
-            return
-        step = max(1, console.size.height - 2)
-        self._scroll_console(step)
-
     def history_prev(self) -> str:
         if not self.task_history:
             return ""

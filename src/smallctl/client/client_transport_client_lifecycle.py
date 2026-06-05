@@ -7,7 +7,7 @@ def _client_key(client: Any) -> tuple[str, str]:
     return (client.base_url, client.api_key)
 
 
-async def _get_async_client(client: Any) -> Any:
+def _get_async_client(client: Any) -> Any:
     import httpx
     if httpx is None:
         raise RuntimeError("Dependency missing: httpx")

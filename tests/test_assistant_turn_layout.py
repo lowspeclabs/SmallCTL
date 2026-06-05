@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.ui.bubbles import (
@@ -111,7 +111,7 @@ def test_consecutive_tool_calls_group_between_thinking_statements() -> None:
 
             tool_group = meta_children[1]
             assert isinstance(tool_group, ToolCallsContainerWidget)
-            tool_children = list(tool_group.query_one(".tool-calls-scroll-container", VerticalScroll).children)
+            tool_children = list(tool_group.query_one(".tool-calls-container", Vertical).children)
             assert [type(child) for child in tool_children] == [
                 ToolCallDetailWidget,
                 ToolCallDetailWidget,
@@ -120,39 +120,6 @@ def test_consecutive_tool_calls_group_between_thinking_statements() -> None:
             assert tool_children[1].text == "shell_exec(command='ls')"
 
     asyncio.run(_run())
-
-
-def test_console_autoscroll_requests_are_coalesced() -> None:
-    scheduled: list[object] = []
-    scroll_calls: list[bool] = []
-
-    class _FakeConsole:
-        def __init__(self) -> None:
-            self._autoscroll_scheduled = False
-            self.scroll_y = 10
-            self.max_scroll_y = 10
-
-        def call_after_refresh(self, callback):
-            scheduled.append(callback)
-
-        def scroll_end(self, animate=False) -> None:
-            scroll_calls.append(bool(animate))
-
-    console = _FakeConsole()
-    console._run_scheduled_autoscroll = ConsolePane._run_scheduled_autoscroll.__get__(console, _FakeConsole)
-    console._schedule_autoscroll = ConsolePane._schedule_autoscroll.__get__(console, _FakeConsole)
-
-    console._schedule_autoscroll()
-    console._schedule_autoscroll()
-
-    assert len(scheduled) == 1
-    assert console._autoscroll_scheduled is True
-
-    callback = scheduled[0]
-    callback()
-
-    assert console._autoscroll_scheduled is False
-    assert scroll_calls == [False]
 
 
 def test_assistant_turn_stays_compact_without_stylesheet() -> None:
@@ -232,7 +199,7 @@ def test_tool_call_after_meta_and_assistant_stays_in_one_turn() -> None:
             assert meta_children[0].text == "Inspect the first result."
             tool_group = meta_children[1]
             assert isinstance(tool_group, ToolCallsContainerWidget)
-            tool_children = list(tool_group.query_one(".tool-calls-scroll-container", VerticalScroll).children)
+            tool_children = list(tool_group.query_one(".tool-calls-container", Vertical).children)
             assert [child.text for child in tool_children] == [
                 "web_fetch(result_id='r1')",
                 "shell_exec(command='ssh host')",

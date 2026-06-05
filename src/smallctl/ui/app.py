@@ -45,10 +45,6 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         ("ctrl+alt+s", "toggle_system_messages", "View: System Messages"),
         ("ctrl+alt+t", "toggle_tool_calls", "View: Tool Calls"),
         ("ctrl+alt+b", "toggle_model_bar_layout", "View: Model Bar"),
-        ("pageup", "scroll_page_up", "Scroll Up"),
-        ("pagedown", "scroll_page_down", "Scroll Down"),
-        ("ctrl+up", "scroll_up", "Scroll Up"),
-        ("ctrl+down", "scroll_down", "Scroll Down"),
         ("ctrl+c", "interrupt_or_quit", "Interrupt/Quit"),
     ]
 
@@ -81,6 +77,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self.closed_by_ctrl_c = False
         self._task_start_time: float | None = None
         self._activity_timer: Any | None = None
+        self._thinking_frame: int = 0
         self._shell_approval_session_default = bool(self.harness_config.shell_approval_session_default)
         self._model_bar_layout = "bottom"
 

@@ -51,6 +51,12 @@ _MEMORY_PREFIXES = (
 _REMOTE_TASK_HINT_RE = re.compile(r"\b(?:remote|ssh|server|host|username|password)\b", re.IGNORECASE)
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _USER_AT_HOST_RE = re.compile(r"\b[A-Za-z0-9._-]+@[A-Za-z0-9._-]+\b")
+_REMOTE_NEGATION_RE = re.compile(
+    r"\b(?:do\s+not|never|don't|dont)\b.*\b(?:connect\s+to|ssh\s+to|use)\b.*\b(?:remote|ssh|server|host)\b"
+    r"|"
+    r"\b(?:remote|ssh|server|host)\b.*\b(?:do\s+not|never|don't|dont)\b.*\b(?:connect\s+to|ssh\s+to|use)\b",
+    re.IGNORECASE,
+)
 _TRACEBACK_HEADER_RE = re.compile(r"Traceback\s*\(most recent call last\):", re.IGNORECASE)
 _TERMINAL_PROMPT_RE = re.compile(r"\S+@[\w.-]+[:~]?[^\$]*\$?\s*")
 
@@ -151,11 +157,30 @@ def infer_requested_tool_name(harness: Any, task: str) -> str:
             return "shell_exec"
         return ""
     remote_task = bool(
-        _REMOTE_TASK_HINT_RE.search(text)
-        or _IPV4_RE.search(text)
-        or _USER_AT_HOST_RE.search(text)
+        (_REMOTE_TASK_HINT_RE.search(text)
+         or _IPV4_RE.search(text)
+         or _USER_AT_HOST_RE.search(text))
+        and not _REMOTE_NEGATION_RE.search(text)
     )
     if remote_task:
+        # Explicitly read-only / non-destructive remote tasks should map to ssh_exec,
+        # even if words like "patch" or "replace" appear in instruction text.
+        is_read_only_task = any(
+            marker in text
+            for marker in (
+                "non-destructive",
+                "read-only",
+                "read only",
+                "triage",
+                "inspect",
+                "investigate",
+                "do not delete",
+                "do not modify",
+                "do not patch",
+            )
+        )
+        if is_read_only_task:
+            return "ssh_exec"
         if any(marker in text for marker in ("style block", "<style>", "</style>", "between ", "bounded block", "inline style")):
             return "ssh_file_replace_between"
         if any(marker in text for marker in ("read file", "read the file", "cat ", "inspect file", "inspect the file")):

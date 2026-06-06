@@ -661,7 +661,11 @@ class LexicalRetriever:
         if bundle.candidate_counts.get("experiences", 0) >= 2:
             experience_gap = bundle.score_gaps.get("experiences", 999.0)
             if experience_gap <= 1.0:
-                reasons.append("prior outcome routing is ambiguous")
+                # Short-circuit: in repair phase, ambiguous prior-outcome routing
+                # is usually caused by a harness policy rejection, not a genuine
+                # memory gap. Refinement just burns tokens without helping.
+                if state.current_phase != "repair":
+                    reasons.append("prior outcome routing is ambiguous")
 
         if not reasons and not (bundle.artifacts or bundle.summaries or bundle.experiences):
             if state.artifacts or state.episodic_summaries or state.warm_experiences:

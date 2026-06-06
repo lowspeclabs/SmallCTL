@@ -138,7 +138,13 @@ def build_refined_retrieval_query(
     bundle: Any,
     retriever_cls: Any,
 ) -> str:
-    parts = [base_query]
+    # In repair phase, avoid bloating the refined query with the full original task prompt.
+    # Use the current goal / delta instead if the base query has grown excessively long.
+    current_goal = retriever_cls._effective_current_goal(state)
+    if state.current_phase == "repair" and len(base_query) > 2000 and current_goal:
+        parts = [current_goal]
+    else:
+        parts = [base_query]
     if state.run_brief.task_contract:
         parts.append(f"Contract: {state.run_brief.task_contract}")
     current_goal = retriever_cls._effective_current_goal(state)

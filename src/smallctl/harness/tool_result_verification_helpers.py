@@ -96,6 +96,30 @@ def looks_like_infinite_loop(command: str, error: str, stdout: str, stderr: str)
     return False
 
 
+def heredoc_delimiters_balanced(command: str) -> bool:
+    """Check that every heredoc opener (<< or <<-) has a matching delimiter line."""
+    text = str(command or "")
+    if "<<" not in text:
+        return True
+    # Find all heredoc delimiters in the command.
+    # Match `<< 'EOF'`, `<< "EOF"`, `<<EOF`, `<<-EOF`, etc.
+    delimiters = re.findall(r"<<\s*-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", text)
+    if not delimiters:
+        return True
+    lines = text.splitlines()
+    for delim in delimiters:
+        # The delimiter must appear on its own line (or with leading whitespace for <<-)
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == delim or stripped == f"'{delim}'" or stripped == f'"{delim}"':
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
 def command_has_write_or_heredoc_shape(command: str) -> bool:
     lowered = str(command or "").strip().lower()
     if not lowered:

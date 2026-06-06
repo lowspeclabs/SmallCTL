@@ -229,7 +229,7 @@ async def _maybe_recover_missing_first_write_session(
             content=(
                 f"Recovered Write Session `{session.write_session_id}` for `{path}` from the failed first write and "
                 + (
-                    "applied the captured payload to the target file. Verify the target file now."
+                    "applied the captured payload to the target file. Treat the write as recovered; verify the target file now and repair any verifier failure before finishing."
                     if replay_success
                     else "attempted to apply the captured payload, but replay failed. Retry without inventing a write_session_id."
                 )
@@ -711,6 +711,10 @@ async def handle_repeated_tool_loop(
                         "tool_name": pending.tool_name,
                     },
                 )
+            )
+            harness.state.recent_errors.append(
+                f"Guard tripped: repeated {pending.tool_name} loop (same arguments repeated). "
+                "Nudged model away from identical tool call."
             )
             harness._runlog(
                 "generic_tool_loop_nudge",

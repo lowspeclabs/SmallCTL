@@ -163,6 +163,26 @@ def _output_excerpt(record: ToolExecutionRecord, *, max_chars: int, hint_text: s
     return _bounded_text(output, limit=max_chars)
 
 
+def _stderr_has_error(output: Any) -> tuple[bool, str]:
+    """Detect stderr content that indicates a silent failure even when exit_code is 0."""
+    if not isinstance(output, dict):
+        return False, ""
+    stderr = str(output.get("stderr") or "").strip()
+    if not stderr:
+        return False, ""
+    lowered = stderr.lower()
+    error_indicators = (
+        "error",
+        "syntax error",
+        "warning: here-document",
+        "not found",
+        "no such file",
+    )
+    if any(ind in lowered for ind in error_indicators):
+        return True, stderr
+    return False, ""
+
+
 def _summary_from_record(record: ToolExecutionRecord, *, max_chars: int) -> str:
     result = record.result
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
@@ -171,6 +191,10 @@ def _summary_from_record(record: ToolExecutionRecord, *, max_chars: int) -> str:
         return metadata_text
     if result.error:
         return _bounded_text(result.error, limit=max_chars)
+    # Surface silent stderr errors (e.g. awk syntax error with exit 0)
+    has_stderr_err, stderr_text = _stderr_has_error(result.output)
+    if has_stderr_err:
+        return _bounded_text(stderr_text, limit=max_chars)
     if result.output not in (None, "", [], {}):
         return _bounded_text(result.output, limit=max_chars)
     status = result.status or ("success" if result.success else "failed")
@@ -325,10 +349,16 @@ def build_tool_plan_observations(
             observations.append(observation)
             seen_calls[call_key] = observation
             continue
+        has_stderr_err, stderr_text = _stderr_has_error(record.result.output)
+        observation_success = bool(record.result.success)
+        observation_error = str(record.result.error or "")
+        if has_stderr_err and observation_success:
+            observation_success = False
+            observation_error = stderr_text
         observation = ToolPlanObservation(
             step_id=step.id,
             tool=record.tool_name or step.tool,
-            success=bool(record.result.success),
+            success=observation_success,
             summary=_summary_from_record(record, max_chars=max_chars_per_step),
             excerpt=_output_excerpt(
                 record,
@@ -343,7 +373,7 @@ def build_tool_plan_observations(
             operation_id=str(record.operation_id or ""),
             path=path,
             query=query,
-            error=str(record.result.error or ""),
+            error=observation_error,
         )
         observations.append(observation)
         seen_calls[call_key] = observation

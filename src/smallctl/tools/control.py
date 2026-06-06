@@ -41,6 +41,7 @@ from .control_loop_status_helpers import (
 )
 from .control_task_complete_gates import (
     task_complete_gate_acceptance as _task_complete_gate_acceptance,
+    task_complete_gate_command_backed_file_creation as _task_complete_gate_command_backed_file_creation,
     task_complete_gate_interactive_program as _task_complete_gate_interactive_program,
     task_complete_gate_missing_input as _task_complete_gate_missing_input,
     task_complete_gate_mutation_expectation as _task_complete_gate_mutation_expectation,
@@ -51,6 +52,7 @@ from .control_task_complete_gates import (
     task_complete_gate_remote_mutation as _task_complete_gate_remote_mutation,
     task_complete_gate_runtime_error as _task_complete_gate_runtime_error,
     task_complete_gate_staged_execution as _task_complete_gate_staged_execution,
+    task_complete_gate_sysadmin_report_consistency as _task_complete_gate_sysadmin_report_consistency,
     task_complete_gate_verifier_approval as _task_complete_gate_verifier_approval,
     task_complete_gate_verifier_failure as _task_complete_gate_verifier_failure,
 )
@@ -76,7 +78,39 @@ async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> d
             if finalized:
                 session = state.write_session
 
-        if str(session.status or "").strip().lower() != "complete":
+        if session is not None and str(session.status or "").strip().lower() != "complete":
+            # If the last verifier passed and the session target already exists on disk,
+            # treat the write session as an orphan and auto-abandon it.
+            verdict = _normalized_verifier_verdict(state)
+            if (
+                isinstance(verdict, dict)
+                and str(verdict.get("verdict", "")).strip() == "pass"
+            ):
+                from ..tools.fs import _resolve
+                try:
+                    target = _resolve(session.write_target_path, getattr(state, "cwd", None))
+                    file_exists = target.exists() and target.is_file() and target.stat().st_size > 0
+                except Exception:
+                    file_exists = False
+
+                if file_exists:
+                    record_write_session_event(
+                        state,
+                        event="session_abandoned",
+                        session=session,
+                        details={
+                            "reason": "auto_abandoned_verifier_satisfied",
+                            "verdict_command": str(
+                                verdict.get("command") or verdict.get("target") or ""
+                            ),
+                        },
+                    )
+                    state.write_session = None
+                    scratchpad = state.scratchpad
+                    scratchpad.pop("_task_complete_last_blocker", None)
+                    scratchpad.pop("_task_complete_blocker_count", None)
+                    return await task_complete("", state, harness)
+
             scratchpad = state.scratchpad
             blocker_key = f"write_session:{session.write_session_id}"
             last_blocker = scratchpad.get("_task_complete_last_blocker")
@@ -171,6 +205,8 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
     gates = [
         lambda: _task_complete_gate_verifier_approval(state),
         lambda: _task_complete_gate_verifier_failure(state, message),
+        lambda: _task_complete_gate_command_backed_file_creation(state),
+        lambda: _task_complete_gate_sysadmin_report_consistency(state, message),
         lambda: _task_complete_gate_phase_contract(state),
         lambda: _task_complete_gate_phase_promotion(state, message),
         lambda: _task_complete_gate_plan_subtasks(state),
@@ -229,6 +265,15 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
         )
     state.scratchpad["_task_complete"] = True
     state.scratchpad["_task_complete_message"] = message
+    ledger = getattr(state, "subtask_ledger", None)
+    if ledger is not None:
+        try:
+            for subtask in getattr(ledger, "subtasks", []) or []:
+                if str(getattr(subtask, "status", "") or "").strip().lower() in {"pending", "active"}:
+                    subtask.status = "done"
+            ledger.active_subtask_id = None
+        except Exception:
+            pass
     state.touch()
     return ok({"status": "complete", "message": message})
 
@@ -398,7 +443,7 @@ async def task_fail(message: str, state: LoopState, harness: Any | None = None) 
                 if finalized:
                     session = state.write_session
 
-        if str(session.status or "").strip().lower() != "complete":
+        if session is not None and str(session.status or "").strip().lower() != "complete":
             record_write_session_event(
                 state,
                 event="session_abandoned",

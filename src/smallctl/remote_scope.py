@@ -204,6 +204,14 @@ def handoff_supports_remote_continuation(state: Any | None) -> bool:
     has_remote_anchors = _handoff_remote_anchor_count(handoff) > 0
     if has_remote_anchors and confirmed_ssh_target_count(state) > 0:
         return True
+    if isinstance(handoff.get("ssh_target"), dict) and str(handoff["ssh_target"].get("host") or "").strip():
+        return True
+    ssh_targets = handoff.get("ssh_targets")
+    if isinstance(ssh_targets, list) and any(
+        isinstance(target, dict) and str(target.get("host") or "").strip()
+        for target in ssh_targets
+    ):
+        return True
 
     task_mode = _normalized_mode(handoff.get("task_mode"))
     if task_mode != "remote_execute" and not _looks_like_remote_task_text(
@@ -237,6 +245,16 @@ def _current_task_texts(state: Any) -> list[str]:
 
 def _has_explicit_local_targets(state: Any) -> bool:
     combined = " ".join(_current_task_texts(state)).lower()
+    if _looks_like_remote_task_text(combined):
+        remote_report_markers = (
+            "/root/",
+            "create a remote report",
+            "remote report",
+            "target host:",
+            "connect to the remote",
+        )
+        if any(marker in combined for marker in remote_report_markers):
+            return False
     local_markers = ("./", "../", "/home/", "/tmp/", "/var/", "/opt/", "/usr/")
     return any(marker in combined for marker in local_markers)
 
@@ -249,8 +267,14 @@ def remote_scope_is_active(state: Any | None) -> bool:
     if _normalized_mode(getattr(state, "active_intent", "")) == "requested_ssh_exec":
         return True
     # If the current task explicitly references local paths, do not treat remote
-    # scope as active regardless of stale handoff or resolved-remote state.
+    # scope as active unless there are also explicit remote targets in the handoff.
     if _has_explicit_local_targets(state):
+        scratchpad = _scratchpad(state)
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict) and (
+            handoff.get("ssh_targets") or handoff.get("remote_target_paths")
+        ):
+            return True
         return False
     scratchpad = _scratchpad(state)
     resolved_remote = scratchpad.get("_resolved_remote_followup")

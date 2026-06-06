@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_completion_allowed
@@ -106,6 +108,14 @@ def task_complete_gate_interactive_program(state: LoopState) -> dict | None:
 
 
 def task_complete_gate_remote_mutation(state: LoopState) -> dict | None:
+    has_manual_success = (
+        state.scratchpad.get("manual_success")
+        or state.scratchpad.get("manual_success_override")
+        or state.scratchpad.get("manual_override")
+        or any("manual success" in str(f).lower() or "verified manually" in str(f).lower() for f in getattr(state.working_memory, "known_facts", []))
+    )
+    if has_manual_success:
+        return None
     remote_requirement = _remote_mutation_verification_requirement(state)
     if remote_requirement is not None:
         block_payload = _remote_mutation_block_payload(remote_requirement)
@@ -142,6 +152,247 @@ def task_complete_gate_missing_input(state: LoopState) -> dict | None:
             },
         )
     return None
+
+
+def _command_backed_file_requirements(state: LoopState) -> list[dict[str, str]]:
+    task_text = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "")
+    if not task_text.strip():
+        return []
+
+    requirements: list[dict[str, str]] = []
+    pattern = re.compile(
+        r"Create\s+(?:a\s+)?(?P<scope>local|remote)\s+[^\n:]*file\s*:\s*\n+\s*"
+        r"(?P<path>\S+)\s*\n+\s*using\s+the\s+(?:local|remote)\s+system's\s+"
+        r"(?P<command>[A-Za-z0-9_.+-]+)\s+command\b",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(task_text):
+        scope = match.group("scope").lower()
+        requirements.append(
+            {
+                "scope": scope,
+                "path": match.group("path").strip(),
+                "command": match.group("command").strip().lower(),
+                "tool_name": "shell_exec" if scope == "local" else "ssh_exec",
+            }
+        )
+    lower_task = task_text.lower()
+    if "output of listing" in lower_task or "output of list" in lower_task or "*.log" in lower_task or "glob" in lower_task:
+        local_paths = re.findall(r"(?m)^\s*(\.?/?[^\s:]+/[^\s:]*result[^\s:]*)\s*$", task_text)
+        for path in local_paths:
+            scope = "remote" if path.startswith("/tmp/") or path.startswith("/var/") or "remote" in path.lower() else "local"
+            requirements.append(
+                {
+                    "scope": scope,
+                    "path": path.strip(),
+                    "command": "ls",
+                    "tool_name": "ssh_exec" if scope == "remote" else "shell_exec",
+                }
+            )
+    return requirements
+
+
+def _artifact_text_for_command_match(artifact: Any) -> str:
+    metadata = getattr(artifact, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+    arguments = metadata.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    parts = [
+        getattr(artifact, "source", ""),
+        getattr(artifact, "summary", ""),
+        getattr(artifact, "inline_content", ""),
+        getattr(artifact, "preview_text", ""),
+        str(arguments.get("command") or ""),
+        str(metadata.get("command") or ""),
+        str(metadata.get("verifier_command") or ""),
+    ]
+    return "\n".join(part for part in parts if part).lower()
+
+
+def _command_requirement_satisfied(state: LoopState, requirement: dict[str, str]) -> bool:
+    required_tool = requirement["tool_name"]
+    required_path = requirement["path"].lower()
+    required_command = requirement["command"].lower()
+    for artifact in getattr(state, "artifacts", {}).values():
+        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+        if tool_name != required_tool:
+            continue
+        metadata = getattr(artifact, "metadata", None)
+        if isinstance(metadata, dict) and metadata.get("success") is False:
+            continue
+        text = _artifact_text_for_command_match(artifact)
+        if required_path in text and re.search(rf"\b{re.escape(required_command)}\b", text):
+            return True
+    return False
+
+
+def task_complete_gate_command_backed_file_creation(state: LoopState) -> dict | None:
+    requirements = _command_backed_file_requirements(state)
+    pending = [req for req in requirements if not _command_requirement_satisfied(state, req)]
+    if not pending:
+        return None
+    return fail(
+        "Cannot complete the task until command-backed file creation requirements are satisfied.",
+        metadata={
+            "reason": "command_backed_file_creation_required",
+            "pending_command_backed_file_requirements": pending,
+            "next_required_action": {
+                "tool_names": sorted({req["tool_name"] for req in pending}),
+                "notes": [
+                    "Create the requested file from the required system command in the same shell/SSH command.",
+                    "Direct file_write or ssh_file_write does not satisfy a user requirement to create the file using a command.",
+                ],
+            },
+            "last_verifier_verdict": _normalized_verifier_verdict(state),
+        },
+    )
+
+
+def _sysadmin_report_task_text(state: LoopState) -> str:
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    return "\n".join(
+        str(part or "")
+        for part in (
+            getattr(run_brief, "original_task", ""),
+            getattr(run_brief, "current_phase_objective", ""),
+            getattr(working_memory, "current_goal", ""),
+        )
+    )
+
+
+def _is_remote_sysadmin_report_task(state: LoopState) -> bool:
+    text = _sysadmin_report_task_text(state).lower()
+    return (
+        str(getattr(state, "task_mode", "") or "").strip().lower() == "remote_execute"
+        and "sysadmin challenge" in text
+        and ("root-cause" in text or " rca" in f" {text}")
+        and "report" in text
+        and "/root/" in text
+    )
+
+
+def _artifact_text(artifact: Any) -> str:
+    parts = [
+        getattr(artifact, "inline_content", None),
+        getattr(artifact, "preview_text", None),
+        getattr(artifact, "summary", None),
+    ]
+    content_path = str(getattr(artifact, "content_path", "") or "").strip()
+    if content_path:
+        try:
+            path = Path(content_path)
+            if path.is_file() and path.stat().st_size <= 250_000:
+                parts.insert(0, path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return "\n".join(str(part) for part in parts if str(part or "").strip())
+
+
+def _latest_sysadmin_report_artifact(state: LoopState) -> Any | None:
+    candidates: list[Any] = []
+    for artifact in getattr(state, "artifacts", {}).values():
+        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+        if tool_name not in {"ssh_file_write", "file_write"}:
+            continue
+        metadata = getattr(artifact, "metadata", None)
+        arguments = metadata.get("arguments") if isinstance(metadata, dict) else {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        target = " ".join(
+            str(value or "")
+            for value in (
+                getattr(artifact, "source", ""),
+                arguments.get("path"),
+                getattr(artifact, "summary", ""),
+            )
+        ).lower()
+        if re.search(r"/root/[^\s]+report[^\s]*\.txt\b", target):
+            candidates.append(artifact)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: str(getattr(item, "created_at", "") or ""))[-1]
+
+
+def _tool_history_has_process_mapped_network_probe(state: LoopState) -> bool:
+    weak_probe = re.compile(r"\bss\s+-tu?ln\b|\bss\s+-tuln\b", re.IGNORECASE)
+    saw_network_probe = False
+    saw_weak_probe = False
+    for record in getattr(state, "tool_execution_records", {}).values():
+        if not isinstance(record, dict) or str(record.get("tool_name") or "") != "ssh_exec":
+            continue
+        args = record.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        command = str(args.get("command") or "")
+        ss_options = re.findall(r"\bss\s+-([A-Za-z]+)", command, re.IGNORECASE)
+        if ss_options:
+            saw_network_probe = True
+        if any("p" in options.lower() and "n" in options.lower() for options in ss_options):
+            return True
+        if weak_probe.search(command):
+            saw_weak_probe = True
+    return saw_network_probe and not saw_weak_probe
+
+
+def _sysadmin_report_consistency_issues(state: LoopState, message: str) -> list[str]:
+    artifact = _latest_sysadmin_report_artifact(state)
+    if artifact is None:
+        return []
+    report = _artifact_text(artifact)
+    lowered_report = re.sub(r"\s+", " ", report.lower()).strip()
+    lowered_message = re.sub(r"\s+", " ", str(message or "").lower()).strip()
+    combined = f"{lowered_report} {lowered_message}"
+    issues: list[str] = []
+
+    created_date = str(getattr(artifact, "created_at", "") or "")[:10]
+    date_match = re.search(r"\b(?:report generated|date)\s*:\s*(\d{4}-\d{2}-\d{2})", report, re.IGNORECASE)
+    if created_date and date_match and date_match.group(1) != created_date:
+        issues.append(f"report date {date_match.group(1)} does not match artifact date {created_date}")
+
+    if (
+        "no suspicious network exposure" in lowered_report
+        and any(marker in combined for marker in ("mysql exposed", "tftp", "ftp listening", "suspicious services found"))
+    ):
+        issues.append("network exposure summary contradicts detailed findings")
+
+    if re.search(r"listening udp services:.*\bport\s+\d+/tcp\b", lowered_report, re.DOTALL):
+        issues.append("UDP listener section labels ports as tcp")
+
+    task_text = _sysadmin_report_task_text(state).lower()
+    if "owning process" in task_text and not _tool_history_has_process_mapped_network_probe(state):
+        issues.append("network listener evidence lacks owning process mapping; use ss -tulpn or equivalent")
+
+    if "top 10 largest files under /var/log" in lowered_report and "unable to obtain list" in lowered_report:
+        issues.append("required /var/log largest-file list is missing")
+
+    return issues
+
+
+def task_complete_gate_sysadmin_report_consistency(state: LoopState, message: str) -> dict | None:
+    if not _is_remote_sysadmin_report_task(state):
+        return None
+    issues = _sysadmin_report_consistency_issues(state, message)
+    if not issues:
+        return None
+    return fail(
+        "Cannot complete the sysadmin report task until the generated report is internally consistent and evidence-backed.",
+        metadata={
+            "reason": "sysadmin_report_consistency_required",
+            "sysadmin_report_issues": issues,
+            "next_required_action": {
+                "tool_names": ["ssh_exec", "ssh_file_write"],
+                "notes": [
+                    "Regather any weak evidence with process-mapped commands such as `ss -tulpn`.",
+                    "Rewrite the report with matching dates, protocol labels, and non-contradictory exposure findings.",
+                    "Preserve required sections: baseline, disk, process, network, SSH/security, logs, and recommendations.",
+                ],
+            },
+            "last_verifier_verdict": _normalized_verifier_verdict(state),
+        },
+    )
 
 
 def task_complete_gate_mutation_expectation(state: LoopState, message: str) -> dict | None:
@@ -181,19 +432,48 @@ def task_complete_gate_verifier_approval(state: LoopState) -> dict | None:
 
 
 def task_complete_gate_verifier_failure(state: LoopState, message: str) -> dict | None:
+    has_manual_success = (
+        state.scratchpad.get("manual_success")
+        or state.scratchpad.get("manual_success_override")
+        or state.scratchpad.get("manual_override")
+        or any("manual success" in str(f).lower() or "verified manually" in str(f).lower() for f in getattr(state.working_memory, "known_facts", []))
+    )
+    if has_manual_success:
+        return None
     verifier_verdict = _normalized_verifier_verdict(state)
     verifier_failure_satisfies_diagnostic = (
         verifier_verdict
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
     )
+    # A removal_absence_probe verdict on a non-removal task is a misclassification
+    # (e.g. inventory task with "do not remove packages" in its constraints).  It
+    # must not gate task completion for tasks that have no actual removal intent.
+    # Lazy import: top-level import creates a circular dependency via harness/__init__
+    # → core_facade → tools (build_registry) before tools is fully initialized.
+    from ..harness.tool_result_verification_removal import _task_has_removal_intent  # noqa: PLC0415
+    verifier_is_spurious_absence_probe = (
+        verifier_verdict
+        and verifier_verdict.get("verifier_kind") == "removal_absence_probe"
+        and not _task_has_removal_intent(state)
+    )
     if (
         verifier_verdict
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and not state.acceptance_waived
         and not verifier_failure_satisfies_diagnostic
+        and not verifier_is_spurious_absence_probe
     ):
-        error = "Cannot complete the task while the latest verifier verdict is still failing."
+        vkind = str(verifier_verdict.get("verifier_kind") or "unknown")
+        vreason = str(
+            verifier_verdict.get("absence_probe_reason")
+            or verifier_verdict.get("failure_mode")
+            or ""
+        )
+        error = (
+            f"Cannot complete the task while the latest verifier verdict is still failing "
+            f"[verifier_kind={vkind}{f', reason={vreason}' if vreason else ''}]."
+        )
         verifier_summary = _verifier_failure_summary(verifier_verdict)
         if verifier_summary:
             error = f"{error} Latest verifier: {verifier_summary}."

@@ -14,12 +14,18 @@ from smallctl.guards import is_over_twenty_b_model_name
 from smallctl.harness.task_classifier import (
     classify_runtime_intent,
     classify_task_mode,
+    looks_like_complex_task,
     runtime_policy_for_intent,
 )
 from smallctl.harness.tool_dispatch import chat_mode_tools
 from smallctl.harness.task_intent import derive_task_contract, extract_intent_state, memory_fact_hint
 from smallctl.memory_store import ExperienceStore
 from smallctl.state import ArtifactRecord, EpisodicSummary, ExperienceMemory, LoopState, WriteSession
+from smallctl.task_targets import extract_task_target_paths
+from smallctl.tools.control_task_complete_gates import (
+    task_complete_gate_command_backed_file_creation,
+    task_complete_gate_sysadmin_report_consistency,
+)
 
 
 def test_classify_task_mode_covers_chat_analysis_and_execution_shapes() -> None:
@@ -36,6 +42,421 @@ def test_classify_task_mode_covers_chat_analysis_and_execution_shapes() -> None:
 
     for task, expected in cases.items():
         assert classify_task_mode(task) == expected
+
+
+def test_local_only_file_create_with_remote_prohibition_stays_local() -> None:
+    task = """Create a file named ./temp/scope-tests/local-only.txt containing:
+
+LOCAL_SCOPE_OK
+
+Do not connect to the remote host.
+After creating it, report whether the file exists locally."""
+
+    assert classify_task_mode(task) == "local_execute"
+    assert looks_like_complex_task(task) is False
+    assert extract_task_target_paths(task) == ["./temp/scope-tests/local-only.txt"]
+
+
+def test_local_temp_log_recovery_task_ignores_config_hosts_for_remote_mode() -> None:
+    task = """You are working only inside ./temp.
+
+Create this directory:
+
+./temp/log_recovery
+
+Create these three files.
+
+./temp/log_recovery/app.log
+
+2026-06-05T10:00:04Z ERROR failed to connect to db host=db.internal port=5432
+
+./temp/log_recovery/config.yaml
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+database:
+  host: db.internal
+  port: 5432
+  timeout: 2
+
+./temp/log_recovery/inventory.txt
+
+db-primary.internal 5432 online
+db-replica.internal 5432 online
+
+Then patch config.yaml and write ./temp/log_recovery/fix_plan.md."""
+
+    assert classify_task_mode(task) == "local_execute"
+
+
+def test_local_and_remote_system_timestamp_task_is_hybrid_execute() -> None:
+    task = """Create a local timestamp file:
+
+./temp/scope-tests/time-local.txt
+
+using the local system's date command.
+
+Create a remote timestamp file:
+
+/tmp/smallctl-scope-tests/time-remote.txt
+
+using the remote system's date command.
+
+Each file must contain:
+hostname=<hostname>
+epoch=<unix timestamp>
+timezone=<timezone if available>
+
+Report both files. Remote is 192.168.1.163 password is "Temp@Pass"""
+
+    assert classify_task_mode(task) == "hybrid_execute"
+
+
+def test_local_remote_file_merge_task_is_hybrid_execute() -> None:
+    task = """Create a local file:
+
+./temp/scope-tests/mixed-direction/data.txt
+
+with contents:
+
+LOCAL_INPUT_DATA
+
+Create a remote file:
+
+/tmp/smallctl-scope-tests/mixed-direction/data.txt
+
+with contents:
+
+REMOTE_INPUT_DATA
+
+Now read both files.
+
+Create a local merged file:
+
+./temp/scope-tests/mixed-direction/merged.txt
+
+with contents:
+
+local=<local data.txt contents>
+remote=<remote data.txt contents>
+
+Do not modify either original data.txt file.
+Do not create merged.txt on the remote host. Remote is root@192.168.1.163 with password "Temp@Pass"""
+
+    assert classify_task_mode(task) == "hybrid_execute"
+
+
+def test_command_backed_timestamp_task_blocks_direct_file_tools() -> None:
+    state = LoopState()
+    state.run_brief.original_task = """Create a local timestamp file:
+
+./temp/scope-tests/time-local.txt
+
+using the local system's date command.
+
+Create a remote timestamp file:
+
+/tmp/smallctl-scope-tests/time-remote.txt
+
+using the remote system's date command.
+
+Each file must contain:
+hostname=<hostname>
+epoch=<unix timestamp>
+timezone=<timezone if available>
+
+Report both files. Remote is root@192.168.1.163 password is "Temp@Pass"""
+    state.artifacts = {
+        "A-local-write": ArtifactRecord(
+            artifact_id="A-local-write",
+            kind="file_write",
+            source="./temp/scope-tests/time-local.txt",
+            created_at="2026-06-05T13:06:40+00:00",
+            size_bytes=53,
+            summary="time-local.txt written",
+            tool_name="file_write",
+            metadata={"success": True, "arguments": {"path": "./temp/scope-tests/time-local.txt"}},
+        ),
+        "A-remote-write": ArtifactRecord(
+            artifact_id="A-remote-write",
+            kind="ssh_file_write",
+            source="/tmp/smallctl-scope-tests/time-remote.txt",
+            created_at="2026-06-05T13:06:41+00:00",
+            size_bytes=44,
+            summary="time-remote.txt written",
+            tool_name="ssh_file_write",
+            metadata={"success": True, "arguments": {"path": "/tmp/smallctl-scope-tests/time-remote.txt"}},
+        ),
+    }
+
+    result = task_complete_gate_command_backed_file_creation(state)
+
+    assert result is not None
+    assert result["metadata"]["reason"] == "command_backed_file_creation_required"
+    pending = result["metadata"]["pending_command_backed_file_requirements"]
+    assert {item["tool_name"] for item in pending} == {"shell_exec", "ssh_exec"}
+
+
+def test_command_backed_timestamp_task_accepts_shell_and_ssh_writes() -> None:
+    state = LoopState()
+    state.run_brief.original_task = """Create a local timestamp file:
+
+./temp/scope-tests/time-local.txt
+
+using the local system's date command.
+
+Create a remote timestamp file:
+
+/tmp/smallctl-scope-tests/time-remote.txt
+
+using the remote system's date command.
+
+Each file must contain:
+hostname=<hostname>
+epoch=<unix timestamp>
+timezone=<timezone if available>
+
+Report both files. Remote is root@192.168.1.163 password is "Temp@Pass"""
+    state.artifacts = {
+        "A-local-shell": ArtifactRecord(
+            artifact_id="A-local-shell",
+            kind="shell_exec",
+            source="{ hostname; date +%s; date +%Z; } > ./temp/scope-tests/time-local.txt",
+            created_at="2026-06-05T13:06:40+00:00",
+            size_bytes=53,
+            summary="shell_exec SUCCESS",
+            tool_name="shell_exec",
+            metadata={
+                "success": True,
+                "arguments": {"command": "{ hostname; date +%s; date +%Z; } > ./temp/scope-tests/time-local.txt"},
+            },
+        ),
+        "A-remote-ssh": ArtifactRecord(
+            artifact_id="A-remote-ssh",
+            kind="ssh_exec",
+            source="{ hostname; date +%s; date +%Z; } > /tmp/smallctl-scope-tests/time-remote.txt",
+            created_at="2026-06-05T13:06:41+00:00",
+            size_bytes=44,
+            summary="ssh_exec SUCCESS",
+            tool_name="ssh_exec",
+            metadata={
+                "success": True,
+                "arguments": {"command": "{ hostname; date +%s; date +%Z; } > /tmp/smallctl-scope-tests/time-remote.txt"},
+            },
+        ),
+    }
+
+    assert task_complete_gate_command_backed_file_creation(state) is None
+
+
+def test_listing_output_result_files_require_command_evidence() -> None:
+    state = LoopState()
+    state.run_brief.original_task = """Create these local files:
+
+./temp/scope-tests/glob-test/local-a.log
+./temp/scope-tests/glob-test/local-b.log
+
+Create these remote files:
+
+/tmp/smallctl-scope-tests/glob-test/remote-a.log
+/tmp/smallctl-scope-tests/glob-test/remote-b.log
+
+Now create:
+
+Local:
+./temp/scope-tests/glob-local-result.txt
+
+Remote:
+/tmp/smallctl-scope-tests/glob-remote-result.txt
+
+Each result file must contain the output of listing *.log in that scope's glob-test directory."""
+    state.artifacts = {
+        "A-local-write": ArtifactRecord(
+            artifact_id="A-local-write",
+            kind="file_write",
+            source="./temp/scope-tests/glob-local-result.txt",
+            created_at="2026-06-05T13:06:40+00:00",
+            size_bytes=24,
+            summary="glob-local-result.txt written",
+            tool_name="file_write",
+            metadata={"success": True, "arguments": {"path": "./temp/scope-tests/glob-local-result.txt"}},
+        ),
+        "A-remote-write": ArtifactRecord(
+            artifact_id="A-remote-write",
+            kind="ssh_file_write",
+            source="/tmp/smallctl-scope-tests/glob-remote-result.txt",
+            created_at="2026-06-05T13:06:41+00:00",
+            size_bytes=26,
+            summary="glob-remote-result.txt written",
+            tool_name="ssh_file_write",
+            metadata={"success": True, "arguments": {"path": "/tmp/smallctl-scope-tests/glob-remote-result.txt"}},
+        ),
+    }
+
+    result = task_complete_gate_command_backed_file_creation(state)
+
+    assert result is not None
+    pending = result["metadata"]["pending_command_backed_file_requirements"]
+    assert {item["tool_name"] for item in pending} == {"shell_exec", "ssh_exec"}
+
+
+def test_listing_output_result_files_accept_shell_and_ssh_listing_commands() -> None:
+    state = LoopState()
+    state.run_brief.original_task = """Local:
+./temp/scope-tests/glob-local-result.txt
+
+Remote:
+/tmp/smallctl-scope-tests/glob-remote-result.txt
+
+Each result file must contain the output of listing *.log in that scope's glob-test directory."""
+    state.artifacts = {
+        "A-local-shell": ArtifactRecord(
+            artifact_id="A-local-shell",
+            kind="shell_exec",
+            source="ls ./temp/scope-tests/glob-test/*.log > ./temp/scope-tests/glob-local-result.txt",
+            created_at="2026-06-05T13:06:40+00:00",
+            size_bytes=24,
+            summary="shell_exec SUCCESS",
+            tool_name="shell_exec",
+            metadata={"success": True, "arguments": {"command": "ls ./temp/scope-tests/glob-test/*.log > ./temp/scope-tests/glob-local-result.txt"}},
+        ),
+        "A-remote-ssh": ArtifactRecord(
+            artifact_id="A-remote-ssh",
+            kind="ssh_exec",
+            source="ls /tmp/smallctl-scope-tests/glob-test/*.log > /tmp/smallctl-scope-tests/glob-remote-result.txt",
+            created_at="2026-06-05T13:06:41+00:00",
+            size_bytes=26,
+            summary="ssh_exec SUCCESS",
+            tool_name="ssh_exec",
+            metadata={"success": True, "arguments": {"command": "ls /tmp/smallctl-scope-tests/glob-test/*.log > /tmp/smallctl-scope-tests/glob-remote-result.txt"}},
+        ),
+    }
+
+    assert task_complete_gate_command_backed_file_creation(state) is None
+
+
+def test_sysadmin_report_gate_blocks_inconsistent_report_completion() -> None:
+    state = LoopState()
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = """Sysadmin Challenge: Disk, Process, Network, and Configuration RCA
+
+Target host: root@192.168.1.89
+Connect to the remote Linux host over SSH.
+List all listening TCP and UDP ports and map each listening port to the owning process.
+Create a report at:
+
+/root/rca-health-investigation-report.txt
+"""
+    state.tool_execution_records = {
+        "net": {
+            "tool_name": "ssh_exec",
+            "args": {"command": "ss -tuln"},
+            "result": {"success": True, "output": {"exit_code": 0}},
+        }
+    }
+    state.artifacts = {
+        "report": ArtifactRecord(
+            artifact_id="report",
+            kind="ssh_file_write",
+            source="/root/rca-health-investigation-report.txt",
+            created_at="2026-06-06T13:10:25+00:00",
+            size_bytes=1000,
+            summary="rca-health-investigation-report.txt written",
+            tool_name="ssh_file_write",
+            preview_text="""Report Generated: 2026-02-23
+
+NO SUSPICIOUS NETWORK EXPOSURE: No services listening on 0.0.0.0 outside expected ports.
+
+Top 10 Largest Files Under /var/log:
+Unable to obtain list.
+
+Listening UDP Services:
+* Port 69/tcp - TFTP - 0.0.0.0
+""",
+            metadata={"success": True, "arguments": {"path": "/root/rca-health-investigation-report.txt"}},
+        )
+    }
+
+    result = task_complete_gate_sysadmin_report_consistency(
+        state,
+        "Top 3 Risks: MySQL exposed, TFTP/FTP listening, Root SSH login permitted.",
+    )
+
+    assert result is not None
+    assert result["metadata"]["reason"] == "sysadmin_report_consistency_required"
+    issues = result["metadata"]["sysadmin_report_issues"]
+    assert any("report date" in issue for issue in issues)
+    assert any("contradicts" in issue for issue in issues)
+    assert any("UDP listener" in issue for issue in issues)
+    assert any("owning process" in issue for issue in issues)
+    assert any("/var/log" in issue for issue in issues)
+
+
+def test_sysadmin_report_gate_accepts_consistent_report_with_process_mapping() -> None:
+    state = LoopState()
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = """Sysadmin Challenge: Disk, Process, Network, and Configuration RCA
+
+Target host: root@192.168.1.89
+Connect to the remote Linux host over SSH.
+List all listening TCP and UDP ports and map each listening port to the owning process.
+Create a report at:
+
+/root/rca-health-investigation-report.txt
+"""
+    state.tool_execution_records = {
+        "net": {
+            "tool_name": "ssh_exec",
+            "args": {"command": "ss -tlnp && ss -ulnp"},
+            "result": {"success": True, "output": {"exit_code": 0}},
+        }
+    }
+    state.artifacts = {
+        "report": ArtifactRecord(
+            artifact_id="report",
+            kind="ssh_file_write",
+            source="/root/rca-health-investigation-report.txt",
+            created_at="2026-06-06T13:10:25+00:00",
+            size_bytes=1000,
+            summary="rca-health-investigation-report.txt written",
+            tool_name="ssh_file_write",
+            preview_text="""Report Generated: 2026-06-06
+
+Network Exposure Assessment: Suspicious services found.
+
+Top 10 Largest Files Under /var/log:
+1. /var/log/ganesha/ganesha.log
+
+Listening UDP Services:
+* Port 69/udp - TFTP - 0.0.0.0 - in.tftpd
+""",
+            metadata={"success": True, "arguments": {"path": "/root/rca-health-investigation-report.txt"}},
+        )
+    }
+
+    assert task_complete_gate_sysadmin_report_consistency(state, "Task completed.") is None
+
+
+def test_local_stdout_then_remote_report_task_is_hybrid_execute() -> None:
+    task = """Run this command locally:
+
+printf 'LOCAL_STDOUT_ONLY\n'
+
+Do not save it to a file.
+
+Then create a remote report:
+
+/tmp/smallctl-scope-tests/local-stdout-observed.txt
+
+The remote report must contain:
+
+LOCAL_COMMAND_RAN_BUT_OUTPUT_NOT_PERSISTED_LOCALLY
+
+Do not create a local file named local-stdout-observed.txt. Remote is root@192.168.1.163 password is "Temp@Pass"""
+
+    assert classify_task_mode(task) == "hybrid_execute"
 
 
 def test_extract_intent_state_does_not_infer_scripts_from_cwd() -> None:

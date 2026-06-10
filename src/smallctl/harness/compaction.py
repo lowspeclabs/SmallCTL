@@ -28,6 +28,8 @@ FALLBACK_STOP_REASONS = {
 class CompactionService:
     def __init__(self, harness: Harness):
         self.harness = harness
+        # Fix 6: Context pipeline idle metric
+        self.compaction_service_calls: int = 0
 
     def _record_compaction_snapshot(
         self,
@@ -63,6 +65,13 @@ class CompactionService:
         system_prompt: str,
         event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
     ) -> None:
+        # Fix 6: Track context pipeline usage
+        self.compaction_service_calls += 1
+        state = self.harness.state
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["compaction_service_calls"] = self.compaction_service_calls
+
         soft_limit = self.harness.context_policy.soft_prompt_token_limit
         tier_manager = MessageTierManager(self.harness.context_policy)
         

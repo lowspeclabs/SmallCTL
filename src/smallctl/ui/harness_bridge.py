@@ -26,6 +26,9 @@ class HarnessBridge:
         self._closed = False
         self._close_lock = threading.Lock()
         self._inflight_future: ConcurrentFuture[Any] | None = None
+        # Fix 5: Bridge heartbeat for deadlock detection
+        self._heartbeat_counter: int = 0
+        self._heartbeat_task: asyncio.Task[Any] | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -150,16 +153,33 @@ class HarnessBridge:
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
+        # Fix 5: Start heartbeat task
+        self._heartbeat_task = loop.create_task(self._heartbeat_loop())
         self._ready.set()
         try:
             loop.run_forever()
         finally:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
             pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
             for task in pending:
                 task.cancel()
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
+
+    async def _heartbeat_loop(self) -> None:
+        """Increment a counter every 10 seconds while the bridge is alive."""
+        try:
+            while True:
+                await asyncio.sleep(10.0)
+                self._heartbeat_counter += 1
+        except asyncio.CancelledError:
+            pass
+
+    def get_heartbeat(self) -> int:
+        """Return the current heartbeat counter for deadlock detection."""
+        return self._heartbeat_counter
 
     def _forward_event(self, event: UIEvent) -> None:
         self._post_ui_event(event)

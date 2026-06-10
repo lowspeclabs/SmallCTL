@@ -94,6 +94,8 @@ class RetrievalBundle:
 class LexicalRetriever:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
+        # Fix 6: Context pipeline idle metric
+        self.retrieval_calls: int = 0
 
     _file_like_paths = staticmethod(file_like_paths)
     _artifact_text = staticmethod(artifact_text)
@@ -152,6 +154,12 @@ class LexicalRetriever:
         experience_limit: int = 5,
         include_experiences: bool = True,
     ) -> RetrievalBundle:
+        # Fix 6: Track context pipeline usage
+        self.retrieval_calls += 1
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["retrieval_calls"] = self.retrieval_calls
+
         base_query = (query or "").strip() or build_retrieval_query(state)
         first_pass = self._retrieve_pass(
             state=state,

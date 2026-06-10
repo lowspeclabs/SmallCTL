@@ -30,6 +30,8 @@ class CompactionAttemptResult:
 class ContextSummarizer:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
         self.policy = policy or ContextPolicy()
+        # Fix 6: Context pipeline idle metric
+        self.compaction_calls: int = 0
 
     @staticmethod
     def _format_message_for_compaction(message: ConversationMessage) -> str:
@@ -51,6 +53,12 @@ class ContextSummarizer:
         keep_recent: int,
         artifact_store: Any | None = None,
     ) -> CompactionAttemptResult:
+        # Fix 6: Track context pipeline usage
+        self.compaction_calls += 1
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["compaction_calls"] = self.compaction_calls
+
         if len(state.recent_messages) <= keep_recent:
             return CompactionAttemptResult(noop_reason="no_compactable_messages")
         old_messages = state.recent_messages[:-keep_recent]

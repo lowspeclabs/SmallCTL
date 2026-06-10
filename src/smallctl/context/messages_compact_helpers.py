@@ -305,3 +305,63 @@ def format_shell_exec_message(
             )
         msg = f"{msg}\n\n{footer}"
     return msg
+
+
+def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
+    """Collapse 3+ shell_exec failures with identical first-200-char content into a summary line.
+
+    Preserves the last 2 occurrences so the model still sees the most recent evidence,
+    but replaces older identical failures with a compact token-saving summary.
+    """
+    if len(messages) < 3:
+        return messages
+
+    # Find shell_exec tool-message indices and group by content signature
+    shell_indices: list[int] = []
+    for idx, msg in enumerate(messages):
+        role = getattr(msg, "role", None)
+        name = getattr(msg, "name", None)
+        if role == "tool" and name == "shell_exec":
+            shell_indices.append(idx)
+
+    if len(shell_indices) < 3:
+        return messages
+
+    signatures: dict[str, list[int]] = {}
+    for idx in shell_indices:
+        content = str(getattr(messages[idx], "content", "") or "").strip()
+        # Only consider failure-looking content
+        lowered = content.lower()
+        if not any(marker in lowered for marker in ("failed", "error:", "exited with code", "timed out")):
+            continue
+        sig = content[:200]
+        signatures.setdefault(sig, []).append(idx)
+
+    # Determine which indices to replace (all but last 2 in each large group)
+    to_replace: set[int] = set()
+    for sig, indices in signatures.items():
+        if len(indices) >= 3:
+            to_replace.update(indices[:-2])
+
+    if not to_replace:
+        return messages
+
+    result: list[Any] = []
+    summary_text = f"[{len(to_replace)} repeated shell_exec failures with identical error collapsed to save tokens. Last 2 occurrences preserved.]"
+    summary_added = False
+    for idx, msg in enumerate(messages):
+        if idx in to_replace:
+            if not summary_added:
+                from ..models.conversation import ConversationMessage
+                result.append(
+                    ConversationMessage(
+                        role="tool",
+                        name="shell_exec",
+                        content=summary_text,
+                    )
+                )
+                summary_added = True
+            continue
+        result.append(msg)
+
+    return result

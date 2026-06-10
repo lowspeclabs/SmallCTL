@@ -272,14 +272,15 @@ class SudoPasswordPromptScreen(ModalScreen[str | None]):
         self.prompt_text = prompt_text
 
     def compose(self) -> ComposeResult:
-        with Container(id="approve-prompt-shell"):
-            with Vertical(id="approve-prompt"):
-                yield Static("Sudo password required", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
-                yield Input(placeholder="Password", password=True, id="sudo-password-input")
-                with Horizontal(id="approve-prompt-buttons"):
-                    yield Button("Submit", id="sudo-password-submit", variant="success")
-                    yield Button("Cancel", id="sudo-password-cancel", variant="error")
+        with Container(id="approve-prompt-overlay"):
+            with Container(id="approve-prompt-shell"):
+                with Vertical(id="approve-prompt"):
+                    yield Static("Sudo password required", id="approve-prompt-title")
+                    yield Static(self._build_body(), id="approve-prompt-body", markup=False)
+                    yield Input(placeholder="Password", password=True, id="sudo-password-input")
+                    with Horizontal(id="approve-prompt-buttons"):
+                        yield Button("Submit", id="sudo-password-submit", variant="success")
+                        yield Button("Cancel", id="sudo-password-cancel", variant="error")
 
     async def on_mount(self) -> None:
         self.query_one("#sudo-password-input", Input).focus()

@@ -7,6 +7,10 @@ _ARGPARSE_REQUIRED_ARGS_PATTERN = re.compile(
     r"(?:error:\s*)?the following arguments are required:\s*(.+)",
     re.IGNORECASE,
 )
+_ARGPARSE_UNRECOGNIZED_ARGS_PATTERN = re.compile(
+    r"(?:error:\s*)?unrecognized arguments:\s*(.+)",
+    re.IGNORECASE,
+)
 _YES_PIPE_PATTERN = re.compile(
     r"(?:^|[;&(]\s*)yes(?:\s+[^|;&]+)?\s*\|\s*(?P<target>[^;&|]+)",
     re.IGNORECASE | re.DOTALL,

@@ -369,6 +369,23 @@ class SmallctlAppFlowMixin:
         self._latest_status_snapshot = state.__dict__.copy()
         self._status_activity = state.activity
         self._api_error_count = state.api_errors
+        if state.token_total >= 100000 and not getattr(self, "_token_runaway_alert_emitted", False):
+            self._token_runaway_alert_emitted = True
+            asyncio.create_task(
+                self._append_system_line(
+                    "[bold red]ALERT: Cumulative token usage exceeded 100k. Session may be in a runaway loop.[/]",
+                    force=True,
+                )
+            )
+            self.post_message(
+                HarnessEvent(
+                    UIEvent(
+                        event_type=UIEventType.ALERT,
+                        content="Cumulative token usage exceeded 100k. Consider reviewing the session for runaway behavior.",
+                        data={"token_total": state.token_total, "threshold": 100000},
+                    )
+                )
+            )
         try:
             is_busy = self.active_task is not None and not self.active_task.done()
             query = getattr(self, "query", None)

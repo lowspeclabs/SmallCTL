@@ -631,6 +631,12 @@ def detect_tool_plan_hard_route(state: Any) -> bool:
         except Exception:
             pass
 
+    # Condition 5: 3+ repeated same-family shell failures warrant tool-plan evidence gathering
+    repeated_signal = detect_repeated_failure_pattern(state, threshold=3)
+    if repeated_signal is not None and str(repeated_signal.tool_name or "").strip() in {"shell_exec", "ssh_exec"}:
+        scratchpad["_fama_force_tool_plan_next_turn"] = True
+        return True
+
     return False
 
 

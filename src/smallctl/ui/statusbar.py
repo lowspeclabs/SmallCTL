@@ -117,6 +117,8 @@ class StatusBar(Static):
             parts.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
         if getattr(self, "_fama_off", False):
             parts.append("[bold #ffb000]FAMA:OFF[/]")
+        if self._token_total >= 100000:
+            parts.append("[bold red]TOKEN RUNAWAY[/]")
 
         # Cumulative token progress bar
         ratio = 0.0
@@ -150,6 +152,8 @@ class StatusBar(Static):
             lines.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
         if getattr(self, "_fama_off", False):
             lines.append("[bold #ffb000]FAMA:OFF[/]")
+        if self._token_total >= 100000:
+            lines.append("[bold red]TOKEN RUNAWAY[/]")
 
         # Cumulative token progress bar
         ratio = 0.0

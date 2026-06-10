@@ -23,6 +23,7 @@ KIND_LABEL = {
     "system": "SYSTEM",
     "alert": "ALERT",
     "cancel": "SYSTEM",
+    "ready": "READY",
 }
 
 KIND_COLOR = {
@@ -37,6 +38,7 @@ KIND_COLOR = {
     "alert": "#f97316",
     "shell": "#ca8a04",
     "cancel": "#ef4444",
+    "ready": "#eab308",
 }
 
 

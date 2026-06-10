@@ -28,6 +28,7 @@ from .assembler_rendering import (
 from .assembler_text_utils import prune_thinking_tags, truncate_text_for_prompt
 from .frame import PromptStateFrame
 from .frame_compiler import PromptStateFrameCompiler
+from .messages_compact_helpers import collapse_repeated_shell_failures
 from .observations import ObservationPacket
 from .policy import ContextPolicy, estimate_text_tokens
 
@@ -45,6 +46,8 @@ class PromptAssembler:
         self.policy = policy or ContextPolicy()
         self.frame_compiler = PromptStateFrameCompiler(policy=self.policy)
         self._compaction_cache: dict[tuple[str, str | None, str | None, str], str] = {}
+        # Fix 6: Context pipeline idle metric
+        self.assemble_calls: int = 0
 
     def build_messages(
         self,
@@ -58,6 +61,12 @@ class PromptAssembler:
         include_structured_sections: bool = True,
         token_budget: int | None = None,
     ) -> PromptAssembly:
+        # Fix 6: Track context pipeline usage
+        self.assemble_calls += 1
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["assemble_calls"] = self.assemble_calls
+
         frame = self.frame_compiler.compile(
             state=state,
             retrieved_summaries=retrieved_summaries,
@@ -78,6 +87,7 @@ class PromptAssembler:
 
         transcript_limit = recent_message_limit or self.policy.recent_message_limit
         transcript = trim_recent_messages(list(state.recent_messages), limit=transcript_limit)
+        transcript = collapse_repeated_shell_failures(transcript)
         max_transcript_tokens = getattr(self.policy, "transcript_token_limit", int(soft_limit * 0.45))
         transcript_tokens = 0
         final_transcript = []

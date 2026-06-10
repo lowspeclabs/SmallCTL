@@ -163,7 +163,8 @@ def build_harness_config_kwargs(
         "test_time_scaling_all_fail_action": getattr(config, "test_time_scaling_all_fail_action", "fallback_normal_retry"),
         **_escalation_harness_kwargs(config),
         "run_logger": run_logger,
-        "fama_enabled": False if getattr(config, "no_fama", False) else getattr(config, "fama_enabled", True),
+        "fama_enabled": False if getattr(config, "fama_disabled", False) else getattr(config, "fama_enabled", True),
+        "fama_disabled": getattr(config, "fama_disabled", False),
         "fama_mode": getattr(config, "fama_mode", "lite"),
         "fama_default_ttl_steps": getattr(config, "fama_default_ttl_steps", 2),
         "fama_max_active_mitigations": getattr(config, "fama_max_active_mitigations", 2),
@@ -394,9 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rewoo-refiner-frame", dest="rewoo_refiner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--rewoo-frame-token-budget", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--no-fama",
+        "--fama-disabled",
         action="store_true",
-        help="Explicitly disable FAMA failure-aware mitigation at runtime.",
+        help="Explicitly disable FAMA failure-aware mitigation at runtime. This is the only override that prevents the loop-mode guard from auto-enabling FAMA.",
     )
     
     # Subcommands

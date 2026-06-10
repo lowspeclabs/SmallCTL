@@ -37,8 +37,11 @@ def setup_logging(
 
 
 def log_kv(logger: logging.Logger, level: int, message: str, **fields: Any) -> None:
+    log_method = getattr(logger, "log", None)
+    if log_method is None:
+        return
     payload = json.dumps(fields, ensure_ascii=True, sort_keys=True, default=str)
-    logger.log(level, "%s | %s", message, payload)
+    log_method(level, "%s | %s", message, payload)
 
 
 @dataclass

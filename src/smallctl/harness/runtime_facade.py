@@ -5,6 +5,7 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from ..interrupt_replies import is_interrupt_response
+from ..logging_utils import log_kv
 from ..models.events import UIEvent
 
 
@@ -143,6 +144,9 @@ def _planner_interrupt_payload(self: Any) -> dict[str, Any] | None:
 
 
 async def _run_teardown(self: Any) -> None:
+    from ..logging_utils import log_kv
+    import time
+
     shutdown_reason = str(getattr(self, "_pending_task_shutdown_reason", "") or "").strip()
     if shutdown_reason:
         self._finalize_task_scope(
@@ -151,6 +155,55 @@ async def _run_teardown(self: Any) -> None:
             reason=shutdown_reason,
         )
         self._pending_task_shutdown_reason = ""
+
+    # Session closure audit log (Fix 7)
+    state = getattr(self, "state", None)
+    session_id = str(getattr(state, "thread_id", "") or getattr(self, "conversation_id", "") or "").strip()
+    step_count = int(getattr(state, "step_count", 0) or 0) if state else 0
+    task_received_at = str(getattr(state, "task_received_at", "") or "").strip() if state else ""
+    created_at = str(getattr(state, "created_at", "") or "").strip() if state else ""
+    duration_sec = 0.0
+    if created_at:
+        try:
+            from datetime import datetime, timezone
+            created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            duration_sec = (datetime.now(timezone.utc) - created_dt).total_seconds()
+        except Exception:
+            pass
+
+    reason = "idle"
+    if shutdown_reason:
+        reason = "interrupted"
+    elif step_count > 0:
+        reason = "task_complete" if getattr(state, "last_verifier_verdict", None) else "closed"
+
+    # Idle session detection warning (Fix 2)
+    if step_count == 0 and not task_received_at:
+        log_kv(
+            self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+            logging.WARNING,
+            "session_idle",
+            msg="Session closed without executing tasks. If this was unintentional, check that the TUI rendered correctly and the task was submitted.",
+            session_id=session_id,
+            duration_sec=round(duration_sec, 2),
+        )
+
+    # Include context pipeline metrics if available (Fix 6)
+    context_metrics = {}
+    if state and hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+        context_metrics = dict(state.scratchpad.get("_context_metrics", {}))
+
+    log_kv(
+        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+        logging.INFO,
+        "session_closing",
+        session_id=session_id,
+        duration_sec=round(duration_sec, 2),
+        step_count=step_count,
+        task_submitted=bool(task_received_at),
+        reason=reason,
+        context_metrics=context_metrics if context_metrics else None,
+    )
 
     self.event_handler = None
     autosave = getattr(self, "_autosave_chat_session_state", None)
@@ -202,10 +255,26 @@ async def run_chat_with_events(
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     from ..graph.runtime import ChatGraphRuntime
+    from datetime import datetime, timezone
 
     redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
     if redirected is not None:
         return redirected
+
+    # Track task receipt time (Fix 2)
+    state = getattr(self, "state", None)
+    if state is not None:
+        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        state.touch()
+
+    log_kv(
+        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+        logging.INFO,
+        "task_received",
+        mode="chat",
+        task_length=len(task),
+        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+    )
 
     self.event_handler = event_handler
     runtime = ChatGraphRuntime.from_harness(
@@ -221,10 +290,26 @@ async def run_auto_with_events(
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> dict[str, Any]:
     from ..graph.runtime import AutoGraphRuntime
+    from datetime import datetime, timezone
 
     redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
     if redirected is not None:
         return redirected
+
+    # Track task receipt time (Fix 2)
+    state = getattr(self, "state", None)
+    if state is not None:
+        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        state.touch()
+
+    # Lifecycle telemetry (Fix 1)
+    log_kv(
+        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+        logging.INFO,
+        "task_received",
+        task_length=len(task),
+        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+    )
 
     self.event_handler = event_handler
     runtime = AutoGraphRuntime.from_harness(
@@ -466,10 +551,26 @@ async def run_task_with_events(
 ) -> dict[str, Any]:
     from ..graph.runtime import LoopGraphRuntime
     from ..graph.runtime_staged import StagedExecutionRuntime
+    from datetime import datetime, timezone
 
     redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
     if redirected is not None:
         return redirected
+
+    # Track task receipt time (Fix 2)
+    state = getattr(self, "state", None)
+    if state is not None:
+        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        state.touch()
+
+    log_kv(
+        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+        logging.INFO,
+        "task_received",
+        mode="loop",
+        task_length=len(task),
+        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+    )
 
     self.event_handler = event_handler
     if _should_use_staged_execution_runtime(self):

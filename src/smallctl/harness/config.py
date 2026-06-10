@@ -91,6 +91,7 @@ class HarnessConfig:
     fama_capsule_token_budget: int = 180
     fama_llm_judge_enabled: bool = False
     fama_llm_judge_min_severity: int = 3
+    fama_disabled: bool = False
     reflexion_enabled: bool = True
     reflexion_max_items: int = 5
     reflexion_inject_top_k: int = 3

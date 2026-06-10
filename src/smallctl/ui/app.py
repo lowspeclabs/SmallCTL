@@ -71,6 +71,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._show_tool_calls = True
         self._status_activity = ""
         self._api_error_count = 0
+        self._token_runaway_alert_emitted = False
         self._latest_status_snapshot: dict[str, Any] | None = None
         self._status_refresh_pending = False
         self._pending_harness_events: list[UIEvent] = []
@@ -141,6 +142,8 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         if self.run_logger:
             self.run_logger.set_listener(self._on_run_log_row)
         log_kv(self._app_logger, logging.INFO, "ui_mounted")
+        # Fix 1: Lifecycle telemetry — waiting for task
+        log_kv(self._app_logger, logging.INFO, "waiting_for_task")
         self._capture_status_snapshot_from_harness()
         self._refresh_status()
         if restore_status is not None:
@@ -158,6 +161,29 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
             self.history_index = len(self.task_history)
             self._record_chat_session_prompt(self.initial_task)
             self.active_task = asyncio.create_task(self._run_harness_task(self.initial_task))
+        else:
+            # Fix 4: Startup confirmation when no pre-loaded task
+            if restore_status is None:
+                asyncio.create_task(
+                    self._append_system_line(
+                        "Ready. Type a message to begin.",
+                        force=True,
+                        kind="ready",
+                    )
+                )
+            # Fix 3: FAMA disabled warning in TUI
+            fama_config = getattr(
+                getattr(self.harness, "state", None), "scratchpad", {}
+            ).get("_fama_config", {})
+            if fama_config.get("enabled") is False and not fama_config.get("_tui_warning_shown"):
+                asyncio.create_task(
+                    self._append_system_line(
+                        "Warning: FAMA (failure-aware mitigation) is disabled. "
+                        "Retry loops and tool misuse will not be auto-detected.",
+                        force=True,
+                    )
+                )
+                fama_config["_tui_warning_shown"] = True
         self.query_one(InputPane).focus()
 
     async def on_unmount(self) -> None:

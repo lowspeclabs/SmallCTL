@@ -159,6 +159,7 @@ class LoopState(LoopStateFlowMixin):
     last_completion_tokens: int = 0
     tool_history: list[str] = field(default_factory=list)
     write_session: WriteSession | None = None
+    task_received_at: str = ""
     log: logging.Logger = field(default_factory=lambda: logging.getLogger("smallctl.state"))
     
     @property

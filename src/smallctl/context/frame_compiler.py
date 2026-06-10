@@ -222,6 +222,8 @@ class PromptStateFrameCompiler:
         files_in_play = self._collect_files_in_play(state=state, latest_brief=latest_brief)
         write_session_summary = self._render_write_session(state) if state.write_session else ""
 
+        _maybe_inject_argparse_subcommand_note(state)
+
         spine = PromptStateSpine(
             cwd=state.cwd,
             task_goal=state.run_brief.original_task,
@@ -596,3 +598,32 @@ class PromptStateFrameCompiler:
     @staticmethod
     def _render_phase_context(state: LoopState) -> list[str]:
         return render_phase_context(state)
+
+
+def _maybe_inject_argparse_subcommand_note(state: LoopState) -> None:
+    """Detect argparse subparser structure in recently read .py artifacts and inject a hint."""
+    note = (
+        "CLI subcommand ordering: this script uses argparse subcommands. "
+        "Place global flags (e.g., --url, --token) BEFORE the subcommand, not after."
+    )
+    known_facts = list(state.working_memory.known_facts) if state.working_memory.known_facts else []
+    if any(note in fact for fact in known_facts):
+        return
+    for artifact in (state.artifacts or {}).values():
+        if isinstance(artifact, dict):
+            kind = str(artifact.get("kind") or artifact.get("tool_name") or "").strip()
+            source = str(artifact.get("source") or "").strip()
+            content = str(artifact.get("inline_content") or artifact.get("preview_text") or "").strip()
+        else:
+            kind = str(getattr(artifact, "kind", "") or getattr(artifact, "tool_name", "") or "").strip()
+            source = str(getattr(artifact, "source", "") or "").strip()
+            content = str(getattr(artifact, "inline_content", "") or getattr(artifact, "preview_text", "") or "").strip()
+        if kind not in {"file_read", "ssh_file_read"}:
+            continue
+        if not source.endswith(".py"):
+            continue
+        if not content:
+            continue
+        if "add_argument" in content and "subparsers.add_parser" in content:
+            state.working_memory.known_facts.append(note)
+            return

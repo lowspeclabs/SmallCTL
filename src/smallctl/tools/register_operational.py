@@ -292,7 +292,11 @@ def register_operational_tools(
             ),
             make_registration(
                 name="shell_exec",
-                description="Execute a shell command after user approval, launch it in background, or poll a background job with job_id.",
+                description=(
+                    "Execute a shell command after user approval, launch it in background, or poll a background job with job_id. "
+                    "On Unix, commands run through /bin/sh by default. Use 'bash -c' explicitly if you need Bash-only features "
+                    "(e.g., here-strings <<<, arrays, or source .venv/bin/activate)."
+                ),
                 schema={
                     "type": "object",
                     "properties": {

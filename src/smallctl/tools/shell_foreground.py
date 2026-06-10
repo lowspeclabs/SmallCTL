@@ -15,9 +15,11 @@ from .shell_sudo import SUDO_PROMPT_PATTERNS, ensure_sudo_credentials
 from .shell_support import (
     InvalidInputLoopDetector,
     _build_argparse_missing_args_question,
+    _build_argparse_unrecognized_args_hint,
     _build_shell_status_update,
     _detect_unsupported_shell_syntax,
     _extract_missing_argparse_arguments,
+    _extract_unrecognized_argparse_arguments,
     _interactive_installer_yes_pipe_guard,
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
@@ -333,6 +335,20 @@ async def shell_exec_foreground(
                             "missing_arguments": missing_args,
                         },
                     )
+
+                unrecognized_args = _extract_unrecognized_argparse_arguments(error)
+                if unrecognized_args:
+                    hint = _build_argparse_unrecognized_args_hint(command, unrecognized_args)
+                    if hint:
+                        return needs_human(
+                            hint,
+                            metadata={
+                                "output": output,
+                                "command": command,
+                                "reason": "unrecognized_arguments",
+                                "unrecognized_arguments": unrecognized_args,
+                            },
+                        )
 
                 path_hint = _shell_workspace_relative_hint(command, cwd=state.cwd)
                 if path_hint and any(

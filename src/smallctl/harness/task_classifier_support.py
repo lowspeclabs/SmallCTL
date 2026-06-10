@@ -92,7 +92,7 @@ def task_is_local_coding_target(task: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    has_py_target = bool(re.search(r'\.\/?temp\/[^\s\'"]+\.py', text))
+    has_py_target = bool(re.search(r'(?:\.\/)?[^\s\'"]+\.py', text))
     if not has_py_target:
         return False
     # Strong coding indicators that should override any SSH mentions in instructions
@@ -115,7 +115,11 @@ def task_is_local_coding_target(task: str) -> bool:
     # If the task is clearly asking for analysis/suggestions, don't treat as coding
     if "list improvements" in lowered or "suggest improvements" in lowered:
         return False
-    # Fallback: old logic for weaker cases
-    has_coding_marker = any(m in lowered for m in ("unittest", "./temp/"))
+    # Fallback: any local .py path without remote indicators is a coding target
     has_explicit_remote = has_remote_execution_target(text)
-    return has_coding_marker and has_py_target and not has_explicit_remote
+    if has_explicit_remote:
+        return False
+    # Additional weak coding markers
+    weak_coding_markers = ("unittest", "python script", "py script", ".py file", "python3")
+    has_weak_coding = any(m in lowered for m in weak_coding_markers)
+    return has_py_target and has_weak_coding

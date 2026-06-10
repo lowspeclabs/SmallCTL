@@ -83,7 +83,9 @@ from .shell_support_write_session_guards import (
 from .shell_support_invalid_input import InvalidInputLoopDetector
 from .shell_support_argparse import (
     _extract_missing_argparse_arguments,
+    _extract_unrecognized_argparse_arguments,
     _build_argparse_missing_args_question,
+    _build_argparse_unrecognized_args_hint,
     _detect_unsupported_shell_syntax,
 )
 from .shell_support_misc import (

@@ -73,6 +73,12 @@
   color: #9ca3af;
 }
 
+.bubble-ready {
+  border-left: thick #eab308;
+  padding-left: 1;
+  color: #eab308;
+}
+
 .bubble-shell {
   border-left: thick #ca8a04;
   padding-left: 1;
@@ -85,9 +91,14 @@
   color: #ef4444;
 }
 
+#approve-prompt-overlay {
+  width: 100%;
+  height: 100%;
+  align: center middle;
+}
+
 #approve-prompt-shell,
 #approve-prompt-plan {
-  align: center middle;
   width: 50;
   max-width: 90%;
   height: auto;
@@ -561,28 +572,55 @@
   border: none;
 }
 
-#quit-confirm-dialog {
+#quit-confirm-overlay {
+  width: 100%;
+  height: 100%;
   align: center middle;
+}
+
+#quit-confirm-dialog {
   width: 50;
   max-width: 90%;
   height: auto;
   padding: 1 2;
-  border: round #ef4444;
+  border: round #ca8a04;
   background: #121212;
   color: #e5e7eb;
   opacity: 80%;
 }
 
+#quit-confirm-content {
+  width: 100%;
+  height: auto;
+  layout: vertical;
+}
+
 #quit-confirm-title {
   width: 100%;
   text-style: bold;
-  color: #ef4444;
+  color: #ca8a04;
   content-align: center middle;
+  padding: 0;
+  margin: 0;
 }
 
 #quit-confirm-buttons {
   width: 100%;
   height: auto;
-  padding-top: 1;
+  padding-top: 0;
   align: center middle;
+}
+
+#quit-confirm-yes,
+#quit-confirm-no {
+  background: #374151;
+  color: #e5e7eb;
+  border: round #ca8a04;
+  margin: 0 1;
+  padding: 0 1;
+}
+
+#quit-confirm-yes:hover,
+#quit-confirm-no:hover {
+  background: #4b5563;
 }

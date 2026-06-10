@@ -122,6 +122,14 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
 
     self.config = config
 
+    # Loop-mode guard: FAMA must stay enabled in loop mode unless explicitly disabled via --fama-disabled
+    if str(config.run_mode or "").strip().lower() == "loop" and not config.fama_enabled and not config.fama_disabled:
+        logger.warning(
+            "FAMA was disabled in config but run_mode is 'loop'. Auto-enabling FAMA to prevent "
+            "retry loops and tool misuse. Pass --fama-disabled to override this guard."
+        )
+        config.fama_enabled = True
+
     self.state.scratchpad["_fama_config"] = {
         "enabled": bool(config.fama_enabled),
         "mode": str(config.fama_mode or "lite"),
@@ -236,3 +244,11 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     if scaling_context is not None:
         self.context_policy.recalculate_quotas(scaling_context)
         self.state.recent_message_limit = self.context_policy.recent_message_limit
+
+    # Lifecycle telemetry: harness fully initialized (Fix 1)
+    logger.info(
+        "harness_initialized session_id=%s model=%s phase=%s",
+        self.state.thread_id,
+        config.model,
+        self._initial_phase,
+    )

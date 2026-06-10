@@ -7,6 +7,7 @@ from typing import Any
 
 from ..recovery_metrics import record_failure_event_metric
 from ..recovery_schema import FailureEvent
+from ..runtime_error_repair import _MISSING_MODULE_RE
 from . import task_completion_outcomes as _task_completion_outcomes
 from . import write_session_outcomes as _write_session_outcomes
 from .deps import GraphRuntimeDeps
@@ -547,6 +548,11 @@ def _failure_event_from_record(harness: Any, record: ToolExecutionRecord, *, sub
         detail = str(record.result.output.get("stderr") or record.result.output.get("message") or "").strip()
     if detail:
         message = f"{message} - {detail[:180]}"
+    suggested_next_action = "Use the tool failure evidence to take the next smallest different action."
+    missing_module_match = _MISSING_MODULE_RE.search(detail)
+    if missing_module_match:
+        module = missing_module_match.group("module").strip()
+        suggested_next_action = f"pip install {module}"
     return FailureEvent(
         event_id=f"tool-{record.operation_id or record.tool_call_id or int(time() * 1000)}",
         timestamp=time(),
@@ -559,7 +565,7 @@ def _failure_event_from_record(harness: Any, record: ToolExecutionRecord, *, sub
         tool_call_id=record.tool_call_id,
         operation_id=record.operation_id,
         subtask_id=subtask_id,
-        suggested_next_action="Use the tool failure evidence to take the next smallest different action.",
+        suggested_next_action=suggested_next_action,
     )
 
 

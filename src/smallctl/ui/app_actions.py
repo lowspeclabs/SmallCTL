@@ -523,12 +523,13 @@ class QuitConfirmScreen(ModalScreen[bool]):
     ]
 
     def compose(self) -> ComposeResult:
-        with Container(id="quit-confirm-dialog"):
-            with Vertical():
-                yield Static("Quit smallctl?", id="quit-confirm-title")
-                with Horizontal(id="quit-confirm-buttons"):
-                    yield Button("Quit", id="quit-confirm-yes", variant="error")
-                    yield Button("Cancel", id="quit-confirm-no", variant="primary")
+        with Container(id="quit-confirm-overlay"):
+            with Container(id="quit-confirm-dialog"):
+                with Vertical(id="quit-confirm-content"):
+                    yield Static("Quit smallctl?", id="quit-confirm-title")
+                    with Horizontal(id="quit-confirm-buttons"):
+                        yield Button("Quit", id="quit-confirm-yes", variant="error")
+                        yield Button("Cancel", id="quit-confirm-no", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one("#quit-confirm-no", Button).focus()

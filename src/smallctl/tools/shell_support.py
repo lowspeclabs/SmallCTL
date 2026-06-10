@@ -59,6 +59,8 @@ from .shell_support_installer_guards import (
     _remote_installer_cwd_and_script,
     _remote_installer_preflight_checks,
     _mark_remote_installer_preflight_clean,
+    _mark_remote_installer_preflight_clean_from_write,
+    _remote_installer_preflight_has_verified_write,
     _expose_interactive_session_tools,
     _looks_like_interactive_installer_target,
     _looks_like_interactive_installer_word,
@@ -91,10 +93,13 @@ from .shell_support_misc import (
 )
 from .shell_support_apt_and_outcome import (
     _apt_deb822_preflight_guard,
+    _apt_sources_list_d_guard,
     _is_deb822_preflight_clean,
     _looks_like_deb822_validator,
     _mark_deb822_preflight_clean,
     classify_shell_outcome,
+    record_apt_update_result,
+    record_sources_list_d_modification,
     validate_sources_file,
 )
 

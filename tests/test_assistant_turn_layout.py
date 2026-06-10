@@ -48,25 +48,18 @@ def test_thinking_after_visible_assistant_stays_in_one_turn() -> None:
 
             assert turn.get_assistant_text() == "Visible summary up top.\nFinal user-facing status."
 
-            body = turn.query_one(".assistant-turn-body", Vertical)
-            main = turn.query_one(".assistant-turn-main", Vertical)
-            meta = turn.query_one(".assistant-turn-meta", Vertical)
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            content_children = list(content.children)
 
-            assert list(body.children) == [meta, main]
-
-            main_children = list(main.children)
-            assert [type(child) for child in main_children] == [TextBlockWidget, TextBlockWidget]
-            assert [child.text for child in main_children] == [
-                "Visible summary up top.",
-                "Final user-facing status.",
-            ]
-
-            meta_children = list(meta.children)
-            assert [type(child) for child in meta_children] == [
+            assert [type(child) for child in content_children] == [
+                TextBlockWidget,
                 AssistantDetailWidget,
                 ToolCallsContainerWidget,
+                TextBlockWidget,
             ]
-            assert meta_children[0].text == "Plan the next step."
+            assert content_children[0].text == "Visible summary up top."
+            assert content_children[1].text == "Plan the next step."
+            assert content_children[3].text == "Final user-facing status."
 
     asyncio.run(_run())
 
@@ -98,18 +91,18 @@ def test_consecutive_tool_calls_group_between_thinking_statements() -> None:
             turn = console._active_assistant_turn
             assert turn is not None
 
-            meta = turn.query_one(".assistant-turn-meta", Vertical)
-            meta_children = list(meta.children)
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            content_children = list(content.children)
 
-            assert [type(child) for child in meta_children] == [
+            assert [type(child) for child in content_children] == [
                 AssistantDetailWidget,
                 ToolCallsContainerWidget,
                 AssistantDetailWidget,
             ]
-            assert meta_children[0].text == "First thought."
-            assert meta_children[2].text == "Second thought."
+            assert content_children[0].text == "First thought."
+            assert content_children[2].text == "Second thought."
 
-            tool_group = meta_children[1]
+            tool_group = content_children[1]
             assert isinstance(tool_group, ToolCallsContainerWidget)
             tool_children = list(tool_group.query_one(".tool-calls-container", Vertical).children)
             assert [type(child) for child in tool_children] == [
@@ -189,21 +182,34 @@ def test_tool_call_after_meta_and_assistant_stays_in_one_turn() -> None:
             turn = turns[0]
             assert turn.get_assistant_text() == "First fetch is complete.\nSecond step is underway."
 
-            meta = turn.query_one(".assistant-turn-meta", Vertical)
-            meta_children = list(meta.children)
-            assert [type(child) for child in meta_children] == [
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            content_children = list(content.children)
+            assert [type(child) for child in content_children] == [
                 AssistantDetailWidget,
                 ToolCallsContainerWidget,
+                TextBlockWidget,
+                ToolCallsContainerWidget,
+                TextBlockWidget,
             ]
 
-            assert meta_children[0].text == "Inspect the first result."
-            tool_group = meta_children[1]
-            assert isinstance(tool_group, ToolCallsContainerWidget)
-            tool_children = list(tool_group.query_one(".tool-calls-container", Vertical).children)
-            assert [child.text for child in tool_children] == [
+            assert content_children[0].text == "Inspect the first result."
+            tool_group_1 = content_children[1]
+            assert isinstance(tool_group_1, ToolCallsContainerWidget)
+            tool_children_1 = list(tool_group_1.query_one(".tool-calls-container", Vertical).children)
+            assert [child.text for child in tool_children_1] == [
                 "web_fetch(result_id='r1')",
+            ]
+
+            assert content_children[2].text == "First fetch is complete."
+
+            tool_group_2 = content_children[3]
+            assert isinstance(tool_group_2, ToolCallsContainerWidget)
+            tool_children_2 = list(tool_group_2.query_one(".tool-calls-container", Vertical).children)
+            assert [child.text for child in tool_children_2] == [
                 "shell_exec(command='ssh host')",
             ]
+
+            assert content_children[4].text == "Second step is underway."
 
     asyncio.run(_run())
 
@@ -313,7 +319,7 @@ def test_unmatched_tool_result_breaks_active_assistant_turn() -> None:
                 type(console._active_assistant_turn),
             ]
             assert children[0].get_assistant_text() == "Before result."
-            assert children[1].kind == "tool_result"
+            assert children[1].kind == "system"
             assert children[2].get_assistant_text() == "After result."
 
     asyncio.run(_run())

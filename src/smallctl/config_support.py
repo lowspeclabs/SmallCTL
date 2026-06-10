@@ -368,6 +368,7 @@ def _env_raw_config(env_or_dotenv: Any) -> dict[str, Any]:
         "api_key": env_or_dotenv(f"{ENV_PREFIX}API_KEY"),
         "context_limit": env_or_dotenv(f"{ENV_PREFIX}CONTEXT_LIMIT"),
         "max_prompt_tokens": env_or_dotenv(f"{ENV_PREFIX}MAX_PROMPT_TOKENS"),
+        "max_prompt_tokens_explicit": env_or_dotenv(f"{ENV_PREFIX}MAX_PROMPT_TOKENS_EXPLICIT"),
         "reserve_completion_tokens": env_or_dotenv(f"{ENV_PREFIX}RESERVE_COMPLETION_TOKENS"),
         "reserve_tool_tokens": env_or_dotenv(f"{ENV_PREFIX}RESERVE_TOOL_TOKENS"),
         "first_token_timeout_sec": env_or_dotenv(f"{ENV_PREFIX}FIRST_TOKEN_TIMEOUT_SEC"),

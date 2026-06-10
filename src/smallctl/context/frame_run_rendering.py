@@ -251,6 +251,11 @@ def continuation_anchor_lines(state: LoopState) -> list[str]:
         failed_tool_name = str(last_failed_tool.get("tool_name") or "").strip()
         if failed_tool_name:
             lines.append(f"last_failed_tool={failed_tool_name}")
+            if bool(last_failed_tool.get("approval_denied")):
+                lines.append(
+                    f"NOTE: The previous {failed_tool_name} call was denied by user approval. "
+                    "If the user indicates approval, re-execute the same call."
+                )
 
     ssh_target = handoff.get("ssh_target")
     if isinstance(ssh_target, dict):
@@ -258,6 +263,10 @@ def continuation_anchor_lines(state: LoopState) -> list[str]:
         user = str(ssh_target.get("user") or "").strip()
         if host:
             lines.append(f"ssh_target={user + '@' if user else ''}{host}")
+            lines.append(
+                f"Remote target is {host}. If you need to run commands on that host, "
+                f"use ssh_exec with host={host}. Do not use any other host."
+            )
             targets = state.scratchpad.get("_session_ssh_targets")
             if isinstance(targets, dict):
                 target_entry = targets.get(host)

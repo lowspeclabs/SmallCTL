@@ -44,11 +44,16 @@ class StatusBar(Static):
         self._token_total = 0  # Cumulative session tokens
         self._context_window = 0  # Total server context window
         self._api_errors = 0
+        self._fama_off = False
         self._refresh_display()
 
     def set_status(self, text: str) -> None:
         # Backward-compatible fallback for any legacy callers.
         self.update(text)
+
+    def set_fama_off(self, off: bool = True) -> None:
+        self._fama_off = off
+        self._refresh_display()
 
     def set_state(
         self,
@@ -69,6 +74,7 @@ class StatusBar(Static):
         token_limit: int, # effective prompt budget (free)
         context_window: int = 0, # total server context window
         api_errors: int = 0,
+        fama_off: bool = False,
     ) -> None:
         self._model = model
         self._phase = phase
@@ -86,6 +92,7 @@ class StatusBar(Static):
         self._token_limit = max(0, token_limit)
         self._context_window = max(0, context_window)
         self._api_errors = api_errors
+        self._fama_off = fama_off
         self._refresh_display()
 
     def _build_status_text(self) -> str:
@@ -94,7 +101,8 @@ class StatusBar(Static):
 
         parts = []
         if getattr(self, "_show_model", True):
-            parts.append(f"model: {self._model}")
+            parts.append(f"[bold #9ca3af] model: {self._model} [/]")
+        parts.append(f"[bold #9ca3af] chat [/]")
         parts.extend(
             [
                 f"phase: {self._phase}",
@@ -102,111 +110,55 @@ class StatusBar(Static):
                 f"mode: {self._mode}",
             ]
         )
-        if self._plan:
-            parts.append(f"plan: {self._plan}")
-        if self._active_step:
-            parts.append(f"active-step: {self._active_step}")
         if self._activity:
             parts.append(f"activity: {self._activity}")
-        if self._contract_flow_ui:
-            if self._contract_phase:
-                parts.append(f"contract: {self._contract_phase}")
-            if self._acceptance_progress:
-                parts.append(f"acceptance: {self._acceptance_progress}")
-            if self._latest_verdict:
-                parts.append(f"verdict: {self._latest_verdict}")
         
         if self._api_errors > 0:
             parts.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
+        if getattr(self, "_fama_off", False):
+            parts.append("[bold #ffb000]FAMA:OFF[/]")
 
-        # Ratio is current prompt pressure
+        # Cumulative token progress bar
         ratio = 0.0
         if self._token_limit > 0:
-            ratio = min(1.0, self._token_usage / self._token_limit)
+            ratio = min(1.0, self._token_total / (self._token_limit * 2))
         
         filled = int(round(ratio * self._BAR_WIDTH))
-        empty = self._BAR_WIDTH - filled
-        if ratio >= 0.95:
-            fill_color = "bold red"
-        elif ratio >= 0.8:
-            fill_color = "yellow"
-        else:
-            fill_color = "green"
-
         filled_segment = "█" * filled
-        empty_segment = "░" * empty
-        bar_markup = f"[{fill_color}]{filled_segment}[/][#5b677a]{empty_segment}[/]"
+        bar_markup = f"[bold #fca5a5]{filled_segment}[/]"
 
-        # Safety Budget (Pressure)
-        limit_label = f"{self._token_limit//1024}k" if self._token_limit >= 1024 else str(self._token_limit)
-        parts.append(f"pressure: {bar_markup} {self._token_usage}/{limit_label}")
-        
-        # Context window display: free / total
-        if self._context_window > 0:
-            free_k = f"{self._token_limit / 1000:.1f}k"
-            total_k = f"{self._context_window / 1000:.1f}k"
-            parts.append(f"ctx: {free_k}/{total_k}")
-        elif self._token_limit > 0:
-            limit_k = f"{self._token_limit / 1000:.1f}k"
-            parts.append(f"ctx: {limit_k}")
-
-        # Cumulative Total
-        parts.append(f"total: {self._token_total:,}")
+        parts.append(f"cumulative: {bar_markup} {self._token_total:,}")
 
         return " | ".join(parts)
 
     def _build_vertical_status_text(self) -> str:
         lines = []
         if getattr(self, "_show_model", True):
-            lines.extend(["[bold #93c5fd]Model[/]", f"{self._model}", ""])
+            lines.extend(["[bold #9ca3af]Model[/]", f"{self._model}", ""])
 
         lines.extend(
             [
-                "[bold #93c5fd]Run[/]",
+                "[bold #9ca3af]Run[/]",
                 f"phase: {self._phase}",
                 f"step: {self._step}",
                 f"mode: {self._mode}",
             ]
         )
-        if self._plan:
-            lines.append(f"plan: {self._plan}")
-        if self._active_step:
-            lines.append(f"active-step: {self._active_step}")
         if self._activity:
             lines.append(f"activity: {self._activity}")
-        if self._contract_flow_ui:
-            if self._contract_phase:
-                lines.append(f"contract: {self._contract_phase}")
-            if self._acceptance_progress:
-                lines.append(f"acceptance: {self._acceptance_progress}")
-            if self._latest_verdict:
-                lines.append(f"verdict: {self._latest_verdict}")
         if self._api_errors > 0:
             lines.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
+        if getattr(self, "_fama_off", False):
+            lines.append("[bold #ffb000]FAMA:OFF[/]")
 
+        # Cumulative token progress bar
         ratio = 0.0
         if self._token_limit > 0:
-            ratio = min(1.0, self._token_usage / self._token_limit)
+            ratio = min(1.0, self._token_total / (self._token_limit * 2))
         filled = int(round(ratio * self._BAR_WIDTH))
-        empty = self._BAR_WIDTH - filled
-        if ratio >= 0.95:
-            fill_color = "bold red"
-        elif ratio >= 0.8:
-            fill_color = "yellow"
-        else:
-            fill_color = "green"
-        bar_markup = f"[{fill_color}]{'█' * filled}[/][#5b677a]{'░' * empty}[/]"
+        bar_markup = f"[bold #fca5a5]{'█' * filled}[/]"
 
-        limit_label = f"{self._token_limit//1024}k" if self._token_limit >= 1024 else str(self._token_limit)
-        lines.extend(["", "[bold #93c5fd]Usage[/]", f"pressure: {bar_markup}", f"tokens: {self._token_usage}/{limit_label}"])
-        if self._context_window > 0:
-            free_k = f"{self._token_limit / 1000:.1f}k"
-            total_k = f"{self._context_window / 1000:.1f}k"
-            lines.append(f"ctx: {free_k}/{total_k}")
-        elif self._token_limit > 0:
-            limit_k = f"{self._token_limit / 1000:.1f}k"
-            lines.append(f"ctx: {limit_k}")
-        lines.append(f"total: {self._token_total:,}")
+        lines.extend(["", "[bold #9ca3af]Usage[/]", f"cumulative: {bar_markup} {self._token_total:,}"])
         return "\n".join(lines)
 
     def _refresh_display(self) -> None:

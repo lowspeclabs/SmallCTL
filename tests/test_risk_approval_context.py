@@ -56,6 +56,73 @@ def test_shell_approval_request_emits_proof_bundle() -> None:
     assert asyncio.run(_run()) is True
 
 
+def test_shell_approval_grace_period_resolves_after_timeout() -> None:
+    """Late UI resolutions within the grace period should still be honoured."""
+    events: list[object] = []
+
+    class _FakeHarness:
+        allow_interactive_shell_approval = True
+        shell_approval_session_default = False
+        event_handler = object()
+
+        async def _emit(self, handler: object, event: object) -> None:
+            del handler
+            events.append(event)
+
+    async def _run() -> bool:
+        harness = _FakeHarness()
+        service = ApprovalService(harness)
+        approval_task = asyncio.create_task(
+            service.request_shell_approval(
+                command="echo hello",
+                cwd="/tmp",
+                timeout_sec=0,  # Immediate timeout
+            )
+        )
+        await asyncio.sleep(0.05)
+        # Resolve within grace period (5 seconds)
+        approval_id = str(events[0].data.get("approval_id") or "")
+        service.resolve_shell_approval(approval_id, True)
+        return await approval_task
+
+    # Should return True because the late resolution is honoured during grace period
+    assert asyncio.run(_run()) is True
+
+
+def test_shell_approval_past_grace_period_is_ignored() -> None:
+    """Resolutions past the grace period should be ignored."""
+    events: list[object] = []
+
+    class _FakeHarness:
+        allow_interactive_shell_approval = True
+        shell_approval_session_default = False
+        event_handler = object()
+
+        async def _emit(self, handler: object, event: object) -> None:
+            del handler
+            events.append(event)
+
+    async def _run() -> bool:
+        harness = _FakeHarness()
+        service = ApprovalService(harness)
+        approval_task = asyncio.create_task(
+            service.request_shell_approval(
+                command="echo hello",
+                cwd="/tmp",
+                timeout_sec=0,  # Immediate timeout
+            )
+        )
+        # Wait longer than the 5-second grace period
+        await asyncio.sleep(6.0)
+        approval_id = str(events[0].data.get("approval_id") or "")
+        # Resolve after grace period
+        service.resolve_shell_approval(approval_id, True)
+        return await approval_task
+
+    # Should return False because the resolution is past grace period
+    assert asyncio.run(_run()) is False
+
+
 def test_approval_screen_renders_proof_bundle_details() -> None:
     state = LoopState(cwd="/tmp")
     state.reasoning_graph.claim_records.append(

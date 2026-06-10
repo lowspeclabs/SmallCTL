@@ -36,6 +36,7 @@ class HarnessEvent(Message):
 
 class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
     CSS_PATH = "styles.tcss"
+    TITLE = "SmallctlApp"
     BINDINGS = [
         ("ctrl+l", "clear_console", "Clear"),
         ("ctrl+k", "cancel_task", "Cancel Task"),
@@ -95,13 +96,13 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
                     yield Button("bar: right", id="model-bar-toggle-sidebar")
                     yield StatusBar(model="n/a", phase="explore", step=0, id="status-sidebar", vertical=True)
                     yield Static("Objective\nNo active objective\n\nTask\nNo active task", id="objective-sidebar")
-                    yield Button("Stop (Ctrl+K)", id="stop-button-sidebar", variant="error")
+                    yield Button("Stop (Ctrl+K)", id="stop-button-sidebar")
             with Horizontal(id="status-row"):
                 yield ModelSelectButton("n/a", id="model-button")
                 yield ChatSelectButton(id="chat-button")
                 yield StatusBar(model="n/a", phase="explore", step=0, id="status", show_model=False)
                 yield Button("bar: bottom", id="model-bar-toggle")
-                yield Button("Stop (Ctrl+K)", id="stop-button", variant="error")
+                yield Button("Stop (Ctrl+K)", id="stop-button")
             yield InputPane("", id="input")
 
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:

@@ -113,11 +113,20 @@ def _inject_recovery_metrics(result: dict[str, Any], state: Any) -> None:
         result["recovery_metrics"] = dict(metrics)
 
 
-def _run_metric_flags(state: Any, challenge_progress: dict[str, Any]) -> dict[str, Any]:
+def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status: str = "") -> dict[str, Any]:
     task_text = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
     no_op = task_text in {"hi", "hello", "hey", "thanks", "thank you"} and int(getattr(state, "step_count", 0) or 0) <= 1
     code_changes = int(challenge_progress.get("code_change_count", 0) or 0) if challenge_progress else 0
     deliverable_verified = bool(challenge_progress.get("verified_after_last_change")) if challenge_progress else False
+    # If the run was cancelled, do not claim deliverable_verified=true unless the objective verifier
+    # passed after the last failure.
+    if status == "cancelled" and deliverable_verified:
+        last_verifier = getattr(state, "last_verifier_verdict", None)
+        last_verifier_pass = False
+        if isinstance(last_verifier, dict):
+            last_verifier_pass = str(last_verifier.get("verdict") or "").strip().lower() == "pass"
+        if not last_verifier_pass:
+            deliverable_verified = False
     diagnostic_only = code_changes <= 0 and not deliverable_verified and not no_op
     return {
         "no_op": no_op,
@@ -159,7 +168,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     challenge_progress = challenge_progress_report(self.state)
     if challenge_progress:
         result["challenge_progress"] = challenge_progress
-    result.update(_run_metric_flags(self.state, challenge_progress))
+    result.update(_run_metric_flags(self.state, challenge_progress, status=status))
     _inject_recovery_metrics(result, self.state)
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
@@ -206,7 +215,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "latest_task_summary_path": task_summary_path,
                 "stall_classification": stall_classification,
                 "error_type": error_type,
-                **_run_metric_flags(self.state, challenge_progress),
+                **_run_metric_flags(self.state, challenge_progress, status=status),
             }
             if challenge_progress:
                 summary_payload["challenge_progress"] = challenge_progress

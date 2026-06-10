@@ -142,3 +142,61 @@ def test_fama_active_mitigation_ttl_is_logged() -> None:
     ttl_events = [data for event, data in events if event == "fama_mitigation_ttl"]
     assert {event["mitigation"] for event in ttl_events} == {"done_gate", "acceptance_checklist_capsule"}
     assert all(event["remaining_steps"] > 0 for event in ttl_events)
+
+
+def test_detect_repeated_failure_pattern_fires_after_three_identical_failures() -> None:
+    from smallctl.fama.detectors import detect_repeated_failure_pattern
+    state = LoopState(step_count=5)
+    state.scratchpad["_repeated_failure_observations"] = [
+        {
+            "key": "file_read::not_found",
+            "tool_name": "file_read",
+            "domain": "",
+            "pattern": "not_found",
+            "count": 3,
+            "last_step": 5,
+            "first_step": 1,
+        }
+    ]
+    signal = detect_repeated_failure_pattern(state, threshold=3)
+    assert signal is not None
+    assert signal.tool_name == "file_read"
+    assert signal.failure_class == "not_found"
+    assert "3 attempts" in signal.evidence
+
+
+def test_detect_repeated_failure_pattern_ignores_stale_observations() -> None:
+    from smallctl.fama.detectors import detect_repeated_failure_pattern
+    state = LoopState(step_count=20)
+    state.scratchpad["_repeated_failure_observations"] = [
+        {
+            "key": "file_read::not_found",
+            "tool_name": "file_read",
+            "domain": "",
+            "pattern": "not_found",
+            "count": 3,
+            "last_step": 5,
+            "first_step": 1,
+        }
+    ]
+    signal = detect_repeated_failure_pattern(state, threshold=3)
+    assert signal is None
+
+
+def test_detect_verifier_failure_mode_fires_on_persistent_failure_mode() -> None:
+    from smallctl.fama.detectors import detect_verifier_failure_mode
+    state = LoopState(step_count=5)
+    state.last_verifier_verdict = {"failure_mode": "logic", "verdict": "fail"}
+    state.scratchpad["_fama_verifier_failure_mode:logic"] = 2
+    signal = detect_verifier_failure_mode(state)
+    assert signal is not None
+    assert signal.failure_class == "logic"
+    assert "failure_mode=logic" in signal.evidence
+
+
+def test_detect_verifier_failure_mode_is_none_on_first_observation() -> None:
+    from smallctl.fama.detectors import detect_verifier_failure_mode
+    state = LoopState(step_count=5)
+    state.last_verifier_verdict = {"failure_mode": "logic", "verdict": "fail"}
+    signal = detect_verifier_failure_mode(state)
+    assert signal is None

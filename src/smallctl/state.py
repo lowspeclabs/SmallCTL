@@ -148,6 +148,7 @@ class LoopState(LoopStateFlowMixin):
     background_processes: dict[str, dict[str, Any]] = field(default_factory=dict)
     cwd: str = field(default_factory=lambda: str(Path.cwd()))
     active_tool_profiles: list[str] = field(default_factory=lambda: ["core"])
+    task_exposed_tools: set[str] = field(default_factory=set)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -262,6 +263,7 @@ class LoopState(LoopStateFlowMixin):
             },
             "cwd": self.cwd,
             "active_tool_profiles": json_safe_value(self.active_tool_profiles),
+            "task_exposed_tools": json_safe_value(sorted(self.task_exposed_tools)),
             "tool_history": json_safe_value(self.tool_history),
             "write_session": self.write_session.to_dict() if self.write_session else None,
             "created_at": self.created_at,
@@ -407,6 +409,7 @@ class LoopState(LoopStateFlowMixin):
         }
         raw["cwd"] = str(migrated.get("cwd", Path.cwd()) or Path.cwd())
         raw["active_tool_profiles"] = _coerce_string_list(migrated.get("active_tool_profiles")) or ["core"]
+        raw["task_exposed_tools"] = set(_coerce_string_list(migrated.get("task_exposed_tools")))
         raw["tool_history"] = _coerce_string_list(migrated.get("tool_history"))
         raw["write_session"] = _coerce_write_session(migrated.get("write_session"))
         raw["created_at"] = _coerce_timestamp_string(migrated.get("created_at"))

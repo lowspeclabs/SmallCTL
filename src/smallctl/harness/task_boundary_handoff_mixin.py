@@ -316,10 +316,14 @@ class TaskBoundaryHandoffMixin:
             tool_name = str(record.get("tool_name") or "").strip()
             if not tool_name:
                 continue
-            return {
+            payload: dict[str, Any] = {
                 "tool_name": tool_name,
                 "error": clip_text_value(str(result.get("error") or "").strip(), limit=220)[0],
             }
+            metadata = record.get("metadata")
+            if isinstance(metadata, dict) and bool(metadata.get("approval_denied")):
+                payload["approval_denied"] = True
+            return payload
         previous_failed = previous.get("last_failed_tool")
         if isinstance(previous_failed, dict) and str(previous_failed.get("tool_name") or "").strip():
             normalized = json_safe_value(previous_failed)

@@ -103,6 +103,7 @@ class ChatSessionSelectScreen(ModalScreen[str | None]):
             setattr(item, "thread_id", session.thread_id)
             await list_view.append(item)
         list_view.index = 0 if self.sessions else None
+        list_view.refresh()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         thread_id = str(getattr(event.item, "thread_id", "") or "").strip()

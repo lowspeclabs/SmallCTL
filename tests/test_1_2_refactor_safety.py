@@ -467,6 +467,7 @@ def test_env_config_mapping_covers_config_fields() -> None:
         "cleanup",
         "compatibility_warnings",
         "max_prompt_tokens_explicit",
+        "no_fama",
         "task",
         "tui",
     }

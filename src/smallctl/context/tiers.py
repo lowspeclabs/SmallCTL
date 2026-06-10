@@ -14,7 +14,7 @@ class MessageTierManager:
         # Fallback defaults if no policy exists/passed
         self.warm_limit = getattr(policy, "warm_brief_limit", 3)
         self.turn_bundle_limit = getattr(policy, "turn_bundle_limit", 6)
-        self.compaction_interval = getattr(policy, "compaction_step_interval", 8)
+        self.compaction_interval = getattr(policy, "compaction_step_interval", 5)
 
     @property
     def hot_window(self) -> int:

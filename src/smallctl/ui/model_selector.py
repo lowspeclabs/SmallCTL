@@ -225,6 +225,7 @@ class ModelSelectScreen(ModalScreen[str | None]):
             list_view.index = selected_index if selected_index is not None else 0
         else:
             list_view.index = None
+        list_view.refresh()
         self.query_one("#model-select-confirm", Button).disabled = not bool(self._visible_models)
         if self._visible_models:
             self.query_one("#model-select-message", Static).update(

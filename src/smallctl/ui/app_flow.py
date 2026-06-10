@@ -30,6 +30,8 @@ from .app_flow_utils import _extract_terminal_result_text, _harness_event_messag
 from .console import ConsolePane
 from .display import (
     StatusState,
+    _build_backend_rca_strip,
+    _CRITICAL_EVENTS,
     check_duplicate_promotion,
     compute_activity_for_event,
     format_restore_status,
@@ -87,7 +89,10 @@ class SmallctlAppFlowMixin:
         except asyncio.CancelledError:
             console = self._get_console()
             if console is not None:
-                await self._append_system_line("Task cancelled.", force=True)
+                await self._append_system_line("Task cancelled.", force=True, kind="cancel")
+                rca = _build_backend_rca_strip(self.harness)
+                if rca:
+                    await self._append_system_line(rca, force=True, kind="cancel")
             step_override = "cancelled"
         except Exception as exc:
             console = self._get_console()
@@ -259,12 +264,15 @@ class SmallctlAppFlowMixin:
     def _on_run_log_row(self, row: dict[str, Any]) -> None:
         if not self._should_render_run_log_row(row):
             return
+        event = str(row.get("event") or "")
         if not self._show_system_messages:
-            return
+            # Critical backend state changes should always be visible
+            if event not in _CRITICAL_EVENTS:
+                return
         if not self._show_tool_calls:
             if row.get("channel") == "tools":
                 return
-            if row.get("event") in {"harness_tool_dispatch", "harness_tool_result"}:
+            if event in {"harness_tool_dispatch", "harness_tool_result"}:
                 return
         from .display import format_run_log_row
 
@@ -398,6 +406,7 @@ class SmallctlAppFlowMixin:
                     token_limit=state.token_limit,
                     context_window=state.context_window,
                     api_errors=state.api_errors,
+                    fama_off=getattr(state, "fama_off", False),
                 )
         except (NoMatches, ScreenStackError):
             return
@@ -634,12 +643,12 @@ class SmallctlAppFlowMixin:
             )
         )
 
-    async def _append_system_line(self, text: str, *, force: bool = False) -> None:
+    async def _append_system_line(self, text: str, *, force: bool = False, kind: str = "system") -> None:
         if not force and not self._show_system_messages:
             return
         console = self._get_console()
         if console is not None:
-            await console.append_line(text)
+            await console.append_line(text, kind=kind)
 
     def _set_activity(self, text: str | None) -> None:
         self._status_activity = str(text or "").strip()
@@ -683,3 +692,5 @@ class SmallctlAppFlowMixin:
             show_system_messages=self._show_system_messages,
             show_tool_calls=self._show_tool_calls,
         )
+
+

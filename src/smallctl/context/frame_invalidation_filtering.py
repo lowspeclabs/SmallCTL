@@ -175,6 +175,65 @@ def filter_invalidated_artifact_snippets(
     return kept, dropped_ids
 
 
+def _current_failure_pattern(state: LoopState) -> tuple[str, str, str]:
+    """Extract (tool_name, host, failure_mode) from current state for failure matching."""
+    failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+    verdict = getattr(state, "last_verifier_verdict", None) or {}
+    if not isinstance(verdict, dict):
+        verdict = {}
+    tool_name = str(verdict.get("tool") or "").strip().lower()
+    target = str(verdict.get("target") or "").strip()
+    host = ""
+    if target and "::" in target:
+        host = target.split("::", 1)[0].strip().lower()
+    if not host:
+        # Try to extract host from recent tool execution records
+        records = getattr(state, "tool_execution_records", {})
+        if isinstance(records, dict):
+            for record in reversed(list(records.values())):
+                if isinstance(record, dict):
+                    args = record.get("args", {})
+                    if isinstance(args, dict):
+                        h = str(args.get("host") or "").strip().lower()
+                        if h:
+                            host = h
+                            break
+    return tool_name, host, failure_mode
+
+
+def _memory_matches_failure_pattern(state: LoopState, memory: ExperienceMemory) -> bool:
+    tool_name, host, failure_mode = _current_failure_pattern(state)
+    if not failure_mode:
+        return False
+    if str(memory.failure_mode or "").strip().lower() != failure_mode:
+        return False
+    if tool_name and str(memory.tool_name or "").strip().lower() != tool_name:
+        return False
+    if host:
+        notes = str(memory.notes or "").strip().lower()
+        if host not in notes:
+            return False
+    return True
+
+
+def _brief_matches_failure_pattern(state: LoopState, brief: ContextBrief) -> bool:
+    tool_name, host, failure_mode = _current_failure_pattern(state)
+    if not failure_mode:
+        return False
+    # Check if failure_mode appears in blockers or candidate_causes
+    relevant_text = " ".join(
+        str(item or "").lower()
+        for item in (brief.blockers + brief.candidate_causes + brief.facts_unconfirmed)
+    )
+    if failure_mode not in relevant_text:
+        return False
+    if tool_name and tool_name not in " ".join(str(t or "").lower() for t in brief.tools_tried):
+        return False
+    if host and host not in relevant_text:
+        return False
+    return True
+
+
 def durably_stale_experience_ids(state: LoopState) -> set[str]:
     return durably_stale_ids(state, "_experience_staleness")
 
@@ -255,6 +314,9 @@ def brief_invalidated(
     brief: ContextBrief,
     invalidations: list[dict[str, Any]],
 ) -> bool:
+    # Phase 4A: preserve briefs that match the current failure pattern
+    if _brief_matches_failure_pattern(state, brief):
+        return False
     current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     for event in invalidations:
         reason = str(event.get("reason") or "").strip().lower()
@@ -311,6 +373,9 @@ def experience_invalidated(
     stale_ids = durably_stale_experience_ids(state)
     if memory.memory_id and memory.memory_id in stale_ids:
         return True
+    # Phase 4A: preserve failure experiences matching the current failure pattern
+    if _memory_matches_failure_pattern(state, memory):
+        return False
     current_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
     notes = str(memory.notes or "").strip()

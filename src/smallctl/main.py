@@ -163,7 +163,7 @@ def build_harness_config_kwargs(
         "test_time_scaling_all_fail_action": getattr(config, "test_time_scaling_all_fail_action", "fallback_normal_retry"),
         **_escalation_harness_kwargs(config),
         "run_logger": run_logger,
-        "fama_enabled": getattr(config, "fama_enabled", True),
+        "fama_enabled": False if getattr(config, "no_fama", False) else getattr(config, "fama_enabled", True),
         "fama_mode": getattr(config, "fama_mode", "lite"),
         "fama_default_ttl_steps": getattr(config, "fama_default_ttl_steps", 2),
         "fama_max_active_mitigations": getattr(config, "fama_max_active_mitigations", 2),
@@ -393,6 +393,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rewoo-solver-frame", dest="rewoo_solver_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--rewoo-refiner-frame", dest="rewoo_refiner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--rewoo-frame-token-budget", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-fama",
+        action="store_true",
+        help="Explicitly disable FAMA failure-aware mitigation at runtime.",
+    )
     
     # Subcommands
     subparsers = parser.add_subparsers(dest="command")
@@ -401,16 +406,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_session_id(harness: object | None) -> str:
-    if harness is None:
-        return ""
-    state = getattr(harness, "state", None)
-    thread_id = str(getattr(state, "thread_id", "") or "").strip()
-    if thread_id:
-        return thread_id
-    conversation_id = str(getattr(harness, "conversation_id", "") or "").strip()
-    if conversation_id:
-        return conversation_id
+def _resolve_session_id(harness: object | None, fallback: str | None = None) -> str:
+    if harness is not None:
+        state = getattr(harness, "state", None)
+        thread_id = str(getattr(state, "thread_id", "") or "").strip()
+        if thread_id:
+            return thread_id
+        conversation_id = str(getattr(harness, "conversation_id", "") or "").strip()
+        if conversation_id:
+            return conversation_id
+    if fallback:
+        return fallback
     return ""
 
 
@@ -517,7 +523,12 @@ def cli(argv: list[str] | None = None) -> int:
                     asyncio.run(harness.teardown())
                 except Exception as exc:
                     log.warning("Harness teardown failed after Ctrl+C: %s", exc)
-            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)))
+            _print_shutdown_alert(
+                _resolve_session_id(
+                    getattr(app, "harness", None),
+                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
+                )
+            )
             return 130
         except Exception as exc:
             log.exception("tui_fatal_error")
@@ -533,7 +544,13 @@ def cli(argv: list[str] | None = None) -> int:
             sys.stdout.write("\033[?1000l\033[?1006l\033[?25h")
             sys.stdout.flush()
         if getattr(app, "closed_by_ctrl_c", False):
-            _print_shutdown_alert(_resolve_session_id(getattr(app, "harness", None)), status="exited")
+            _print_shutdown_alert(
+                _resolve_session_id(
+                    getattr(app, "harness", None),
+                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
+                ),
+                status="exited",
+            )
             return 130
     elif config.task or config.restore_graph_state:
         harness = Harness(HarnessConfig(**build_harness_config_kwargs(config, run_logger=run_logger)))

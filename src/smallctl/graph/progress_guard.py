@@ -525,6 +525,49 @@ def _maybe_inject_verifier_success_nudge(state: Any, graph_state: Any) -> None:
         break
 
 
+def _update_remote_install_stall_counter(state: Any, graph_state: Any, counters: dict[str, Any]) -> None:
+    """Track repeated remote download/install failures to detect install stalls."""
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode != "remote_execute":
+        return
+
+    remote_install_tools = {"ssh_exec", "http_get", "file_download"}
+    for record in getattr(graph_state, "last_tool_results", []) or []:
+        tool_name = str(getattr(record, "tool_name", "") or "").strip()
+        if tool_name not in remote_install_tools:
+            continue
+        result = getattr(record, "result", None)
+        if result is None or getattr(result, "success", False):
+            continue
+        args = getattr(record, "args", {}) if isinstance(getattr(record, "args", None), dict) else {}
+        host = str(args.get("host") or "").strip().lower()
+        command = str(args.get("command") or "").strip().lower()
+        url = str(args.get("url") or "").strip().lower()
+
+        # Determine objective category
+        category = ""
+        if "git" in command or "git" in url:
+            category = "git"
+        elif "curl" in command or "wget" in command:
+            category = "curl"
+        elif tool_name in {"http_get", "file_download"} or url:
+            category = "download"
+        elif command:
+            category = "remote_command"
+
+        key = f"remote_install:{host}:{category}"
+        prior = counters.get("_remote_install_stall_history", [])
+        if not isinstance(prior, list):
+            prior = []
+        prior.append(key)
+        prior = prior[-5:]
+        counters["_remote_install_stall_history"] = prior
+        count = sum(1 for item in prior if item == key)
+        counters["remote_install_stall"] = max(int(counters.get("remote_install_stall", 0) or 0), count)
+        if count >= 3:
+            break
+
+
 def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     """Evaluate this turn and update the no-actionable-progress counter."""
     state = getattr(harness, "state", None)
@@ -571,6 +614,9 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
                     pass
     else:
         counters["no_actionable_progress"] = int(counters.get("no_actionable_progress", 0)) + 1
+
+    # Update remote-install stall counter
+    _update_remote_install_stall_counter(state, graph_state, counters)
 
     # Record successful reads for next-turn range comparison
     for record in getattr(graph_state, "last_tool_results", []) or []:

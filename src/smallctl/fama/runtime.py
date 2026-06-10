@@ -13,15 +13,23 @@ from .config import (
 from .detectors import detect_early_stop_from_result, latest_verifier_passed
 from .fingerprints import active_done_gate_fingerprints, passing_verifier_fingerprint
 from .detectors import (
+    detect_apt_deb822_preflight_blocked,
     detect_backend_stream_halt,
     detect_bad_tool_args,
     detect_context_drift,
     detect_empty_write,
+    detect_objective_verifier_mismatch,
+    detect_preflight_contradiction,
+    detect_preexisting_state_as_success,
+    detect_stale_success_claim,
+    detect_repeated_failure_pattern,
+    detect_repeated_remote_installer_failure,
     detect_repeated_tool_loop,
     detect_remote_local_confusion,
     detect_remote_verification_pending,
     detect_tool_plan_hard_route,
     detect_verifier_failure_from_result,
+    detect_verifier_failure_mode,
     detect_tool_output_misread,
     detect_wrong_path,
     detect_write_session_stall,
@@ -206,6 +214,33 @@ async def observe_tool_result(
         )
         if wrong_path is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=wrong_path, dedupe=True)
+
+        preflight_contradiction = detect_preflight_contradiction(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if preflight_contradiction is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=preflight_contradiction, dedupe=True)
+
+        apt_deb822_block = detect_apt_deb822_preflight_blocked(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if apt_deb822_block is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=apt_deb822_block, dedupe=True)
+
+        stale_success = detect_stale_success_claim(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if stale_success is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=stale_success, dedupe=True)
     except Exception as exc:
         logger.warning("FAMA observe failed: %s", exc)
         _runlog(
@@ -252,6 +287,9 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
         detect_write_session_stall(state, threshold=threshold),
         detect_backend_stream_halt(state, threshold=2),
         detect_context_drift(state),
+        detect_repeated_remote_installer_failure(state, threshold=2),
+        detect_objective_verifier_mismatch(state),
+        detect_preexisting_state_as_success(state),
     ):
         if signal is not None:
             _handle_signal(harness, state=state, config=config, signal=signal, dedupe=True)

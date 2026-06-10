@@ -296,6 +296,15 @@ async def ssh_file_write(
         if isinstance(output_dict, dict):
             output_dict["content"] = content
         _clear_remote_mutation_requirement(state, path=path, host=str(metadata.get("host") or ""))
+        # Track modifications to /etc/apt/sources.list.d for the apt guard
+        if path.startswith("/etc/apt/sources.list.d/"):
+            from .shell_support import record_sources_list_d_modification
+            record_sources_list_d_modification(
+                state,
+                path=path,
+                host=str(metadata.get("host") or ""),
+                user=str(user or "").strip() or None,
+            )
     return result
 
 

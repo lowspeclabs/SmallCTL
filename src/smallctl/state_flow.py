@@ -637,6 +637,12 @@ class LoopStateFlowMixin:
                     and str(memory.tool_name or "").strip().lower() in _READ_ONLY_TOOLS
                 ):
                     should_downgrade = False
+                if should_downgrade and self._is_execute_repair_transition(detail_payload):
+                    if any(
+                        marker in str(memory.notes or "").lower()
+                        for marker in ("error:", "failed", "failure", "missing", "not found", "blocked", "preflight")
+                    ):
+                        should_downgrade = False
             elif reason_label == "environment_changed":
                 phase_tag = f"phase_{self.current_phase}".lower()
                 env_tags = {str(tag).strip().lower() for tag in (memory.environment_tags or []) if str(tag).strip()}
@@ -647,6 +653,12 @@ class LoopStateFlowMixin:
                     and str(memory.tool_name or "").strip().lower() in _READ_ONLY_TOOLS
                 ):
                     should_downgrade = False
+                if should_downgrade and self._is_execute_repair_transition(detail_payload):
+                    if any(
+                        marker in str(memory.notes or "").lower()
+                        for marker in ("error:", "failed", "failure", "missing", "not found", "blocked", "preflight")
+                    ):
+                        should_downgrade = False
             if not should_downgrade:
                 continue
             memory.confidence = max(0.0, min(1.0, float(memory.confidence or 0.0) - 0.2))
@@ -714,6 +726,19 @@ class LoopStateFlowMixin:
                 recent_step = max([int(step or 0) for step in step_range] or [0])
                 if should_mark_stale and self._is_recent_context_step(recent_step):
                     should_mark_stale = False
+                if should_mark_stale and self._is_execute_repair_transition(detail_payload):
+                    brief_text = " ".join(
+                        str(line or "")
+                        for line in (
+                            (getattr(brief, "key_discoveries", []) or [])
+                            + (getattr(brief, "new_facts", []) or [])
+                        )
+                    )
+                    if brief_text and any(
+                        marker in brief_text.lower()
+                        for marker in ("error:", "failed", "failure", "missing", "not found", "blocked", "preflight")
+                    ):
+                        should_mark_stale = False
             elif reason_label == "verifier_failed":
                 should_mark_stale = any(
                     self._verifier_failure_should_invalidate_optimistic(str(line), detail_payload)

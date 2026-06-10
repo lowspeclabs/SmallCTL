@@ -16,6 +16,11 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
     FamaFailureKind.WRITE_SESSION_STALL: ["write_session_recovery_capsule", "outline_only_recovery"],
     FamaFailureKind.BACKEND_STREAM_HALT: ["micro_plan_capsule", "outline_only_recovery"],
     FamaFailureKind.CONTEXT_DRIFT: ["micro_plan_capsule", "evidence_gathering_needed", "evidence_gathering_needed_hard_route", "remote_scope_capsule"],
+    FamaFailureKind.PREFLIGHT_CONTRADICTION: ["preflight_contradiction_capsule", "micro_plan_capsule"],
+    FamaFailureKind.STALE_SUCCESS_CLAIM: ["acceptance_checklist_capsule", "evidence_reuse_capsule"],
+    FamaFailureKind.OBJECTIVE_MISMATCH: ["acceptance_checklist_capsule", "evidence_reuse_capsule"],
+    FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE: ["repeated_remote_installer_failure_capsule", "preflight_contradiction_capsule", "evidence_reuse_capsule", "micro_plan_capsule"],
+    FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: ["preexisting_state_as_success_capsule", "acceptance_checklist_capsule", "evidence_reuse_capsule"],
 }
 
 

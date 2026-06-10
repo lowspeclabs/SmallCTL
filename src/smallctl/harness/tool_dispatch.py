@@ -411,7 +411,24 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
                 },
             )
 
+    # Timeout override: cap at harness limit
+    timeout_override_metadata: dict[str, Any] = {}
+    requested_timeout = args.get("timeout_sec")
+    if requested_timeout is not None:
+        harness_timeout = getattr(getattr(harness, "config", None), "graph_dispatch_tools_timeout_sec", None)
+        if harness_timeout is not None and int(requested_timeout) > int(harness_timeout):
+            args = dict(args)
+            args["timeout_sec"] = int(harness_timeout)
+            timeout_override_metadata = {
+                "effective_timeout_sec": int(harness_timeout),
+                "timeout_override_reason": f"capped by harness graph_dispatch_tools_timeout_sec ({harness_timeout}s)",
+            }
+
     result = await harness.dispatcher.dispatch(tool_name, args)
+    if timeout_override_metadata and isinstance(result, ToolEnvelope):
+        if result.metadata is None:
+            result.metadata = {}
+        result.metadata.update(timeout_override_metadata)
     if getattr(result, "success", False) or (isinstance(result, dict) and result.get("success")):
         import time
         scratchpad = harness.state.scratchpad

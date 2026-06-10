@@ -122,6 +122,7 @@ class UIStatusSnapshot:
     token_limit: int = 0
     context_window: int = 0
     api_errors: int = 0
+    fama_off: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,6 +142,7 @@ class UIStatusSnapshot:
             "token_limit": self.token_limit,
             "context_window": self.context_window,
             "api_errors": self.api_errors,
+            "fama_off": self.fama_off,
         }
 
     @classmethod
@@ -172,7 +174,9 @@ class UIStatusSnapshot:
         if api_errors is None:
             api_errors = 0
 
+        fama_off = False
         if harness is not None:
+            fama_off = not bool(getattr(harness.state, "scratchpad", {}).get("_fama_config", {}).get("enabled", True))
             phase = str(getattr(harness.state, "current_phase", phase) or phase)
             step = getattr(harness.state, "step_count", 0)
             mode = "planning" if bool(getattr(harness.state, "planning_mode_enabled", False)) else "execution"
@@ -219,4 +223,5 @@ class UIStatusSnapshot:
             token_limit=max(0, token_limit),
             context_window=max(0, context_window),
             api_errors=max(0, int(api_errors)),
+            fama_off=fama_off,
         )

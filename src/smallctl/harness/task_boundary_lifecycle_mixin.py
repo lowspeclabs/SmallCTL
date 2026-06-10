@@ -13,6 +13,7 @@ from ..remote_scope import handoff_supports_remote_continuation, task_matches_re
 from ..models.conversation import ConversationMessage
 from ..recovery_metrics import record_failure_event_metric
 from ..state import (
+    ContextBrief,
     EpisodicSummary,
     PromptBudgetSnapshot,
     RunBrief,
@@ -347,6 +348,9 @@ class TaskBoundaryLifecycleMixin:
             for key in _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS:
                 if key in self.harness.state.scratchpad:
                     preserved_scratchpad[key] = self.harness.state.scratchpad[key]
+        # Always clear _tool_attempt_history across task boundaries so guard
+        # thresholds are evaluated within the current task only.
+        preserved_scratchpad.pop("_tool_attempt_history", None)
         if preserved_previous_task:
             preserved_scratchpad["_task_boundary_previous_task"] = preserved_previous_task
 
@@ -388,6 +392,7 @@ class TaskBoundaryLifecycleMixin:
         self.harness.state.inactive_steps = 0
         self.harness.state.latest_verdict = None
 
+        task_boundary_brief = self._generate_task_boundary_brief()
         self.harness.state.scratchpad = preserved_scratchpad
         self.harness.state.recent_messages = recent_tail if preserve_recent_tail else []
         self.harness.state.recent_errors = preserved_recent_errors if preserve_guard_context else []
@@ -453,6 +458,8 @@ class TaskBoundaryLifecycleMixin:
             self.harness.state.write_session = None
         self.harness.state.episodic_summaries = preserved_summaries if preserve_summaries else []
         self.harness.state.context_briefs = preserved_context_briefs if preserve_summaries else []
+        if task_boundary_brief is not None:
+            self.harness.state.context_briefs.append(task_boundary_brief)
         self.harness.state.prompt_budget = PromptBudgetSnapshot()
         self.harness.state.retrieval_cache = []
         self.harness.state.task_mode = ""
@@ -478,6 +485,62 @@ class TaskBoundaryLifecycleMixin:
             semantic_recent_tail=semantic_recent_tail,
             preserve_guard_context=preserve_guard_context,
         )
+
+    def _generate_task_boundary_brief(self) -> ContextBrief | None:
+        """Generate a ContextBrief from the current task state before resetting.
+
+        This ensures the context_briefs lane is populated at task boundaries
+        so the model retains structured memory across switches.
+        """
+        state = self.harness.state
+        if not getattr(state, "recent_messages", None):
+            return None
+        brief_id = f"B{len(state.context_briefs) + 1:04d}"
+        from ..context.summarizer import ContextSummarizer
+        from ..context.policy import ContextPolicy
+        policy = getattr(self.harness, "context_policy", None)
+        if policy is None:
+            policy = ContextPolicy()
+        summarizer = ContextSummarizer(policy)
+        key_discoveries = []
+        if state.working_memory.known_facts:
+            key_discoveries.extend(state.working_memory.known_facts[-4:])
+        if state.working_memory.decisions:
+            key_discoveries.extend(state.working_memory.decisions[-4:])
+        if not key_discoveries:
+            key_discoveries = ["Task boundary brief: no explicit discoveries recorded"]
+        tools_tried = [
+            record.tool_name
+            for record in getattr(state, "reasoning_graph", None).evidence_records[-6:]
+            if getattr(record, "tool_name", None)
+        ] if getattr(state, "reasoning_graph", None) else []
+        files_touched = []
+        for artifact_id, artifact in (getattr(state, "artifacts", {}) or {}).items():
+            if getattr(artifact, "source", None):
+                files_touched.append(artifact.source)
+        brief = ContextBrief(
+            brief_id=brief_id,
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            tier="warm",
+            step_range=(0, state.step_count),
+            task_goal=str(state.run_brief.original_task or ""),
+            current_phase=str(state.current_phase or ""),
+            key_discoveries=key_discoveries[:6],
+            tools_tried=list(set(tools_tried))[:6],
+            blockers=state.working_memory.failures[-4:],
+            files_touched=list(set(files_touched))[:8],
+            artifact_ids=list((getattr(state, "artifacts", {}) or {}).keys())[-10:],
+            next_action_hint=str(state.working_memory.next_actions[-1] if state.working_memory.next_actions else ""),
+            staleness_step=state.step_count,
+            facts_confirmed=key_discoveries[:4],
+            state_changes=["task_boundary_reset"],
+        )
+        self.harness._runlog(
+            "task_boundary_brief_generated",
+            "generated context brief on task boundary",
+            brief_id=brief_id,
+        )
+        return brief
 
     def maybe_reset_for_new_task(self, task: str, *, raw_task: str | None = None) -> None:
         pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
@@ -591,7 +654,7 @@ class TaskBoundaryLifecycleMixin:
         if active is not None:
             active.next_action = text[:240]
             active.updated_at = event.timestamp
-            if "human_resteer" not in active.failure_classes:
+            if active is not None and "human_resteer" not in active.failure_classes:
                 active.failure_classes.append("human_resteer")
         reflexion = getattr(self.harness, "reflexion", None)
         maybe_create = getattr(reflexion, "maybe_create_reflection", None)

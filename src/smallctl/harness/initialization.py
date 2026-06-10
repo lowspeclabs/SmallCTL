@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import asyncio.subprocess
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ..context import (
     ArtifactStore,
@@ -126,6 +129,13 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         "llm_judge_enabled": bool(config.fama_llm_judge_enabled),
         "llm_judge_min_severity": int(config.fama_llm_judge_min_severity),
     }
+    if not config.fama_enabled:
+        logger.warning(
+            "FAMA (failure-aware mitigation) is DISABLED. "
+            "Retry loops, verifier failures, and tool misuse will not be auto-detected. "
+            "Run with --fama-enabled or remove fama_enabled: false from config to enable."
+        )
+        self.state.scratchpad["_fama_config"]["_disable_warning_emitted"] = True
     self.state.scratchpad["_recovery_config"] = {
         "reflexion_enabled": bool(config.reflexion_enabled),
         "reflexion_inject_top_k": int(config.reflexion_inject_top_k),

@@ -174,6 +174,151 @@ def _apt_deb822_preflight_guard(
     )
 
 
+def _apt_sources_list_d_guard(
+    command: str,
+    *,
+    tool_name: str,
+    state: Any = None,
+    host: str = "",
+    user: str = "",
+) -> dict[str, Any] | None:
+    """Block apt operations if a repo file under /etc/apt/sources.list.d was created
+    but apt-get update has not yet succeeded, or if the last apt-get update failed
+    with a malformed-entry error.
+    """
+    raw = str(command or "").strip()
+    lowered = raw.lower()
+    if not re.search(r"\b(?:apt|apt-get)\b", lowered):
+        return None
+    # Always allow apt-get update / apt update as the remediation step
+    if re.search(r"\bupdate\b", lowered) and not re.search(r"\b(?:install|upgrade|dist-upgrade|full-upgrade|autoremove|purge|remove)\b", lowered):
+        return None
+    if not re.search(r"\b(?:install|upgrade|dist-upgrade|full-upgrade|autoremove|purge|remove)\b", lowered):
+        return None
+
+    if state is None:
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+
+    key = "_apt_sources_list_d_guard"
+    guard_state = scratchpad.get(key)
+    if not isinstance(guard_state, dict):
+        return None
+
+    # Check for malformed-entry failure
+    last_update_error = str(guard_state.get("last_update_error") or "").strip()
+    if "malformed entry" in last_update_error.lower() or "malformed" in last_update_error.lower():
+        malformed_file = str(guard_state.get("malformed_file") or "").strip()
+        extra = {}
+        if malformed_file:
+            extra["malformed_file"] = malformed_file
+        return _guard_fail(
+            f"`{tool_name}` blocked apt operation because the last `apt-get update` reported a malformed source list. "
+            "Repair or remove the malformed file before proceeding.",
+            reason="apt_malformed_sources_list",
+            command=raw,
+            next_required_action={
+                "strategy": "repair_malformed_apt_source",
+                "steps": [
+                    f"Inspect and fix or remove the malformed file ({malformed_file or 'under /etc/apt/sources.list.d/'}).",
+                    "Run `apt-get update` again to confirm it succeeds.",
+                    "Then retry the original apt command.",
+                ],
+            },
+            extra_metadata={
+                "host": host,
+                "user": user,
+                **extra,
+            },
+        )
+
+    # Check if sources.list.d was modified but update has not succeeded
+    if guard_state.get("sources_list_d_modified") and not guard_state.get("apt_update_succeeded"):
+        return _guard_fail(
+            f"`{tool_name}` blocked apt operation because a repo file under `/etc/apt/sources.list.d/` was created "
+            "but `apt-get update` has not yet succeeded. Run `apt-get update` first.",
+            reason="apt_update_required_after_sources_change",
+            command=raw,
+            next_required_action="apt-get update",
+            extra_metadata={
+                "host": host,
+                "user": user,
+            },
+        )
+
+    return None
+
+
+def record_apt_update_result(
+    state: Any,
+    *,
+    command: str,
+    success: bool,
+    stderr: str = "",
+    host: str = "",
+    user: str = "",
+) -> None:
+    """Observe apt-get update results to track whether apt sources are healthy."""
+    if state is None:
+        return
+    raw = str(command or "").strip().lower()
+    if not re.search(r"\bapt-get\b.*\bupdate\b|\bapt\b.*\bupdate\b", raw):
+        return
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    key = "_apt_sources_list_d_guard"
+    guard_state = scratchpad.setdefault(key, {})
+    if not isinstance(guard_state, dict):
+        guard_state = {}
+        scratchpad[key] = guard_state
+
+    if success:
+        guard_state["apt_update_succeeded"] = True
+        guard_state["last_update_error"] = ""
+        guard_state["malformed_file"] = ""
+    else:
+        stderr_text = str(stderr or "").strip()
+        guard_state["apt_update_succeeded"] = False
+        # Try to extract malformed file path from error
+        malformed_match = re.search(r"malformed entry.*?in list file\s+(.+?)(?:\s|$)", stderr_text, re.IGNORECASE)
+        if malformed_match:
+            guard_state["last_update_error"] = stderr_text
+            guard_state["malformed_file"] = malformed_match.group(1).strip()
+        else:
+            guard_state["last_update_error"] = stderr_text
+
+
+def record_sources_list_d_modification(
+    state: Any,
+    *,
+    path: str,
+    host: str = "",
+    user: str = "",
+) -> None:
+    """Record that a file under /etc/apt/sources.list.d/ was modified."""
+    if state is None:
+        return
+    normalized = str(path or "").strip()
+    if not normalized.startswith("/etc/apt/sources.list.d/"):
+        return
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    key = "_apt_sources_list_d_guard"
+    guard_state = scratchpad.setdefault(key, {})
+    if not isinstance(guard_state, dict):
+        guard_state = {}
+        scratchpad[key] = guard_state
+    guard_state["sources_list_d_modified"] = True
+    guard_state["apt_update_succeeded"] = False
+    guard_state["modified_file"] = normalized
+    guard_state["host"] = str(host or "").strip().lower()
+    guard_state["user"] = str(user or "").strip().lower()
+
+
 def classify_shell_outcome(command: str, returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
     """Classify expected miss commands as empty_result when stdout/stderr semantics are clear."""
     cmd = str(command or "").strip()

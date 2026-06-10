@@ -437,6 +437,17 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
     )
     schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
 
+    # Phase 4C: tool exposure monotonicity — never hide a tool once exposed
+    exposed = set(harness.state.task_exposed_tools)
+    current_names = set(_tool_names(schemas))
+    missing_exposed = exposed - current_names
+    if missing_exposed:
+        for tool_name in missing_exposed:
+            schema = _retry_tool_schema(harness, tool_name=tool_name)
+            if schema is not None:
+                schemas.append(schema)
+                current_names.add(tool_name)
+
     # Fix 2: Expose shell_exec in planning mode for local debug tasks
     if normalized_mode == "planning" and is_local_coding:
         shell_schema = _retry_tool_schema(harness, tool_name="shell_exec")
@@ -460,6 +471,8 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         )
         if hidden_tools:
             _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
+    # Update exposed tools set so future turns preserve monotonicity
+    harness.state.task_exposed_tools = harness.state.task_exposed_tools | set(_tool_names(schemas))
     return {
         "schemas": schemas,
         "names": _tool_names(schemas),

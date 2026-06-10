@@ -15,7 +15,7 @@ from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
 from .console import ConsolePane
-from .display import format_tool_call_for_display
+from .display import _build_backend_rca_strip, format_tool_call_for_display
 from .model_selector import ModelSelectScreen
 
 
@@ -84,11 +84,14 @@ class SmallctlAppActionsMixin:
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Active task cancelled.")
+                rca = _build_backend_rca_strip(self.harness)
+                if rca:
+                    await self._append_system_line(rca)
             self._refresh_status(step_override="cancelled")
             return
         console = self._get_console()
         if console is not None:
-            await self._append_system_line("No active task.")
+            await self._append_system_line("No active task.", kind="cancel")
 
     def _dismiss_active_approval_prompt(self) -> None:
         prompt = self._active_approval_prompt

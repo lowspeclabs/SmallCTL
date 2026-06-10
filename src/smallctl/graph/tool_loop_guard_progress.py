@@ -159,6 +159,7 @@ def _dir_list_same_path_repeat_is_loop(harness: Any, pending: PendingToolCall) -
         return False
 
     history = _tool_attempt_history(harness)
+    same_path_count = 0
     for index in range(len(history) - 1, -1, -1):
         item = history[index]
         if str(item.get("tool_name", "")) != "dir_list":
@@ -169,9 +170,11 @@ def _dir_list_same_path_repeat_is_loop(harness: Any, pending: PendingToolCall) -
             continue
         if path != candidate_path:
             continue
-        if not _model_is_exact_small_gemma_4_it(getattr(getattr(harness, "client", None), "model", None)):
-            return True
-        return not _dir_list_repeat_has_intervening_progress(history, index)
+        same_path_count += 1
+        if same_path_count >= 2:
+            if not _model_is_exact_small_gemma_4_it(getattr(getattr(harness, "client", None), "model", None)):
+                return True
+            return not _dir_list_repeat_has_intervening_progress(history, index)
     return False
 
 

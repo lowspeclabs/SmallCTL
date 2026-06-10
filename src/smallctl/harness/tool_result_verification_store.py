@@ -26,6 +26,7 @@ from .tool_result_verification_repair import (
 )
 from .tool_result_verification_semantic import (
     _insufficient_verifier_message,
+    _install_task_requires_strong_verifier,
     _passing_verifier_is_weaker_than_prior_failure,
     _semantic_verifier_failure,
 )
@@ -120,6 +121,17 @@ def _store_verifier_verdict(
         verdict = "pass"
     else:
         verdict = "fail"
+
+    # Fix 2: detect false-negative path verifiers for SSH exec
+    false_negative_path = False
+    if verdict == "fail" and tool_name == "ssh_exec":
+        if _verifier_path_failure_is_false_negative(
+            state, host=host, command=command, stdout=raw_stdout, stderr=raw_stderr
+        ):
+            verdict = "pass"
+            semantic_failure = ""
+            false_negative_path = True
+
     insufficient_verifier = False
     if verdict == "pass":
         insufficient_verifier = _passing_verifier_is_weaker_than_prior_failure(
@@ -131,9 +143,23 @@ def _store_verifier_verdict(
             verdict = "fail"
             semantic_failure = _insufficient_verifier_message(state, command=command)
 
+    # Reject weak verifiers for install tasks
+    install_verifier_weak = False
+    if verdict == "pass" and not insufficient_verifier:
+        install_verifier_weak, install_weak_reason = _install_task_requires_strong_verifier(
+            state, command=command
+        )
+        if install_verifier_weak:
+            verdict = "fail"
+            semantic_failure = install_weak_reason
+
     failure_class = "approval_denied" if approval_denied else classify_execution_failure(result.error or stderr or stdout)
     if insufficient_verifier:
         failure_class = "insufficient_verifier"
+    if install_verifier_weak:
+        failure_class = "insufficient_verifier"
+    if false_negative_path:
+        failure_class = "false_negative_path_verifier"
     if not approval_denied and failure_class == "environment":
         if looks_like_infinite_loop(command, str(result.error or ""), stdout, stderr):
             failure_class = "infinite_loop_suspected"
@@ -179,7 +205,7 @@ def _store_verifier_verdict(
         "failure_mode": failure_class,
         "acceptance_delta": acceptance_delta,
     }
-    if insufficient_verifier:
+    if insufficient_verifier or install_verifier_weak:
         normalized["insufficient_verifier"] = True
         normalized["verifier_kind"] = current_verifier_kind
     if approval_denied:
@@ -245,3 +271,54 @@ def _store_verifier_verdict(
         docker_retry=docker_retry,
     )
     return normalized
+
+
+def _verifier_path_failure_is_false_negative(
+    state: Any,
+    *,
+    host: str,
+    command: str,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    """Return True if a path verifier failure contradicts a recent ssh_file_write verification."""
+    combined_output = str(stdout or "") + "\n" + str(stderr or "")
+    if "no such file or directory" not in combined_output.lower():
+        return False
+    if not host:
+        return False
+    # Extract path from command
+    words = str(command or "").strip().split()
+    path = ""
+    for word in words:
+        if word.startswith("/"):
+            path = word
+            break
+    if not path:
+        return False
+    recent_messages = getattr(state, "recent_messages", None) or []
+    if not isinstance(recent_messages, list):
+        return False
+    for msg in reversed(recent_messages):
+        if msg is None:
+            continue
+        # Support both dict and object-style messages (e.g. SimpleNamespace)
+        if isinstance(msg, dict):
+            role = msg.get("role")
+            name = msg.get("name")
+            metadata = msg.get("metadata") or {}
+        else:
+            role = getattr(msg, "role", None)
+            name = getattr(msg, "name", None)
+            metadata = getattr(msg, "metadata", None) or {}
+        if role != "tool" or name != "ssh_file_write":
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if not metadata.get("success"):
+            continue
+        msg_host = str(metadata.get("host") or "").strip().lower()
+        msg_path = str(metadata.get("path") or "").strip()
+        if msg_host == host.strip().lower() and msg_path == path:
+            return True
+    return False

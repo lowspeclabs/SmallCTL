@@ -20,6 +20,11 @@ class FamaFailureKind(str, Enum):
     WRITE_SESSION_STALL = "write_session_stall"
     BACKEND_STREAM_HALT = "backend_stream_halt"
     CONTEXT_DRIFT = "context_drift"
+    PREFLIGHT_CONTRADICTION = "preflight_contradiction"
+    STALE_SUCCESS_CLAIM = "stale_success_claim"
+    OBJECTIVE_MISMATCH = "objective_mismatch"
+    REPEATED_REMOTE_INSTALLER_FAILURE = "repeated_remote_installer_failure"
+    PREEXISTING_STATE_AS_SUCCESS = "preexisting_state_as_success"
 
 
 FAILURE_CLASSES = {
@@ -39,6 +44,11 @@ FAILURE_CLASSES = {
     "human_resteer": "User corrected direction or clarified after model drift.",
     "backend_stream_failure": "Model/backend stream failed, truncated, or wedged.",
     "no_progress": "Progress guard sees no new files, evidence, or subtask movement.",
+    "preflight_contradiction": "Preflight guard contradicted verified evidence (e.g. wrote file then claimed NOT FOUND).",
+    "stale_success_claim": "Model claimed success after task_complete was blocked or before verification passed.",
+    "objective_mismatch": "Verifier or success check does not match the user objective.",
+    "repeated_remote_installer_failure": "Remote installer preflight or execution failed repeatedly.",
+    "preexisting_state_as_success": "Model treated pre-existing state as successful task completion.",
 }
 
 
@@ -52,6 +62,11 @@ DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.WRITE_SESSION_STALL: "write_session_stall",
     FamaFailureKind.BACKEND_STREAM_HALT: "backend_stream_failure",
     FamaFailureKind.CONTEXT_DRIFT: "context_missing",
+    FamaFailureKind.PREFLIGHT_CONTRADICTION: "preflight_contradiction",
+    FamaFailureKind.STALE_SUCCESS_CLAIM: "stale_success_claim",
+    FamaFailureKind.OBJECTIVE_MISMATCH: "objective_mismatch",
+    FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE: "repeated_remote_installer_failure",
+    FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: "preexisting_state_as_success",
 }
 
 

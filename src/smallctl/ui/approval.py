@@ -52,14 +52,15 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
         self.proof_bundle = proof_bundle or {}
 
     def compose(self) -> ComposeResult:
-        with Container(id="approve-prompt-shell"):
-            with Vertical(id="approve-prompt"):
-                yield Static("Approve shell command?", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
-                with Horizontal(id="approve-prompt-buttons"):
-                    yield Button("Yes", id="approve-yes", variant="success")
-                    yield Button("Yes for Session", id="approve-yes-session", variant="success")
-                    yield Button("No", id="approve-no", variant="error")
+        with Container(id="approve-prompt-overlay"):
+            with Container(id="approve-prompt-shell"):
+                with Vertical(id="approve-prompt"):
+                    yield Static("Approve shell command?", id="approve-prompt-title")
+                    yield Static(self._build_body(), id="approve-prompt-body", markup=False)
+                    with Horizontal(id="approve-prompt-buttons"):
+                        yield Button("Yes", id="approve-yes", variant="success")
+                        yield Button("Yes for Session", id="approve-yes-session", variant="success")
+                        yield Button("No", id="approve-no", variant="error")
 
     async def on_mount(self) -> None:
         self.query_one("#approve-yes", Button).focus()
@@ -188,14 +189,15 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalDecision]):
         self.response_mode = response_mode
 
     def compose(self) -> ComposeResult:
-        with Container(id="approve-prompt-plan"):
-            with Vertical(id="approve-prompt"):
-                yield Static("Approve plan?", id="approve-prompt-title")
-                yield Static(self._build_body(), id="approve-prompt-body", markup=False)
-                with Horizontal(id="approve-prompt-buttons"):
-                    yield Button("Yes", id="approve-plan-yes", variant="success")
-                    yield Button("No", id="approve-plan-no", variant="error")
-                    yield Button("Revise", id="approve-plan-revise", variant="primary")
+        with Container(id="approve-prompt-overlay"):
+            with Container(id="approve-prompt-plan"):
+                with Vertical(id="approve-prompt"):
+                    yield Static("Approve plan?", id="approve-prompt-title")
+                    yield Static(self._build_body(), id="approve-prompt-body", markup=False)
+                    with Horizontal(id="approve-prompt-buttons"):
+                        yield Button("Yes", id="approve-plan-yes", variant="success")
+                        yield Button("No", id="approve-plan-no", variant="error")
+                        yield Button("Revise", id="approve-plan-revise", variant="primary")
 
     async def on_mount(self) -> None:
         self.query_one("#approve-plan-yes", Button).focus()

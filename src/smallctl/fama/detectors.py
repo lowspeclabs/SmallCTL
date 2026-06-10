@@ -51,7 +51,8 @@ def detect_early_stop_from_result(
     metadata = getattr(result, "metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
     reason = str(metadata.get("reason") or "").strip()
-    if reason in {"task_complete_blocked_in_staged_execution", "session_incomplete"}:
+    if reason in {"task_complete_blocked_in_staged_execution", "session_incomplete",
+                  "remote_mutation_requires_verification"}:
         verifier = _metadata_verifier(metadata)
         if not _verifier_failed(verifier):
             return None
@@ -631,3 +632,551 @@ def detect_tool_plan_hard_route(state: Any) -> bool:
             pass
 
     return False
+
+
+def _detect_repeated_failure_pattern_from_scratchpad(
+    state: Any,
+    *,
+    threshold: int = 3,
+) -> FamaSignal | None:
+    """Legacy fallback using _repeated_failure_observations scratchpad."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    observations = scratchpad.get("_repeated_failure_observations")
+    if not isinstance(observations, list):
+        return None
+    current_step_val = current_step(state)
+    for obs in observations:
+        if not isinstance(obs, dict):
+            continue
+        count = int(obs.get("count", 0) or 0)
+        if count < threshold:
+            continue
+        last_step = int(obs.get("last_step", 0) or 0)
+        if current_step_val - last_step > 5:
+            continue
+        tool_name = str(obs.get("tool_name") or "").strip()
+        pattern = str(obs.get("pattern") or "").strip()
+        if not tool_name or not pattern:
+            continue
+        evidence = f"{tool_name} failed with {pattern} ({count} attempts)"
+        failure_class = pattern.replace(" ", "_")
+        return FamaSignal(
+            kind=FamaFailureKind.LOOPING,
+            severity=2,
+            source="tool_result",
+            evidence=evidence,
+            step=current_step_val,
+            tool_name=tool_name,
+            failure_class=failure_class,
+            next_safe_action=(
+                f"The same `{tool_name}` call has failed {count} times with the same error. "
+                "Stop retrying the identical call. Use ask_human if the path or command is ambiguous, "
+                "or switch to a fundamentally different approach."
+            ),
+            suggested_mitigations=["interactive_tui_capsule", "evidence_reuse_capsule"],
+        )
+    return None
+
+
+def detect_repeated_failure_pattern(
+    state: Any,
+    *,
+    threshold: int = 3,
+) -> FamaSignal | None:
+    """Detect when the same tool fails with the same error pattern >= threshold times.
+
+    Scans the last N tool results directly from state.tool_execution_records.
+    Counts identical (tool_name, failure_class, target_host) tuples within the last 5 turns.
+    """
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict) or not records:
+        # Fallback to legacy scratchpad observations (used by some tests)
+        return _detect_repeated_failure_pattern_from_scratchpad(state, threshold=threshold)
+
+    current_step_val = current_step(state)
+    # Collect the last 5 tool results in chronological order
+    items = [
+        record for record in records.values()
+        if isinstance(record, dict) and int(record.get("step_count", 0) or 0) > 0
+    ]
+    items.sort(key=lambda r: int(r.get("step_count", 0) or 0))
+    recent = items[-5:]
+
+    from collections import Counter
+    failures: list[tuple[str, str, str]] = []
+    for record in recent:
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        if bool(result.get("success")):
+            continue
+        tool_name = str(record.get("tool_name") or "").strip()
+        if not tool_name:
+            continue
+        metadata = result.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        failure_class = str(metadata.get("failure_mode") or metadata.get("failure_kind") or metadata.get("error_kind") or result.get("status") or "").strip().lower()
+        args = record.get("args")
+        args = args if isinstance(args, dict) else {}
+        host = str(args.get("host") or metadata.get("host") or "").strip().lower()
+        failures.append((tool_name, failure_class or "unknown", host))
+
+    if not failures:
+        return None
+
+    counts = Counter(failures)
+    most_common = counts.most_common(1)
+    if not most_common:
+        return None
+    (key, count) = most_common[0]
+    if count < threshold:
+        return None
+
+    tool_name, failure_class, host = key
+    evidence = f"{tool_name} failed with {failure_class} on {host or 'unknown host'} ({count} attempts in last 5 turns)"
+    return FamaSignal(
+        kind=FamaFailureKind.LOOPING,
+        severity=2,
+        source="tool_result",
+        evidence=evidence,
+        step=current_step_val,
+        tool_name=tool_name,
+        failure_class=failure_class,
+        next_safe_action=(
+            f"The same `{tool_name}` call has failed {count} times with the same error. "
+            "Stop retrying the identical call. Use ask_human if the path or command is ambiguous, "
+            "or switch to a fundamentally different approach."
+        ),
+        suggested_mitigations=["interactive_tui_capsule", "evidence_reuse_capsule"],
+    )
+
+
+def detect_verifier_failure_mode(
+    state: Any,
+    *,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect a persistent failure_mode from the last verifier verdict.
+
+    If the harness has set failure_mode (e.g., 'logic', 'path') in
+    last_verifier_verdict and the model has not yet resolved it, emit a
+    FAMA signal so the failure-aware mitigation system can inject a
+    targeted capsule.
+    """
+    verdict = getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verdict, dict):
+        return None
+    failure_mode = str(verdict.get("failure_mode") or "").strip()
+    if not failure_mode:
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        state.scratchpad = scratchpad
+    key = f"_fama_verifier_failure_mode:{failure_mode}"
+    count = int(scratchpad.get(key, 0) or 0) + 1
+    scratchpad[key] = count
+    threshold = 1 if str(getattr(state, "task_mode", "")).startswith("remote") else 2
+    if count < threshold:
+        return None
+    return FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="verifier",
+        evidence=f"last_verifier_verdict shows failure_mode={failure_mode} (observed {count} times)",
+        step=current_step(state),
+        tool_name="task_complete",
+        operation_id=operation_id,
+        failure_class=failure_mode,
+        next_safe_action="Read the verifier output carefully, identify the exact failure mode, and patch one narrow cause before retrying.",
+        suggested_mitigations=["repair_debug_scaffold", "acceptance_checklist_capsule"],
+    )
+
+
+def detect_preflight_contradiction(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when a preflight guard claims a file is NOT FOUND but a same-session
+    ssh_file_write verified the exact path on the same host/user."""
+    if str(tool_name or "").strip() != "ssh_exec":
+        return None
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    preflight = metadata.get("preflight_probes")
+    if not isinstance(preflight, dict):
+        return None
+    if preflight.get("script_exists"):
+        return None
+    script_path = str(preflight.get("script_path") or "").strip()
+    host = str(metadata.get("host") or "").strip().lower()
+    user = str(metadata.get("user") or "").strip() or None
+    if not script_path or not host:
+        return None
+    from ..tools.shell_support import _remote_installer_preflight_has_verified_write
+    if not _remote_installer_preflight_has_verified_write(
+        state, host=host, user=user, script_path=script_path
+    ):
+        return None
+    evidence = (
+        f"preflight reported NOT FOUND for {script_path} on {host}, "
+        f"but ssh_file_write verified it in the same session"
+    )
+    return FamaSignal(
+        kind=FamaFailureKind.PREFLIGHT_CONTRADICTION,
+        severity=2,
+        source="preflight",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name="ssh_exec",
+        operation_id=operation_id,
+        failure_class="preflight_contradiction",
+        next_safe_action="The installer path was already verified by ssh_file_write. Retry the installer command without additional path checks.",
+        suggested_mitigations=["preflight_contradiction_capsule"],
+    )
+
+
+def detect_repeated_remote_installer_failure(
+    state: Any,
+    *,
+    threshold: int = 2,
+) -> FamaSignal | None:
+    """Detect repeated remote installer preflight or execution failures."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    preflights = scratchpad.get("_remote_installer_preflight")
+    if not isinstance(preflights, dict):
+        return None
+    failure_count = 0
+    last_host = ""
+    last_script = ""
+    for entry in preflights.values():
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "").strip()
+        if status in {"missing_critical_files", "corrupt", "required"}:
+            failure_count += 1
+            last_host = str(entry.get("host") or "").strip()
+            last_script = str(entry.get("script_path") or "").strip()
+    if failure_count < threshold:
+        return None
+    evidence = f"remote installer preflight/execution failed {failure_count} times"
+    if last_host:
+        evidence += f"; host={last_host}"
+    if last_script:
+        evidence += f"; script={last_script}"
+    return FamaSignal(
+        kind=FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE,
+        severity=2,
+        source="preflight",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name="ssh_exec",
+        failure_class="repeated_remote_installer_failure",
+        next_safe_action="The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
+        suggested_mitigations=["repeated_remote_installer_failure_capsule", "evidence_reuse_capsule"],
+    )
+
+
+def detect_stale_success_claim(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when the model claims task_complete success but it was blocked
+    or the objective verifier has not actually passed."""
+    if str(tool_name or "").strip() != "task_complete":
+        return None
+    if bool(getattr(result, "success", False)):
+        return None
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    reason = str(metadata.get("reason") or "").strip()
+    if reason not in {
+        "task_complete_blocked_in_staged_execution",
+        "session_incomplete",
+        "missing_supported_claim",
+        "remote_mutation_requires_verification",
+    }:
+        return None
+    # Check if the model's last assistant message claimed success
+    messages = getattr(state, "messages", [])
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages[-6:]):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        content = str(msg.get("content") or "").lower()
+        if any(phrase in content for phrase in (
+            "successfully installed", "installation complete", "pihole is installed",
+            "done", "completed successfully", "finished installing",
+        )):
+            evidence = f"model claimed success but task_complete was blocked; reason={reason}"
+            return FamaSignal(
+                kind=FamaFailureKind.STALE_SUCCESS_CLAIM,
+                severity=2,
+                source="tool_result",
+                evidence=evidence,
+                step=current_step(state),
+                tool_name="task_complete",
+                operation_id=operation_id,
+                failure_class="stale_success_claim",
+                next_safe_action="Do not claim success before the objective verifier passes. Verify the actual install outcome with a service check or version command.",
+                suggested_mitigations=["acceptance_checklist_capsule", "evidence_reuse_capsule"],
+            )
+    return None
+
+
+def detect_objective_verifier_mismatch(
+    state: Any,
+    *,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when the last verifier checks something tangential to the user objective
+    (e.g. verifying script existence instead of install success)."""
+    verdict = getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verdict, dict):
+        return None
+    command = str(verdict.get("command") or verdict.get("target") or "").lower()
+    task = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
+    if not task or not command:
+        return None
+    # Heuristic: install task but verifier only checks file existence
+    install_indicators = ("install", "setup", "deploy", "configure")
+    if not any(ind in task for ind in install_indicators):
+        return None
+    file_only_checks = ("ls -la ", "test -f ", "test -e ", "cat ")
+    if not any(cmd in command for cmd in file_only_checks):
+        return None
+    # Check if the verifier passed
+    verdict_label = str(verdict.get("verdict") or "").strip().lower()
+    if verdict_label != "pass":
+        return None
+    evidence = (
+        f"verifier only checked file existence ({command}) for an install task; "
+        f"objective={task[:80]}"
+    )
+    return FamaSignal(
+        kind=FamaFailureKind.OBJECTIVE_MISMATCH,
+        severity=2,
+        source="verifier",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name="task_complete",
+        operation_id=operation_id,
+        failure_class="objective_mismatch",
+        next_safe_action="The verifier must match the user objective. For install tasks, verify service status, version, or listening port—not just file existence.",
+        suggested_mitigations=["acceptance_checklist_capsule"],
+    )
+
+
+def detect_preexisting_state_as_success(
+    state: Any,
+    *,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when the model may be confusing pre-existing remote state with
+    successful completion from its own actions."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    # Look for evidence that pre-existing state was found early in the session
+    preexisting = scratchpad.get("_preexisting_remote_state_observed")
+    if not isinstance(preexisting, dict):
+        return None
+    # Only trigger if the model later attempted task_complete
+    last_tool = None
+    messages = getattr(state, "messages", [])
+    if isinstance(messages, list):
+        for msg in reversed(messages[-10:]):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                if isinstance(tool_calls, list) and tool_calls:
+                    last_tool = str(tool_calls[-1].get("function", {}).get("name") or "").strip()
+                    break
+    if last_tool != "task_complete":
+        return None
+    host = str(preexisting.get("host") or "").strip()
+    path = str(preexisting.get("path") or "").strip()
+    evidence = "pre-existing remote state may have been treated as task completion"
+    if host:
+        evidence += f"; host={host}"
+    if path:
+        evidence += f"; path={path}"
+    return FamaSignal(
+        kind=FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS,
+        severity=2,
+        source="task_result",
+        evidence=evidence,
+        step=current_step(state),
+        tool_name="task_complete",
+        operation_id=operation_id,
+        failure_class="preexisting_state_as_success",
+        next_safe_action="Distinguish 'state already existed' from 'I caused the state'. Verify that your actions produced the intended outcome, not that it was already present.",
+        suggested_mitigations=["preexisting_state_as_success_capsule", "acceptance_checklist_capsule", "evidence_reuse_capsule"],
+    )
+
+
+def detect_apt_deb822_preflight_blocked(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when an apt operation is blocked by the deb822 preflight guard.
+
+    If the validator has already been marked clean for this host/user but the
+    gate still blocks, emit a high-severity contradiction signal. Otherwise
+    emit a low-severity guidance signal for the first occurrence.
+    """
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("reason") != "apt_deb822_preflight_required":
+        return None
+    host = str(metadata.get("host") or "").strip().lower()
+    user = str(metadata.get("user") or "").strip().lower()
+    from ..tools.shell_support import _is_deb822_preflight_clean
+    if _is_deb822_preflight_clean(state, host=host, user=user):
+        return FamaSignal(
+            kind=FamaFailureKind.PREFLIGHT_CONTRADICTION,
+            severity=3,
+            source="preflight",
+            evidence=f"apt_deb822 preflight blocked for {host}/{user} but validator was already marked clean in session",
+            step=current_step(state),
+            tool_name=str(tool_name or "").strip() or None,
+            operation_id=operation_id,
+            failure_class="apt_deb822_preflight_contradiction",
+            next_safe_action="The deb822 validator passed earlier but the apt preflight gate is still blocking. Escalate to ask_human or a larger model.",
+            suggested_mitigations=["preflight_contradiction_capsule"],
+        )
+    return FamaSignal(
+        kind=FamaFailureKind.PREFLIGHT_CONTRADICTION,
+        severity=1,
+        source="preflight",
+        evidence=f"apt_deb822 preflight required for {host}/{user}",
+        step=current_step(state),
+        tool_name=str(tool_name or "").strip() or None,
+        operation_id=operation_id,
+        failure_class="apt_deb822_preflight_required",
+        next_safe_action="Run the standalone deb822 validator first, then retry the apt command.",
+        suggested_mitigations=["preflight_contradiction_capsule"],
+    )
+
+
+def detect_loop_rewrite(
+    state: Any,
+    *,
+    tool_name: str,
+    arguments: dict[str, Any] | None = None,
+) -> FamaSignal | None:
+    """Detect when the same file is rewritten multiple times with similar content."""
+    if tool_name not in {"file_write", "ssh_file_write"}:
+        return None
+    args = arguments if isinstance(arguments, dict) else {}
+    path = str(args.get("path") or "").strip()
+    content = str(args.get("content") or "").strip()
+    if not path or not content:
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    key = f"_loop_rewrite:{path}"
+    history = scratchpad.get(key)
+    if not isinstance(history, list):
+        history = []
+    # Store a hash of the content to detect similar rewrites
+    import hashlib
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    history.append(content_hash)
+    scratchpad[key] = history[-5:]
+    if len(history) < 3:
+        return None
+    # Check if last 3 hashes are identical or very similar
+    if len(set(history[-3:])) == 1:
+        return FamaSignal(
+            kind=FamaFailureKind.LOOPING,
+            severity=2,
+            source="tool_result",
+            evidence=f"{tool_name} has rewritten {path} {len(history)} times with identical content",
+            step=current_step(state),
+            tool_name=tool_name,
+            failure_class="repeated_action",
+            next_safe_action="Stop rewriting the same file. Use file_patch for narrow edits, or verify the existing content before overwriting.",
+            suggested_mitigations=["micro_plan_capsule", "evidence_reuse_capsule"],
+        )
+    return None
+
+
+def detect_verifier_path_misclassification(
+    state: Any,
+    *,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect when a verifier path failure contradicts a recent ssh_file_write verification."""
+    verdict = getattr(state, "last_verifier_verdict", None)
+    if not isinstance(verdict, dict):
+        return None
+    failure_mode = str(verdict.get("failure_mode") or "").strip().lower()
+    if failure_mode != "path":
+        return None
+    command = str(verdict.get("command") or "").strip()
+    if not command:
+        return None
+    # Extract path from command
+    words = command.split()
+    path = ""
+    for word in words:
+        if word.startswith("/"):
+            path = word
+            break
+    if not path:
+        return None
+    recent_messages = getattr(state, "recent_messages", None) or []
+    if not isinstance(recent_messages, list):
+        return None
+    for msg in reversed(recent_messages):
+        if msg is None:
+            continue
+        # Support both dict and object-style messages (e.g. SimpleNamespace)
+        if isinstance(msg, dict):
+            role = msg.get("role")
+            name = msg.get("name")
+            metadata = msg.get("metadata") or {}
+        else:
+            role = getattr(msg, "role", None)
+            name = getattr(msg, "name", None)
+            metadata = getattr(msg, "metadata", None) or {}
+        if role != "tool" or name != "ssh_file_write":
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if not metadata.get("success"):
+            continue
+        msg_path = str(metadata.get("path") or "").strip()
+        if msg_path == path:
+            return FamaSignal(
+                kind=FamaFailureKind.TOOL_OUTPUT_MISREAD,
+                severity=2,
+                source="verifier",
+                evidence=f"verifier reported path failure for {path}, but ssh_file_write confirmed it exists",
+                step=current_step(state),
+                tool_name="ssh_exec",
+                operation_id=operation_id,
+                failure_class="verifier_misclassification",
+                next_safe_action="The path was verified by ssh_file_write. The verifier failure is a false negative. Retry the command or use a different verification approach.",
+                suggested_mitigations=["evidence_reuse_capsule", "acceptance_checklist_capsule"],
+            )
+    return None

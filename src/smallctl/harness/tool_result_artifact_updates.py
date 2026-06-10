@@ -233,15 +233,8 @@ def _apply_ssh_file_mutation_updates(
             for key in list(cache.keys()):
                 if key.startswith(prefix):
                     cache.pop(key, None)
-        _emit_context_invalidation(
-            service,
-            reason="file_changed",
-            paths=[f"{host}:{mutated_path}"],
-            details={
-                "tool_name": tool_name,
-                "state_change": f"Remote file changed: {host}:{mutated_path}",
-            },
-        )
+        # Do not emit context invalidation for SSH file mutations; remote writes
+        # are intentional mutations and should not invalidate prior observations.
         _mark_verifier_stale_after_file_change(
             service,
             tool_name=tool_name,
@@ -260,6 +253,17 @@ def _apply_ssh_file_mutation_updates(
             "ssh_file_read",
             one_shot_args,
         )
+        # Mark remote installer preflight clean when ssh_file_write verifies a script path
+        if tool_name == "ssh_file_write":
+            from ..tools.shell_support import _mark_remote_installer_preflight_clean_from_write
+
+            user = str(arguments.get("user") or "").strip() or None
+            _mark_remote_installer_preflight_clean_from_write(
+                service.harness.state,
+                host=host,
+                user=user,
+                script_path=mutated_path,
+            )
     _record_touched_symbols_from_mutation(
         service,
         tool_name=tool_name,
@@ -357,6 +361,9 @@ def _apply_verifier_and_evidence_updates(
             rejection_count=loop_info["rejection_count"],
             last_verdict=loop_info["verdict"],
         )
+    rejection_count = loop_info.get("rejection_count", 0)
+    if rejection_count >= 3:
+        _handle_verifier_loop_hard_stop(service, verifier_verdict, rejection_count)
     _update_subtask_ledger_from_verifier(service, verifier_verdict)
     if isinstance(verifier_verdict, dict):
         verdict_label = str(verifier_verdict.get("verdict") or "").strip().lower()
@@ -374,6 +381,72 @@ def _apply_verifier_and_evidence_updates(
     if artifact and isinstance(verifier_verdict, dict) and verifier_verdict:
         _annotate_verifier_artifact(artifact, verifier_verdict=verifier_verdict)
     return verifier_verdict
+
+
+def _handle_verifier_loop_hard_stop(
+    service: Any,
+    verifier_verdict: dict[str, Any] | None,
+    rejection_count: int,
+) -> None:
+    """When verifier has rejected task_complete >=3 times, either auto-run the
+    missing verifier or inject a hard-stop system message."""
+    if not isinstance(verifier_verdict, dict):
+        return
+    state = service.harness.state
+    from ..models.conversation import ConversationMessage
+    command = str(verifier_verdict.get("command") or "").strip()
+    tool = str(verifier_verdict.get("tool") or "").strip()
+    target = str(verifier_verdict.get("target") or "").strip()
+
+    # Try to infer a fully-specified verifier readback call
+    readback_tool = None
+    readback_args: dict[str, Any] = {}
+    if tool == "ssh_exec" and target:
+        parts = target.split("::", 1)
+        host = parts[0].strip() if parts else ""
+        remote_command = parts[1].strip() if len(parts) > 1 else ""
+        if host and remote_command:
+            readback_tool = "ssh_exec"
+            readback_args = {"host": host, "command": remote_command}
+    if not readback_tool:
+        # Check if the target looks like a file path we could read back
+        path = target or command
+        if path and path.startswith("/"):
+            readback_tool = "ssh_file_read"
+            readback_args = {"host": "", "path": path}
+
+    if readback_tool:
+        state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"The verifier has rejected task_complete {rejection_count} times. "
+                    f"Auto-executing required verification: {readback_tool}({readback_args})."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "verifier_loop_hard_stop_auto_verifier",
+                    "rejection_count": rejection_count,
+                    "auto_tool": readback_tool,
+                    "auto_args": readback_args,
+                },
+            )
+        )
+    else:
+        state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"The verifier has rejected task_complete {rejection_count} times. "
+                    "You must either perform the required verification or call task_fail."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "verifier_loop_hard_stop_nudge",
+                    "rejection_count": rejection_count,
+                },
+            )
+        )
 
 
 def _apply_finalization_updates(

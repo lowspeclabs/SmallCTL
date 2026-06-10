@@ -13,16 +13,41 @@ if TYPE_CHECKING:
 
 
 KIND_LABEL = {
-    "user": "USER",
-    "thinking": "THINK",
-    "assistant": "ASSIST",
+    "user": "User",
+    "thinking": "thinking",
+    "assistant": "Assistant",
     "planner": "PLANNER",
-    "tool_call": "TOOL",
+    "tool_call": "Tool Calls",
     "tool_result": "RESULT",
     "error": "ERROR",
     "system": "SYSTEM",
     "alert": "ALERT",
+    "cancel": "SYSTEM",
 }
+
+KIND_COLOR = {
+    "user": "#e5e7eb",
+    "thinking": "#ca8a04",
+    "assistant": "#eab308",
+    "planner": "#e879f9",
+    "tool_call": "#16a34a",
+    "tool_result": "#38bdf8",
+    "error": "#ef4444",
+    "system": "#9ca3af",
+    "alert": "#f97316",
+    "shell": "#ca8a04",
+    "cancel": "#ef4444",
+}
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}m{secs:.0f}s"
 
 
 def _format_full_printout_text(text: str) -> str:
@@ -66,11 +91,9 @@ class BubbleWidget(Static):
         self._refresh_content()
 
     def _refresh_content(self) -> None:
-        label = KIND_LABEL.get(self.kind, self.kind.upper())
+        color = KIND_COLOR.get(self.kind, "#9ca3af")
         content = Text()
-        content.append(label, style="bold")
-        content.append("\n")
-        content.append(self.text)
+        content.append(self.text, style=color)
         self.update(content)
 
     def get_selection(self, selection: Any) -> Any:
@@ -165,34 +188,29 @@ class AssistantDetailWidget(Collapsible):
             self.title = self._build_title(self._text)
 
     def _build_title(self, text: str) -> str:
-        label = KIND_LABEL.get(self.kind, self.kind.upper())
+        color = KIND_COLOR.get(self.kind, "#9ca3af")
         if self.kind == "thinking":
             return self._build_thinking_title()
         preview = " ".join(text.split())
         if len(preview) > self.PREVIEW_LIMIT:
             preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
         preview = markup_escape(preview)
-        return f"{label}: {preview}" if preview else label
+        return f"[bold {color}]{preview}[/]" if preview else f"[bold {color}]{self.kind.upper()}[/]"
 
     def _build_thinking_title(self) -> str:
         import time
+        color = KIND_COLOR.get("thinking", "#ca8a04")
         if self._thinking_done_time is not None and self._thinking_start_time is not None:
             duration = self._thinking_done_time - self._thinking_start_time
-            return f"Thought: {self._format_duration(duration)}"
+            return f"[bold {color}]Thought: {self._format_duration(duration)}[/]"
         if self._thinking_start_time is not None:
             elapsed = time.monotonic() - self._thinking_start_time
-            return f"thinking {self._format_duration(elapsed)}..."
-        return "THINK"
+            return f"[bold {color}]thinking {self._format_duration(elapsed)}...[/]"
+        return f"[bold {color}]THINK[/]"
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
-        if seconds < 1:
-            return f"{int(seconds * 1000)}ms"
-        if seconds < 60:
-            return f"{seconds:.1f}s"
-        minutes = int(seconds // 60)
-        secs = seconds % 60
-        return f"{minutes}m{secs:.0f}s"
+        return _format_duration(seconds)
 
     async def add_child_widget(self, widget: Widget) -> None:
         await self._body_widget.mount(widget)
@@ -222,7 +240,7 @@ class ArtifactBubbleWidget(Collapsible):
         )
 
     def _build_title(self) -> str:
-        t = f"📦 ARTIFACT: {markup_escape(self._title_base)}"
+        t = f"[bold #9ca3af]📦 {markup_escape(self._title_base)}[/]"
         if self.path:
             t += f" [{markup_escape(self.path)}]"
         return t
@@ -247,7 +265,7 @@ class TaskChecklistWidget(Collapsible):
         self._content_widget = TextBlockWidget(text)
         super().__init__(
             self._content_widget,
-            title=title,
+            title=f"[bold #22c55e]{title}[/]",
             collapsed=True,
             id=id,
             classes="assistant-detail assistant-detail-checklist",
@@ -269,15 +287,45 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         tool_call_id: str | None = None,
         id: str | None = None,
     ) -> None:
-        super().__init__(kind="tool_call", text=text, id=id)
+        import time
         self.tool_name = tool_name
         self.tool_call_id = tool_call_id
         self._result_widgets: list[Widget] = []
         self._pending_full_printouts: list[ArtifactBubbleWidget] = []
+        self._start_time: float = time.monotonic()
+        self._done_time: float | None = None
+        super().__init__(kind="tool_call", text=text, id=id)
 
     @property
     def has_result(self) -> bool:
         return bool(self._result_widgets)
+
+    def _build_title(self, text: str) -> str:
+        color = KIND_COLOR.get(self.kind, "#9ca3af")
+        duration_str = ""
+        if self._done_time is not None:
+            duration = self._done_time - self._start_time
+            duration_str = f" ({_format_duration(duration)})"
+        elif self._start_time is not None:
+            import time
+            elapsed = time.monotonic() - self._start_time
+            duration_str = f" ({_format_duration(elapsed)})"
+        preview = " ".join(text.split())
+        if len(preview) > self.PREVIEW_LIMIT:
+            preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
+        preview = markup_escape(preview)
+        base = preview or self.tool_name or self.kind.upper()
+        return f"[bold {color}]{base}{duration_str}[/]"
+
+    def finalize(self) -> None:
+        if self._done_time is None:
+            import time
+            self._done_time = time.monotonic()
+            self.title = self._build_title(self._text)
+
+    def update_timer(self) -> None:
+        if self._done_time is None:
+            self.title = self._build_title(self._text)
 
     async def add_result(self, text: str, *, tool_name: str | None = None, data: dict[str, Any] | None = None) -> Widget:
         data = data or {}
@@ -301,6 +349,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             await self.add_child_widget(bubble)
             self._result_widgets.append(bubble)
             await self._flush_pending_full_printouts()
+            self.finalize()
             return bubble
             
         detail = AssistantDetailWidget(kind="tool_result", text=text, id=None)
@@ -308,6 +357,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         await self.add_child_widget(detail)
         self._result_widgets.append(detail)
         await self._flush_pending_full_printouts()
+        self.finalize()
         return detail
 
     async def get_or_create_artifact_bubble(self, title: str, *, path: str | None = None) -> ArtifactBubbleWidget:
@@ -350,13 +400,34 @@ class ToolCallDetailWidget(AssistantDetailWidget):
 class ToolCallsContainerWidget(Collapsible):
     def __init__(self, *, id: str | None = None) -> None:
         self._body_widget = Vertical(classes="tool-calls-container")
+        import time
+        self._start_time: float = time.monotonic()
+        self._done_time: float | None = None
         super().__init__(
             self._body_widget,
-            title="🛠️ Tool Calls",
+            title=self._build_title(),
             collapsed=True,
             id=id,
             classes="assistant-detail assistant-detail-tool_call bubble bubble-tool_call"
         )
+
+    def _build_title(self) -> str:
+        if self._done_time is not None:
+            duration = self._done_time - self._start_time
+            return f"[bold #16a34a]🛠️ Tool Calls ({_format_duration(duration)})[/]"
+        import time
+        elapsed = time.monotonic() - self._start_time
+        return f"[bold #16a34a]🛠️ Tool Calls ({_format_duration(elapsed)})[/]"
+
+    def finalize(self) -> None:
+        if self._done_time is None:
+            import time
+            self._done_time = time.monotonic()
+            self.title = self._build_title()
+
+    def update_timer(self) -> None:
+        if self._done_time is None:
+            self.title = self._build_title()
 
     async def add_tool_call(self, detail: Widget) -> None:
         await self._body_widget.mount(detail)
@@ -370,10 +441,8 @@ class AssistantTurnWidget(Vertical):
         self._label_widget = Static(self._build_label_text(), classes="assistant-turn-label")
         self._body_widget = Vertical(classes="assistant-turn-body")
         self._body_widget.styles.height = "auto"
-        self._meta_widget = Vertical(classes="assistant-turn-meta")
-        self._meta_widget.styles.height = "auto"
-        self._main_widget = Vertical(classes="assistant-turn-main")
-        self._main_widget.styles.height = "auto"
+        self._content_widget = Vertical(classes="assistant-turn-content")
+        self._content_widget.styles.height = "auto"
         self._last_assistant_block: TextBlockWidget | None = None
         self._last_thinking_detail: AssistantDetailWidget | None = None
         self._last_shell_stream: ArtifactBubbleWidget | None = None
@@ -387,7 +456,7 @@ class AssistantTurnWidget(Vertical):
     def get_assistant_text(self) -> str:
         parts: list[str] = []
         try:
-            for child in self._main_body().children:
+            for child in self._content_body().children:
                 if isinstance(child, TextBlockWidget):
                     parts.append(child.text)
         except Exception:
@@ -396,17 +465,17 @@ class AssistantTurnWidget(Vertical):
 
     def has_meta_content(self) -> bool:
         try:
-            return bool(list(self._meta_body().children))
+            return bool(list(self._content_body().children))
         except Exception:
             return False
 
     async def add_meta_widget(self, widget: Widget) -> None:
-        await self._meta_widget.mount(widget)
+        await self._content_widget.mount(widget)
 
     async def set_task_checklist(self, text: str, *, title: str = "📋 Task Checklist") -> None:
         if self._task_checklist_widget is None:
             self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
-            await self._meta_widget.mount(self._task_checklist_widget)
+            await self._content_widget.mount(self._task_checklist_widget)
         else:
             self._task_checklist_widget.set_text(text)
             self._task_checklist_widget.set_title(title)
@@ -415,20 +484,19 @@ class AssistantTurnWidget(Vertical):
     async def _ensure_checklist_at_bottom(self) -> None:
         if self._task_checklist_widget is None:
             return
-        if self._meta_widget.children and self._meta_widget.children[-1] is self._task_checklist_widget:
+        if self._content_widget.children and self._content_widget.children[-1] is self._task_checklist_widget:
             return
         # Recreate widget at the bottom to avoid Textual move/remove quirks
         text = self._task_checklist_widget._content_widget.text
         title = self._task_checklist_widget.title
-        await self._meta_widget.remove_children(".assistant-detail-checklist")
+        await self._content_widget.remove_children(".assistant-detail-checklist")
         self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
-        await self._meta_widget.mount(self._task_checklist_widget)
+        await self._content_widget.mount(self._task_checklist_widget)
 
     def compose(self) -> ComposeResult:
         yield self._label_widget
         with self._body_widget:
-            yield self._meta_widget
-            yield self._main_widget
+            yield self._content_widget
 
     @property
     def speaker(self) -> str:
@@ -442,19 +510,25 @@ class AssistantTurnWidget(Vertical):
         self._label_widget.update(self._build_label_text())
 
     def _build_label_text(self) -> str:
-        return KIND_LABEL.get(self._speaker, self._speaker.upper())
+        label = KIND_LABEL.get(self._speaker, self._speaker.upper())
+        color = KIND_COLOR.get(self._speaker, "#eab308")
+        return f"[bold {color}]{label}[/]"
 
     async def append_assistant_text(self, text: str) -> None:
         if not text:
             return
         if self._last_thinking_detail is not None:
             self._last_thinking_detail.finalize_thinking()
+        if self._current_tool_calls_container is not None:
+            self._current_tool_calls_container.finalize()
+            self._current_tool_calls_container = None
         if self._last_assistant_block is None:
             text = _trim_leading_blank_lines(text)
             if not text:
                 return
             self._last_assistant_block = TextBlockWidget(classes="assistant-turn-text")
-            await self._main_body().mount(self._last_assistant_block)
+            await self._content_body().mount(self._last_assistant_block)
+            await self._ensure_checklist_at_bottom()
         self._last_assistant_block.append_text(text)
         self._last_thinking_detail = None
 
@@ -476,7 +550,8 @@ class AssistantTurnWidget(Vertical):
         else:
             bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
             bubble.add_class("assistant-detail-nested")
-            await self._meta_body().mount(bubble)
+            await self._content_body().mount(bubble)
+            await self._ensure_checklist_at_bottom()
         self._last_assistant_block = None
         self._last_thinking_detail = None
         self._last_shell_stream = None
@@ -484,9 +559,12 @@ class AssistantTurnWidget(Vertical):
     async def append_thinking_text(self, text: str) -> None:
         if not text:
             return
+        if self._current_tool_calls_container is not None:
+            self._current_tool_calls_container.finalize()
+            self._current_tool_calls_container = None
         if self._last_thinking_detail is None:
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
-            await self._meta_body().mount(self._last_thinking_detail)
+            await self._content_body().mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.append_text(text)
         self._last_thinking_detail.update_thinking_timer()
@@ -495,11 +573,14 @@ class AssistantTurnWidget(Vertical):
         self._last_shell_stream = None
 
     async def replace_thinking_text(self, text: str) -> None:
+        if self._current_tool_calls_container is not None:
+            self._current_tool_calls_container.finalize()
+            self._current_tool_calls_container = None
         if self._last_thinking_detail is None:
             if not text:
                 return
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
-            await self._meta_body().mount(self._last_thinking_detail)
+            await self._content_body().mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.set_text(text)
         self._last_thinking_detail.update_thinking_timer()
@@ -529,10 +610,13 @@ class AssistantTurnWidget(Vertical):
                     text=""
                 )
                 self._last_shell_stream.add_class("assistant-detail-nested")
-                await self._meta_body().mount(self._last_shell_stream)
+                await self._content_body().mount(self._last_shell_stream)
                 await self._ensure_checklist_at_bottom()
             self._last_shell_stream.append_text(text)
 
+        if self._current_tool_calls_container is not None:
+            self._current_tool_calls_container.finalize()
+            self._current_tool_calls_container = None
         self._last_assistant_block = None
         self._last_thinking_detail = None
 
@@ -548,7 +632,7 @@ class AssistantTurnWidget(Vertical):
         if container is None:
             container = ToolCallsContainerWidget()
             self._current_tool_calls_container = container
-            await self._meta_body().mount(container)
+            await self._content_body().mount(container)
             await self._ensure_checklist_at_bottom()
         await container.add_tool_call(detail)
         self._tool_call_details.append(detail)
@@ -597,11 +681,14 @@ class AssistantTurnWidget(Vertical):
     def _body(self) -> Vertical:
         return self._body_widget
 
+    def _content_body(self) -> Vertical:
+        return self._content_widget
+
     def _main_body(self) -> Vertical:
-        return self._main_widget
+        return self._content_widget
 
     def _meta_body(self) -> Vertical:
-        return self._meta_widget
+        return self._content_widget
 
 
 def _coerce_speaker(value: str | None) -> str:

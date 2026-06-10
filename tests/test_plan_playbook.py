@@ -2673,7 +2673,9 @@ def test_resume_continue_after_repeated_tool_loop_reseeds_guard_and_adds_nudge()
     assert state.recent_messages[-1].role == "system"
     assert "Do not call `dir_list` again with the same arguments" in state.recent_messages[-1].content
     assert "trust the visible listing" in state.recent_messages[-1].content
-    assert "Guard tripped: repeated dir_list loop (same path repeated without progress)" in (
+    # With the 3+ threshold fix, _dir_list_same_path_repeat_is_loop requires 3 total
+    # calls. After resume there is only 1 prior call, so the generic loop guard fires.
+    assert "Guard tripped: repeated tool call loop" in (
         _detect_repeated_tool_loop(harness, PendingToolCall(tool_name="dir_list", args={})) or ""
     )
     assert getattr(emitted[0], "content", "") == "continue"
@@ -3340,6 +3342,10 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
             "_token_limit": status.token_limit,
             "_context_window": status.context_window,
             "_api_errors": status.api_errors,
+            "_phase_transition": "",
+            "_waiver_reason": "",
+            "_blocker_summary": "",
+            "_blocker_persistent": False,
         }
     )
 

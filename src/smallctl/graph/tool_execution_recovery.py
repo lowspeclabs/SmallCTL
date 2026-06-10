@@ -57,6 +57,31 @@ from .tool_execution_recovery_support import (
 from . import write_session_outcomes as _write_session_outcomes
 from .escalation_triggers import _maybe_auto_trigger_escalation_for_tool_loop
 
+
+def _should_escalate_to_ask_human_for_repeated_failure(harness: Any, pending: PendingToolCall) -> bool:
+    """Check if the same tool has failed 3+ times with the same error pattern."""
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        return False
+    observations = scratchpad.get("_repeated_failure_observations")
+    if not isinstance(observations, list):
+        return False
+    current_step = int(getattr(harness.state, "step_count", 0) or 0)
+    for obs in observations:
+        if not isinstance(obs, dict):
+            continue
+        count = int(obs.get("count", 0) or 0)
+        if count < 3:
+            continue
+        last_step = int(obs.get("last_step", 0) or 0)
+        if current_step - last_step > 5:
+            continue
+        tool_name = str(obs.get("tool_name") or "").strip()
+        if tool_name == pending.tool_name:
+            return True
+    return False
+
+
 async def _maybe_recover_missing_first_write_session(
     graph_state: GraphRunState,
     harness: Any,
@@ -647,6 +672,35 @@ async def handle_repeated_tool_loop(
                 "cleared staged artifact and write session after repeated reads",
                 step=harness.state.step_count,
                 artifact_id=artifact_id,
+                guard_error=repeat_error,
+            )
+            graph_state.pending_tool_calls = []
+            graph_state.last_tool_results = []
+            return None
+
+        # Escalate to ask_human after 3 identical failures for path disambiguation
+        if _should_escalate_to_ask_human_for_repeated_failure(harness, pending):
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        f"STOP. The same `{pending.tool_name}` call has failed 3+ times with the same error. "
+                        "Call `ask_human` with the exact path or command you are trying to use "
+                        "so the user can confirm or correct it before you retry."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "repeated_failure_ask_human",
+                        "tool_name": pending.tool_name,
+                    },
+                )
+            )
+            harness._runlog(
+                "repeated_failure_ask_human_escalation",
+                "escalated to ask_human after 3 identical failures",
+                step=harness.state.step_count,
+                tool_name=pending.tool_name,
+                arguments=json_safe_value(pending.args),
                 guard_error=repeat_error,
             )
             graph_state.pending_tool_calls = []

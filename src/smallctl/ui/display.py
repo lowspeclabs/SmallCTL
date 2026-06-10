@@ -21,6 +21,13 @@ from ..models.events import (
 )
 
 
+_CRITICAL_EVENTS = {
+    "context_lane_dropped",
+    "fama_health_warning",
+    "fama_capsule_health",
+    "terminal_control_failed",
+}
+
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -77,6 +84,9 @@ def should_render_run_log_row(row: dict[str, Any]) -> bool:
     channel = str(row.get("channel") or "")
     event = str(row.get("event") or "")
 
+    # Critical backend state changes should always be visible
+    if event in _CRITICAL_EVENTS:
+        return True
     if channel in {"tools", "chat", "model_output"}:
         return False
     if channel != "harness":
@@ -100,6 +110,9 @@ def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool
         return False
     if event.data.get("ui_kind") == "subtask_checklist":
         return True
+    # Critical backend state changes should always be visible
+    if event.data.get("ui_kind") in _CRITICAL_EVENTS or event.data.get("event") in _CRITICAL_EVENTS:
+        return True
     if event.event_type in {UIEventType.SYSTEM, UIEventType.METRICS} and not show_system_messages:
         return False
     # Treat most ALERTs as system-level noise, but preserve interactive prompts
@@ -117,10 +130,24 @@ def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool
 
 def format_run_log_row(row: dict[str, Any]) -> str:
     """Format a run log row for display."""
+    event = str(row.get("event") or "").strip()
+    data = row.get("data") or {}
+    if event == "verifier_path_false_negative_guard":
+        target = str(data.get("target") or "")
+        command = str(data.get("command") or "")
+        return f"[harness] ⚠️ verifier path-failure overridden: {target} ({command})"
+    if event == "timeout_override":
+        requested = data.get("requested_timeout_sec")
+        effective = data.get("effective_timeout_sec")
+        reason = str(data.get("reason") or "")
+        return f"[harness] ⏱️ timeout capped: {requested}s → {effective}s ({reason})"
+    if event == "fama_capsule_health_warning":
+        warning = str(data.get("warning") or "")
+        return f"[harness] 🚨 FAMA health: {warning}"
     msg = row.get("message") or ""
     if len(msg) > 1024:
         msg = msg[:1024] + "... [truncated]"
-    return f"[{row.get('channel')}] {row.get('event')}: {msg}"
+    return f"[{row.get('channel')}] {event}: {msg}"
 
 
 def compute_activity_for_event(
@@ -366,6 +393,59 @@ def _raw_duplicate_tokens(text: str) -> list[str]:
 
 def _is_standalone_ip(token: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", token))
+
+
+def _build_backend_rca_strip(harness: Any) -> str:
+    """Build a compact backend RCA strip for cancelled/interrupted runs."""
+    if harness is None:
+        return ""
+    state = getattr(harness, "state", None)
+    if state is None:
+        return ""
+    parts: list[str] = []
+
+    # Last failing verifier
+    last_verifier = getattr(state, "last_verifier_verdict", None)
+    if isinstance(last_verifier, dict):
+        verdict = str(last_verifier.get("verdict") or "").strip().lower()
+        cmd = str(last_verifier.get("command") or "").strip()
+        if verdict == "fail" and cmd:
+            parts.append(f"Last failing verifier: `{cmd}`")
+        elif verdict == "pass" and cmd:
+            parts.append(f"Last passing verifier: `{cmd}`")
+
+    # Last 3 critical tool failures
+    critical_failures: list[str] = []
+    recent_errors = getattr(state, "recent_errors", None)
+    if isinstance(recent_errors, list):
+        for err in recent_errors[-3:]:
+            err_text = str(err or "").strip()
+            if err_text and len(err_text) <= 120:
+                critical_failures.append(err_text)
+            elif err_text:
+                critical_failures.append(err_text[:117] + "...")
+    if critical_failures:
+        parts.append("Recent failures: " + "; ".join(critical_failures))
+
+    # FAMA health
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        fama = scratchpad.get("_fama")
+        if isinstance(fama, dict):
+            signals = fama.get("signals")
+            if isinstance(signals, list) and signals:
+                parts.append(f"FAMA signals: {len(signals)}")
+            else:
+                parts.append("FAMA: no mitigations rendered recently")
+
+        # Hidden artifact IDs
+        hidden = scratchpad.get("suppressed_truncated_artifact_ids")
+        if isinstance(hidden, list) and hidden:
+            parts.append(f"Hidden artifacts: {', '.join(str(a) for a in hidden[-3:])}")
+
+    if not parts:
+        return ""
+    return "RCA: " + " | ".join(parts)
 
 
 class StatusState:

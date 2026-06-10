@@ -750,12 +750,12 @@ def test_prompt_builder_tunes_recent_message_limit_for_remote_repair_pressure() 
     service = PromptBuilderService(harness)
     asyncio.run(service.build_messages("SYSTEM PROMPT"))
 
-    assert calls["memory_limit"] == 4
-    assert calls["assembler_limit"] == 4
+    assert calls["memory_limit"] == 8
+    assert calls["assembler_limit"] == 8
     tuning_entry = next(
         entry for entry in harness.run_logger.entries if entry["event"] == "recent_message_limit_tuned"
     )
-    assert tuning_entry["data"]["adjusted_limit"] == 4
+    assert tuning_entry["data"]["adjusted_limit"] == 8
     assert "high_prompt_budget" in tuning_entry["data"]["reasons"]
 
 

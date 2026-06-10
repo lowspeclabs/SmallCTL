@@ -76,13 +76,14 @@ def _maybe_schedule_task_complete_remote_mutation_verifier(
             source="system",
         )
     ]
+    required_call_text = f"{tool_name}({', '.join(f'{k}={repr(v)}' for k, v in args.items())})"
     harness.state.append_message(
         ConversationMessage(
             role="system",
             content=(
-                "Auto-continuing remote mutation verification with `ssh_file_read` "
-                "or `ssh_exec` because `task_complete` was blocked. For deletion "
-                "tasks, a `not found` / `no such file` read or an empty directory "
+                "VERIFICATION REQUIRED: Before calling task_complete, verify the remote file mutation. "
+                f"Required call: {required_call_text}. "
+                "For deletion tasks, a `not found` / `no such file` read or an empty directory "
                 "listing is valid proof. For binary or key files, a read-only "
                 "presence/hash check is valid proof. "
                 "Verification already completed means the model may call `task_complete` "

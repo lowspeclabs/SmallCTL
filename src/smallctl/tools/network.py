@@ -40,6 +40,7 @@ shell_join = _shell_join
 from .shell_support import (
     InvalidInputLoopDetector,
     _apt_deb822_preflight_guard,
+    _apt_sources_list_d_guard,
     _expose_interactive_session_tools,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
@@ -47,8 +48,11 @@ from .shell_support import (
     _looks_like_deb822_validator,
     _mark_deb822_preflight_clean,
     _mark_remote_installer_preflight_clean,
+    _mark_remote_installer_preflight_clean_from_write,
     _remote_installer_cwd_and_script,
     _remote_installer_preflight_guard,
+    _remote_installer_preflight_has_verified_write,
+    record_apt_update_result,
 )
 from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
@@ -73,6 +77,23 @@ from .network_installer_preflight import _run_remote_installer_preflight_probes
 
 if TYPE_CHECKING:
     from ..state import LoopState
+
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+
+
+async def _preflight_curl_url_in_command(command: str) -> tuple[bool, str]:
+    """If a curl/wget command targets a suspicious URL, run a local HEAD preflight."""
+    lowered = command.lower()
+    if "curl" not in lowered and "wget" not in lowered:
+        return False, ""
+    urls = _URL_RE.findall(command)
+    from .http import _preflight_head_check
+    for url in urls:
+        blocked, reason = await _preflight_head_check(url)
+        if blocked:
+            return True, reason
+    return False, ""
 
 
 async def ssh_exec(
@@ -160,6 +181,18 @@ async def ssh_exec(
             )
             denied["status"] = "denied"
             return denied
+
+    blocked, reason = await _preflight_curl_url_in_command(command)
+    if blocked:
+        return fail(
+            reason,
+            metadata={
+                "host": host,
+                "command": command,
+                "reason": "url_preflight_failed",
+                "preflight": True,
+            },
+        )
 
     result = await run_ssh_command(
         host=host,
@@ -263,7 +296,24 @@ async def run_ssh_command(
         metadata = dict(apt_guard.get("metadata") or {})
         metadata.update({"host": host, "user": user})
         apt_guard["metadata"] = metadata
+        if harness and hasattr(harness, "_runlog"):
+            harness._runlog(
+                "apt_deb822_preflight_blocked",
+                f"APT blocked pending deb822 validation for {host} — run the validator first.",
+                host=host,
+                user=user,
+                reason="apt_deb822_preflight_required",
+            )
         return apt_guard
+
+    sources_guard = _apt_sources_list_d_guard(
+        command, tool_name="ssh_exec", state=state, host=host, user=user
+    )
+    if sources_guard is not None:
+        metadata = dict(sources_guard.get("metadata") or {})
+        metadata.update({"host": host, "user": user})
+        sources_guard["metadata"] = metadata
+        return sources_guard
 
     preflight_guard = None
     if stdin_data is None:
@@ -336,6 +386,12 @@ async def run_ssh_command(
         # Build enriched, actionable error text
         parts: list[str] = []
         parts.append("Remote installer environment scan completed.")
+
+        # Check if we have verified write evidence for this script path
+        has_verified_write = _remote_installer_preflight_has_verified_write(
+            state, host=host, user=user, script_path=probes.get("script_path", "")
+        )
+
         if probes.get("script_exists"):
             if probes.get("script_executable"):
                 parts.append(
@@ -345,6 +401,10 @@ async def run_ssh_command(
                 parts.append(
                     f"- Script: {probes['script_path']} (exists but NOT executable)"
                 )
+        elif has_verified_write:
+            parts.append(
+                f"- Script: {probes['script_path']} (verified by ssh_file_write, probe may be stale)"
+            )
         else:
             parts.append(f"- Script: {probes['script_path']} (NOT FOUND)")
             if probes.get("cwd"):
@@ -366,7 +426,7 @@ async def run_ssh_command(
 
         parts.append(f"\n{probes['recommended_approach']}")
 
-        if not probes.get("script_exists"):
+        if not probes.get("script_exists") and not has_verified_write:
             parts.append(
                 "\nAction required: Verify the installer path before retrying."
             )
@@ -574,6 +634,16 @@ async def run_ssh_command(
                 },
             )
 
+        # Record apt-get update results for the sources.list.d guard
+        record_apt_update_result(
+            state,
+            command=command,
+            success=proc.returncode == 0,
+            stderr=str(output.get("stderr") or ""),
+            host=host,
+            user=user,
+        )
+
         if proc.returncode != 0:
             err_output = output.get("stderr", "")
             if not isinstance(err_output, str):
@@ -630,6 +700,8 @@ async def run_ssh_command(
                 },
             )
 
+        if _looks_like_deb822_validator(command):
+            _mark_deb822_preflight_clean(state, host=host, user=user)
         return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
 
     except asyncio.TimeoutError:

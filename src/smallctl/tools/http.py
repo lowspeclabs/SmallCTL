@@ -16,6 +16,27 @@ from .fs_write_session_policy import _guard_suspicious_temp_root_path
 from .fs_write_sessions import _resolve
 
 
+_SUSPICIOUS_URL_PATTERNS = ("github.com",)
+_PREFLIGHT_TIMEOUT_SEC = 2
+
+
+async def _preflight_head_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Return (should_block, reason) if the URL fails a lightweight HEAD preflight."""
+    lowered = url.lower()
+    if not any(pattern in lowered for pattern in _SUSPICIOUS_URL_PATTERNS):
+        return False, ""
+    if httpx is None:
+        return False, ""
+    try:
+        async with httpx.AsyncClient(timeout=_PREFLIGHT_TIMEOUT_SEC) as client:
+            response = await client.head(url, headers=headers, follow_redirects=True)
+        if response.status_code == 404:
+            return True, "URL returned 404 on HEAD preflight. The resource does not exist. Do not retry with similar URLs."
+    except Exception:
+        pass
+    return False, ""
+
+
 async def http_get(
     url: str,
     headers: dict[str, str] | None = None,
@@ -23,6 +44,9 @@ async def http_get(
 ) -> dict[str, Any]:
     if httpx is None:
         return fail("Dependency missing: httpx")
+    blocked, reason = await _preflight_head_check(url, headers=headers)
+    if blocked:
+        return fail(reason, metadata={"status_code": 404, "preflight": True})
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=timeout_sec) as client:

@@ -173,7 +173,7 @@ class LexicalRetriever:
         if not refined_query or refined_query == base_query:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
-            return RetrievalBundle(
+            bundle = RetrievalBundle(
                 query=base_query,
                 initial_query=base_query,
                 summaries=first_pass.summaries,
@@ -188,6 +188,9 @@ class LexicalRetriever:
                 ranked_candidates=first_pass.ranked_candidates,
                 miss_reasons={**first_pass.miss_reasons, "refinement": [f"refinement_triggered:{reason}"]},
             )
+            if "artifact signal is weak" in reason:
+                self._inject_failure_artifacts(state, bundle)
+            return bundle
 
         second_pass = self._retrieve_pass(
             state=state,
@@ -207,12 +210,16 @@ class LexicalRetriever:
             second_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
             state.retrieval_cache = [snippet.artifact_id for snippet in second_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in second_pass.experiences]
+            if "artifact signal is weak" in reason:
+                self._inject_failure_artifacts(state, second_pass)
             return second_pass
 
         first_pass.refinement_reason = reason
         first_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
         state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
         state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
+        if "artifact signal is weak" in reason:
+            self._inject_failure_artifacts(state, first_pass)
         return first_pass
 
     def retrieve_artifacts(
@@ -696,6 +703,32 @@ class LexicalRetriever:
 
     def _build_refined_query(self, *, state: LoopState, bundle: RetrievalBundle) -> str:
         return build_refined_retrieval_query(state, base_query=bundle.query, bundle=bundle)
+
+    def _inject_failure_artifacts(self, state: LoopState, bundle: RetrievalBundle) -> None:
+        """Force-include the last 2 failure artifacts when artifact signal is weak."""
+        existing_ids = {snippet.artifact_id for snippet in bundle.artifacts}
+        failure_artifacts: list[tuple[datetime, ArtifactRecord]] = []
+        for artifact_id, artifact in getattr(state, "artifacts", {}).items():
+            if artifact_id in existing_ids:
+                continue
+            metadata = getattr(artifact, "metadata", {}) if isinstance(getattr(artifact, "metadata", None), dict) else {}
+            if bool(metadata.get("success")):
+                continue
+            created = getattr(artifact, "created_at", None)
+            try:
+                dt = datetime.fromisoformat(str(created)) if created else datetime.min
+            except Exception:
+                dt = datetime.min
+            failure_artifacts.append((dt, artifact))
+        failure_artifacts.sort(key=lambda item: item[0], reverse=True)
+        best_score = bundle.best_scores.get("artifacts", 0.0)
+        synthetic_score = max(best_score, 50.0)
+        for _, artifact in failure_artifacts[:2]:
+            text = self._artifact_text(artifact)
+            bundle.artifacts.append(ArtifactSnippet(artifact_id=artifact.artifact_id, text=text, score=synthetic_score))
+        if failure_artifacts[:2]:
+            bundle.best_scores["artifacts"] = synthetic_score
+            bundle.miss_reasons.setdefault("refinement", []).append("failure_artifact_boost_injected")
 
     def _score_experience(
         self,

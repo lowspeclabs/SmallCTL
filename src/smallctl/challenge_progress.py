@@ -100,7 +100,7 @@ def record_verifier_result(
     verdict: str,
     exit_code: Any,
 ) -> None:
-    if tool_name != "shell_exec":
+    if tool_name not in {"shell_exec", "ssh_exec"}:
         return
     progress = getattr(state, "challenge_progress", None)
     if progress is None:
@@ -120,7 +120,10 @@ def record_verifier_result(
     except (TypeError, ValueError):
         progress.last_verifier_exit_code = None
     if progress.last_verifier_verdict == "pass":
-        progress.verified_after_last_change = step >= progress.last_code_change_step
+        if _verifier_matches_user_objective(state, command):
+            progress.verified_after_last_change = step >= progress.last_code_change_step
+        else:
+            progress.verified_after_last_change = False
         progress.post_pass_nonterminal_steps = 0
         progress.no_change_steps_after_write = 0
         if getattr(progress, "successful_artifact_write_step", None) is not None and step >= progress.successful_artifact_write_step:
@@ -130,6 +133,33 @@ def record_verifier_result(
     else:
         progress.verified_after_last_change = False
         _set_phase(progress, "debug", step=step)
+
+
+def _verifier_matches_user_objective(state: Any, command: str) -> bool:
+    """Return True if the verifier command matches the user objective.
+
+    For install/setup tasks, weak file-existence verifiers do not count as
+    objective-matching verification.
+    """
+    task = str(
+        getattr(getattr(state, "run_brief", None), "original_task", "")
+        or ""
+    ).strip().lower()
+    if not task:
+        return True
+    install_markers = ("install", "setup", "deploy", "configure")
+    if not any(m in task for m in install_markers):
+        return True
+    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    weak_patterns = [
+        (r"\bls\s+-la?\s+\S+", "file existence check"),
+        (r"\btest\s+-[ef]\s+\S+", "file existence check"),
+        (r"\bcat\s+\S+", "file content check"),
+    ]
+    for pattern, _check_type in weak_patterns:
+        if re.search(pattern, normalized):
+            return False
+    return True
 
 
 def _write_session_deadline_block(state: Any, *, tool_name: str) -> ToolEnvelope | None:

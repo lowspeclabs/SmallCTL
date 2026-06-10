@@ -52,7 +52,7 @@ class ContextPolicy:
     turn_bundle_limit: int = 6
     coding_profile_enabled: bool = True
     cold_fact_limit: int = 12
-    compaction_step_interval: int = 8
+    compaction_step_interval: int = 5
 
     # Ratio-based scaling fields (Phase I)
     hot_history_ratio: float = 0.45     # share of soft_limit for verbatim transcript

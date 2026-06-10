@@ -15,7 +15,13 @@ def _resolve(path: str, cwd: str | None = None) -> Path:
     base = Path(cwd) if cwd else Path.cwd()
     candidate = Path(path)
     if not candidate.is_absolute():
-        candidate = base / candidate
+        # Guard against paths that already encode the CWD as relative segments
+        base_str = str(base).rstrip("/")
+        path_str = str(path).lstrip("./")
+        if base_str and path_str.startswith(base_str.lstrip("/") + "/"):
+            candidate = Path("/" + path_str)
+        else:
+            candidate = base / candidate
     return candidate.resolve()
 
 

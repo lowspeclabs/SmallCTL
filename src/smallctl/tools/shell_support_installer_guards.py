@@ -127,6 +127,13 @@ def _remote_installer_preflight_guard(
     if state is None or not raw or not _looks_like_remote_installer_mutation(raw):
         return None
     cwd, script_path = _remote_installer_cwd_and_script(raw)
+
+    # Trust same-session ssh_file_write readback for the exact script path
+    if _remote_installer_preflight_has_verified_write(
+        state, host=host, user=user, script_path=script_path
+    ):
+        return None
+
     key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd])
     scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
     preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
@@ -284,6 +291,74 @@ def _mark_remote_installer_preflight_clean(
     entry["user"] = user or ""
     entry["cwd"] = cwd
     entry["created_at_step"] = int(getattr(state, "step_count", 0) or 0)
+
+
+def _mark_remote_installer_preflight_clean_from_write(
+    state: LoopState | None,
+    *,
+    host: str,
+    user: str | None,
+    script_path: str,
+) -> None:
+    """Mark preflight clean when a same-session ssh_file_write verified the script path."""
+    if state is None or not script_path:
+        return
+    normalized_path = str(script_path).strip()
+    cwd = ""
+    if "/" in normalized_path:
+        cwd = normalized_path.rsplit("/", 1)[0]
+    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd])
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
+    if not isinstance(preflights, dict):
+        preflights = {}
+        scratchpad[_REMOTE_INSTALLER_PREFLIGHT_KEY] = preflights
+    entry = preflights.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        preflights[key] = entry
+    entry["status"] = "clean"
+    entry["host"] = host
+    entry["user"] = user or ""
+    entry["cwd"] = cwd
+    entry["script_path"] = normalized_path
+    entry["created_at_step"] = int(getattr(state, "step_count", 0) or 0)
+    entry["verified_by_ssh_file_write"] = True
+
+
+def _remote_installer_preflight_has_verified_write(
+    state: LoopState | None,
+    *,
+    host: str,
+    user: str | None,
+    script_path: str,
+) -> bool:
+    """Check if a same-session ssh_file_write verified the exact script path on the same host/user."""
+    if state is None or not script_path:
+        return False
+    normalized_path = str(script_path).strip()
+    cwd = ""
+    if "/" in normalized_path:
+        cwd = normalized_path.rsplit("/", 1)[0]
+    key = "|".join([str(host or "").strip().lower(), str(user or "").strip().lower(), cwd])
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    preflights = scratchpad.get(_REMOTE_INSTALLER_PREFLIGHT_KEY)
+    if not isinstance(preflights, dict):
+        return False
+    entry = preflights.get(key)
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get("status") or "").strip() != "clean":
+        return False
+    if not entry.get("verified_by_ssh_file_write"):
+        return False
+    entry_script = str(entry.get("script_path") or "").strip()
+    if entry_script and entry_script != normalized_path:
+        return False
+    created = int(entry.get("created_at_step", 0) or 0)
+    current = int(getattr(state, "step_count", 0) or 0)
+    # Trust the write verification for up to 8 steps
+    return current - created <= 8
 
 
 def _expose_interactive_session_tools(state: LoopState | None) -> None:

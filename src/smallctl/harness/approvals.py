@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 import logging
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
@@ -11,6 +12,10 @@ if TYPE_CHECKING:
     from ..harness import Harness
 
 logger = logging.getLogger("smallctl.harness.approvals")
+
+# Grace period (seconds) after shell-approval timeout during which a late
+# resolution from the UI is still honoured.
+_SHELL_APPROVAL_EXPIRY_GRACE_SEC = 5.0
 
 
 def _set_future_result_if_pending(future: asyncio.Future[Any], value: Any) -> None:
@@ -23,6 +28,7 @@ class ApprovalService:
     def __init__(self, harness: Harness):
         self.harness = harness
         self._shell_approval_waiters: dict[str, asyncio.Future[bool]] = {}
+        self._shell_approval_expired: dict[str, tuple[asyncio.Future[bool], float]] = {}
         self._sudo_password_waiters: dict[str, asyncio.Future[str | None]] = {}
 
     async def request_shell_approval(
@@ -57,8 +63,31 @@ class ApprovalService:
         )
         try:
             await self.harness._emit(self.harness.event_handler, event)
-            return await asyncio.wait_for(future, timeout=float(timeout_sec))
-        except asyncio.TimeoutError:
+            # Primary timeout
+            timeout_task = asyncio.ensure_future(
+                asyncio.sleep(float(timeout_sec))
+            )
+            done, pending = await asyncio.wait(
+                {future, timeout_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            # Only cancel timeout helper tasks, never the approval future.
+            if timeout_task in pending:
+                timeout_task.cancel()
+            if future in done:
+                return future.result()
+            # Primary timeout fired — enter grace period so late UI clicks are
+            # not silently dropped.  Keep the future alive for a short window.
+            grace_task = asyncio.ensure_future(
+                asyncio.sleep(_SHELL_APPROVAL_EXPIRY_GRACE_SEC)
+            )
+            done2, pending2 = await asyncio.wait(
+                {future, grace_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if grace_task in pending2:
+                grace_task.cancel()
+            if future in done2:
+                return future.result()
+            # Grace period expired without resolution — definitively reject.
             self._reject_shell_approval(approval_id)
             return False
         except Exception:
@@ -66,9 +95,23 @@ class ApprovalService:
             raise
         finally:
             self._shell_approval_waiters.pop(approval_id, None)
+            self._prune_expired_shell_approvals()
 
     def resolve_shell_approval(self, approval_id: str, approved: bool) -> None:
         future = self._shell_approval_waiters.get(approval_id)
+        if future is None:
+            # Check the grace-period buffer for a recently-timed-out waiter.
+            expired_entry = self._shell_approval_expired.pop(approval_id, None)
+            if expired_entry is not None:
+                future, expiry = expired_entry
+                if time.time() <= expiry and not future.done():
+                    logger.warning(
+                        "resolve_shell_approval: resolving approval %s from expired buffer (grace period)",
+                        approval_id,
+                    )
+                    self._resolve_future(future, bool(approved))
+                    return
+                # Past grace period or already handled — fall through to no-op.
         self._resolve_future(future, bool(approved))
 
     def reject_pending_shell_approvals(self) -> None:
@@ -78,6 +121,16 @@ class ApprovalService:
     def _reject_shell_approval(self, approval_id: str) -> None:
         future = self._shell_approval_waiters.get(approval_id)
         self._resolve_future(future, False)
+
+    def _prune_expired_shell_approvals(self) -> None:
+        now = time.time()
+        stale = [
+            approval_id
+            for approval_id, (_, expiry) in self._shell_approval_expired.items()
+            if now > expiry
+        ]
+        for approval_id in stale:
+            del self._shell_approval_expired[approval_id]
 
     async def request_sudo_password(
         self,

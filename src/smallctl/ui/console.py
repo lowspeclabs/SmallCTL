@@ -17,8 +17,8 @@ class ConsolePane(VerticalScroll):
     async def on_mount(self) -> None:
         await self.mount(Vertical(id="bubble-stack"))
 
-    async def append_line(self, line: str) -> None:
-        await self._add_bubble("system", line)
+    async def append_line(self, line: str, kind: str = "system") -> None:
+        await self._add_bubble(kind, line)
         self._last_system_message = line
 
     async def clear_bubbles(self) -> None:
@@ -108,10 +108,10 @@ class ConsolePane(VerticalScroll):
 
         kind_map = {
             UIEventType.USER: "user",
-            UIEventType.TOOL_RESULT: "tool_result",
-            UIEventType.ERROR: "error",
+            UIEventType.TOOL_RESULT: "system",
+            UIEventType.ERROR: "system",
             UIEventType.SYSTEM: "system",
-            UIEventType.ALERT: "alert",
+            UIEventType.ALERT: "system",
         }
         kind = kind_map.get(event.event_type, "system")
         if event.event_type in {
@@ -214,8 +214,14 @@ class ConsolePane(VerticalScroll):
         return self._active_assistant_turn
 
     async def update_thinking_indicator(self) -> None:
-        if self._active_assistant_turn is not None and self._active_assistant_turn._last_thinking_detail is not None:
-            self._active_assistant_turn._last_thinking_detail.update_thinking_timer()
+        if self._active_assistant_turn is not None:
+            if self._active_assistant_turn._last_thinking_detail is not None:
+                self._active_assistant_turn._last_thinking_detail.update_thinking_timer()
+            if self._active_assistant_turn._current_tool_calls_container is not None:
+                self._active_assistant_turn._current_tool_calls_container.update_timer()
+            for detail in self._active_assistant_turn._tool_call_details:
+                if not detail.has_result:
+                    detail.update_timer()
 
     def get_last_system_message(self) -> str:
         return self._last_system_message

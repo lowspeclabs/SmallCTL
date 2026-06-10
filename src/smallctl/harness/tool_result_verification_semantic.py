@@ -127,3 +127,32 @@ def _insufficient_verifier_message(state: Any, *, command: str) -> str:
             f"`{prior_command}`; rerun the script/tests that failed."
         )
     return f"Verifier `{command}` only checks syntax; rerun the script/tests required by the task."
+
+
+def _install_task_requires_strong_verifier(state: Any, *, command: str) -> tuple[bool, str]:
+    """Check if the current task is an install task and the verifier is too weak.
+
+    Returns (True, reason) if the verifier should be rejected as insufficient for
+    an install/ setup/ deploy objective.
+    """
+    task = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
+    if not task:
+        return False, ""
+    install_markers = ("install", "setup", "deploy", "configure")
+    if not any(m in task for m in install_markers):
+        return False, ""
+
+    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    # Weak verifiers for install tasks: only check file existence
+    weak_patterns = [
+        (r"\bls\s+-la?\s+\S+", "file existence check"),
+        (r"\btest\s+-[ef]\s+\S+", "file existence check"),
+        (r"\bcat\s+\S+", "file content check"),
+    ]
+    for pattern, check_type in weak_patterns:
+        if re.search(pattern, normalized):
+            return True, (
+                f"This is an install task, but the verifier only does a {check_type} (`{command}`). "
+                f"For install tasks, verify with service status, version command, or listening port."
+            )
+    return False, ""

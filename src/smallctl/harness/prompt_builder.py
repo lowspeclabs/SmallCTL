@@ -68,6 +68,9 @@ class PromptBuilderService:
         adjusted_limit = min(base_limit, 6)
         if high_prompt_pressure or "observation_invalidation_churn" in pressure_reasons:
             adjusted_limit = min(adjusted_limit, 4)
+        # Phase 3B: enforce floor of 8 for remote repair so failure history is preserved
+        if str(getattr(state, "current_phase", "") or "").strip().lower() == "repair":
+            adjusted_limit = max(8, adjusted_limit)
         adjusted_limit = max(2, adjusted_limit)
         self.harness._runlog(
             "recent_message_limit_tuned",

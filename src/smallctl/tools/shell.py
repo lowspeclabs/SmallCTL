@@ -16,6 +16,7 @@ from .shell_processes import cwd_get, cwd_set, env_get, env_set, process_kill, s
 from .shell_foreground import shell_exec_foreground
 from .shell_support import (
     _apt_deb822_preflight_guard,
+    _apt_sources_list_d_guard,
     _expose_interactive_session_tools,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
@@ -26,6 +27,7 @@ from .shell_support import (
     _shell_workspace_destructive_delete_guard,
     _shell_write_session_artifact_delete_guard,
     _shell_write_session_target_path_guard,
+    record_apt_update_result,
 )
 
 
@@ -123,7 +125,25 @@ async def shell_exec(
         user=_local_user(),
     )
     if apt_guard is not None:
+        if harness and hasattr(harness, "_runlog"):
+            harness._runlog(
+                "apt_deb822_preflight_blocked",
+                "APT blocked pending deb822 validation on localhost — run the validator first.",
+                host="localhost",
+                user=_local_user(),
+                reason="apt_deb822_preflight_required",
+            )
         return apt_guard
+
+    sources_guard = _apt_sources_list_d_guard(
+        command,
+        tool_name="shell_exec",
+        state=state,
+        host="localhost",
+        user=_local_user(),
+    )
+    if sources_guard is not None:
+        return sources_guard
     preflight_guard = _remote_installer_preflight_guard(
         command,
         host="localhost",
@@ -194,6 +214,15 @@ async def shell_exec(
     )
     if result.get("success") and _looks_like_deb822_validator(command):
         _mark_deb822_preflight_clean(state, host="localhost", user=_local_user())
+    # Record apt-get update results for the sources.list.d guard
+    record_apt_update_result(
+        state,
+        command=command,
+        success=bool(result.get("success")),
+        stderr=str(result.get("stderr") or ""),
+        host="localhost",
+        user=_local_user(),
+    )
     return result
 
 

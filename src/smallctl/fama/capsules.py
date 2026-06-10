@@ -21,6 +21,9 @@ CAPSULE_TEXT: dict[str, str] = {
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
     "repair_debug_scaffold": "REPAIR MODE: You have already read the failing file. The bugs are in code you wrote. Do NOT read the file again. Emit ONE mutation (file_patch/file_write/ast_patch) this turn, then run the verifier.",
+    "preflight_contradiction_capsule": "A preflight validation passed but the gate is still blocking. Do not retry the same validator; escalate or ask for human guidance.",
+    "repeated_remote_installer_failure_capsule": "The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
+    "preexisting_state_as_success_capsule": "Distinguish 'state already existed' from 'I caused the state'. Verify that your actions produced the intended outcome, not that it was already present.",
 }
 
 
@@ -61,6 +64,13 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
                 lines.append(scaffold)
                 seen.add(scaffold)
                 used_tokens += scaffold_tokens
+    # Track empty streak for health monitoring
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        if not lines:
+            scratchpad["_fama_empty_streak"] = int(scratchpad.get("_fama_empty_streak", 0) or 0) + 1
+        else:
+            scratchpad["_fama_empty_streak"] = 0
     return lines
 
 
@@ -76,3 +86,35 @@ def _enabled(config: dict[str, Any]) -> bool:
     if "enabled" in config and not bool(config.get("enabled")):
         return False
     return str(config.get("mode") or "lite").strip().lower() != "off"
+
+
+def fama_capsule_health_warning(state: Any) -> str | None:
+    """Return a warning if FAMA capsules have been empty for 3+ consecutive prompts."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    streak = int(scratchpad.get("_fama_empty_streak", 0) or 0)
+    if streak < 3:
+        return None
+    return f"no mitigations have been rendered for {streak} consecutive prompts"
+
+
+def fama_fallback_recovery_guidance(state: Any) -> list[str]:
+    """Provide fallback recovery guidance when FAMA capsules are empty for 3+ prompts."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return []
+    streak = int(scratchpad.get("_fama_empty_streak", 0) or 0)
+    if streak < 3:
+        return []
+    failure_class = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+    lines: list[str] = []
+    if "path" in failure_class or failure_class == "wrong_path":
+        lines.append("Path failure detected but no FAMA mitigation active. Verify the exact path exists and retry.")
+    elif "verifier" in failure_class:
+        lines.append("Verifier failure detected but no FAMA mitigation active. Read the failing output and patch one narrow cause.")
+    elif "backend" in failure_class:
+        lines.append("Backend stream failure detected. Retry with a smaller, explicit next action.")
+    else:
+        lines.append("No FAMA mitigation is active. Break the next move into one concrete action, expected evidence, and stop condition.")
+    return lines

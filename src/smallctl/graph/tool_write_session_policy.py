@@ -235,39 +235,52 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     harness.state.write_session = session
     migrated_archived_stage = _migrate_archived_stage_into_session(harness, session, target)
 
-    stage_path = str(getattr(session, "write_staging_path", "") or "").strip()
-    if stage_path and Path(stage_path).exists():
-        task_description = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
-        if migrated_archived_stage is None and not is_staged_artifact_recoverable(stage_path, task_description):
-            required = extract_symbols_from_task(task_description)
-            try:
-                content = Path(stage_path).read_text(encoding="utf-8")
-            except Exception:
-                content = ""
-            defined = extract_defined_symbols(content)
-            missing = sorted(required - defined)
-            reason = (
-                "Staged artifact rejected: implementation shell detected"
-                + (f" (missing {', '.join(missing)})." if missing else ".")
-                + " Starting fresh."
-            )
-            _abandon_staged_artifact(harness, stage_path, reason)
-        else:
-            _register_write_session_stage_artifact(harness, session)
+    if migrated_archived_stage is not None:
+        _register_write_session_stage_artifact(harness, session)
+        session_source = "chunk_mode_recovery"
+        session_message = "initialized chunked authoring session from recovery path"
+    elif (
+            getattr(session, "write_staging_path", None)
+            and Path(session.write_staging_path).exists()
+        ):
+            stage_path = session.write_staging_path
+            task_description = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
+            if not is_staged_artifact_recoverable(stage_path, task_description):
+                required = extract_symbols_from_task(task_description)
+                try:
+                    content = Path(stage_path).read_text(encoding="utf-8")
+                except Exception:
+                    content = ""
+                defined = extract_defined_symbols(content)
+                missing = sorted(required - defined)
+                reason = (
+                    "Staged artifact rejected: implementation shell detected"
+                    + (f" (missing {', '.join(missing)})." if missing else ".")
+                    + " Starting fresh."
+                )
+                _abandon_staged_artifact(harness, stage_path, reason)
+                session_source = "chunk_mode_plan"
+                session_message = "initialized chunked authoring session"
+            else:
+                _register_write_session_stage_artifact(harness, session)
+                session_source = "chunk_mode_recovery"
+                session_message = "initialized chunked authoring session from recovery path"
     else:
         _register_write_session_stage_artifact(harness, session)
+        session_source = "chunk_mode_plan"
+        session_message = "initialized chunked authoring session"
 
     record_write_session_event(
         harness.state,
         event="session_opened",
         session=session,
-        details={"source": "chunk_mode_recovery"},
+        details={"source": session_source},
     )
     runlog = getattr(harness, "_runlog", None)
     if callable(runlog):
         runlog(
             "chunk_mode_prearmed",
-            "initialized chunked authoring session from recovery path",
+            session_message,
             session_id=session.write_session_id,
             target_path=target,
         )

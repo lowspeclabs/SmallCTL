@@ -99,6 +99,9 @@ async def stream_chat(
     if httpx is None:
         raise RuntimeError("Dependency missing: httpx")
 
+    # Copy messages so transport sanitization/redaction never mutates the
+    # caller's list (e.g. state.recent_messages).
+    messages = [dict(message) for message in messages]
     original_messages = [dict(message) for message in messages]
     original_tools = [dict(tool) for tool in tools]
     messages = client.adapter.sanitize_messages(messages)

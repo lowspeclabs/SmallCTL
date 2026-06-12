@@ -201,6 +201,34 @@ async def interpret_model_output(
                     harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
                     return LoopRoute.NEXT_STEP
 
+    # Anti-premature-fail guard: block task_fail/task_complete within 2 steps
+    # of a verifier failure to force at least one repair attempt.
+    if graph_state.pending_tool_calls:
+        has_terminal = any(c.tool_name in {"task_complete", "task_fail"} for c in graph_state.pending_tool_calls)
+        if has_terminal:
+            failure_step = harness.state.scratchpad.get("_verifier_failure_step")
+            if isinstance(failure_step, int) and failure_step > 0:
+                if harness.state.step_count - failure_step < 2:
+                    graph_state.pending_tool_calls = [
+                        c for c in graph_state.pending_tool_calls
+                        if c.tool_name not in {"task_complete", "task_fail"}
+                    ]
+                    if graph_state.pending_tool_calls:
+                        harness.state.append_message(ConversationMessage(
+                            role="user",
+                            content=(
+                                "VERIFIER RECOVERY: The latest verifier check failed. "
+                                "Attempt a repair (file_patch, file_write, or shell_exec) before "
+                                "calling task_fail or task_complete."
+                            ),
+                            metadata={
+                                "is_recovery_nudge": True,
+                                "recovery_kind": "verifier_failure_repair_required",
+                            },
+                        ))
+                        harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
+                        return LoopRoute.NEXT_STEP
+
     if graph_state.pending_tool_calls:
         tool_exposure = resolve_turn_tool_exposure(harness, graph_state.run_mode)
         allowed_tool_names = {

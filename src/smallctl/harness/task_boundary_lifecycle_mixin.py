@@ -232,6 +232,20 @@ class TaskBoundaryLifecycleMixin:
         start_token_usage = int(scope.get("start_token_usage") or 0)
         current_step_count = int(getattr(self.harness.state, "step_count", 0) or 0)
         current_token_usage = int(getattr(self.harness.state, "token_usage", 0) or 0)
+        recent_errors = [
+            str(error or "").strip()
+            for error in (getattr(self.harness.state, "recent_errors", []) or [])
+            if str(error or "").strip()
+        ]
+        if not recent_errors:
+            reasoning_graph = getattr(self.harness.state, "reasoning_graph", None)
+            evidence_records = list(getattr(reasoning_graph, "evidence_records", []) or [])
+            for record in evidence_records[-12:]:
+                if not bool(getattr(record, "negative", False)):
+                    continue
+                statement = str(getattr(record, "statement", "") or "").strip()
+                if statement:
+                    recent_errors.append(statement)
 
         payload = {
             "task_id": str(scope.get("task_id") or "").strip(),
@@ -255,11 +269,9 @@ class TaskBoundaryLifecycleMixin:
             "active_tool_profiles": list(getattr(self.harness.state, "active_tool_profiles", []) or []),
             "target_paths": list(scope.get("target_paths") or []),
             "artifact_count": len(getattr(self.harness.state, "artifacts", {}) or {}),
-            "recent_error_count": len(getattr(self.harness.state, "recent_errors", []) or []),
+            "recent_error_count": len(recent_errors),
             "last_recent_error": self._clip_task_summary_text(
-                (getattr(self.harness.state, "recent_errors", []) or [""])[-1]
-                if getattr(self.harness.state, "recent_errors", [])
-                else "",
+                recent_errors[-1] if recent_errors else "",
                 limit=180,
             ),
             "summary_path": str(scope.get("summary_path") or "").strip(),
@@ -585,6 +597,20 @@ class TaskBoundaryLifecycleMixin:
                 self.store_task_handoff(raw_task=previous_task, effective_task=previous_task)
             if turn_type == "CLARIFICATION":
                 reset_reason = "task_clarification"
+                last_failed = handoff.get("last_failed_tool") or {}
+                if isinstance(last_failed, dict) and last_failed.get("approval_denied"):
+                    self.harness.state.append_message(
+                        ConversationMessage(
+                            role="system",
+                            content=(
+                                "NOTE: The previous task ended because a command was denied. "
+                                "The user wants to try again. "
+                                "Ask the user to clarify: re-run the same command, modify it, "
+                                "or try a different approach?"
+                            ),
+                            metadata={"is_clarification_nudge": True, "recovery_kind": "denial_followup"},
+                        )
+                    )
             elif preserve_prior_result:
                 reset_reason = "task_soft_switch"
             else:
@@ -634,35 +660,55 @@ class TaskBoundaryLifecycleMixin:
         active = ledger.active() if ledger is not None and callable(getattr(ledger, "active", None)) else None
         if active is not None:
             subtask_id = str(getattr(active, "subtask_id", "") or "").strip()
+        normalized_turn_type = str(turn_type or "").strip().upper()
+        lowered_text = text.lower()
+        correction_markers = (
+            "you misunderstood",
+            "you've read",
+            "you have read",
+            "read enough",
+            "not what i asked",
+            "instead",
+            "wrong",
+        )
+        is_human_resteer = normalized_turn_type == "CORRECTION" or any(
+            marker in lowered_text for marker in correction_markers
+        )
+        failure_class = "human_resteer" if is_human_resteer else "same_scope_iteration"
+        message_prefix = "human_resteer: user redirected" if is_human_resteer else "same_scope_iteration: user continued"
         event = FailureEvent(
-            event_id=f"resteer-{int(time() * 1000)}",
+            event_id=f"same-scope-{int(time() * 1000)}",
             timestamp=time(),
-            failure_class="human_resteer",
+            failure_class=failure_class,
             severity="warning",
             source="task_boundary",
-            message=f"human_resteer: user redirected same-scope work ({turn_type.lower() or 'followup'})",
+            message=f"{message_prefix} same-scope work ({turn_type.lower() or 'followup'})",
             evidence=[text[:240]],
             subtask_id=subtask_id or None,
             suggested_next_action=text[:240],
-            metadata={"effective_task": str(effective_task or "").strip()[:240]},
+            metadata={
+                "effective_task": str(effective_task or "").strip()[:240],
+                "turn_type": normalized_turn_type,
+            },
         )
         state.failure_events.append(event)
         state.failure_events = state.failure_events[-40:]
         record_failure_event_metric(state, event)
-        state.last_failure_class = "human_resteer"
-        state.scratchpad["_last_failure_class"] = "human_resteer"
+        state.last_failure_class = failure_class
+        state.scratchpad["_last_failure_class"] = failure_class
         if active is not None:
             active.next_action = text[:240]
             active.updated_at = event.timestamp
-            if active is not None and "human_resteer" not in active.failure_classes:
-                active.failure_classes.append("human_resteer")
+            if active is not None and failure_class not in active.failure_classes:
+                active.failure_classes.append(failure_class)
         reflexion = getattr(self.harness, "reflexion", None)
         maybe_create = getattr(reflexion, "maybe_create_reflection", None)
         if callable(maybe_create):
             maybe_create(event, ledger)
         self.harness._runlog(
-            "recovery_human_resteer_recorded",
-            "same-scope human resteer recorded",
+            "recovery_human_resteer_recorded" if is_human_resteer else "same_scope_iteration_recorded",
+            "same-scope human resteer recorded" if is_human_resteer else "same-scope iteration recorded",
             turn_type=turn_type,
+            failure_class=failure_class,
             subtask_id=subtask_id,
         )

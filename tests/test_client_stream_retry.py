@@ -798,6 +798,47 @@ def test_stream_chat_llamacpp_model_unloaded_recovers_and_reuses_reduced_payload
     assert retry_budget_entries[-1]["data"]["reduction_reason"] == "http_400_recovery"
 
 
+def test_stream_chat_redacts_provider_payload_without_mutating_live_messages(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="generic",
+        run_logger=_RunLogger(),
+    )
+    payloads: list[dict[str, object]] = []
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers
+            payloads.append(dict(payload))
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    messages = [{"role": "user", "content": "ssh password is hunter2"}]
+    original_messages = [dict(message) for message in messages]
+
+    async def _run() -> None:
+        async for _event in client_transport.stream_chat(client, messages=messages, tools=[]):
+            pass
+
+    asyncio.run(_run())
+
+    assert messages == original_messages
+    assert payloads
+    assert payloads[0]["messages"][0]["content"] != "ssh password is hunter2"
+    assert "REDACTED" in str(payloads[0]["messages"][0]["content"])
+
+
 def test_stream_chat_llamacpp_model_unloaded_yields_provider_chunk_error(monkeypatch) -> None:
     async def _recover(payload: dict[str, object]) -> dict[str, object]:
         del payload

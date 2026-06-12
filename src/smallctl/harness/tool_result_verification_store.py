@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..challenge_progress import record_verifier_result
@@ -10,6 +11,7 @@ from .tool_result_verification_blocker import (
     _extract_latest_execution_blocker,
     _store_latest_execution_blocker,
 )
+from .tool_result_verification_constants import _INTERACTIVE_PROMPT_RE
 from .tool_result_verification_helpers import (
     classify_execution_failure,
     command_is_binary_probe,
@@ -122,6 +124,12 @@ def _store_verifier_verdict(
     else:
         verdict = "fail"
 
+    if verdict == "pass" and tool_name == "ssh_exec":
+        combined = "\n".join(part for part in (raw_stdout, raw_stderr) if str(part or "").strip())
+        if _INTERACTIVE_PROMPT_RE.search(combined) or re.search(r"\([yYnN]/[yYnN]\)|continue\?.*\([yYnN]/[yYnN]\)|password:\s*$", combined, re.IGNORECASE | re.DOTALL):
+            verdict = "fail"
+            semantic_failure = "interactive prompt detected in ssh_exec output"
+
     # Fix 2: detect false-negative path verifiers for SSH exec
     false_negative_path = False
     if verdict == "fail" and tool_name == "ssh_exec":
@@ -173,6 +181,8 @@ def _store_verifier_verdict(
         stderr=stderr,
     ):
         failure_class = "long_running_remote_command"
+    if semantic_failure == "interactive prompt detected in ssh_exec output":
+        failure_class = "interactive_prompt"
     docker_retry = _record_docker_retry_state(
         state,
         command=command,

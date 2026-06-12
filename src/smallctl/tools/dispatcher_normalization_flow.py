@@ -37,6 +37,7 @@ from .dispatcher_ssh_recovery import (
 from .dispatcher_remote_detection import task_clearly_targets_remote_ssh_host as _task_clearly_targets_remote_ssh_host
 
 _SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
+_SSH_REMOTE_TOOLS = {"ssh_exec", "ssh_session_start"}
 
 
 def normalize_tool_request(
@@ -74,6 +75,49 @@ def normalize_tool_request(
         return tool_name, arguments, remote_file_guard, normalization_metadata
 
     if tool_name in _SSH_FILE_TOOLS:
+        pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
+            arguments,
+            state=state,
+        )
+        normalization_metadata.update(pre_metadata)
+        try:
+            normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
+            normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
+                normalized_arguments,
+                state=state,
+            )
+            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+                if _preserve_key in normalization_metadata:
+                    ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
+            if "recovered_ssh_password_source" in normalization_metadata:
+                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_recovered"] = True
+            normalization_metadata.update(ssh_metadata)
+            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
+                normalized_arguments,
+                state=state,
+                normalization_metadata=normalization_metadata,
+            )
+            normalization_metadata.update(pin_metadata)
+            if pin_block is not None:
+                return tool_name, normalized_arguments, pin_block, normalization_metadata
+            return tool_name, normalized_arguments, None, normalization_metadata
+        except ValueError as exc:
+            return (
+                tool_name,
+                arguments,
+                ToolEnvelope(
+                    success=False,
+                    error=str(exc),
+                    metadata={
+                        "tool_name": tool_name,
+                        "reason": "invalid_ssh_target",
+                    },
+                ),
+                normalization_metadata,
+            )
+
+    if tool_name == "ssh_session_start":
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
             state=state,

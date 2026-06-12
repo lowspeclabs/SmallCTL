@@ -98,6 +98,10 @@ def _close_process_pipe(pipe: Any) -> None:
             transport.close()
         except Exception:
             pass
+        try:
+            setattr(pipe, attr_name, None)
+        except Exception:
+            pass
 
 
 def _close_process_transports(proc: Any) -> None:
@@ -108,6 +112,10 @@ def _close_process_transports(proc: Any) -> None:
     if transport is not None:
         try:
             transport.close()
+        except Exception:
+            pass
+        try:
+            proc._transport = None
         except Exception:
             pass
 
@@ -193,6 +201,16 @@ async def _run_teardown(self: Any) -> None:
     if state and hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
         context_metrics = dict(state.scratchpad.get("_context_metrics", {}))
 
+    assemble_calls = context_metrics.get("assemble_calls", 0)
+    if assemble_calls == 0:
+        log_kv(
+            self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+            logging.WARNING,
+            "context_pipeline_idle",
+            msg="Context pipeline was never exercised.",
+            session_id=session_id,
+        )
+
     log_kv(
         self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
         logging.INFO,
@@ -203,6 +221,31 @@ async def _run_teardown(self: Any) -> None:
         task_submitted=bool(task_received_at),
         reason=reason,
         context_metrics=context_metrics if context_metrics else None,
+    )
+
+    # Extract model calls, tools dispatched, and fama configuration (Fix 7)
+    model_calls = 0
+    tools_dispatched = 0
+    fama_active = True
+    if state and hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+        model_calls = int(state.scratchpad.get("_model_calls", 0))
+        tools_dispatched = int(state.scratchpad.get("_tools_dispatched", 0))
+        fama_config = state.scratchpad.get("_fama_config", {})
+        if isinstance(fama_config, dict):
+            fama_active = fama_config.get("enabled", True)
+
+    log_kv(
+        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+        logging.INFO,
+        "session_audit",
+        session_id=session_id,
+        duration_sec=round(duration_sec, 2),
+        step_count=step_count,
+        task_submitted=bool(task_received_at),
+        model_calls=model_calls,
+        tools_dispatched=tools_dispatched,
+        fama_active=fama_active,
+        reason=reason,
     )
 
     self.event_handler = None
@@ -434,6 +477,11 @@ def _autosave_chat_session_state(self: Any) -> None:
     thread_id = str(getattr(state, "thread_id", "") or getattr(self, "conversation_id", "") or "").strip()
     cwd = str(getattr(state, "cwd", "") or "").strip()
     if not thread_id or not cwd:
+        return
+    # Skip autosaving if session is idle (Fix 2)
+    step_count = int(getattr(state, "step_count", 0) or 0)
+    task_received_at = str(getattr(state, "task_received_at", "") or "").strip()
+    if step_count == 0 and not task_received_at:
         return
     try:
         client = getattr(self, "client", None)

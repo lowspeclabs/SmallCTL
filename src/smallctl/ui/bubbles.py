@@ -27,15 +27,15 @@ KIND_LABEL = {
 }
 
 KIND_COLOR = {
-    "user": "#e5e7eb",
+    "user": "#ffffff",
     "thinking": "#ca8a04",
     "assistant": "#eab308",
     "planner": "#e879f9",
     "tool_call": "#16a34a",
     "tool_result": "#38bdf8",
     "error": "#ef4444",
-    "system": "#9ca3af",
-    "alert": "#f97316",
+    "system": "#eab308",
+    "alert": "#ef4444",
     "shell": "#ca8a04",
     "cancel": "#ef4444",
     "ready": "#eab308",
@@ -95,6 +95,9 @@ class BubbleWidget(Static):
     def _refresh_content(self) -> None:
         color = KIND_COLOR.get(self.kind, "#9ca3af")
         content = Text()
+        if self.kind in ("user", "system"):
+            label = KIND_LABEL.get(self.kind, self.kind.upper())
+            content.append(f"{label}\n", style="bold #ffffff")
         content.append(self.text, style=color)
         self.update(content)
 
@@ -435,6 +438,21 @@ class ToolCallsContainerWidget(Collapsible):
         await self._body_widget.mount(detail)
 
 
+class LiveOutputContainerWidget(Collapsible):
+    def __init__(self, *, id: str | None = None) -> None:
+        self._body_widget = Vertical(classes="liveoutput-container")
+        super().__init__(
+            self._body_widget,
+            title="[bold #0891b2]Live Output[/]",
+            collapsed=False,
+            id=id,
+            classes="assistant-detail assistant-detail-liveoutput bubble bubble-liveoutput"
+        )
+
+    async def add_stream_bubble(self, bubble: ArtifactBubbleWidget) -> None:
+        await self._body_widget.mount(bubble)
+
+
 class AssistantTurnWidget(Vertical):
     def __init__(self, *, id: str | None = None, speaker: str = "assistant") -> None:
         super().__init__(id=id, classes="assistant-turn bubble bubble-assistant")
@@ -450,6 +468,7 @@ class AssistantTurnWidget(Vertical):
         self._last_shell_stream: ArtifactBubbleWidget | None = None
         self._tool_call_details: list[ToolCallDetailWidget] = []
         self._current_tool_calls_container: ToolCallsContainerWidget | None = None
+        self._live_output_container: LiveOutputContainerWidget | None = None
         self._task_checklist_widget: TaskChecklistWidget | None = None
 
     def has_assistant_text(self) -> bool:
@@ -590,31 +609,38 @@ class AssistantTurnWidget(Vertical):
         self._last_assistant_block = None
         self._last_shell_stream = None
 
-    async def append_shell_stream(self, text: str) -> None:
+    async def append_shell_stream(
+        self,
+        text: str,
+        *,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
         if not text:
             return
 
-        # Find the active shell_exec call to nest the stream under
-        shell_call = None
-        for detail in reversed(self._tool_call_details):
-            if detail.tool_name in {"shell_exec", "ssh_exec"}:
-                shell_call = detail
-                break
-
-        if shell_call:
-            bubble = await shell_call.get_or_create_artifact_bubble("Live Output")
+        detail = self._match_tool_call_detail(tool_name=tool_name, tool_call_id=tool_call_id)
+        if detail is not None:
+            bubble = await detail.get_or_create_artifact_bubble("Live Output")
             bubble.append_text(text)
-        else:
-            # Fallback to turn-level stream if no tool call found (unlikely)
-            if self._last_shell_stream is None:
-                self._last_shell_stream = ArtifactBubbleWidget(
-                    title="Live Output",
-                    text=""
-                )
-                self._last_shell_stream.add_class("assistant-detail-nested")
-                await self._content_body().mount(self._last_shell_stream)
-                await self._ensure_checklist_at_bottom()
-            self._last_shell_stream.append_text(text)
+            self._last_shell_stream = None
+            self._last_assistant_block = None
+            self._last_thinking_detail = None
+            return
+
+        if self._live_output_container is None:
+            self._live_output_container = LiveOutputContainerWidget()
+            await self._content_body().mount(self._live_output_container)
+
+        if self._last_shell_stream is None:
+            self._last_shell_stream = ArtifactBubbleWidget(
+                title="Live Output",
+                text="",
+            )
+            self._last_shell_stream.add_class("assistant-detail-nested")
+            await self._live_output_container.add_stream_bubble(self._last_shell_stream)
+            await self._ensure_checklist_at_bottom()
+        self._last_shell_stream.append_text(text)
 
         if self._current_tool_calls_container is not None:
             self._current_tool_calls_container.finalize()
@@ -700,3 +726,23 @@ def _coerce_speaker(value: str | None) -> str:
 
 def _trim_leading_blank_lines(text: str) -> str:
     return re.sub(r"^(?:[ \t]*\r?\n)+", "", text)
+
+
+class SystemInterruptWidget(Static):
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        id: str | None = None,
+    ) -> None:
+        super().__init__("", id=id, classes="bubble bubble-system-interrupt")
+        self.text = text
+        self._refresh_content()
+
+    def set_text(self, value: str) -> None:
+        self.text = value
+        self._refresh_content()
+
+    def _refresh_content(self) -> None:
+        line = self.text.replace("[harness] ", "").strip()
+        self.update(Text(f"  ⚠ {line}", style="#eab308"))

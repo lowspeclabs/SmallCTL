@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 from textual.css.query import NoMatches
 
-from smallctl.chat_sessions import persist_chat_session_state
+from smallctl.chat_sessions import (
+    load_chat_session_ui_transcript,
+    persist_chat_session_state,
+    persist_chat_session_ui_transcript,
+)
 from smallctl.models.conversation import ConversationMessage
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.state import LoopState
@@ -238,6 +242,42 @@ def test_maybe_restore_harness_state_prefers_bridge_payload() -> None:
     assert flow._latest_status_snapshot == {"model": "bridge-model", "phase": "explore", "step": 0}
 
 
+def test_maybe_restore_harness_state_loads_ui_transcript_for_checkpoint_restore(tmp_path) -> None:
+    persist_chat_session_ui_transcript(
+        cwd=tmp_path,
+        thread_id="thread-restore",
+        ui_transcript=[{"event_type": "system", "content": "checkpoint UI note", "data": {}}],
+    )
+
+    class _Bridge:
+        async def restore_graph_state(self, thread_id: str | None = None) -> dict[str, object]:
+            return {
+                "restored": True,
+                "thread_id": "thread-restore",
+                "has_pending_interrupt": False,
+                "recent_messages": [{"role": "user", "content": "prompt history"}],
+            }
+
+    class _Harness:
+        state = SimpleNamespace(cwd=str(tmp_path))
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.fresh_run = False
+            self.restore_graph_state_on_startup = True
+            self.restore_thread_id = "thread-restore"
+            self.harness = _Harness()
+            self._harness_bridge = _Bridge()
+            self._latest_status_snapshot = None
+
+    result = asyncio.run(_Flow()._maybe_restore_harness_state())
+
+    assert result is not None
+    assert result["ui_transcript"] == [
+        {"event_type": "system", "content": "checkpoint UI note", "data": {}}
+    ]
+
+
 def test_maybe_restore_harness_state_falls_back_to_saved_chat_state(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.thread_id = "thread-saved"
@@ -248,6 +288,11 @@ def test_maybe_restore_harness_state_falls_back_to_saved_chat_state(tmp_path) ->
         thread_id="thread-saved",
         state_payload=state.to_dict(),
         model="test-model",
+    )
+    persist_chat_session_ui_transcript(
+        cwd=tmp_path,
+        thread_id="thread-saved",
+        ui_transcript=[{"event_type": "system", "content": "restored UI note", "data": {}}],
     )
 
     class _Bridge:
@@ -288,6 +333,64 @@ def test_maybe_restore_harness_state_falls_back_to_saved_chat_state(tmp_path) ->
         {"role": "user", "content": "saved question"},
         {"role": "assistant", "content": "saved answer"},
     ]
+    assert result["ui_transcript"] == [
+        {"event_type": "system", "content": "restored UI note", "data": {}}
+    ]
+
+
+def test_saved_chat_state_preserves_separate_ui_transcript(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-ui"
+    state.append_message(ConversationMessage(role="user", content="prompt state user"))
+
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-ui",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+    persist_chat_session_ui_transcript(
+        cwd=tmp_path,
+        thread_id="thread-ui",
+        ui_transcript=[{"event_type": "system", "content": "UI-only recovery note", "data": {}}],
+    )
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-ui",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+
+    assert load_chat_session_ui_transcript(cwd=tmp_path, thread_id="thread-ui") == [
+        {"event_type": "system", "content": "UI-only recovery note", "data": {}}
+    ]
+
+
+def test_append_system_line_records_ui_transcript(tmp_path) -> None:
+    lines: list[tuple[str, str]] = []
+
+    class _Console:
+        async def append_line(self, text: str, *, kind: str = "system") -> None:
+            lines.append((text, kind))
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._show_system_messages = True
+            self.console = _Console()
+            self.harness = SimpleNamespace(
+                state=SimpleNamespace(cwd=str(tmp_path), thread_id="thread-ui-line")
+            )
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    asyncio.run(_Flow()._append_system_line("Persistent UI line", kind="warning"))
+
+    assert lines == [("Persistent UI line", "warning")]
+    transcript = load_chat_session_ui_transcript(cwd=tmp_path, thread_id="thread-ui-line")
+    assert transcript[-1]["event_type"] == "system"
+    assert transcript[-1]["content"] == "Persistent UI line"
+    assert transcript[-1]["data"] == {"kind": "warning"}
 
 
 def test_refresh_status_updates_model_button_and_status_details() -> None:
@@ -740,6 +843,68 @@ def test_render_restored_chat_uses_serialized_messages_without_harness_state_rea
     ]
 
 
+def test_render_restored_chat_shows_recovery_system_messages() -> None:
+    rendered: list[tuple[UIEventType, str]] = []
+
+    class _Console:
+        async def clear_bubbles(self) -> None:
+            return None
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content))
+
+    class _Flow(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self.harness = None
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+
+    asyncio.run(
+        flow._render_restored_chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Auto-continuing patch recovery for `x.py`.",
+                    "metadata": {"is_recovery_nudge": True, "recovery_kind": "file_patch_read_autocontinue"},
+                },
+            ]
+        )
+    )
+
+    assert rendered == [(UIEventType.SYSTEM, "Auto-continuing patch recovery for `x.py`.")]
+
+
+def test_render_restored_chat_shows_ui_transcript_system_messages() -> None:
+    rendered: list[tuple[UIEventType, str]] = []
+
+    class _Console:
+        async def clear_bubbles(self) -> None:
+            return None
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content))
+
+    class _Flow(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self.harness = None
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    asyncio.run(
+        _Flow()._render_restored_chat(
+            messages=[{"event_type": "system", "content": "UI-only status note", "data": {}}]
+        )
+    )
+
+    assert rendered == [(UIEventType.SYSTEM, "UI-only status note")]
+
+
 def test_submitted_paste_renders_full_user_bubble_and_runs_full_task() -> None:
     rendered: list[tuple[UIEventType, str]] = []
     started: list[str] = []
@@ -987,6 +1152,70 @@ def test_run_harness_task_forces_pre_stream_failure_visible_when_system_hidden()
     assert status_steps[-1] == "error"
     assert flow.active_task is None
     assert flow._pending_user_echo is None
+
+
+def test_run_harness_task_shows_unverified_change_warning() -> None:
+    system_lines: list[tuple[str, bool, str | None]] = []
+
+    class _Console:
+        def get_active_assistant_text(self) -> str:
+            return ""
+
+    class _Bridge:
+        async def run_auto(self, task: str) -> dict[str, object]:
+            assert task == "edit"
+            return {
+                "status": "cancelled",
+                "reason": "cancel_requested",
+                "unverified_change_warning": "Task cancelled after modifying files to temp/example.py. Changes were not verified.",
+            }
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self.harness = object()
+            self._harness_bridge = _Bridge()
+            self._status_activity = ""
+            self._api_error_count = 0
+            self._pending_user_echo = None
+            self._show_system_messages = False
+            self._show_tool_calls = True
+            self.active_task = None
+            self._task_start_time = None
+            self._activity_timer = None
+            self.console = _Console()
+            self._app_logger = logging.getLogger("test.ui_flow_regressions.unverified_warning")
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+        def _set_activity(self, text: str | None) -> None:
+            self._status_activity = str(text or "")
+
+        def _refresh_status(
+            self,
+            step_override: int | str | None = None,
+            *,
+            snapshot: dict[str, object] | None = None,
+        ) -> None:
+            return None
+
+        def set_interval(self, interval: float, callback: object) -> object:
+            class _Timer:
+                def stop(self) -> None:
+                    return None
+
+            return _Timer()
+
+        async def _append_system_line(self, text: str, *, force: bool = False, kind: str | None = None) -> None:
+            system_lines.append((text, force, kind))
+
+    asyncio.run(_Flow()._run_harness_task("edit"))
+
+    assert (
+        "Task cancelled after modifying files to temp/example.py. Changes were not verified.",
+        True,
+        "warning",
+    ) in system_lines
 
 
 def test_task_complete_message_is_not_promoted_over_streamed_assistant_text() -> None:

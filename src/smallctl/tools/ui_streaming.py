@@ -13,12 +13,14 @@ class BufferedUIEventEmitter:
         *,
         harness: Any,
         event_type: UIEventType,
+        event_data: dict[str, Any] | None = None,
         flush_interval_sec: float = 0.05,
         max_buffer_chars: int = 8192,
         max_chunk_chars: int = 16384,
     ) -> None:
         self._harness = harness
         self._event_type = event_type
+        self._event_data = dict(event_data or {})
         self._flush_interval_sec = max(0.0, float(flush_interval_sec))
         self._max_buffer_chars = max(1, int(max_buffer_chars))
         self._max_chunk_chars = max(1, int(max_chunk_chars))
@@ -62,7 +64,7 @@ class BufferedUIEventEmitter:
             return
         content = self._buffer
         self._buffer = ""
-        await self._emit(UIEvent(event_type=self._event_type, content=content))
+        await self._emit(UIEvent(event_type=self._event_type, content=content, data=dict(self._event_data)))
         self._last_flush_at = time.monotonic()
 
     async def _emit(self, event: UIEvent) -> None:
@@ -70,4 +72,13 @@ class BufferedUIEventEmitter:
             asyncio.get_running_loop()
         except RuntimeError:
             return
+        if self._event_data:
+            merged = dict(self._event_data)
+            merged.update(event.data)
+            event = UIEvent(
+                event_type=event.event_type,
+                content=event.content,
+                data=merged,
+                timestamp=event.timestamp,
+            )
         await self._harness._emit(self._harness.event_handler, event)

@@ -23,9 +23,23 @@ from ..models.events import (
 
 _CRITICAL_EVENTS = {
     "context_lane_dropped",
+    "file_patch_read_autocontinue",
     "fama_health_warning",
     "fama_capsule_health",
+    "fama_signal_detected",
+    "fama_signal_to_mitigation",
+    "fama_mitigation_activated",
+    "reflexion_created",
+    "recovery_human_resteer_recorded",
+    "same_scope_iteration_recorded",
+    "task_interrupted",
     "terminal_control_failed",
+    "verifier_loop_detected",
+    "generic_tool_loop_nudge",
+    "recent_message_limit_tuned",
+    "mode_decision",
+    "retrieval_ranked_with_intent",
+    "retrieval_selected",
 }
 
 _DUPLICATE_STOPWORDS = {
@@ -144,10 +158,90 @@ def format_run_log_row(row: dict[str, Any]) -> str:
     if event == "fama_capsule_health_warning":
         warning = str(data.get("warning") or "")
         return f"[harness] 🚨 FAMA health: {warning}"
+    if event == "fama_signal_detected":
+        kind = str(data.get("kind") or "").strip()
+        failure_class = str(data.get("failure_class") or "").strip()
+        tool_name = str(data.get("tool_name") or "").strip()
+        bits = [bit for bit in (kind, failure_class, tool_name) if bit]
+        return f"[harness] FAMA signal: {' | '.join(bits) if bits else 'detected'}"
+    if event == "fama_signal_to_mitigation":
+        signal_kind = str(data.get("signal_kind") or "").strip()
+        activated = data.get("activated_mitigations")
+        if isinstance(activated, list):
+            activated_text = ", ".join(str(item) for item in activated if str(item).strip())
+        else:
+            activated_text = ""
+        suffix = f" -> {activated_text}" if activated_text else ""
+        return f"[harness] FAMA routed: {signal_kind or 'signal'}{suffix}"
+    if event == "fama_mitigation_activated":
+        mitigation = str(data.get("mitigation") or "").strip()
+        reason = str(data.get("reason") or "").strip()
+        suffix = f" ({reason})" if reason else ""
+        return f"[harness] FAMA mitigation active: {mitigation or 'mitigation'}{suffix}"
+    if event == "verifier_loop_detected":
+        rejection_count = data.get("rejection_count", "?")
+        return f"[harness] ⚠️ Verifier loop detected ({rejection_count} rejections)"
+    if event == "file_patch_read_autocontinue":
+        target = str(data.get("target_path") or "").strip()
+        error_kind = str(data.get("error_kind") or "patch mismatch").strip()
+        suffix = f" for {target}" if target else ""
+        return f"[harness] Patch recovery: auto-reading current file{suffix} after {error_kind}"
+    if event == "context_lane_dropped":
+        lane = str(data.get("lane") or data.get("context_lane") or "context").strip()
+        reason = str(data.get("reason") or data.get("drop_reason") or "stale or over budget").strip()
+        return f"[harness] Context refreshed: dropped {lane} ({reason})"
+    if event == "recovery_human_resteer_recorded":
+        turn_type = str(data.get("turn_type") or data.get("reason") or "follow-up").strip()
+        return f"[harness] Follow-up classified for recovery: {turn_type}"
+    if event == "same_scope_iteration_recorded":
+        turn_type = str(data.get("turn_type") or "follow-up").strip()
+        return f"[harness] Same-scope follow-up recorded: {turn_type}"
+    if event == "reflexion_created":
+        failure = data.get("failure")
+        failure_class = ""
+        if isinstance(failure, dict):
+            failure_class = str(failure.get("failure_class") or failure.get("kind") or "").strip()
+        suffix = f": {failure_class}" if failure_class else ""
+        return f"[harness] Recovery memory created{suffix}"
+    if event == "task_interrupted":
+        result = data.get("result")
+        result_reason = str(result.get("reason") or "").strip() if isinstance(result, dict) else ""
+        reason = str(data.get("reason") or result_reason).strip()
+        return f"[harness] Task interrupted{': ' + reason if reason else ''}"
+    if event == "generic_tool_loop_nudge":
+        tool_name = str(data.get("tool_name") or "")
+        return f"[harness] ⚠️ Loop guard nudge: {tool_name}"
+    if event == "recent_message_limit_tuned":
+        adjusted = data.get("adjusted_limit")
+        reasons = data.get("reasons", [])
+        reason_str = ", ".join(str(r) for r in reasons) if reasons else "pressure"
+        return f"[harness] 📉 Message window reduced to {adjusted} ({reason_str})"
     msg = row.get("message") or ""
     if len(msg) > 1024:
         msg = msg[:1024] + "... [truncated]"
     return f"[{row.get('channel')}] {event}: {msg}"
+
+
+def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
+    """Build a compact status-bar banner for recovery/guard state."""
+    if event == "upstream_install_source_invalid_pivot":
+        return "Blocked: installer source invalid or unavailable"
+    if event == "verifier_loop_detected":
+        return f"Recovery: verifier loop ({data.get('rejection_count', '?')} rejects)"
+    if event == "generic_tool_loop_nudge":
+        tool_name = str(data.get("tool_name") or "tool").strip()
+        return f"Recovery: loop guard nudged {tool_name}"
+    if event == "recent_message_limit_tuned":
+        adjusted = data.get("adjusted_limit")
+        return f"Recovery: message window reduced to {adjusted}"
+    interrupt = data.get("interrupt") if isinstance(data, dict) else None
+    if isinstance(interrupt, dict) and str(interrupt.get("kind") or "").strip() == "apt_deb822_validator_approval":
+        host = str(interrupt.get("host") or "").strip()
+        target = host or "localhost"
+        return f"Recovery: apt deb822 validation awaiting approval for {target}"
+    if str(data.get("ui_kind") or "").strip() == "apt_deb822_validator_approval":
+        return "Recovery: apt deb822 validation awaiting approval"
+    return ""
 
 
 def compute_activity_for_event(
@@ -403,6 +497,38 @@ def _build_backend_rca_strip(harness: Any) -> str:
     if state is None:
         return ""
     parts: list[str] = []
+    if str(getattr(state, "current_phase", "") or "").strip().lower() == "repair":
+        parts.append("Phase: repair")
+
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        blocker = scratchpad.get("_install_source_invalid_blocker")
+        if isinstance(blocker, dict):
+            host = str(blocker.get("host") or "installer source").strip() or "installer source"
+            parts.append(f"Blocked: invalid upstream install source ({host})")
+
+    records = getattr(state, "tool_execution_records", None)
+    if isinstance(records, dict):
+        for record in reversed(list(records.values())):
+            if not isinstance(record, dict):
+                continue
+            result = record.get("result")
+            if not isinstance(result, dict):
+                continue
+            metadata = result.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("reason") or "").strip() != "tool_dispatch_cancelled":
+                continue
+            tool_name = str(record.get("tool_name") or metadata.get("tool_name") or "tool").strip()
+            source = str(metadata.get("cancellation_source") or "cancel_requested").strip()
+            elapsed = metadata.get("elapsed_sec")
+            detail = f"Cancelled while waiting on `{tool_name}`"
+            if isinstance(elapsed, (int, float)):
+                detail += f" after {float(elapsed):.1f}s"
+            detail += f" ({source})"
+            parts.append(detail)
+            break
 
     # Last failing verifier
     last_verifier = getattr(state, "last_verifier_verdict", None)
@@ -413,6 +539,8 @@ def _build_backend_rca_strip(harness: Any) -> str:
             parts.append(f"Last failing verifier: `{cmd}`")
         elif verdict == "pass" and cmd:
             parts.append(f"Last passing verifier: `{cmd}`")
+        if bool(last_verifier.get("insufficient_verifier")):
+            parts.append("Verifier insufficient for objective")
 
     # Last 3 critical tool failures
     critical_failures: list[str] = []
@@ -428,8 +556,19 @@ def _build_backend_rca_strip(harness: Any) -> str:
         parts.append("Recent failures: " + "; ".join(critical_failures))
 
     # FAMA health
-    scratchpad = getattr(state, "scratchpad", None)
     if isinstance(scratchpad, dict):
+        invalidations = scratchpad.get("_context_invalidations")
+        if isinstance(invalidations, list) and invalidations:
+            latest = invalidations[-1]
+            if isinstance(latest, dict):
+                artifact_count = int(latest.get("invalidated_artifact_count", 0) or 0)
+                observation_count = int(latest.get("invalidated_observation_count", 0) or 0)
+                summary_count = int(latest.get("invalidated_summary_count", 0) or 0)
+                if artifact_count or observation_count or summary_count:
+                    parts.append(
+                        "Context invalidated: "
+                        f"artifacts={artifact_count}, observations={observation_count}, summaries={summary_count}"
+                    )
         fama = scratchpad.get("_fama")
         if isinstance(fama, dict):
             signals = fama.get("signals")
@@ -473,6 +612,7 @@ class StatusState:
         token_limit: int = 0,
         context_window: int = 0,
         api_errors: int = 0,
+        recovery_banner: str = "",
     ) -> None:
         self.model = model
         self.phase = phase
@@ -490,6 +630,7 @@ class StatusState:
         self.token_limit = token_limit
         self.context_window = context_window
         self.api_errors = api_errors
+        self.recovery_banner = recovery_banner
 
     @classmethod
     def from_harness(
@@ -535,4 +676,5 @@ class StatusState:
             token_limit=max(0, int(payload.get("token_limit", 0) or 0)),
             context_window=max(0, int(payload.get("context_window", 0) or 0)),
             api_errors=max(0, int(payload.get("api_errors", 0) or 0)),
+            recovery_banner=str(payload.get("recovery_banner", "") or ""),
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.markup import escape
 from textual.widgets import Static
 
 
@@ -45,6 +46,7 @@ class StatusBar(Static):
         self._context_window = 0  # Total server context window
         self._api_errors = 0
         self._fama_off = False
+        self._recovery_banner = ""
         self._refresh_display()
 
     def set_status(self, text: str) -> None:
@@ -75,6 +77,7 @@ class StatusBar(Static):
         context_window: int = 0, # total server context window
         api_errors: int = 0,
         fama_off: bool = False,
+        recovery_banner: str = "",
     ) -> None:
         self._model = model
         self._phase = phase
@@ -93,6 +96,7 @@ class StatusBar(Static):
         self._context_window = max(0, context_window)
         self._api_errors = api_errors
         self._fama_off = fama_off
+        self._recovery_banner = recovery_banner
         self._refresh_display()
 
     def _build_status_text(self) -> str:
@@ -112,6 +116,14 @@ class StatusBar(Static):
         )
         if self._activity:
             parts.append(f"activity: {self._activity}")
+        if self._contract_phase:
+            parts.append(f"contract: {self._contract_phase}")
+        if self._acceptance_progress:
+            parts.append(f"acceptance: {self._acceptance_progress}")
+        if self._latest_verdict:
+            parts.append(f"verdict: {escape(self._latest_verdict)}")
+        if self._recovery_banner:
+            parts.append(f"[bold yellow]{self._recovery_banner}[/]")
         
         if self._api_errors > 0:
             parts.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
@@ -136,11 +148,11 @@ class StatusBar(Static):
     def _build_vertical_status_text(self) -> str:
         lines = []
         if getattr(self, "_show_model", True):
-            lines.extend(["[bold #9ca3af]Model[/]", f"{self._model}", ""])
+            lines.extend(["[bold #93c5fd]Model[/]", f"{self._model}", ""])
 
         lines.extend(
             [
-                "[bold #9ca3af]Run[/]",
+                "[bold #93c5fd]Run[/]",
                 f"phase: {self._phase}",
                 f"step: {self._step}",
                 f"mode: {self._mode}",
@@ -148,6 +160,14 @@ class StatusBar(Static):
         )
         if self._activity:
             lines.append(f"activity: {self._activity}")
+        if self._contract_phase:
+            lines.append(f"contract: {self._contract_phase}")
+        if self._acceptance_progress:
+            lines.append(f"acceptance: {self._acceptance_progress}")
+        if self._latest_verdict:
+            lines.append(f"verdict: {escape(self._latest_verdict)}")
+        if self._recovery_banner:
+            lines.append(f"[bold yellow]{self._recovery_banner}[/]")
         if self._api_errors > 0:
             lines.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
         if getattr(self, "_fama_off", False):
@@ -162,7 +182,7 @@ class StatusBar(Static):
         filled = int(round(ratio * self._BAR_WIDTH))
         bar_markup = f"[bold #fca5a5]{'█' * filled}[/]"
 
-        lines.extend(["", "[bold #9ca3af]Usage[/]", f"cumulative: {bar_markup} {self._token_total:,}"])
+        lines.extend(["", "[bold #93c5fd]Usage[/]", f"cumulative: {bar_markup} {self._token_total:,}"])
         return "\n".join(lines)
 
     def _refresh_display(self) -> None:

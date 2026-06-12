@@ -43,7 +43,7 @@
 }
 
 .bubble-user {
-  border-left: thick #4b5563;
+  border-left: thick #ffffff;
   padding-left: 1;
 }
 
@@ -67,10 +67,15 @@
   padding-left: 1;
 }
 
-.bubble-system {
-  border-left: thick #9ca3af;
+.bubble-liveoutput {
+  border-left: thick #0891b2;
   padding-left: 1;
-  color: #9ca3af;
+}
+
+.bubble-system {
+  border-left: thick #eab308;
+  padding-left: 1;
+  color: #eab308;
 }
 
 .bubble-ready {
@@ -99,7 +104,7 @@
 
 #approve-prompt-shell,
 #approve-prompt-plan {
-  width: 50;
+  width: 60;
   max-width: 90%;
   height: auto;
   padding: 1 2;
@@ -225,6 +230,10 @@
 }
 
 .assistant-detail-tool_result {
+  border: none;
+}
+
+.assistant-detail-liveoutput {
   border: none;
 }
 
@@ -568,6 +577,11 @@
   max-height: 24;
 }
 
+.liveoutput-container {
+  height: auto;
+  max-height: 24;
+}
+
 .assistant-detail-checklist {
   border: none;
 }
@@ -611,16 +625,28 @@
   align: center middle;
 }
 
-#quit-confirm-yes,
+#quit-confirm-yes {
+  background: #7f1d1d;
+  color: #e5e7eb;
+  border: round #ef4444;
+  margin: 0 1;
+  padding: 0 1;
+  min-width: 0;
+}
+
+#quit-confirm-yes:hover {
+  background: #991b1b;
+}
+
 #quit-confirm-no {
   background: #374151;
   color: #e5e7eb;
   border: round #ca8a04;
   margin: 0 1;
   padding: 0 1;
+  min-width: 0;
 }
 
-#quit-confirm-yes:hover,
 #quit-confirm-no:hover {
   background: #4b5563;
 }

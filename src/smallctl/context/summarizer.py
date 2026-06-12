@@ -46,6 +46,12 @@ class ContextSummarizer:
         if callable(clear_fn):
             clear_fn(key, item_id)
 
+    def _record_compaction_call(self, state: LoopState) -> None:
+        self.compaction_calls += 1
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["compaction_calls"] = self.compaction_calls
+
     def compact_recent_messages_with_status(
         self,
         *,
@@ -54,10 +60,7 @@ class ContextSummarizer:
         artifact_store: Any | None = None,
     ) -> CompactionAttemptResult:
         # Fix 6: Track context pipeline usage
-        self.compaction_calls += 1
-        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
-            state.scratchpad.setdefault("_context_metrics", {})
-            state.scratchpad["_context_metrics"]["compaction_calls"] = self.compaction_calls
+        self._record_compaction_call(state)
 
         if len(state.recent_messages) <= keep_recent:
             return CompactionAttemptResult(noop_reason="no_compactable_messages")
@@ -128,6 +131,9 @@ class ContextSummarizer:
         keep_recent: int,
         artifact_store: Any | None = None,
     ) -> CompactionAttemptResult:
+        # Fix 6: Track context pipeline usage
+        self._record_compaction_call(state)
+
         if len(state.recent_messages) <= keep_recent:
             return CompactionAttemptResult(noop_reason="no_compactable_messages")
         old_messages = state.recent_messages[:-keep_recent]
@@ -216,6 +222,7 @@ class ContextSummarizer:
         step_range: tuple[int, int],
         artifact_store: Any | None = None,
     ) -> ContextBrief | None:
+        self._record_compaction_call(state)
         if not messages:
             return None
 

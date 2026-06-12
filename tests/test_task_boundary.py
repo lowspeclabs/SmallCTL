@@ -1171,6 +1171,21 @@ def test_assistant_markdown_bold_options_are_persisted_in_last_task_handoff() ->
     }
 
 
+def test_remote_target_extraction_rejects_password_like_user_at_host() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _make_harness(state)
+
+    task = 'ssh root@192.168.1.162 w/ password "Temp@Pass" and run apt update'
+    Harness._store_task_handoff(
+        harness,
+        raw_task=task,
+        effective_task=task,
+    )
+
+    handoff = state.scratchpad["_last_task_handoff"]
+    assert handoff["ssh_targets"] == [{"host": "192.168.1.162", "user": "root"}]
+
+
 def test_bare_option_number_resolves_when_action_options_exist() -> None:
     state = LoopState(cwd="/tmp")
     prior = "rca vaultwarden ssl error and propose workarounds"

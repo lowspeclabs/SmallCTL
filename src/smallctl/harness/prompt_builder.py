@@ -17,8 +17,8 @@ class PromptBuilderService:
     def _prompt_pressure_threshold(self) -> int:
         soft_limit = self.harness.context_policy.soft_prompt_token_limit
         if soft_limit is None:
-            return 12000
-        return max(256, int(soft_limit * 0.8))
+            return 10000
+        return max(256, int(soft_limit * 0.7))
 
     def _dynamic_recent_message_limit(self) -> int:
         base_limit = max(1, int(getattr(self.harness.context_policy, "recent_message_limit", 1) or 1))
@@ -69,8 +69,11 @@ class PromptBuilderService:
         if high_prompt_pressure or "observation_invalidation_churn" in pressure_reasons:
             adjusted_limit = min(adjusted_limit, 4)
         # Phase 3B: enforce floor of 8 for remote repair so failure history is preserved
-        if str(getattr(state, "current_phase", "") or "").strip().lower() == "repair":
+        if str(getattr(state, "current_phase", "") or "").strip().lower() in {"execute", "repair", "verify"}:
             adjusted_limit = max(8, adjusted_limit)
+        # Remote execute mode needs even more context to maintain coherent task state
+        if str(getattr(state, "task_mode", "") or "").strip().lower() == "remote_execute":
+            adjusted_limit = max(10, adjusted_limit)
         adjusted_limit = max(2, adjusted_limit)
         self.harness._runlog(
             "recent_message_limit_tuned",
@@ -105,6 +108,15 @@ class PromptBuilderService:
             return True
         return False
 
+    def _smalltalk_experience_suppressed(self) -> bool:
+        state = self.harness.state
+        scratchpad = getattr(state, "scratchpad", {}) or {}
+        labels = {
+            str(getattr(state, "active_intent", "") or "").strip().lower(),
+            str(scratchpad.get("_chat_runtime_intent") or "").strip().lower(),
+        }
+        return "smalltalk" in labels
+
     async def build_messages(
         self,
         system_prompt: str,
@@ -128,11 +140,17 @@ class PromptBuilderService:
         cold_store = None if fresh_run_active else self.harness.cold_memory_store
         
         suppress_llamacpp_repair_experiences = self._llamacpp_small_repair_pressure()
+        suppress_smalltalk_experiences = self._smalltalk_experience_suppressed()
+        include_experiences = (
+            not fresh_run_active
+            and not suppress_llamacpp_repair_experiences
+            and not suppress_smalltalk_experiences
+        )
         retrieval_bundle = self.harness.retriever.retrieve_bundle(
             state=self.harness.state,
             query=query,
             cold_store=cold_store,
-            include_experiences=not fresh_run_active and not suppress_llamacpp_repair_experiences,
+            include_experiences=include_experiences,
         )
         def _stale_count(key: str) -> int:
             payload = self.harness.state.scratchpad.get(key)
@@ -154,7 +172,7 @@ class PromptBuilderService:
         
         summaries = retrieval_bundle.summaries
         artifacts = retrieval_bundle.artifacts
-        experiences = [] if fresh_run_active or suppress_llamacpp_repair_experiences else retrieval_bundle.experiences
+        experiences = [] if not include_experiences else retrieval_bundle.experiences
         
         self.harness._runlog(
             "retrieval_selected",
@@ -194,6 +212,15 @@ class PromptBuilderService:
             ],
             lane_routes=retrieval_bundle.lane_routes,
             stale_lane_counts=stale_lane_counts,
+            experience_suppression_reason=(
+                "fresh_run"
+                if fresh_run_active
+                else "llamacpp_small_repair_pressure"
+                if suppress_llamacpp_repair_experiences
+                else "smalltalk"
+                if suppress_smalltalk_experiences
+                else ""
+            ),
         )
         self.harness._runlog(
             "retrieval_ranked_with_intent",

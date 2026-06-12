@@ -18,6 +18,7 @@ from .prompt_fragments import (
     _PRIVILEGES_NO_SUDO_GUESS,
     _REDUNDANCY_PREFER_SUMMARY,
     _REFLECTION_GATE,
+    _REMOTE_DOWNLOAD_FALLBACK,
     _REMOTE_PROBES_BATCH,
     _RESPONSE_STRUCTURE_GEMMA,
     _RESPONSE_STRUCTURE_SMALL_GEMMA,
@@ -108,6 +109,7 @@ def build_system_prompt(
                 _PRIVILEGES_NO_SUDO_GUESS,
                 _SHELL_POSIX_REDIRECTION,
                 _REMOTE_PROBES_BATCH,
+                _REMOTE_DOWNLOAD_FALLBACK,
                 _MEMORY_PERSIST_KEY_FACTS,
                 "MEMORY: `memory_update`, session notes, and plans do not satisfy the supported-claim gate for diagnosis/remediation. Only actual tool evidence counts, so do not try to satisfy a shell/SSH/file guard by storing the intended command in memory. ",
                 _REDUNDANCY_PREFER_SUMMARY,
@@ -443,7 +445,11 @@ def build_system_prompt(
                         "For remote services or watch/follow commands, do not run a foreground command that is expected to keep running; use a service manager, detached/background launch, or a bounded `timeout ...` probe, then verify separately. "
                         "If the user explicitly asks to rerun, recheck, or confirm live, do not rely on retrieved historical notes alone; issue a fresh `ssh_exec` unless the tool is unavailable or blocked. "
                         "Do not infer remote file, package, or service absence from local shell output, local filesystem paths, or stale artifacts; strong remote claims require fresh `ssh_exec` evidence from that host. "
-                        "DIAGNOSTIC EXIT CODES: Exit code 1 from status or presence probes (systemctl status, dpkg -l, apt list, which, whereis) that report 'not found' is valid negative intelligence, NOT an error. Report the finding and call task_complete when you have enough evidence."
+                        "DIAGNOSTIC EXIT CODES: Exit code 1 from status or presence probes (systemctl status, dpkg -l, apt list, which, whereis) that report 'not found' is valid negative intelligence, NOT an error. Report the finding and call task_complete when you have enough evidence. "
+                        "SSH TTY GUIDANCE: `ssh_exec` does NOT allocate a TTY by default. "
+                        "For interactive installers (e.g. Pi-hole), use `ssh_session_start` to open a persistent session, or prefix the command with `DEBIAN_FRONTEND=noninteractive` to suppress prompts. "
+                        "For apt operations, prefer non-interactive mode (`apt install -y` or `DEBIAN_FRONTEND=noninteractive apt install ...`) or use `ssh_session_start`. "
+                        "Do not pass `-t` to `bash` inside the command string; pass it to `ssh` itself if you must force TTY allocation."
                     )
                     if _state_has_remote_cleanup_intent(state):
                         parts.append(
@@ -509,7 +515,11 @@ def build_system_prompt(
                     "For remote services or watch/follow commands, do not run a foreground command that is expected to keep running; use a service manager, detached/background launch, or a bounded `timeout ...` probe, then verify separately. "
                     "If the user explicitly asks to rerun, recheck, or confirm live, do not rely on retrieved historical notes alone; issue a fresh `ssh_exec` unless the tool is unavailable or blocked. "
                     "Do not infer remote file, package, or service absence from local shell output, local filesystem paths, or stale artifacts; strong remote claims require fresh `ssh_exec` evidence from that host. "
-                    "DIAGNOSTIC EXIT CODES: Exit code 1 from status or presence probes (systemctl status, dpkg -l, apt list, which, whereis) that report 'not found' is valid negative intelligence, NOT an error. Report the finding and call task_complete when you have enough evidence."
+                    "DIAGNOSTIC EXIT CODES: Exit code 1 from status or presence probes (systemctl status, dpkg -l, apt list, which, whereis) that report 'not found' is valid negative intelligence, NOT an error. Report the finding and call task_complete when you have enough evidence. "
+                    "SSH TTY GUIDANCE: `ssh_exec` does NOT allocate a TTY by default. "
+                    "For interactive installers (e.g. Pi-hole), use `ssh_session_start` to open a persistent session, or prefix the command with `DEBIAN_FRONTEND=noninteractive` to suppress prompts. "
+                    "For apt operations, prefer non-interactive mode (`apt install -y` or `DEBIAN_FRONTEND=noninteractive apt install ...`) or use `ssh_session_start`. "
+                    "Do not pass `-t` to `bash` inside the command string; pass it to `ssh` itself if you must force TTY allocation."
                 )
                 if _state_has_remote_cleanup_intent(state):
                     parts.append(

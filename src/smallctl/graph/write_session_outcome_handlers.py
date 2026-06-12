@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..fama.router import route_signal as _route_fama_signal
+from ..fama.signals import (
+    ActiveMitigation as _ActiveMitigation,
+    FamaFailureKind as _FamaFailureKind,
+    FamaSignal as _FamaSignal,
+    current_step as _fama_current_step,
+)
+from ..fama.state import activate_mitigations as _fama_activate_mitigations
 from ..models.conversation import ConversationMessage
 from ..state import clip_text_value
 from ..tools.fs import (
@@ -101,6 +109,25 @@ async def _handle_write_session_syntax_failure(
         )
     )
     _maybe_trigger_write_session_fallback(harness, session)
+
+    # Activate FAMA write-session recovery capsule so the next prompt
+    # includes guidance to repair the session rather than starting over.
+    try:
+        step = _fama_current_step(harness.state)
+        signal = _FamaSignal(
+            kind=_FamaFailureKind.WRITE_SESSION_STALL,
+            severity=2,
+            source="write_session_syntax_failure",
+            evidence=f"Syntax check failed for `{session.write_target_path}` section `{current_section}`",
+            step=step,
+            tool_name=str(record.tool_name or ""),
+            failure_class="verifier_failed",
+        )
+        mitigations = _route_fama_signal(signal, state=harness.state, config=getattr(harness, "config", None))
+        if mitigations:
+            _fama_activate_mitigations(harness.state, mitigations)
+    except Exception:
+        pass
 
 
 async def _handle_write_session_finalize_failure(

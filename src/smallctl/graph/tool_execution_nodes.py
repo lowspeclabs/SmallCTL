@@ -39,6 +39,8 @@ from .tool_call_parser import (
 from .tool_execution_recovery import handle_repeated_tool_loop
 from .escalation_triggers import _maybe_auto_trigger_escalation_for_same_tool_failures
 from .tool_execution_persistence import persist_tool_results
+from ..fama.runtime import _handle_signal
+from ..fama.signals import FamaFailureKind, FamaSignal, current_step
 from .shell_outcomes import (
     _shell_human_retry_hint,
     _shell_ssh_retry_hint,
@@ -248,6 +250,22 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         _record_tool_attempt(harness, pending)
 
         if repeat_error is not None:
+            _handle_signal(
+                harness,
+                state=harness.state,
+                config=getattr(harness, "config", None),
+                signal=FamaSignal(
+                    kind=FamaFailureKind.LOOPING,
+                    severity=2,
+                    source="loop_guard",
+                    evidence=repeat_error,
+                    step=current_step(harness.state),
+                    tool_name=pending.tool_name,
+                    failure_class="repeated_action",
+                    next_safe_action="Stop retrying the identical tool call. Use a different tool or ask for missing information.",
+                ),
+                dedupe=True,
+            )
             maybe_pending = await handle_repeated_tool_loop(
                 harness=harness,
                 graph_state=graph_state,
@@ -518,9 +536,11 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                             )
                         )
                         continue
-                    harness._active_dispatch_task = asyncio.create_task(
-                        dispatch_fn(pending.tool_name, pending.args)
-                    )
+                    harness._active_ui_tool_context = {
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                    }
+                    harness._active_dispatch_task = asyncio.create_task(dispatch_fn(pending.tool_name, pending.args))
                     result = await harness._active_dispatch_task
             except _nodes.ToolNotFoundError:
                 if pending.tool_name in _nodes.HALLUCINATION_MAP:
@@ -602,6 +622,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 return
             finally:
                 harness._active_dispatch_task = None
+                harness._active_ui_tool_context = None
             _store_tool_execution_record(
                 harness,
                 operation_id=operation_id,

@@ -13,6 +13,7 @@ DEFAULT_SIGNAL_WINDOW = 8
 class FamaFailureKind(str, Enum):
     EARLY_STOP = "early_stop"
     LOOPING = "looping"
+    INTERACTIVE_SESSION_STALL = "interactive_session_stall"
     REMOTE_LOCAL_CONFUSION = "remote_local_confusion"
     REMOTE_VERIFICATION_PENDING = "remote_verification_pending"
     TOOL_OUTPUT_MISREAD = "tool_output_misread"
@@ -24,12 +25,14 @@ class FamaFailureKind(str, Enum):
     STALE_SUCCESS_CLAIM = "stale_success_claim"
     OBJECTIVE_MISMATCH = "objective_mismatch"
     REPEATED_REMOTE_INSTALLER_FAILURE = "repeated_remote_installer_failure"
+    UPSTREAM_INSTALL_SOURCE_INVALID = "upstream_install_source_invalid"
     PREEXISTING_STATE_AS_SUCCESS = "preexisting_state_as_success"
 
 
 FAILURE_CLASSES = {
     "tool_schema_invalid": "Model emitted malformed JSON, wrong tool name, or invalid args.",
     "tool_execution_failed": "Tool ran but returned success=false or exception.",
+    "patch_target_not_found": "A file patch target_text did not match the current file content.",
     "completion_blocked": "Model attempted to finish while completion gates were still blocked.",
     "wrong_path": "Path does not exist, wrong cwd, absolute path issue, remote/local mismatch, or stale file path.",
     "remote_verification_pending": "Remote mutation appears complete but still needs remote read-back verification.",
@@ -42,12 +45,14 @@ FAILURE_CLASSES = {
     "context_missing": "Model needs evidence it has not actually retrieved.",
     "hallucinated_assumption": "Model asserted something unsupported by tool output.",
     "human_resteer": "User corrected direction or clarified after model drift.",
+    "same_scope_iteration": "User continued or refined the same task without implying model drift.",
     "backend_stream_failure": "Model/backend stream failed, truncated, or wedged.",
     "no_progress": "Progress guard sees no new files, evidence, or subtask movement.",
     "preflight_contradiction": "Preflight guard contradicted verified evidence (e.g. wrote file then claimed NOT FOUND).",
     "stale_success_claim": "Model claimed success after task_complete was blocked or before verification passed.",
     "objective_mismatch": "Verifier or success check does not match the user objective.",
     "repeated_remote_installer_failure": "Remote installer preflight or execution failed repeatedly.",
+    "upstream_install_source_invalid": "Installer fetches or package hosts are invalid upstream while general connectivity still works.",
     "preexisting_state_as_success": "Model treated pre-existing state as successful task completion.",
 }
 
@@ -55,6 +60,7 @@ FAILURE_CLASSES = {
 DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.EARLY_STOP: "completion_blocked",
     FamaFailureKind.LOOPING: "repeated_action",
+    FamaFailureKind.INTERACTIVE_SESSION_STALL: "interactive_session_stall",
     FamaFailureKind.REMOTE_LOCAL_CONFUSION: "wrong_path",
     FamaFailureKind.REMOTE_VERIFICATION_PENDING: "remote_verification_pending",
     FamaFailureKind.TOOL_OUTPUT_MISREAD: "hallucinated_assumption",
@@ -66,6 +72,7 @@ DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.STALE_SUCCESS_CLAIM: "stale_success_claim",
     FamaFailureKind.OBJECTIVE_MISMATCH: "objective_mismatch",
     FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE: "repeated_remote_installer_failure",
+    FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID: "upstream_install_source_invalid",
     FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: "preexisting_state_as_success",
 }
 

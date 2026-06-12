@@ -18,6 +18,8 @@ from .tool_result_verification import (
     _store_verifier_verdict,
 )
 from .verifier_monitor import track_verifier_rejection
+from ..fama.runtime import _handle_signal
+from ..fama.signals import FamaFailureKind, FamaSignal, current_step
 from ..shell_utils import (
     file_read_cache_key as _file_read_cache_key,
     ssh_file_read_cache_key as _ssh_file_read_cache_key,
@@ -361,6 +363,22 @@ def _apply_verifier_and_evidence_updates(
             rejection_count=loop_info["rejection_count"],
             last_verdict=loop_info["verdict"],
         )
+        _handle_signal(
+            service.harness,
+            state=service.harness.state,
+            config=getattr(service.harness, "config", None),
+            signal=FamaSignal(
+                kind=FamaFailureKind.EARLY_STOP,
+                severity=2,
+                source="verifier",
+                evidence=f"verifier_loop_detected with {loop_info['rejection_count']} rejections",
+                step=current_step(service.harness.state),
+                tool_name="task_complete",
+                failure_class="verifier_failed",
+                next_safe_action="Read the failing output and patch one narrow cause, then rerun the smallest check.",
+            ),
+            dedupe=True,
+        )
     rejection_count = loop_info.get("rejection_count", 0)
     if rejection_count >= 3:
         _handle_verifier_loop_hard_stop(service, verifier_verdict, rejection_count)
@@ -487,7 +505,17 @@ def _apply_finalization_updates(
             limit=12,
         )
     _extract_and_pin_critical_errors(service, tool_name=tool_name, result=result, artifact=artifact)
-    service.harness.state.recent_errors = []
+    if result.success:
+        service.harness.state.recent_errors = []
+    else:
+        error_text = str(result.error or result.metadata.get("error") or "tool failed").strip()
+        error_kind = str(result.metadata.get("error_kind") or "").strip()
+        if error_kind:
+            error_text = f"{error_kind}: {error_text}" if error_text else error_kind
+        if error_text:
+            recent_errors = list(getattr(service.harness.state, "recent_errors", []) or [])
+            recent_errors.append(f"{tool_name}: {error_text}")
+            service.harness.state.recent_errors = recent_errors[-8:]
     return evidence
 
 

@@ -378,3 +378,72 @@ def test_format_run_log_row_fama_health_alarm() -> None:
     formatted = format_run_log_row(row)
     assert "FAMA capsules are empty" in formatted
     assert "🚨" in formatted
+
+
+def test_format_run_log_row_patch_recovery_autoread() -> None:
+    from smallctl.ui.display import format_run_log_row, should_render_run_log_row
+
+    row = {
+        "channel": "harness",
+        "event": "file_patch_read_autocontinue",
+        "data": {"target_path": "temp/example.py", "error_kind": "patch_target_not_found"},
+    }
+
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "Patch recovery" in formatted
+    assert "temp/example.py" in formatted
+    assert "patch_target_not_found" in formatted
+
+
+def test_format_run_log_row_task_interrupted_reason() -> None:
+    from smallctl.ui.display import format_run_log_row, should_render_run_log_row
+
+    row = {
+        "channel": "harness",
+        "event": "task_interrupted",
+        "data": {"result": {"reason": "cancel_requested"}},
+    }
+
+    assert should_render_run_log_row(row) is True
+    assert format_run_log_row(row) == "[harness] Task interrupted: cancel_requested"
+
+
+def test_format_run_log_row_fama_signal_and_mitigation_are_visible() -> None:
+    from smallctl.ui.display import format_run_log_row, should_render_run_log_row
+
+    signal_row = {
+        "channel": "harness",
+        "event": "fama_signal_detected",
+        "data": {"kind": "bad_tool_args", "failure_class": "patch_target_not_found", "tool_name": "file_patch"},
+    }
+    route_row = {
+        "channel": "harness",
+        "event": "fama_signal_to_mitigation",
+        "data": {"signal_kind": "bad_tool_args", "activated_mitigations": ["patch_target_not_found_capsule"]},
+    }
+    mitigation_row = {
+        "channel": "harness",
+        "event": "fama_mitigation_activated",
+        "data": {"mitigation": "patch_target_not_found_capsule", "reason": "bad_tool_args"},
+    }
+
+    assert should_render_run_log_row(signal_row) is True
+    assert "patch_target_not_found" in format_run_log_row(signal_row)
+    assert should_render_run_log_row(route_row) is True
+    assert "patch_target_not_found_capsule" in format_run_log_row(route_row)
+    assert should_render_run_log_row(mitigation_row) is True
+    assert "FAMA mitigation active" in format_run_log_row(mitigation_row)
+
+
+def test_format_run_log_row_same_scope_iteration_visible() -> None:
+    from smallctl.ui.display import format_run_log_row, should_render_run_log_row
+
+    row = {
+        "channel": "harness",
+        "event": "same_scope_iteration_recorded",
+        "data": {"turn_type": "ITERATION"},
+    }
+
+    assert should_render_run_log_row(row) is True
+    assert format_run_log_row(row) == "[harness] Same-scope follow-up recorded: ITERATION"

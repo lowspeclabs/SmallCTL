@@ -105,12 +105,13 @@ def register_operational_tools(
             ),
             make_registration(
                 name="ssh_session_send",
-                description="Send input to an active interactive SSH session, usually one prompt answer ending in a newline.",
+                description="Send input to an active interactive SSH session. By default this submits the input with a trailing newline.",
                 schema={
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
-                        "input": {"type": "string", "description": "Text to write to remote stdin; include trailing newline for prompt answers."},
+                        "input": {"type": "string", "description": "Text to write to remote stdin. Omit the trailing newline for normal shell commands; the tool appends it by default."},
+                        "send_newline": {"type": "boolean", "default": True, "description": "Append a trailing newline before writing. Set false for raw password or single-keystroke input."},
                         "wait_sec": {"type": "number", "default": 0.5},
                         "max_chars": {"type": "integer", "default": 6000},
                     },

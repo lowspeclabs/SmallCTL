@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from smallctl.tools import shell
 from smallctl.tools.network_interactive_sessions import (
     _SSH_INTERACTIVE_SESSIONS,
+    ssh_session_read,
     ssh_session_start,
     ssh_session_send,
     ssh_session_send_and_read,
@@ -215,6 +216,39 @@ def test_ssh_session_send_detects_unchanged_prompt_after_send(monkeypatch) -> No
             assert result["success"] is True
             assert "_note" in result["output"]
             assert "unchanged" in result["output"]["_note"].lower()
+        finally:
+            _SSH_INTERACTIVE_SESSIONS.clear()
+
+    asyncio.run(_run())
+
+
+def test_ssh_session_read_detects_repeated_unchanged_prompt(monkeypatch) -> None:
+    proc = _InteractiveProcess("Continue? (y/N)")
+
+    async def _fake_create_process(**_kwargs):
+        return proc
+
+    monkeypatch.setattr(shell, "create_process", _fake_create_process)
+
+    async def _run() -> None:
+        _SSH_INTERACTIVE_SESSIONS.clear()
+        try:
+            start = await ssh_session_start(
+                host="192.0.2.10",
+                user="root",
+                command="./installer",
+            )
+            assert start["success"] is True
+            session_id = start["output"]["session_id"]
+
+            first = await ssh_session_read(session_id=session_id, wait_sec=0)
+            second = await ssh_session_read(session_id=session_id, wait_sec=0)
+
+            assert first["success"] is True
+            assert second["success"] is True
+            assert second["metadata"]["interactive_output_unchanged"] is True
+            assert second["metadata"]["unchanged_read_count"] >= 1
+            assert "unchanged" in second["output"]["_note"].lower()
         finally:
             _SSH_INTERACTIVE_SESSIONS.clear()
 

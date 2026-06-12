@@ -47,6 +47,11 @@ def _tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | N
 
 
 def _semantic_tool_call_fingerprint(tool_name: str, args: dict[str, Any], *, cwd: str | None = None) -> str:
+    if tool_name == "ssh_session_read" and isinstance(args, dict):
+        normalized = dict(args)
+        normalized.pop("wait_sec", None)
+        normalized.pop("max_chars", None)
+        return _tool_call_fingerprint(tool_name, normalized, cwd=cwd)
     return _tool_call_fingerprint(tool_name, args, cwd=cwd)
 
 
@@ -169,6 +174,11 @@ def _directive_hint_for_repeated_tool(harness: Any, pending: PendingToolCall) ->
         return (
             f"Directive Hint: Stop re-reading the same remote file{path_note}. Use the evidence already in Working Memory. "
             "If you need to verify state, run one focused `ssh_exec` command. Otherwise synthesize and proceed."
+        )
+    if tool_name == "ssh_session_read":
+        return (
+            "Directive Hint: Stop polling the same interactive SSH prompt. Inspect the latest prompt state, retry `ssh_session_send` with explicit submit semantics if needed, "
+            "or explain the blocker instead of increasing waits indefinitely."
         )
     return (
         f"Directive Hint: Stop repeating `{tool_name}` with near-identical arguments. Use the current evidence and choose a different next action: "

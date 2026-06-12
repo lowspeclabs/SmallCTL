@@ -177,9 +177,32 @@ class PromptStateFrameCompiler:
                     "reason": "local_coding_task",
                 }
             experiences = filtered_experiences
+        # P2.1: Auto-recover blocked duplicate web_fetch by force-including the
+        # referenced artifact if the last tool result points to one.
+        force_artifact_snippets = list(retrieved_artifacts)
+        last_existing_artifact_id = _last_duplicate_fetch_artifact_id(state)
+        if last_existing_artifact_id:
+            existing_ids = {s.artifact_id for s in force_artifact_snippets}
+            if last_existing_artifact_id not in existing_ids:
+                artifact = state.artifacts.get(last_existing_artifact_id)
+                if artifact is not None:
+                    preview = str(
+                        getattr(artifact, "preview_text", None)
+                        or getattr(artifact, "inline_content", None)
+                        or ""
+                    )[:1200]
+                    if preview:
+                        force_artifact_snippets.append(
+                            ArtifactSnippet(
+                                artifact_id=last_existing_artifact_id,
+                                text=preview,
+                                score=1.0,
+                            )
+                        )
+
         artifacts, dropped_artifact_ids = self._filter_invalidated_artifact_snippets(
             state=state,
-            snippets=list(retrieved_artifacts),
+            snippets=force_artifact_snippets,
         )
         invalidated_hints = self._invalidated_fact_hints(state)
         known_good_facts = self._dedupe(
@@ -627,3 +650,40 @@ def _maybe_inject_argparse_subcommand_note(state: LoopState) -> None:
         if "add_argument" in content and "subparsers.add_parser" in content:
             state.working_memory.known_facts.append(note)
             return
+
+
+def _last_duplicate_fetch_artifact_id(state: LoopState) -> str | None:
+    """Return the existing_artifact_id from the most recent web_fetch duplicate block."""
+    records = getattr(state, "tool_execution_records", None)
+    if not isinstance(records, dict) or not records:
+        return None
+    # Find the most recent record by step_count
+    items = [
+        (str(key), dict(value))
+        for key, value in records.items()
+        if isinstance(value, dict)
+    ]
+    if not items:
+        return None
+    try:
+        items.sort(
+            key=lambda kv: int(
+                (kv[1].get("evidence_context") or {}).get("step_count")
+                or kv[1].get("step_count")
+                or 0
+            )
+        )
+    except (TypeError, ValueError):
+        pass
+    for _op_id, record in reversed(items):
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        metadata = result.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("reason") == "web_fetch_duplicate_result_id":
+            existing = str(metadata.get("existing_artifact_id") or "").strip()
+            if existing:
+                return existing
+    return None

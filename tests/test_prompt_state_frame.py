@@ -589,7 +589,11 @@ class _NoOpCompaction:
 
 
 class _Retriever:
-    def retrieve_bundle(self, **_: object) -> RetrievalBundle:
+    def __init__(self) -> None:
+        self.include_experiences: bool | None = None
+
+    def retrieve_bundle(self, **kwargs: object) -> RetrievalBundle:
+        self.include_experiences = bool(kwargs.get("include_experiences"))
         return RetrievalBundle(
             query="frame query",
             initial_query="frame query",
@@ -716,6 +720,21 @@ def test_prompt_builder_logs_frame_and_lane_events() -> None:
     assert lane_dropped and "active_intent" in lane_dropped[0]["data"]
 
 
+def test_prompt_builder_suppresses_experience_retrieval_for_smalltalk() -> None:
+    harness = _Harness()
+    harness.state.active_intent = "smalltalk"
+    service = PromptBuilderService(harness)
+
+    asyncio.run(service.build_messages("SYSTEM PROMPT"))
+
+    assert harness.retriever.include_experiences is False
+    retrieval_entry = next(
+        entry for entry in harness.run_logger.entries if entry["event"] == "retrieval_selected"
+    )
+    assert retrieval_entry["data"]["experiences"] == []
+    assert retrieval_entry["data"]["experience_suppression_reason"] == "smalltalk"
+
+
 def test_prompt_builder_tunes_recent_message_limit_for_remote_repair_pressure() -> None:
     calls: dict[str, int] = {}
 
@@ -750,12 +769,12 @@ def test_prompt_builder_tunes_recent_message_limit_for_remote_repair_pressure() 
     service = PromptBuilderService(harness)
     asyncio.run(service.build_messages("SYSTEM PROMPT"))
 
-    assert calls["memory_limit"] == 8
-    assert calls["assembler_limit"] == 8
+    assert calls["memory_limit"] == 10
+    assert calls["assembler_limit"] == 10
     tuning_entry = next(
         entry for entry in harness.run_logger.entries if entry["event"] == "recent_message_limit_tuned"
     )
-    assert tuning_entry["data"]["adjusted_limit"] == 8
+    assert tuning_entry["data"]["adjusted_limit"] == 10
     assert "high_prompt_budget" in tuning_entry["data"]["reasons"]
 
 

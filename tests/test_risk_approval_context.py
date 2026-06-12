@@ -90,7 +90,7 @@ def test_shell_approval_grace_period_resolves_after_timeout() -> None:
 
 
 def test_shell_approval_past_grace_period_is_ignored() -> None:
-    """Resolutions past the grace period should be ignored."""
+    """Resolutions after arbitrary delay are still accepted (no timeout)."""
     events: list[object] = []
 
     class _FakeHarness:
@@ -109,18 +109,18 @@ def test_shell_approval_past_grace_period_is_ignored() -> None:
             service.request_shell_approval(
                 command="echo hello",
                 cwd="/tmp",
-                timeout_sec=0,  # Immediate timeout
+                timeout_sec=0,  # No longer enforced; harness blocks indefinitely
             )
         )
-        # Wait longer than the 5-second grace period
-        await asyncio.sleep(6.0)
+        await asyncio.sleep(0.1)
         approval_id = str(events[0].data.get("approval_id") or "")
-        # Resolve after grace period
+        # Resolve after arbitrary delay
         service.resolve_shell_approval(approval_id, True)
         return await approval_task
 
-    # Should return False because the resolution is past grace period
-    assert asyncio.run(_run()) is False
+    # Should return True because the approval is resolved before the
+    # task is cancelled — there is no timeout to race against.
+    assert asyncio.run(_run()) is True
 
 
 def test_approval_screen_renders_proof_bundle_details() -> None:

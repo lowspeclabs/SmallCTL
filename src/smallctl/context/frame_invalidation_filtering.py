@@ -400,6 +400,31 @@ def experience_invalidated(
     return False
 
 
+def experience_invalidated_with_reason(
+    *,
+    state: LoopState,
+    memory: ExperienceMemory,
+    invalidations: list[dict[str, Any]],
+    failing_tool: str | None = None,
+) -> tuple[bool, str]:
+    normalized_failing_tool = str(failing_tool or "").strip().lower()
+    if normalized_failing_tool and any(
+        str(event.get("reason") or "").strip().lower() == "phase_advanced"
+        for event in invalidations
+    ):
+        memory_tool = str(memory.tool_name or "").strip().lower()
+        memory_outcome = str(memory.outcome or "").strip().lower()
+        if memory_tool == normalized_failing_tool and memory_outcome == "failure":
+            return True, "failing_tool_memory"
+        return False, "preserved_nonfailing_memory"
+    invalidated = experience_invalidated(
+        state=state,
+        memory=memory,
+        invalidations=invalidations,
+    )
+    return invalidated, "invalidated" if invalidated else "retained"
+
+
 def artifact_invalidated(
     *,
     state: LoopState,

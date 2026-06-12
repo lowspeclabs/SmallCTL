@@ -487,10 +487,14 @@ def is_staged_artifact_recoverable(artifact_path: str, task_description: str) ->
     """
     Returns True if the staged artifact contains enough structural
     evidence that the model can patch it rather than rewrite it.
+    Also rejects artifacts with syntax errors.
     """
     try:
         content = Path(artifact_path).read_text(encoding="utf-8")
     except Exception:
+        return False
+
+    if not _is_staged_artifact_syntactically_valid(artifact_path, content):
         return False
 
     required_symbols = extract_symbols_from_task(task_description)
@@ -504,6 +508,31 @@ def is_staged_artifact_recoverable(artifact_path: str, task_description: str) ->
     has_implementation = has_class_or_function_bodies(content)
 
     return coverage >= 0.5 and has_implementation
+
+
+def _is_staged_artifact_syntactically_valid(artifact_path: str, content: str) -> bool:
+    """
+    Runs a syntax/compile check on the staged file. Returns False if the file
+    has a syntax error (e.g. unclosed brackets, bad indentation).
+    """
+    path = Path(artifact_path)
+    ext = path.suffix.lower()
+    if ext == ".py":
+        try:
+            compile(content, str(path), "exec")
+        except SyntaxError:
+            return False
+    elif ext in {".js", ".ts"}:
+        import subprocess
+        try:
+            subprocess.run(
+                ["node", "--check", str(path)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+    return True
 
 
 def _abandon_staged_artifact(harness: Any, stage_path: str, reason: str) -> None:

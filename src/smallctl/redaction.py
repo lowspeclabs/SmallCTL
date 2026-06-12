@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Redaction utilities for transport, logging, and exported boundaries.
+
+Live runtime state may temporarily contain plaintext secrets when needed for task
+continuity, but provider payloads and observability/export surfaces must redact
+them before serialization or transport.
+"""
+
 import hashlib
 import json
 import re

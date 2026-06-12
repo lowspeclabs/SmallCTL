@@ -74,6 +74,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._token_runaway_alert_emitted = False
         self._latest_status_snapshot: dict[str, Any] | None = None
         self._status_refresh_pending = False
+        self._recovery_banner = ""
         self._pending_harness_events: list[UIEvent] = []
         self._pending_status_event: UIEvent | None = None
         self._ui_event_drain_task: asyncio.Task[None] | None = None
@@ -147,7 +148,9 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._capture_status_snapshot_from_harness()
         self._refresh_status()
         if restore_status is not None:
-            restored_messages = restore_status.get("recent_messages") if isinstance(restore_status, dict) else None
+            restored_messages = restore_status.get("ui_transcript") if isinstance(restore_status, dict) else None
+            if not isinstance(restored_messages, list):
+                restored_messages = restore_status.get("recent_messages") if isinstance(restore_status, dict) else None
             if isinstance(restored_messages, list):
                 await self._render_restored_chat(messages=restored_messages)
             asyncio.create_task(
@@ -168,7 +171,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
                     self._append_system_line(
                         "Ready. Type a message to begin.",
                         force=True,
-                        kind="ready",
+                        kind="system",
                     )
                 )
             # Fix 3: FAMA disabled warning in TUI

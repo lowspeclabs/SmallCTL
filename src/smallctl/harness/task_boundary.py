@@ -64,6 +64,7 @@ from .task_boundary_support import (
     normalize_remote_host,
     normalize_task_text,
     parse_inline_task_wrapper,
+    suspicious_remote_target_reason,
 )
 from .task_boundary_helpers import (
     extract_remote_absolute_paths,
@@ -432,10 +433,24 @@ class TaskBoundaryService(
             seen_hosts: set[str] = set()
             for match in _USER_AT_HOST_RE.finditer(text):
                 host = normalize_remote_host(match.group("host"))
+                user = str(match.group("user") or "").strip()
                 if not host:
                     continue
+                reason = suspicious_remote_target_reason(host=host, user=user)
+                prefix = text[max(0, match.start() - 24):match.start()].lower()
+                suffix = text[match.end(): min(len(text), match.end() + 8)]
+                if not reason and "password" in prefix and (suffix.startswith('"') or suffix.startswith("'")):
+                    reason = "password_context"
+                if reason:
+                    self.harness._runlog(
+                        "ssh_target_candidate_rejected",
+                        "rejected suspicious SSH target candidate from task text",
+                        candidate=f"{user}@{host}" if user else host,
+                        reason=reason,
+                    )
+                    continue
                 seen_hosts.add(host)
-                collected.append({"host": host, "user": str(match.group("user") or "").strip()})
+                collected.append({"host": host, "user": user})
             for match in _IPV4_HOST_RE.finditer(text):
                 host = normalize_remote_host(match.group(0))
                 if not host or host in seen_hosts:
@@ -637,7 +652,6 @@ class TaskBoundaryService(
 
     def _strip_ordinal_prefix(self, task: str) -> str:
         return strip_ordinal_prefix(task)
-
 
 
 

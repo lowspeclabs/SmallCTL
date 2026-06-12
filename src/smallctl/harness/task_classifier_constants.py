@@ -172,13 +172,9 @@ DEBUG_MARKERS = (
     "logs",
 )
 
-REMOTE_HINTS = (
-    "remote",
-    "ssh",
-    "server",
-    "host",
-    "vm",
-    "instance",
+REMOTE_HINTS_WORD_BOUNDARIES_RE = re.compile(
+    r"\b(?:remote|ssh|server|host|vm|instance)\b",
+    re.IGNORECASE,
 )
 
 SSH_AUTH_MARKERS = (

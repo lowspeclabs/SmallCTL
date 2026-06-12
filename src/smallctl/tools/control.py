@@ -61,6 +61,44 @@ from .verifier_quality import (
     verifier_quality as _verifier_quality,
 )
 
+
+def _task_complete_gate_fake_escalation(state: LoopState, harness: Any, message: str) -> dict | None:
+    task_text = " ".join(
+        str(part or "")
+        for part in (
+            getattr(getattr(state, "run_brief", None), "original_task", ""),
+            getattr(getattr(state, "working_memory", None), "current_goal", ""),
+            message,
+        )
+    ).lower()
+    if "escalat" not in task_text or not any(marker in task_text for marker in ("bigger model", "stronger model", "larger model")):
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    last_escalation = scratchpad.get("_last_escalation")
+    if isinstance(last_escalation, dict) and str(last_escalation.get("id") or "").strip():
+        return None
+    config = getattr(harness, "config", None)
+    can_escalate = bool(getattr(config, "escalation_enabled", False)) and bool(getattr(config, "escalation_expose_tool", True))
+    tool_names = ["escalate_to_bigger_model", "task_fail"] if can_escalate else ["task_fail", "ask_human"]
+    guidance = (
+        "Call `escalate_to_bigger_model` first or explain that escalation is unavailable."
+        if can_escalate
+        else "Escalation did not happen and is not currently available. Explain that plainly or ask the user how to proceed."
+    )
+    return fail(
+        "Cannot complete an escalation request unless an actual escalation happened.",
+        metadata={
+            "reason": "escalation_not_performed",
+            "next_required_action": {
+                "tool_names": tool_names,
+                "notes": [guidance],
+            },
+            "last_verifier_verdict": _normalized_verifier_verdict(state),
+        },
+    )
+
 async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> dict | None:
     session = state.write_session
     if session is not None and str(session.status or "").strip().lower() != "complete":
@@ -177,6 +215,9 @@ async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> d
 
 async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
     verifier_verdict = _normalized_verifier_verdict(state)
+    escalation_gate = _task_complete_gate_fake_escalation(state, harness, message)
+    if escalation_gate is not None:
+        return escalation_gate
     gates = [
         lambda: _task_complete_gate_staged_execution(state),
         lambda: _task_complete_gate_runtime_error(state),

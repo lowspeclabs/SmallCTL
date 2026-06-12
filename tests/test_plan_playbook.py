@@ -3346,6 +3346,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
             "_waiver_reason": "",
             "_blocker_summary": "",
             "_blocker_persistent": False,
+            "_recovery_banner": "Recovery: verifier loop (2 rejects)",
         }
     )
 
@@ -3353,6 +3354,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     assert "contract: verify" in text
     assert "acceptance: 1/2" in text
     assert "verdict: pass | pytest | exit 0" in text
+    assert "Recovery: verifier loop (2 rejects)" in text
 
     bar.__dict__["_vertical"] = True
     vertical_text = StatusBar._build_status_text(bar)

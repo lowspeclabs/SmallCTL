@@ -71,6 +71,7 @@ from .network_interactive_sessions import (
     ssh_session_close,
     ssh_session_read,
     ssh_session_send,
+    ssh_session_send_and_read,
     ssh_session_start,
 )
 from .network_installer_preflight import _run_remote_installer_preflight_probes
@@ -518,6 +519,7 @@ async def run_ssh_command(
         stream_emitter = BufferedUIEventEmitter(
             harness=harness,
             event_type=UIEventType.SHELL_STREAM,
+            event_data=_active_tool_event_data(harness, fallback_tool_name="ssh_exec"),
         )
 
         async def read_stream(stream: Any, out_list: list[str]) -> None:
@@ -748,3 +750,12 @@ async def run_ssh_command(
         )
     finally:
         unregister_process(harness, proc)
+
+
+def _active_tool_event_data(harness: Any, *, fallback_tool_name: str) -> dict[str, Any]:
+    context = getattr(harness, "_active_ui_tool_context", None)
+    if not isinstance(context, dict):
+        return {"tool_name": fallback_tool_name}
+    data = dict(context)
+    data.setdefault("tool_name", fallback_tool_name)
+    return data

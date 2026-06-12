@@ -143,6 +143,12 @@ class LexicalRetriever:
     def _artifact_signal_threshold(cls, state: LoopState) -> float:
         return 5.0 if cls._uses_light_artifact_policy(state) else 2.5
 
+    def _record_retrieval_call(self, state: LoopState) -> None:
+        self.retrieval_calls += 1
+        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
+            state.scratchpad.setdefault("_context_metrics", {})
+            state.scratchpad["_context_metrics"]["retrieval_calls"] = self.retrieval_calls
+
     def retrieve_bundle(
         self,
         *,
@@ -155,10 +161,7 @@ class LexicalRetriever:
         include_experiences: bool = True,
     ) -> RetrievalBundle:
         # Fix 6: Track context pipeline usage
-        self.retrieval_calls += 1
-        if hasattr(state, "scratchpad") and isinstance(state.scratchpad, dict):
-            state.scratchpad.setdefault("_context_metrics", {})
-            state.scratchpad["_context_metrics"]["retrieval_calls"] = self.retrieval_calls
+        self._record_retrieval_call(state)
 
         base_query = (query or "").strip() or build_retrieval_query(state)
         first_pass = self._retrieve_pass(
@@ -237,6 +240,7 @@ class LexicalRetriever:
         query: str,
         token_budget: int | None = None,
     ) -> list[ArtifactSnippet]:
+        self._record_retrieval_call(state)
         ranked = self._rank_artifacts(state=state, query=query)
         snippets = self._select_artifact_snippets(
             ranked,
@@ -254,6 +258,7 @@ class LexicalRetriever:
         query: str,
         token_budget: int | None = None,
     ) -> list[EpisodicSummary]:
+        self._record_retrieval_call(state)
         ranked = self._rank_summaries(state=state, query=query)
         return self._select_summaries(ranked, token_budget=token_budget)
 
@@ -264,6 +269,7 @@ class LexicalRetriever:
         cold_store: Any = None,
         limit: int = 5,
     ) -> list[ExperienceMemory]:
+        self._record_retrieval_call(state)
         ranked = self._rank_experiences(state=state, cold_store=cold_store)
         distinct = self._select_distinct_experiences([memory for _, memory in ranked], limit=limit)
         state.retrieved_experience_ids = [memory.memory_id for memory in distinct]
@@ -762,6 +768,8 @@ class LexicalRetriever:
         safe_notes = redact_sensitive_text(m.notes)
         item_tokens = _tokens(f"{normalize_intent_label(m.intent)} {m.tool_name} {safe_notes} {m.failure_mode}")
         active_intent = normalize_intent_label(state.active_intent)
+        remote_recovery_mode = self._is_remote_ssh_recovery_turn(state=state, query_text=query_text)
+        memory_tool_name = str(m.tool_name or "").strip().lower()
 
         score = 0.0
         if namespace_bucket(memory_namespace, routing) == "preferred":
@@ -788,6 +796,13 @@ class LexicalRetriever:
 
         environment_overlap = len(set(m.environment_tags) & self._state_environment_tags(state))
         score += environment_overlap * 1.5
+        if remote_recovery_mode and memory_tool_name in {"ssh_exec", "ssh_session_start"}:
+            actionable_remote_tags = {"tty", "noninteractive", "apt"}
+            matching_tags = actionable_remote_tags & {str(tag).strip().lower() for tag in m.environment_tags}
+            if matching_tags:
+                score += 12.0 + (2.0 * len(matching_tags))
+            if memory_tool_name == "ssh_session_start" and self._remote_recovery_prefers_interactive_session(state, query_text):
+                score += 6.0
 
         entity_overlap = len(set(m.entity_tags) & self._state_entity_tags(state))
         score += entity_overlap * 1.5
@@ -855,6 +870,8 @@ class LexicalRetriever:
                 score *= 0.35
             if self._query_requests_live_remote_correction(query_text):
                 score *= 0.45
+            if remote_recovery_mode and not self._memory_has_remote_installer_detail(m):
+                score *= 0.3
 
         # De-prioritize identical-task memories for small models (≤7B) to avoid
         # confusing the model into thinking the current task is already done.
@@ -864,6 +881,14 @@ class LexicalRetriever:
             memory_intent = str(m.intent or "").strip().lower()
             if current_task and (current_task in memory_notes or current_task in memory_intent or memory_notes in current_task):
                 score *= 0.3
+
+        # De-prioritize SSH tool experiences after repeated SSH auth failures
+        # so the model considers non-SSH alternatives (local exec, different host).
+        if str(m.tool_name or "").strip().lower().startswith("ssh_"):
+            if str(getattr(state, "last_failure_class", "") or "").strip().lower() == "verifier_failed":
+                active_intent = normalize_intent_label(getattr(state, "active_intent", ""))
+                if active_intent in {"requested_ssh_exec", "ssh_exec"}:
+                    score *= 0.4
 
         return score
 
@@ -980,6 +1005,52 @@ class LexicalRetriever:
                 if "(" in action:
                     return action.split("(")[0].strip()
         return None
+
+    def _is_remote_ssh_recovery_turn(self, *, state: LoopState, query_text: str) -> bool:
+        task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+        active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        text = " ".join(
+            [
+                str(query_text or ""),
+                str(getattr(state.run_brief, "original_task", "") or ""),
+                str(getattr(state.working_memory, "current_goal", "") or ""),
+            ]
+        ).lower()
+        return (
+            task_mode == "remote_execute"
+            or active_intent in {"requested_ssh_exec", "ssh_exec"}
+            or "ssh" in text
+        ) and any(
+            token in text or token == failure_mode
+            for token in ("apt", "tty", "noninteractive", "install", "installer", "password", "retry", "stalled", "stall")
+        )
+
+    @staticmethod
+    def _memory_has_remote_installer_detail(memory: ExperienceMemory) -> bool:
+        tags = {str(tag).strip().lower() for tag in getattr(memory, "environment_tags", []) or []}
+        if {"tty", "noninteractive", "apt"} & tags:
+            return True
+        text = " ".join(
+            [
+                str(getattr(memory, "notes", "") or ""),
+                str(getattr(memory, "failure_mode", "") or ""),
+                str(getattr(memory, "intent", "") or ""),
+            ]
+        ).lower()
+        return any(token in text for token in ("ssh", "apt", "tty", "noninteractive", "installer"))
+
+    @staticmethod
+    def _remote_recovery_prefers_interactive_session(state: LoopState, query_text: str) -> bool:
+        failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+        text = " ".join(
+            [
+                str(query_text or ""),
+                str(getattr(state.run_brief, "original_task", "") or ""),
+                str(getattr(state.working_memory, "current_goal", "") or ""),
+            ]
+        ).lower()
+        return any(token in text or token == failure_mode for token in ("tty", "prompt", "interactive", "stalled", "stall", "retry", "retries"))
 
     def _uses_remote_artifact_profile(self, *, state: LoopState, query: str) -> bool:
         requested_tool = self._infer_requested_tool(state)

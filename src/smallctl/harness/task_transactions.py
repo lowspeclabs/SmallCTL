@@ -72,6 +72,7 @@ class FollowupSignals:
     remote_clarification: bool = False
     guard_failure_context: bool = False
     retry_language: bool = False
+    denial_context: bool = False
 
 
 def classify_followup_transaction(
@@ -100,6 +101,9 @@ def classify_followup_transaction(
         relevance = "low"
     elif signals.guard_failure_context and signals.retry_language:
         turn_type = "RETRY"
+        relevance = "high"
+    elif signals.denial_context and signals.retry_language:
+        turn_type = "CLARIFICATION"
         relevance = "high"
     elif signals.remote_clarification:
         turn_type = "CLARIFICATION"

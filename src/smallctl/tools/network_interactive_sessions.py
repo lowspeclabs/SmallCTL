@@ -20,6 +20,43 @@ from .ui_streaming import BufferedUIEventEmitter
 _SSH_INTERACTIVE_SESSIONS: dict[str, dict[str, Any]] = {}
 
 
+def _snapshot_signature(snapshot: dict[str, Any]) -> tuple[str, str, str, int | None]:
+    return (
+        str(snapshot.get("status") or "").strip(),
+        str(snapshot.get("detected_prompt") or "").strip(),
+        str(snapshot.get("output_tail") or ""),
+        snapshot.get("exit_code") if isinstance(snapshot.get("exit_code"), int) else None,
+    )
+
+
+def _annotate_interactive_snapshot(
+    session: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    event: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    metadata: dict[str, Any] = {"interactive_session": True}
+    last_signature = session.get("last_snapshot_signature")
+    signature = _snapshot_signature(snapshot)
+    unchanged = signature == last_signature
+    if event == "read":
+        unchanged_count = int(session.get("unchanged_read_count", 0) or 0) + 1 if unchanged else 0
+        session["unchanged_read_count"] = unchanged_count
+        if unchanged:
+            snapshot["_note"] = "Interactive SSH output is unchanged since the previous read; the prompt state has not advanced."
+            metadata["interactive_output_unchanged"] = True
+            metadata["unchanged_read_count"] = unchanged_count
+    elif event == "send":
+        session["unchanged_read_count"] = 0
+        if unchanged:
+            snapshot["_note"] = "Interactive SSH output is unchanged after send; input may have been echoed without advancing the prompt."
+            metadata["interactive_output_unchanged"] = True
+    else:
+        session["unchanged_read_count"] = 0
+    session["last_snapshot_signature"] = signature
+    return snapshot, metadata
+
+
 def _interactive_session_snapshot(session_id: str, session: dict[str, Any], *, max_chars: int = 6000) -> dict[str, Any]:
     proc = session.get("proc")
     stdout = "".join(session.get("stdout", []))
@@ -151,6 +188,9 @@ async def ssh_session_start(
         asyncio.create_task(collect(proc.stderr, "stderr")),
     ]
     await asyncio.sleep(0.2)
+    session["last_snapshot_signature"] = _snapshot_signature(
+        _interactive_session_snapshot(session_id, session)
+    )
     _expose_interactive_session_tools(state)
     return ok(
         _interactive_session_snapshot(session_id, session),
@@ -178,15 +218,17 @@ async def ssh_session_read(
         return fail("Unknown SSH interactive session.", metadata={"session_id": session_id})
     await asyncio.sleep(max(0.0, min(float(wait_sec or 0), 30.0)))
     snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+    snapshot, metadata = _annotate_interactive_snapshot(session, snapshot, event="read")
     if snapshot.get("status") == "exited":
         await _cleanup_interactive_session(session_id, session, harness=session.get("harness"), terminate=False)
-    return ok(snapshot, metadata={"interactive_session": True})
+    return ok(snapshot, metadata=metadata)
 
 
 async def ssh_session_send(
     *,
     session_id: str,
     input: str,
+    send_newline: bool = True,
     wait_sec: float = 0.5,
     max_chars: int = 6000,
 ) -> dict[str, Any]:
@@ -204,10 +246,38 @@ async def ssh_session_send(
     stdin = getattr(proc, "stdin", None)
     if stdin is None:
         return fail("SSH interactive session stdin is unavailable.", metadata={"session_id": session_id})
-    stdin.write(str(input or "").encode("utf-8"))
+    text = str(input or "")
+    if send_newline and text and not text.endswith("\n"):
+        text += "\n"
+    stdin.write(text.encode("utf-8"))
     await stdin.drain()
+    session["last_sent_input"] = str(input or "")
+    session["last_send_used_newline"] = bool(send_newline)
     await asyncio.sleep(max(0.0, min(float(wait_sec or 0), 30.0)))
-    return ok(_interactive_session_snapshot(session_id, session, max_chars=max_chars), metadata={"interactive_session": True})
+    snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+    snapshot, metadata = _annotate_interactive_snapshot(session, snapshot, event="send")
+    metadata["send_newline"] = bool(send_newline)
+    return ok(snapshot, metadata=metadata)
+
+
+async def ssh_session_send_and_read(
+    *,
+    session_id: str,
+    input: str,
+    send_newline: bool = True,
+    wait_sec: float = 0.5,
+    max_chars: int = 6000,
+) -> dict[str, Any]:
+    sent = await ssh_session_send(
+        session_id=session_id,
+        input=input,
+        send_newline=send_newline,
+        wait_sec=wait_sec,
+        max_chars=max_chars,
+    )
+    if not bool(sent.get("success")):
+        return sent
+    return await ssh_session_read(session_id=session_id, wait_sec=0, max_chars=max_chars)
 
 
 async def ssh_session_close(

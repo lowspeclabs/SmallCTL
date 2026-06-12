@@ -158,6 +158,7 @@ from smallctl.tools.shell_support import (
     _remote_installer_preflight_guard,
     _shell_execution_authoring_guard,
     guard_fail,
+    record_apt_update_result,
     validate_sources_file,
 )
 from smallctl.tools.web import _resolve_fetch_selector
@@ -666,7 +667,18 @@ def test_shell_installer_pipe_guard_uses_consistent_metadata() -> None:
 
 
 def test_apt_deb822_preflight_guard_uses_consistent_metadata() -> None:
-    result = _apt_deb822_preflight_guard("apt-get update", tool_name="shell_exec")
+    state = LoopState(cwd="/tmp")
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="malformed entry in list file /etc/apt/sources.list.d/debian.sources",
+        host="localhost",
+        user="root",
+    )
+    result = _apt_deb822_preflight_guard(
+        "apt-get update", tool_name="shell_exec", state=state, host="localhost", user="root"
+    )
 
     assert result is not None
     assert result["success"] is False
@@ -682,9 +694,17 @@ def test_apt_deb822_preflight_guard_uses_consistent_metadata() -> None:
 
 def test_apt_deb822_preflight_allows_after_session_validation() -> None:
     state = LoopState(cwd="/tmp")
-    # Initially blocked
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="malformed entry in list file /etc/apt/sources.list.d/debian.sources",
+        host="localhost",
+        user="root",
+    )
+    # Initially blocked because apt update failed
     result = _apt_deb822_preflight_guard(
-        "apt-get update",
+        "apt-get install foo",
         tool_name="shell_exec",
         state=state,
         host="localhost",
@@ -698,7 +718,7 @@ def test_apt_deb822_preflight_allows_after_session_validation() -> None:
 
     # Now allowed
     result2 = _apt_deb822_preflight_guard(
-        "apt-get update",
+        "apt-get install foo",
         tool_name="shell_exec",
         state=state,
         host="localhost",
@@ -709,11 +729,35 @@ def test_apt_deb822_preflight_allows_after_session_validation() -> None:
 
 def test_apt_deb822_preflight_respects_host_user_isolation() -> None:
     state = LoopState(cwd="/tmp")
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="malformed entry in list file /etc/apt/sources.list.d/debian.sources",
+        host="host-a",
+        user="root",
+    )
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="malformed entry in list file /etc/apt/sources.list.d/debian.sources",
+        host="host-b",
+        user="root",
+    )
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="malformed entry in list file /etc/apt/sources.list.d/debian.sources",
+        host="host-a",
+        user="other",
+    )
     _mark_deb822_preflight_clean(state, host="host-a", user="root")
 
     # Different host still blocked
     result = _apt_deb822_preflight_guard(
-        "apt-get update",
+        "apt-get install foo",
         tool_name="ssh_exec",
         state=state,
         host="host-b",
@@ -724,7 +768,7 @@ def test_apt_deb822_preflight_respects_host_user_isolation() -> None:
 
     # Different user still blocked
     result2 = _apt_deb822_preflight_guard(
-        "apt-get update",
+        "apt-get install foo",
         tool_name="ssh_exec",
         state=state,
         host="host-a",

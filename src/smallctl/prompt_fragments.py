@@ -58,6 +58,12 @@ _ARTIFACT_PAGING = (
     "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. "
 )
 
+_REMOTE_DOWNLOAD_FALLBACK = (
+    "DOWNLOAD: If curl fails repeatedly with 404 for a download URL, try wget before retrying the same URL. "
+    "Different tools may resolve differently. If both curl and wget 404 on multiple URL variants, "
+    "search the web for the correct source or ask the user for help."
+)
+
 _PATCH_VERBATIM_RULE = (
     "PATCH VERBATIM RULE: When using `file_patch` or `ast_patch`, copy the `target_text` verbatim from the most recent `file_read` or `artifact_print` output or artifact. "
     "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. "

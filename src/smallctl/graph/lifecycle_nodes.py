@@ -228,6 +228,44 @@ async def resume_loop_run(
             )
             if validation_reason:
                 validation_resume_hint += f" Validation reason: {validation_reason}."
+    apt_validator_resume_hint = ""
+    apt_validator_pending: PendingToolCall | None = None
+    if str(pending.get("kind") or "").strip() == "apt_deb822_validator_approval":
+        action = interrupt_response_action(pending, human_input)
+        if action == "approve":
+            tool_name = str(pending.get("tool_name") or "ssh_exec").strip() or "ssh_exec"
+            arguments = pending.get("arguments")
+            if isinstance(arguments, dict) and arguments:
+                apt_validator_pending = PendingToolCall(
+                    tool_name=tool_name,
+                    args=dict(arguments),
+                    source="system",
+                )
+                apt_validator_resume_hint = (
+                    "APT deb822 validation approved. Run the exact validator command now before retrying apt. "
+                    "Preserve the current remote host/user targeting."
+                )
+        elif action == "reject":
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        "APT remains blocked until the deb822 validator runs. Ask for a different recovery step or "
+                        "provide new instructions."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "apt_deb822_validator_rejected",
+                    },
+                )
+            )
+            harness._runlog(
+                "apt_deb822_validator_rejected",
+                "deb822 validator approval rejected; keeping apt blocked visible",
+                tool_name=str(pending.get("tool_name") or "ssh_exec"),
+                host=str(pending.get("host") or ""),
+                user=str(pending.get("user") or ""),
+            )
     if continue_like and str(pending.get("kind") or "").strip() == "repeated_tool_loop_resume":
         interrupted_tool_name = str(pending.get("tool_name") or "").strip()
         interrupted_args = pending.get("arguments")
@@ -319,7 +357,28 @@ async def resume_loop_run(
         )
     )
     maybe_record_reported_runtime_error(harness.state, human_input)
-    if interrupted_pending is not None:
+    if apt_validator_pending is not None:
+        graph_state.pending_tool_calls = [apt_validator_pending]
+        if apt_validator_resume_hint:
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=apt_validator_resume_hint,
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "apt_deb822_validator_approved",
+                        "tool_name": apt_validator_pending.tool_name,
+                        "arguments": json_safe_value(apt_validator_pending.args),
+                    },
+                )
+            )
+        harness._runlog(
+            "apt_deb822_validator_approved",
+            "scheduled approved deb822 validator after interrupt resume",
+            tool_name=apt_validator_pending.tool_name,
+            arguments=json_safe_value(apt_validator_pending.args),
+        )
+    elif interrupted_pending is not None:
         _record_tool_attempt(harness, interrupted_pending)
         goal_recap = build_goal_recap(harness)
         state = getattr(harness, "state", None)

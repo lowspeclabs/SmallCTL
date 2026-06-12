@@ -53,6 +53,16 @@ def _restored_tool_calls(value: Any) -> list[dict[str, Any]]:
     return restored
 
 
+def _tool_call_only_summary(tool_calls: list[dict[str, Any]]) -> str:
+    names = [str(call.get("name") or "").strip() for call in tool_calls]
+    names = [name for name in names if name]
+    if not names:
+        return "Calling tool..."
+    if len(names) == 1:
+        return f"Calling {names[0]}..."
+    return "Calling " + ", ".join(names[:3]) + ("..." if len(names) > 3 else "...")
+
+
 def _parse_restored_tool_args(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -75,10 +85,10 @@ class SmallctlAppActionsMixin:
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
             bridge.cancel(source="ui_stop_button")
-            bridge.abort()
         elif self.harness is not None:
             self.harness.cancel(source="ui_stop_button")
         if self.active_task and not self.active_task.done():
+            await asyncio.sleep(0.05)
             self.active_task.cancel()
             log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")
             console = self._get_console()
@@ -305,21 +315,32 @@ class SmallctlAppActionsMixin:
         else:
             source_messages = list(messages)
         for message in source_messages:
-            role = str(message.get("role") or "").strip().lower()
+            is_ui_transcript_event = "event_type" in message
+            role = str(message.get("role") or message.get("event_type") or "").strip().lower()
             content = str(message.get("content") or "")
             metadata = message.get("metadata")
             if not isinstance(metadata, dict):
-                metadata = {}
+                data = message.get("data")
+                metadata = data if isinstance(data, dict) else {}
             speaker_data = _restored_speaker_data(metadata)
             if role == "user":
                 if content.strip():
                     await console.append_event(UIEvent(UIEventType.USER, content.strip()))
             elif role == "assistant":
+                tool_calls = _restored_tool_calls(message.get("tool_calls"))
                 if content.strip():
                     await console.append_event(
                         UIEvent(UIEventType.ASSISTANT, content, data=speaker_data)
                     )
-                for tool_call in _restored_tool_calls(message.get("tool_calls")):
+                elif tool_calls:
+                    await console.append_event(
+                        UIEvent(
+                            UIEventType.ASSISTANT,
+                            _tool_call_only_summary(tool_calls),
+                            data={**speaker_data, "synthetic_tool_call_summary": True},
+                        )
+                    )
+                for tool_call in tool_calls:
                     await console.append_event(
                         UIEvent(
                             UIEventType.TOOL_CALL,
@@ -346,6 +367,30 @@ class SmallctlAppActionsMixin:
                                 "tool_call_id": tool_call_id,
                                 **metadata,
                             },
+                        )
+                    )
+            elif role == "tool_call":
+                await console.append_event(
+                    UIEvent(UIEventType.TOOL_CALL, content, data={**speaker_data, **metadata})
+                )
+            elif role == "tool_result":
+                if content.strip():
+                    await console.append_event(
+                        UIEvent(UIEventType.TOOL_RESULT, content, data={**speaker_data, **metadata})
+                    )
+            elif role == "system":
+                is_recovery_system = bool(
+                    metadata.get("is_recovery_nudge")
+                    or metadata.get("recovery_kind")
+                    or metadata.get("ui_kind")
+                    or metadata.get("event")
+                )
+                if content.strip() and (is_ui_transcript_event or is_recovery_system):
+                    await console.append_event(
+                        UIEvent(
+                            UIEventType.SYSTEM,
+                            content,
+                            data={**speaker_data, **metadata},
                         )
                     )
 

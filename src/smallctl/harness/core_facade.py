@@ -169,6 +169,18 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     if challenge_progress:
         result["challenge_progress"] = challenge_progress
     result.update(_run_metric_flags(self.state, challenge_progress, status=status))
+    unverified_change_warning = ""
+    if status == "cancelled" and challenge_progress:
+        code_changes = int(challenge_progress.get("code_change_count", 0) or 0)
+        verified_after_last_change = bool(challenge_progress.get("verified_after_last_change"))
+        if code_changes > 0 and not verified_after_last_change:
+            changed_paths = challenge_progress.get("last_code_change_paths")
+            if not isinstance(changed_paths, list):
+                changed_paths = []
+            path_text = ", ".join(str(path) for path in changed_paths[:3] if str(path).strip())
+            target_text = f" to {path_text}" if path_text else ""
+            unverified_change_warning = f"Task cancelled after modifying files{target_text}. Changes were not verified."
+            result["unverified_change_warning"] = unverified_change_warning
     _inject_recovery_metrics(result, self.state)
 
     if getattr(self, "run_logger", None) and hasattr(self.run_logger, "run_dir"):
@@ -211,6 +223,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                     if any(marker in str(e) for marker in ("Guard tripped", "file_read_hard_block", "human_resteer"))
                 ),
                 "postmortem_summary": postmortem_summary,
+                "unverified_change_warning": unverified_change_warning,
                 "latest_task_id": task_id,
                 "latest_task_summary_path": task_summary_path,
                 "stall_classification": stall_classification,
@@ -232,10 +245,35 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 if tasks_dir.exists()
                 else []
             )
+            task_summaries: list[dict[str, Any]] = []
+            for path_text in task_summary_paths:
+                try:
+                    payload = json.loads(Path(path_text).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    task_summaries.append(payload)
+            prior_task_completed = any(
+                str(item.get("status") or item.get("result_status") or "").strip().lower()
+                in {"completed", "success", "succeeded"}
+                for item in task_summaries[:-1]
+            )
+            latest_task_cancelled = status == "cancelled" or any(
+                str(item.get("terminal_event") or "").strip() == "task_interrupted"
+                for item in task_summaries[-1:]
+            )
             session_summary_payload = {
                 **summary_payload,
                 "task_count": len(task_summary_paths),
                 "task_summary_paths": task_summary_paths,
+                "prior_task_completed": prior_task_completed,
+                "latest_task_cancelled": latest_task_cancelled,
+                "files_changed_after_latest_task_start": bool(
+                    challenge_progress and int(challenge_progress.get("code_change_count", 0) or 0) > 0
+                ),
+                "verification_after_latest_change": bool(
+                    challenge_progress and challenge_progress.get("verified_after_last_change")
+                ),
             }
             if callable(schedule):
                 schedule(_write_json_file, session_summary_path, session_summary_payload, trailing_newline=True)

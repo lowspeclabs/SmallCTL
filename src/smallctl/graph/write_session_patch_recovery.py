@@ -9,6 +9,8 @@ from ..state import WriteSession
 from .autocontinue import store_durable_autocontinue
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 
+_REDIRECT_NUDGE_MAX = 2
+
 
 def _maybe_emit_patch_existing_first_choice_nudge(
     harness: Any,
@@ -633,6 +635,23 @@ def _maybe_emit_write_session_target_path_redirect_nudge(harness: Any, record: T
     staging_path = str(metadata.get("staging_path") or "").strip()
     if not session_id or not target_path or not staging_path:
         return False
+
+    nudge_count_key = f"_write_session_redirect_nudge_count_{session_id}"
+    current_count = int(harness.state.scratchpad.get(nudge_count_key, 0) or 0)
+    current_count += 1
+    harness.state.scratchpad[nudge_count_key] = current_count
+    if current_count > _REDIRECT_NUDGE_MAX:
+        session = getattr(harness.state, "write_session", None)
+        if session is not None:
+            from .write_session_outcomes_support import _abort_write_session
+            _abort_write_session(harness, session)
+        harness._runlog(
+            "write_session_redirect_nudge_ceiling",
+            "Reached redirect nudge ceiling; aborting write session",
+            session_id=session_id,
+            nudge_count=current_count,
+        )
+        return True
 
     signature = "|".join(
         [

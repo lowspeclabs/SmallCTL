@@ -218,13 +218,27 @@ def normalize_remote_host(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def suspicious_remote_target_reason(*, host: Any, user: Any = "") -> str:
+    normalized_host = normalize_remote_host(host)
+    normalized_user = str(user or "").strip().lower()
+    if not normalized_host:
+        return "missing_host"
+    if any(char.isspace() for char in normalized_host) or any(char in normalized_host for char in '"\''):
+        return "invalid_host_format"
+    if any(char.isspace() for char in normalized_user) or any(char in normalized_user for char in '"\''):
+        return "invalid_user_format"
+    if normalized_host in {"pass", "password", "passwd", "secret"}:
+        return "password_like_host"
+    return ""
+
+
 def coerce_remote_target(value: Any) -> dict[str, str] | None:
     if not isinstance(value, dict):
         return None
     host = normalize_remote_host(value.get("host"))
-    if not host:
-        return None
     user = str(value.get("user") or "").strip()
+    if suspicious_remote_target_reason(host=host, user=user):
+        return None
     return {"host": host, "user": user}
 
 

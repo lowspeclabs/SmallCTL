@@ -535,6 +535,12 @@ class TaskBoundaryClassificationMixin:
         )
         guard_failure_context = self._has_recent_guard_failure_context()
         retry_language = bool(_RETRY_FOLLOWUP_RE.search(raw))
+        last_failed = handoff.get("last_failed_tool") or {}
+        denial_context = bool(
+            isinstance(last_failed, dict)
+            and last_failed.get("approval_denied")
+            and retry_language
+        )
         task_mode = classify_task_mode(effective)
         return classify_followup_transaction(
             raw_task=raw,
@@ -555,6 +561,7 @@ class TaskBoundaryClassificationMixin:
                 remote_clarification=remote_clarification,
                 guard_failure_context=guard_failure_context,
                 retry_language=retry_language,
+                denial_context=denial_context,
             ),
             allowed_paths=self._followup_allowed_paths(
                 raw_task=raw,

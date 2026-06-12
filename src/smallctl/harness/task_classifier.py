@@ -24,7 +24,7 @@ from .task_classifier_constants import (
     PLAN_ONLY_PHRASES,
     READONLY_FILE_TARGETS,
     READONLY_SUGGESTION_MARKERS,
-    REMOTE_HINTS,
+    REMOTE_HINTS_WORD_BOUNDARIES_RE,
     SSH_AUTH_MARKERS,
     TOOL_PLAN_EVIDENCE_MARKERS,
     WEB_LOOKUP_MARKERS,
@@ -594,7 +594,7 @@ def looks_like_complex_task(task: str) -> bool:
         return True
 
     # Both remote and local targets
-    has_remote = any(m in text for m in REMOTE_HINTS) or bool(IP_ADDRESS_PATTERN.search(text))
+    has_remote = bool(REMOTE_HINTS_WORD_BOUNDARIES_RE.search(text)) or bool(IP_ADDRESS_PATTERN.search(text))
     has_local = any(m in text for m in ("file", "files", "code", "script", "patch", "edit", "module", "repo"))
     if has_remote and has_local:
         return True

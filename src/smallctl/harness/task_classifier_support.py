@@ -9,7 +9,7 @@ from .task_classifier_constants import (
     IP_ADDRESS_PATTERN,
     PLAN_ONLY_PHRASES,
     READONLY_FILE_TARGETS,
-    REMOTE_HINTS,
+    REMOTE_HINTS_WORD_BOUNDARIES_RE,
 )
 
 def is_smalltalk(task: str) -> bool:
@@ -46,7 +46,8 @@ def has_remote_execution_target(task: str) -> bool:
         return True
     if "@" in text and any(marker in text for marker in ("ssh", "scp", "sftp")):
         return True
-    return any(marker in text for marker in REMOTE_HINTS)
+    # Use word-boundary matching to avoid false positives on words like "hosts", "serverless"
+    return bool(REMOTE_HINTS_WORD_BOUNDARIES_RE.search(text))
 
 
 def looks_like_debug_inspection_request(task: str) -> bool:
@@ -95,6 +96,12 @@ def task_is_local_coding_target(task: str) -> bool:
     has_py_target = bool(re.search(r'(?:\.\/)?[^\s\'"]+\.py', text))
     if not has_py_target:
         return False
+    # Extract .py paths and check if any point to a local filesystem location
+    py_paths = re.findall(r'[^\s\'"]+\.py', text)
+    has_local_style_path = any(
+        p.startswith(('./', '../')) or (not p.startswith('/') and not p.startswith('~/'))
+        for p in py_paths
+    )
     # Strong coding indicators that should override any SSH mentions in instructions
     strong_coding_markers = (
         "build a self-contained python script",
@@ -115,8 +122,10 @@ def task_is_local_coding_target(task: str) -> bool:
     # If the task is clearly asking for analysis/suggestions, don't treat as coding
     if "list improvements" in lowered or "suggest improvements" in lowered:
         return False
+    # Local-style paths override weak remote hints (e.g. "fake hosts" in task description)
+    if has_local_style_path and not has_explicit_remote:
+        return True
     # Fallback: any local .py path without remote indicators is a coding target
-    has_explicit_remote = has_remote_execution_target(text)
     if has_explicit_remote:
         return False
     # Additional weak coding markers

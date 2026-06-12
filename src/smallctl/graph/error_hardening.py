@@ -273,9 +273,112 @@ def _maybe_emit_ground_truth_diffusion(
 # ---------------------------------------------------------------------------
 
 _MAX_ERROR_SIGNATURE_LEN = 200
+_URL_HOST_RE = re.compile(r"https?://([^/\s'\"]+)", re.IGNORECASE)
+_HTML_FETCH_RE = re.compile(r"<(?:!doctype\s+html|html|head|body)\b", re.IGNORECASE)
+_HTML_SHELL_ERROR_RE = re.compile(r"syntax error near unexpected token\s+`?<", re.IGNORECASE)
+_FETCH_404_RE = re.compile(r"\b404\b|\bnot found\b", re.IGNORECASE)
+_PUBLIC_DNS_CMD_RE = re.compile(r"\b(?:dig|nslookup|host)\b", re.IGNORECASE)
+_PUBLIC_RESOLVER_RE = re.compile(r"(?:@(?:8\.8\.8\.8|1\.1\.1\.1)|\b8\.8\.8\.8\b|\b1\.1\.1\.1\b)")
+_NXDOMAIN_RE = re.compile(r"\bNXDOMAIN\b", re.IGNORECASE)
+_RESOLVE_FAIL_RE = re.compile(r"Could not resolve '?([A-Za-z0-9.-]+)'?", re.IGNORECASE)
+_INSTALL_MARKER_RE = re.compile(r"\b(?:install|setup|deploy|configure|bootstrap|apt-get|apt)\b", re.IGNORECASE)
 
 
-def _web_search_query_for_repeated_error(error: str) -> str:
+def _record_command(record: ToolExecutionRecord) -> str:
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    return str(args.get("command") or "").strip()
+
+
+def _extract_command_host(command: str) -> str:
+    match = _URL_HOST_RE.search(str(command or ""))
+    return str(match.group(1) if match else "").strip()
+
+
+def _install_source_diagnosis(harness: Any) -> dict[str, Any]:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return {}
+    diagnosis = scratchpad.get("_install_source_diagnosis")
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+        scratchpad["_install_source_diagnosis"] = diagnosis
+    return diagnosis
+
+
+def _observe_install_source_diagnosis(harness: Any, record: ToolExecutionRecord) -> None:
+    if record.tool_name not in {"ssh_exec", "shell_exec"}:
+        return
+    diagnosis = _install_source_diagnosis(harness)
+    if not diagnosis and getattr(harness, "state", None) is None:
+        return
+    command = _record_command(record)
+    output = _record_output_text(record)
+    command_lower = command.lower()
+
+    if command and _INSTALL_MARKER_RE.search(command):
+        diagnosis["install_context_seen"] = True
+
+    if any(token in command_lower for token in ("curl ", "wget ")) and (
+        _HTML_FETCH_RE.search(output) or _HTML_SHELL_ERROR_RE.search(output) or _FETCH_404_RE.search(output)
+    ):
+        diagnosis["invalid_fetch_count"] = int(diagnosis.get("invalid_fetch_count", 0) or 0) + 1
+        host = _extract_command_host(command)
+        if host:
+            diagnosis["source_host"] = host
+
+    resolve_match = _RESOLVE_FAIL_RE.search(output)
+    if resolve_match:
+        diagnosis["resolve_fail_count"] = int(diagnosis.get("resolve_fail_count", 0) or 0) + 1
+        diagnosis["source_host"] = str(resolve_match.group(1) or "").strip()
+        if _INSTALL_MARKER_RE.search(command):
+            diagnosis["install_context_resolve_failed"] = True
+
+    if command and _PUBLIC_DNS_CMD_RE.search(command) and _PUBLIC_RESOLVER_RE.search(command) and _NXDOMAIN_RE.search(output):
+        diagnosis["public_dns_nxdomain"] = True
+        command_parts = command.split()
+        if len(command_parts) > 1 and not command_parts[1].startswith("@"):
+            diagnosis["nxdomain_host"] = command_parts[1]
+            diagnosis.setdefault("source_host", command_parts[1])
+
+    if record.result.success and (
+        ("ping" in command_lower and "1.1.1.1" in command_lower)
+        or ("curl" in command_lower and "example.com" in command_lower)
+        or ("curl" in command_lower and "example.org" in command_lower)
+    ):
+        diagnosis["network_ok"] = True
+
+
+def _install_source_invalid_query(harness: Any) -> str:
+    state = getattr(harness, "state", None)
+    diagnosis = _install_source_diagnosis(harness)
+    host = str(diagnosis.get("source_host") or diagnosis.get("nxdomain_host") or "installer host").strip()
+    task_text = " ".join(
+        str(part or "")
+        for part in (
+            getattr(getattr(state, "run_brief", None), "original_task", ""),
+            getattr(getattr(state, "working_memory", None), "current_goal", ""),
+        )
+    ).lower()
+    if "fog" in task_text or "fogproject" in host:
+        return f"{host} NXDOMAIN fog install official instructions"
+    if "debian" in task_text or "ubuntu" in task_text:
+        return f"current official install instructions Debian {host} NXDOMAIN"
+    return f"{host} NXDOMAIN official install instructions"
+
+
+def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRecord | None = None, harness: Any = None) -> str:
+    if harness is not None:
+        diagnosis = _install_source_diagnosis(harness)
+        if bool(diagnosis.get("public_dns_nxdomain")) and bool(diagnosis.get("network_ok")):
+            return _install_source_invalid_query(harness)
+    if record is not None:
+        command = _record_command(record).lower()
+        if _INSTALL_MARKER_RE.search(command) and (
+            _HTML_FETCH_RE.search(error) or _HTML_SHELL_ERROR_RE.search(error) or _FETCH_404_RE.search(error) or _RESOLVE_FAIL_RE.search(error)
+        ):
+            host = _extract_command_host(command)
+            if host:
+                return f"{host} official install instructions"
     prefix = "nginx error" if _NGINX_CONFIG_TEST_RE.search(error) else "error"
     return f"{prefix}: {error[:150]}"
 
@@ -314,11 +417,133 @@ def _maybe_schedule_web_search_for_repeated_error(
     seen_errors[signature] = count
     scratchpad["_repeated_error_signatures"] = seen_errors
 
-    # Only act on the second occurrence
-    if count != 2:
+    # Act on 2nd occurrence: web search. Escalate on 4th+: stagnation nudge.
+    if count == 2:
+        # Check whether web_search is registered
+        registry = getattr(harness, "registry", None)
+        names_fn = getattr(registry, "names", None) if registry is not None else None
+        try:
+            has_web_search = callable(names_fn) and "web_search" in names_fn()
+        except Exception:
+            has_web_search = False
+
+        query = _web_search_query_for_repeated_error(error, record=record, harness=harness)
+
+        if has_web_search:
+            # Schedule the search as the very next tool call
+            graph_state.pending_tool_calls = [
+                PendingToolCall(
+                    tool_name="web_search",
+                    args={"query": query, "limit": 5},
+                    raw_arguments=json.dumps(
+                        {"query": query, "limit": 5}, ensure_ascii=True, sort_keys=True
+                    ),
+                    source="system",
+                )
+            ]
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        f"This error has occurred twice. Auto-searching the web for: `{query}`. "
+                        "Use the search results to diagnose the root cause before making another fix."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "repeated_error_web_search",
+                        "query": query,
+                    },
+                )
+            )
+            harness._runlog(
+                "repeated_error_web_search_scheduled",
+                "scheduled automatic web_search after repeated identical error",
+                query=query,
+                error_signature=signature[:200],
+            )
+            return True
+        else:
+            # Tool not available; inject a nudge instead
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        f"This error has occurred twice. Consider searching the web for: `{query}`. "
+                        "If `web_search` is unavailable, explain the blocker and ask for guidance."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "repeated_error_web_search_unavailable",
+                        "query": query,
+                    },
+                )
+            )
+            harness._runlog(
+                "repeated_error_web_search_nudge",
+                "nudged model to search web after repeated identical error (tool unavailable)",
+                query=query,
+                error_signature=signature[:200],
+            )
+            return True
+
+    # Escalate on repeated occurrences beyond count 2
+    if count >= 4:
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    f"The same error has occurred {count} times: `{signature[:120]}`. "
+                    "Stop retrying the same approach. This strategy is not working. "
+                    "Reassess the problem from scratch. Use a completely different tool or approach."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "repeated_error_stagnation",
+                    "error_signature": signature[:200],
+                    "count": count,
+                },
+            )
+        )
+        harness._runlog(
+            "repeated_error_stagnation_nudge",
+            "escalated nudge after repeated identical error stagnation",
+            error_signature=signature[:200],
+            count=count,
+        )
+        counters = getattr(harness.state, "stagnation_counters", None)
+        if isinstance(counters, dict):
+            counters["repeat_command"] = int(counters.get("repeat_command", 0)) + 1
+        return True
+
+    return False
+
+
+def _maybe_pivot_upstream_install_source_invalid(
+    graph_state: GraphRunState,
+    harness: Any,
+) -> bool:
+    diagnosis = _install_source_diagnosis(harness)
+    if not diagnosis:
+        return False
+    if not bool(diagnosis.get("public_dns_nxdomain")) or not bool(diagnosis.get("network_ok")):
+        return False
+    if int(diagnosis.get("invalid_fetch_count", 0) or 0) <= 0 and int(diagnosis.get("resolve_fail_count", 0) or 0) <= 0:
         return False
 
-    # Check whether web_search is registered
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict) or scratchpad.get("_install_source_invalid_pivoted"):
+        return False
+    scratchpad["_install_source_invalid_pivoted"] = True
+    blocker = {
+        "reason": "upstream_install_source_invalid",
+        "host": str(diagnosis.get("source_host") or diagnosis.get("nxdomain_host") or "").strip(),
+        "invalid_fetch_count": int(diagnosis.get("invalid_fetch_count", 0) or 0),
+        "resolve_fail_count": int(diagnosis.get("resolve_fail_count", 0) or 0),
+        "network_ok": True,
+    }
+    scratchpad["_install_source_invalid_blocker"] = blocker
+    scratchpad["_ui_recovery_banner"] = "Blocked: installer source invalid or unavailable"
+
     registry = getattr(harness, "registry", None)
     names_fn = getattr(registry, "names", None) if registry is not None else None
     try:
@@ -326,61 +551,211 @@ def _maybe_schedule_web_search_for_repeated_error(
     except Exception:
         has_web_search = False
 
-    query = _web_search_query_for_repeated_error(error)
+    query = _install_source_invalid_query(harness)
+    host = str(blocker.get("host") or "the installer/package host").strip()
+    question = (
+        "I found a blocker while trying to continue the install. "
+        f"The upstream install source `{host}` appears invalid or unavailable: public DNS returned NXDOMAIN, "
+        "general internet connectivity still works, and earlier installer fetches were invalid. "
+        "Should I research the current official install path, use an alternate/manual source you provide, or stop and report this as blocked?"
+    )
+    payload = {
+        "kind": "ask_human",
+        "question": question,
+        "reason": "upstream_install_source_invalid",
+        "blocker": blocker,
+        "suggested_actions": [
+            "research_current_official_install_path",
+            "use_user_provided_alternate_source",
+            "stop_blocked_with_summary",
+        ],
+    }
+    scratchpad["_ask_human"] = True
+    scratchpad["_ask_human_question"] = question
+    harness.state.pending_interrupt = payload
+    graph_state.interrupt_payload = payload
+    graph_state.pending_tool_calls = []
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "Blocked: installer source invalid or unavailable. Public DNS returned NXDOMAIN for the package host, "
+                "general connectivity still works, and earlier installer fetches were invalid. Stop local DNS repair and retry churn. "
+                "Ask the user whether to research the current official install path, use an alternate/manual source, or stop blocked. "
+                f"If researching is approved, use a task-aware query such as `{query}`."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "upstream_install_source_invalid",
+                "query": query,
+                "blocker": blocker,
+                "interrupt": payload,
+            },
+        )
+    )
+    harness._runlog(
+        "upstream_install_source_invalid_pivot",
+        "pivoted from local installer retries to source validation",
+        blocker=json_safe_value(blocker),
+        query=query,
+        web_search_available=has_web_search,
+        interrupt_kind="ask_human",
+    )
+    return True
 
-    if has_web_search:
-        # Schedule the search as the very next tool call
-        graph_state.pending_tool_calls = [
-            PendingToolCall(
-                tool_name="web_search",
-                args={"query": query, "limit": 5},
-                raw_arguments=json.dumps(
-                    {"query": query, "limit": 5}, ensure_ascii=True, sort_keys=True
-                ),
-                source="system",
-            )
-        ]
-        harness.state.append_message(
-            ConversationMessage(
-                role="system",
-                content=(
-                    f"This error has occurred twice. Auto-searching the web for: `{query}`. "
-                    "Use the search results to diagnose the root cause before making another fix."
-                ),
-                metadata={
-                    "is_recovery_nudge": True,
-                    "recovery_kind": "repeated_error_web_search",
-                    "query": query,
-                },
-            )
+
+# ---------------------------------------------------------------------------
+# A4) Dead-URL 404 spiral detection for remote SSH download attempts
+# ---------------------------------------------------------------------------
+
+_404_URL_RE = re.compile(
+    r"(?:curl|wget)\s*.*?(?:404|not found|Not Found|Failed to download)",
+    re.IGNORECASE,
+)
+
+
+def _maybe_nudge_repeated_404_remote_url(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    """Detect repeated 404 errors from curl/wget on remote hosts and nudge
+    the model to stop retrying the same URL family.
+    """
+    if record.tool_name not in {"ssh_exec", "shell_exec"}:
+        return False
+    if not _record_has_failure_evidence(record):
+        return False
+
+    error = _record_output_text(record)
+    if not error or len(error) < 20:
+        return False
+    if not _404_URL_RE.search(error):
+        return False
+
+    # Extract the failing URL from the command
+    command = str(getattr(record.args, "get", lambda k: None)("command") or "").strip()
+    if not command:
+        return False
+
+    # Extract host
+    host = str(getattr(record.args, "get", lambda k: None)("host") or "").strip()
+
+    # Derive a URL family from the command (e.g. firecow/fog)
+    family = ""
+    for marker in ("github.com/", "raw.githubusercontent.com/"):
+        idx = command.find(marker)
+        if idx >= 0:
+            rest = command[idx + len(marker):]
+            parts = rest.replace("/", " ").split()
+            # Take org/repo (first two path components)
+            family = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+            break
+
+    if not family:
+        return False
+
+    scratchpad = getattr(harness.state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+
+    # Track per-family 404 counts across the session
+    url_counts: dict[str, int] = scratchpad.get("_repeated_404_url_counts", {})
+    if not isinstance(url_counts, dict):
+        url_counts = {}
+    count = url_counts.get(family, 0) + 1
+    url_counts[family] = count
+    scratchpad["_repeated_404_url_counts"] = url_counts
+
+    # Nudge at count 2 (second 404 from same URL family)
+    if count < 2:
+        return False
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"The URL family `{family}` has returned 404 {count} times "
+                f"on remote host `{host}`. "
+                "These URLs do not exist. Stop retrying this URL family. "
+                "Use `web_search` to find the correct source or call `ask_human` for the right download location."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "repeated_404_url_spiral",
+                "url_family": family,
+                "host": host,
+                "count": count,
+            },
         )
-        harness._runlog(
-            "repeated_error_web_search_scheduled",
-            "scheduled automatic web_search after repeated identical error",
-            query=query,
-            error_signature=signature[:200],
+    )
+    harness._runlog(
+        "repeated_404_url_spiral_nudge",
+        "nudged model to stop retrying dead URLs after repeated 404",
+        url_family=family,
+        host=host,
+        count=count,
+    )
+    return True
+
+
+_SSH_AUTH_FAILURE_RE = re.compile(
+    r"(?:permission denied|publickey|authentication failed|"
+    r"password required|password:)",
+    re.IGNORECASE,
+)
+
+
+_SSH_FAILURE_COUNT_KEY = "_ssh_auth_failure_count"
+
+
+def _maybe_nudge_ssh_auth_fallback(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    """After repeated SSH auth failures, nudge the model to try a different
+    host, use local shell_exec, or ask the user for corrected credentials.
+    """
+    if record.tool_name != "ssh_exec":
+        return False
+    if not _record_has_failure_evidence(record):
+        return False
+    error = _record_output_text(record)
+    if not error or not _SSH_AUTH_FAILURE_RE.search(error):
+        return False
+
+    scratchpad = getattr(harness.state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+    count = int(scratchpad.get(_SSH_FAILURE_COUNT_KEY, 0) or 0) + 1
+    scratchpad[_SSH_FAILURE_COUNT_KEY] = count
+
+    if count < 2:
+        return False
+
+    host = str(getattr(record.args, "get", lambda k: None)("host") or "").strip()
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"SSH authentication to `{host}` failed {count} times. "
+                "The credential/access issue will not resolve by retrying. "
+                "Try a different host, use local shell_exec to run commands "
+                "locally, or ask the user for corrected credentials."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "ssh_auth_fallback",
+                "host": host,
+                "count": count,
+            },
         )
-        return True
-    else:
-        # Tool not available; inject a nudge instead
-        harness.state.append_message(
-            ConversationMessage(
-                role="system",
-                content=(
-                    f"This error has occurred twice. Consider searching the web for: `{query}`. "
-                    "If `web_search` is unavailable, explain the blocker and ask for guidance."
-                ),
-                metadata={
-                    "is_recovery_nudge": True,
-                    "recovery_kind": "repeated_error_web_search_unavailable",
-                    "query": query,
-                },
-            )
-        )
-        harness._runlog(
-            "repeated_error_web_search_nudge",
-            "nudged model to search web after repeated identical error (tool unavailable)",
-            query=query,
-            error_signature=signature[:200],
-        )
-        return True
+    )
+    harness._runlog(
+        "ssh_auth_fallback_nudge",
+        "nudged model to stop retrying SSH after auth failures",
+        host=host,
+        count=count,
+    )
+    return True

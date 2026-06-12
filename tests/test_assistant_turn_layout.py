@@ -8,6 +8,7 @@ from textual.containers import Vertical
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.ui.bubbles import (
     AssistantDetailWidget,
+    ArtifactBubbleWidget,
     BubbleWidget,
     TextBlockWidget,
     ToolCallDetailWidget,
@@ -290,6 +291,58 @@ def test_matched_tool_result_keeps_active_assistant_turn() -> None:
             assert len(children) == 1
             assert children[0] is console._active_assistant_turn
             assert children[0].get_assistant_text() == "Done."
+
+    asyncio.run(_run())
+
+
+def test_shell_stream_nests_under_matching_tool_call() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "ssh_exec",
+                    data={"display_text": "ssh_exec(command='journalctl -f')", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.SHELL_STREAM,
+                    "line 1\n",
+                    data={"tool_name": "ssh_exec", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.SHELL_STREAM,
+                    "line 2\n",
+                    data={"tool_name": "ssh_exec", "tool_call_id": "tool-1"},
+                )
+            )
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            content_children = list(content.children)
+            assert [type(child) for child in content_children] == [ToolCallsContainerWidget]
+
+            tool_group = content_children[0]
+            assert isinstance(tool_group, ToolCallsContainerWidget)
+            tool_children = list(tool_group.query_one(".tool-calls-container", Vertical).children)
+            assert len(tool_children) == 1
+
+            detail = tool_children[0]
+            assert isinstance(detail, ToolCallDetailWidget)
+            nested_results = detail._result_widgets
+            assert len(nested_results) == 1
+            assert isinstance(nested_results[0], ArtifactBubbleWidget)
+            assert nested_results[0]._title_base == "Live Output"
+            assert nested_results[0]._content_widget.text == "line 1\nline 2\n"
 
     asyncio.run(_run())
 

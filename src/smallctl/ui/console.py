@@ -4,8 +4,8 @@ from typing import Any
 from textual.containers import Vertical, VerticalScroll
 
 from ..models.events import UIEvent, UIEventType
-from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget
-from .display import format_test_time_scaling_event
+from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget, SystemInterruptWidget
+from .display import _CRITICAL_EVENTS, format_test_time_scaling_event
 
 
 class ConsolePane(VerticalScroll):
@@ -68,7 +68,11 @@ class ConsolePane(VerticalScroll):
             return
         if event.event_type == UIEventType.SHELL_STREAM:
             await self._ensure_assistant_turn(speaker=speaker)
-            await self._append_shell_stream(event.content)
+            await self._append_shell_stream(
+                event.content,
+                tool_name=_coerce_str(event.data.get("tool_name")),
+                tool_call_id=_coerce_str(event.data.get("tool_call_id")),
+            )
             return
         if event.event_type == UIEventType.TOOL_CALL:
             await self._ensure_assistant_turn(speaker=speaker)
@@ -90,6 +94,25 @@ class ConsolePane(VerticalScroll):
                 )
                 if nested:
                     return
+            # Nesting failed — no active turn, or no matching tool call detail.
+            # Create a fallback assistant turn with a synthetic tool call entry
+            # so the result always renders nested under its parent tool call
+            # instead of appearing as a separate top-level bubble.
+            await self._ensure_assistant_turn(speaker=speaker)
+            fallback_tool_name = event.content or "tool"
+            fallback_tool_call_id = _coerce_str(event.data.get("tool_call_id"))
+            await self._append_tool_call(
+                str(event.data.get("display_text") or f"[{fallback_tool_name}]"),
+                tool_name=fallback_tool_name,
+                tool_call_id=fallback_tool_call_id,
+            )
+            await self._append_tool_result(
+                str(event.data.get("display_text") or event.content),
+                tool_name=_coerce_str(event.data.get("tool_name")),
+                tool_call_id=fallback_tool_call_id,
+                data=event.data,
+            )
+            return
 
         if event.event_type == UIEventType.SYSTEM and event.data.get("kind") == "test_time_scaling":
             await self._append_test_time_scaling_event(event)
@@ -106,9 +129,13 @@ class ConsolePane(VerticalScroll):
             await turn.set_task_checklist(content, title=f"📋 {title}")
             return
 
+        # P2.2: critical backend events render as compact inline interruptions
+        if event.event_type == UIEventType.SYSTEM and event.data.get("ui_kind") in _CRITICAL_EVENTS:
+            await self._append_critical_interrupt(event)
+            return
+
         kind_map = {
             UIEventType.USER: "user",
-            UIEventType.TOOL_RESULT: "system",
             UIEventType.ERROR: "system",
             UIEventType.SYSTEM: "system",
             UIEventType.ALERT: "system",
@@ -116,7 +143,6 @@ class ConsolePane(VerticalScroll):
         kind = kind_map.get(event.event_type, "system")
         if event.event_type in {
             UIEventType.USER,
-            UIEventType.TOOL_RESULT,
             UIEventType.ERROR,
             UIEventType.SYSTEM,
             UIEventType.METRICS,
@@ -152,9 +178,15 @@ class ConsolePane(VerticalScroll):
         turn = await self._ensure_assistant_turn()
         await turn.replace_thinking_text(text)
 
-    async def _append_shell_stream(self, text: str) -> None:
+    async def _append_shell_stream(
+        self,
+        text: str,
+        *,
+        tool_name: str | None,
+        tool_call_id: str | None,
+    ) -> None:
         turn = await self._ensure_assistant_turn()
-        await turn.append_shell_stream(text)
+        await turn.append_shell_stream(text, tool_name=tool_name, tool_call_id=tool_call_id)
 
     async def _append_tool_call(
         self,
@@ -201,6 +233,16 @@ class ConsolePane(VerticalScroll):
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.mount(panel)
         self._active_assistant_turn = None
+        self._last_system_message = event.content
+
+    async def _append_critical_interrupt(self, event: UIEvent) -> None:
+        text = str(event.data.get("display_text") or event.content)
+        interrupt = SystemInterruptWidget(text=text)
+        if self._active_assistant_turn is not None:
+            await self._active_assistant_turn.add_meta_widget(interrupt)
+        else:
+            stack = self.query_one("#bubble-stack", Vertical)
+            await stack.mount(interrupt)
         self._last_system_message = event.content
 
     async def _ensure_assistant_turn(self, *, speaker: str | None = None) -> AssistantTurnWidget:

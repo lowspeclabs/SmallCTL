@@ -395,6 +395,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rewoo-refiner-frame", dest="rewoo_refiner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--rewoo-frame-token-budget", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
+        "--fama-enabled",
+        action="store_true",
+        default=None,
+        help="Explicitly enable FAMA failure-aware mitigation. Use this to override fama_enabled: false from config or .env.",
+    )
+    parser.add_argument(
         "--fama-disabled",
         action="store_true",
         help="Explicitly disable FAMA failure-aware mitigation at runtime. This is the only override that prevents the loop-mode guard from auto-enabling FAMA.",

@@ -36,6 +36,27 @@ def test_task_boundary_reset_does_not_crash_when_active_is_none() -> None:
         turn_type="ITERATION",
     )
 
+    assert state.last_failure_class == "same_scope_iteration"
+
+
+def test_task_boundary_correction_remains_human_resteer() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "prior task"
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(fama_enabled=True, fama_mode="lite"),
+        _runlog=lambda *args, **kwargs: None,
+        log=None,
+    )
+    mixin = TaskBoundaryLifecycleMixin()
+    mixin.harness = harness
+
+    mixin._record_same_scope_resteer(
+        raw_task="you misunderstood; use the other file",
+        effective_task="use the other file",
+        turn_type="CORRECTION",
+    )
+
     assert state.last_failure_class == "human_resteer"
 
 

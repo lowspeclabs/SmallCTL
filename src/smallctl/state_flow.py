@@ -602,6 +602,14 @@ class LoopStateFlowMixin:
                 should_invalidate = str(entry.created_phase or "").strip() != str(self.current_phase or "").strip()
                 if should_invalidate and self._is_recent_context_step(entry.created_at_step):
                     should_invalidate = False
+                if should_invalidate and self._is_execute_repair_transition(detail_payload):
+                    if any(
+                        marker in str(content or "").lower()
+                        for marker in ("error:", "failed", "missing", "not found", "blocked")
+                    ):
+                        should_invalidate = True
+                    else:
+                        should_invalidate = False
             elif reason_label == "verifier_failed":
                 should_invalidate = self._verifier_failure_should_invalidate_optimistic(content, detail_payload)
             elif reason_label == "environment_changed":
@@ -810,6 +818,10 @@ class LoopStateFlowMixin:
                     if value:
                         artifact_paths.append(value)
                 should_mark_stale = any(self._text_matches_any_path(candidate, path_hints) for candidate in artifact_paths)
+                # Skip read-only artifacts on file_changed; _mark_prior_read_artifacts_stale already handles them.
+                # Re-invalidating here doubles observation churn and forces unnecessary re-reads.
+                if should_mark_stale and reason_label == "file_changed" and is_read_only_artifact(artifact):
+                    should_mark_stale = False
             elif reason_label in {"phase_advanced", "environment_changed"}:
                 metadata_phase = str(metadata.get("phase") or metadata.get("created_phase") or "").strip()
                 should_mark_stale = bool(metadata_phase and metadata_phase != str(self.current_phase or "").strip())

@@ -18,9 +18,11 @@ from .detectors import (
     detect_bad_tool_args,
     detect_context_drift,
     detect_empty_write,
+    detect_interactive_installer_stall,
     detect_objective_verifier_mismatch,
     detect_preflight_contradiction,
     detect_preexisting_state_as_success,
+    detect_patch_target_not_found,
     detect_stale_success_claim,
     detect_repeated_failure_pattern,
     detect_repeated_remote_installer_failure,
@@ -28,6 +30,7 @@ from .detectors import (
     detect_remote_local_confusion,
     detect_remote_verification_pending,
     detect_tool_plan_hard_route,
+    detect_upstream_install_source_invalid,
     detect_verifier_failure_from_result,
     detect_verifier_failure_mode,
     detect_tool_output_misread,
@@ -163,6 +166,21 @@ async def observe_tool_result(
         if bad_args is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=bad_args, dedupe=True)
 
+        patch_target_not_found = detect_patch_target_not_found(
+            state,
+            tool_name=tool_name,
+            result=result,
+            operation_id=operation_id,
+        )
+        if patch_target_not_found is not None:
+            await _handle_observed_signal(
+                harness,
+                state=state,
+                config=config,
+                signal=patch_target_not_found,
+                dedupe=True,
+            )
+
         output_misread = detect_tool_output_misread(
             state,
             tool_name=tool_name,
@@ -214,6 +232,20 @@ async def observe_tool_result(
         )
         if wrong_path is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=wrong_path, dedupe=True)
+
+        if str(tool_name or "").strip() == "ssh_session_read":
+            metadata = getattr(result, "metadata", None)
+            metadata = metadata if isinstance(metadata, dict) else {}
+            if bool(metadata.get("interactive_output_unchanged")):
+                interactive_stall = detect_interactive_installer_stall(state, threshold=2)
+                if interactive_stall is not None:
+                    await _handle_observed_signal(
+                        harness,
+                        state=state,
+                        config=config,
+                        signal=interactive_stall,
+                        dedupe=True,
+                    )
 
         preflight_contradiction = detect_preflight_contradiction(
             state,
@@ -284,10 +316,12 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
     threshold = int(getattr(config, "loop_guard_stagnation_threshold", 3) or 3)
     for signal in (
         detect_repeated_tool_loop(state, threshold=threshold),
+        detect_interactive_installer_stall(state, threshold=2),
         detect_write_session_stall(state, threshold=threshold),
         detect_backend_stream_halt(state, threshold=2),
         detect_context_drift(state),
         detect_repeated_remote_installer_failure(state, threshold=2),
+        detect_upstream_install_source_invalid(state),
         detect_objective_verifier_mismatch(state),
         detect_preexisting_state_as_success(state),
     ):
@@ -430,6 +464,29 @@ def _handle_signal(
                         "severity": 3,
                         "evidence": f"{signal.evidence} (hallucination={is_hallucination}, repeated={count}x)",
                     })
+                    # Hard circuit-breaker: when the same (failure_class, tool_name)
+                    # combination has escalated 3+ times, clear done_gate and
+                    # force a strategic pivot so the model stops cycling.
+                    payload_pivot = get_fama_state(state)
+                    pivot_key = f"_fama_pivot_count:{signal.failure_class}:{signal.tool_name}"
+                    pivot_count = int(payload_pivot.get(pivot_key, 0) or 0) + 1
+                    payload_pivot[pivot_key] = pivot_count
+                    if pivot_count >= 3:
+                        cleared_pivot = clear_mitigations(
+                            state,
+                            {"done_gate", "acceptance_checklist_capsule"},
+                            reason="dead_end_pivot",
+                        )
+                        for mit in cleared_pivot:
+                            _runlog(
+                                harness,
+                                "fama_circuit_breaker",
+                                "FAMA circuit breaker: forcing strategic pivot after repeated same-failure escalation",
+                                failure_class=signal.failure_class,
+                                tool_name=tool_name,
+                                pivot_count=pivot_count,
+                                cleared=mit.name,
+                            )
                     # fall through to process the signal
                 else:
                     _runlog(

@@ -763,6 +763,87 @@ class TestInterruptApprovalFixes:
         payload = json.loads(summary_path.read_text())
         assert payload["postmortem_summary"] == "Approve this change?"
 
+    def test_session_summary_distinguishes_prior_and_latest_cancelled_unverified(self, tmp_path) -> None:
+        from smallctl.harness.core_facade import _finalize
+        from types import SimpleNamespace
+        import json
+
+        run_dir = tmp_path / "run"
+        prior_dir = run_dir / "tasks" / "task-0001"
+        latest_dir = run_dir / "tasks" / "task-0002"
+        latest_dir.mkdir(parents=True)
+        prior_dir.mkdir(parents=True)
+        (prior_dir / "task_summary.json").write_text(
+            json.dumps({"status": "completed", "terminal_event": "task_completed"}),
+            encoding="utf-8",
+        )
+        (latest_dir / "task_summary.json").write_text(
+            json.dumps({"status": "interrupted", "terminal_event": "task_interrupted"}),
+            encoding="utf-8",
+        )
+
+        class MockHarness:
+            def __init__(self):
+                self.run_logger = SimpleNamespace(run_dir=run_dir)
+                self.state = SimpleNamespace(
+                    step_count=3,
+                    inactive_steps=0,
+                    token_usage={},
+                    recent_errors=[],
+                    challenge_progress=SimpleNamespace(
+                        task_category="coding",
+                        challenge_id="",
+                        required_output_paths=[],
+                        phase="implement",
+                        code_change_count=1,
+                        last_code_change_step=2,
+                        last_code_change_paths=["temp/example.py"],
+                        last_verifier_artifact_paths=[],
+                        last_verifier_step=0,
+                        last_verifier_command="",
+                        last_verifier_kind="",
+                        last_verifier_verdict="",
+                        verified_after_last_change=False,
+                        redundant_verifier_count=0,
+                        post_pass_nonterminal_steps=0,
+                        no_change_steps_after_write=0,
+                        successful_artifact_write_step=None,
+                        first_post_write_verification_step=None,
+                        nonterminal_steps_after_verified_write=0,
+                    ),
+                    run_brief=SimpleNamespace(original_task="edit ./temp/example.py"),
+                    working_memory=SimpleNamespace(current_goal=""),
+                )
+                self.checkpoint_on_exit = False
+                self._cancel_requested = False
+                self._active_dispatch_task = None
+
+            def _finalize_task_scope(self, **kwargs):
+                return {"task_id": "task-0002", "summary_path": str(latest_dir / "task_summary.json")}
+
+            def _record_terminal_experience(self, result):
+                pass
+
+            def _rewrite_active_plan_export(self):
+                pass
+
+            def _persist_checkpoint(self, result):
+                pass
+
+            def _runlog(self, *args, **kwargs):
+                pass
+
+        result = _finalize(MockHarness(), {"status": "cancelled", "reason": "cancel_requested"})
+
+        assert result["unverified_change_warning"] == (
+            "Task cancelled after modifying files to temp/example.py. Changes were not verified."
+        )
+        payload = json.loads((run_dir / "session_summary.json").read_text(encoding="utf-8"))
+        assert payload["prior_task_completed"] is True
+        assert payload["latest_task_cancelled"] is True
+        assert payload["files_changed_after_latest_task_start"] is True
+        assert payload["verification_after_latest_change"] is False
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

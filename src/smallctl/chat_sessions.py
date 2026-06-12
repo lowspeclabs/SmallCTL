@@ -84,10 +84,19 @@ def persist_chat_session_state(
     state_path = session_state_path(cwd, resolved_thread_id)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    existing_ui_transcript: list[Any] = []
+    try:
+        existing_payload = json.loads(state_path.read_text(encoding="utf-8"))
+        existing = existing_payload.get("ui_transcript") if isinstance(existing_payload, dict) else None
+        if isinstance(existing, list):
+            existing_ui_transcript = existing
+    except Exception:
+        existing_ui_transcript = []
     payload = {
         "thread_id": resolved_thread_id,
         "saved_at": now,
         "state": state_payload,
+        "ui_transcript": existing_ui_transcript,
     }
     state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -106,6 +115,49 @@ def persist_chat_session_state(
         created_at=str(state_payload.get("created_at") or now),
     )
     return state_path
+
+
+def persist_chat_session_ui_transcript(
+    *,
+    cwd: str | Path,
+    thread_id: str,
+    ui_transcript: list[dict[str, Any]],
+) -> Path | None:
+    resolved_thread_id = str(thread_id or "").strip()
+    if not resolved_thread_id or not isinstance(ui_transcript, list):
+        return None
+    state_path = session_state_path(cwd, resolved_thread_id)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {"thread_id": resolved_thread_id, "state": {}}
+    if not isinstance(payload, dict):
+        payload = {"thread_id": resolved_thread_id, "state": {}}
+    payload["thread_id"] = resolved_thread_id
+    payload["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    payload["ui_transcript"] = ui_transcript[-500:]
+    payload.setdefault("state", {})
+    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return state_path
+
+
+def load_chat_session_ui_transcript(
+    *,
+    cwd: str | Path,
+    thread_id: str,
+) -> list[dict[str, Any]]:
+    path = session_state_path(cwd, thread_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    transcript = payload.get("ui_transcript")
+    if not isinstance(transcript, list):
+        return []
+    return [item for item in transcript if isinstance(item, dict)]
 
 
 def load_chat_session_state(

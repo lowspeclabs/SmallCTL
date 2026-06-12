@@ -15,6 +15,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "remote_verification_pending_capsule": "A remote mutation is pending verification; read back the remote path/state instead of rediscovering local paths.",
     "micro_plan_capsule": "Break the next move into one concrete action, expected evidence, and stop condition.",
     "evidence_reuse_capsule": "Use visible evidence before repeating the same read or command.",
+    "interactive_installer_stall_capsule": "The interactive SSH prompt is unchanged after prior sends. Do not keep polling. Retry one input with explicit submit semantics, inspect the exact prompt, or explain the blocker.",
     "tool_exposure_narrowing": "Do not repeat the same tool call; use prior output or switch to one different tool/action that can create new evidence.",
     "evidence_gathering_needed": "Gather a bounded read-only ToolPlan evidence pass before patching or finishing.",
     "evidence_gathering_needed_hard_route": "",
@@ -23,8 +24,12 @@ CAPSULE_TEXT: dict[str, str] = {
     "repair_debug_scaffold": "REPAIR MODE: You have already read the failing file. The bugs are in code you wrote. Do NOT read the file again. Emit ONE mutation (file_patch/file_write/ast_patch) this turn, then run the verifier.",
     "preflight_contradiction_capsule": "A preflight validation passed but the gate is still blocking. Do not retry the same validator; escalate or ask for human guidance.",
     "repeated_remote_installer_failure_capsule": "The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
+    "source_invalid_install_capsule": "Installer source looks invalid upstream. Do not keep retrying local DNS or shell execution. Research the current official install path, ask for approval for an alternate/manual path, or explain the blocker.",
+    "remote_auth_failure_capsule": "SSH authentication failed. Do not retry the same SSH command — the credential/access issue will persist. Try a different host, use local shell_exec, or ask the user for corrected credentials.",
     "preexisting_state_as_success_capsule": "Distinguish 'state already existed' from 'I caused the state'. Verify that your actions produced the intended outcome, not that it was already present.",
     "repeated_shell_failure_collapsed": "Multiple identical shell failures were collapsed in the transcript. Do NOT repeat the same command. Use the preserved last occurrence as evidence, diagnose the root cause, and try a fundamentally different approach.",
+    "dead_end_pivot_capsule": "Multiple attempts have failed with the same root cause. This may be an unfixable external blocker. If DNS, source resolution, or upstream availability is broken and cannot be repaired from this session, stop retrying and explain the blocker. Call task_fail with a clear description if no alternative path exists.",
+    "patch_target_not_found_capsule": "Previous exact patch target was not found. Use the fresh file read, choose a smaller exact span, or verify the intended edit is already applied before retrying file_patch.",
 }
 
 

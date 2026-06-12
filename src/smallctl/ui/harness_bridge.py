@@ -166,6 +166,7 @@ class HarnessBridge:
                 task.cancel()
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(asyncio.sleep(0))
             loop.close()
 
     async def _heartbeat_loop(self) -> None:

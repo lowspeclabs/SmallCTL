@@ -61,7 +61,13 @@ def fama_hidden_tools_for_exposure(
         else:
             hidden_tools.add("task_complete")
     if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
-        hidden_tools.add("task_fail")
+        # Dead-end escape hatch: if the same verifier has rejected 5+ times
+        # on the same target, let the model call task_fail to report the
+        # blocker rather than cycling indefinitely.
+        rejection_count = _verifier_rejection_count(state)
+        same_target_streak = _same_target_rejection_streak(state)
+        if rejection_count < 5 or same_target_streak < 4:
+            hidden_tools.add("task_fail")
     if "remote_tool_exposure_guard" in active:
         # Don't hide local mutating tools when the current task explicitly
         # references local paths — the model needs them to complete the task.
@@ -228,3 +234,30 @@ def _latest_loop_repeated_tool(state: Any) -> str:
         if marker in evidence:
             return evidence.split(marker, 1)[1].split(";", 1)[0].strip()
     return ""
+
+
+def _verifier_rejection_count(state: Any) -> int:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return 0
+    return int(scratchpad.get("_verifier_rejection_count", 0) or 0)
+
+
+def _same_target_rejection_streak(state: Any) -> int:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return 0
+    verdict = scratchpad.get("_last_verifier_rejection")
+    if not isinstance(verdict, dict):
+        return 0
+    command = str(verdict.get("command") or verdict.get("target") or "").strip()
+    if not command:
+        return 0
+    key = "_fama_same_target_streak"
+    last = scratchpad.get(key)
+    if isinstance(last, dict) and last.get("command") == command:
+        streak = int(last.get("streak", 0) or 0) + 1
+    else:
+        streak = 1
+    scratchpad[key] = {"command": command, "streak": streak}
+    return streak

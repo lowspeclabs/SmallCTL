@@ -166,6 +166,7 @@ async def shell_exec_foreground(
             stream_emitter = BufferedUIEventEmitter(
                 harness=harness,
                 event_type=UIEventType.SHELL_STREAM,
+                event_data=_active_tool_event_data(harness, fallback_tool_name="shell_exec"),
             )
 
             async def read_stream(stream, out_list, is_stderr: bool = False):
@@ -395,3 +396,12 @@ async def shell_exec_foreground(
         if execution_sec > 0:
             result["metadata"]["execution_sec"] = round(execution_sec, 3)
     return result
+
+
+def _active_tool_event_data(harness: Any, *, fallback_tool_name: str) -> dict[str, Any]:
+    context = getattr(harness, "_active_ui_tool_context", None)
+    if not isinstance(context, dict):
+        return {"tool_name": fallback_tool_name}
+    data = dict(context)
+    data.setdefault("tool_name", fallback_tool_name)
+    return data

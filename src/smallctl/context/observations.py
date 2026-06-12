@@ -277,6 +277,12 @@ def _is_stale_packet(state: LoopState, packet: ObservationPacket) -> bool:
         reason = str(item.get("reason") or "").strip().lower()
         paths = item.get("paths")
         path_list = [str(path).strip() for path in paths] if isinstance(paths, list) else []
+        # If the observation documents the artifact that was just invalidated,
+        # preserve it — the observation IS the record of the change, not stale data.
+        invalidated_artifact_ids = item.get("invalidated_artifact_ids", [])
+        if isinstance(invalidated_artifact_ids, list) and packet.artifact_id:
+            if packet.artifact_id in invalidated_artifact_ids:
+                continue
         if reason == "file_changed" and packet.path:
             if any(_path_match(packet.path, changed) for changed in path_list):
                 return True

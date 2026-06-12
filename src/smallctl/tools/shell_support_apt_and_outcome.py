@@ -146,6 +146,23 @@ def _apt_deb822_preflight_guard(
     if _is_deb822_preflight_clean(state, host, user):
         return None
 
+    # Only gate on deb822 if a prior apt update actually failed (source-related error).
+    # Do not proactively block all apt operations — most systems have healthy sources.
+    if state is not None:
+        scratchpad = getattr(state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            guard_state = scratchpad.get("_apt_sources_list_d_guard")
+            if isinstance(guard_state, dict):
+                update_succeeded = guard_state.get("apt_update_succeeded")
+                if update_succeeded is not False:
+                    return None
+            else:
+                return None
+        else:
+            return None
+    else:
+        return None
+
     # One-liner validator (chainable with &&) — no heredoc delimiter issues.
     validator = (
         "python3 -c \"from pathlib import Path; "

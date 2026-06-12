@@ -60,6 +60,8 @@ def _response_choices(interrupt: dict[str, Any]) -> set[str]:
             response_mode = "yes/no/revise"
         elif kind == "staged_step_blocked":
             response_mode = "revise/skip/retry"
+        elif kind == "apt_deb822_validator_approval":
+            response_mode = "yes/no"
         else:
             response_mode = "continue"
 

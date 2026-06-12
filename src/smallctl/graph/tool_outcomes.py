@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from time import time
@@ -30,13 +31,19 @@ from .escalation_triggers import (
 )
 from ..harness.tool_visibility import schedule_retry_tool_exposure
 from ..models.conversation import ConversationMessage
+from ..models.events import UIEvent, UIEventType
+from ..state import json_safe_value
 from .tool_execution_recovery_helpers import (
     _maybe_emit_repair_recovery_nudge,
     _maybe_schedule_repair_loop_status_autocontinue,
 )
 from .error_hardening import (
+    _maybe_pivot_upstream_install_source_invalid,
     _maybe_emit_ground_truth_diffusion,
     _maybe_emit_nginx_sites_enabled_nudge,
+    _maybe_nudge_repeated_404_remote_url,
+    _observe_install_source_diagnosis,
+    _maybe_nudge_ssh_auth_fallback,
     _maybe_schedule_web_search_for_repeated_error,
 )
 from .tool_outcome_resolution import maybe_apply_terminal_tool_outcome
@@ -74,6 +81,7 @@ async def apply_tool_outcomes(
 ) -> LoopRoute:
     harness = deps.harness
     for record in graph_state.last_tool_results:
+        _observe_install_source_diagnosis(harness, record)
         _maybe_clear_missing_input_after_remote_readback(harness, record)
         _maybe_clear_missing_input_after_local_alias_read(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
@@ -89,8 +97,12 @@ async def apply_tool_outcomes(
             _maybe_emit_nginx_sites_enabled_nudge(harness, record)
             _maybe_emit_ground_truth_diffusion(harness, record)
             _maybe_schedule_web_search_for_repeated_error(graph_state, harness, record)
+            _maybe_nudge_repeated_404_remote_url(graph_state, harness, record)
+            _maybe_nudge_ssh_auth_fallback(graph_state, harness, record)
 
         _maybe_confirm_apt_sources_tip(harness.state, record)
+        if await _maybe_request_apt_deb822_validator(graph_state, deps, record):
+            return LoopRoute.FINALIZE
 
         if await maybe_apply_terminal_tool_outcome(graph_state, deps, record, chat_mode=False):
             return LoopRoute.FINALIZE
@@ -125,6 +137,7 @@ async def apply_tool_outcomes(
         harness=harness,
         graph_state=graph_state,
     )
+    _maybe_pivot_upstream_install_source_invalid(graph_state, harness)
     _update_progress_tracking(harness, graph_state)
     task_boundary_service = getattr(harness, "_task_boundary_service", None)
     if task_boundary_service is not None:
@@ -599,3 +612,115 @@ def _has_failure_event_for_operation(harness: Any, operation_id: str) -> bool:
     if not isinstance(events, list):
         return False
     return any(str(getattr(event, "operation_id", "") or "") == operation_id for event in events[-8:])
+
+
+async def _maybe_request_apt_deb822_validator(
+    graph_state: GraphRunState,
+    deps: GraphRuntimeDeps,
+    record: ToolExecutionRecord,
+) -> bool:
+    """Pause for explicit approval before running the deb822 validator."""
+    harness = deps.harness
+    if record.result.success:
+        return False
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if metadata.get("reason") != "apt_deb822_preflight_required":
+        return False
+    if graph_state.pending_tool_calls:
+        return False
+    signature = "|".join(
+        [
+            str(record.tool_call_id or ""),
+            str(record.operation_id or ""),
+            "apt_deb822_validator_approval",
+        ]
+    )
+    existing_interrupt = getattr(harness.state, "pending_interrupt", None)
+    if isinstance(existing_interrupt, dict) and existing_interrupt.get("signature") == signature:
+        return False
+    host = str(metadata.get("host") or "").strip()
+    user = str(metadata.get("user") or "").strip()
+    validator = (
+        "python3 -c \"from pathlib import Path; "
+        "p = Path('/etc/apt/sources.list.d/debian.sources'); "
+        "s = p.read_text(); "
+        "missing = [k for k in ('Types:', 'URIs:', 'Suites:', 'Components:') if k not in s]; "
+        "assert not missing, 'debian.sources missing deb822 fields: ' + ', '.join(missing); "
+        "print('deb822 OK')\""
+    )
+    tool_name = str(record.tool_name or "ssh_exec")
+    args: dict[str, Any] = {"command": validator}
+    if host:
+        args["host"] = host
+    if user:
+        args["user"] = user
+    target = f"{user + '@' if user else ''}{host}" if host else "localhost"
+    question = (
+        "APT is blocked until `/etc/apt/sources.list.d/debian.sources` is validated as deb822. "
+        f"Approve the next safe recovery step on {target}?\n\n"
+        f"Validator command: `{validator}`\n\n"
+        "Reply `yes` to run it or `no` to keep the task blocked and choose another action."
+    )
+    payload = {
+        "kind": "apt_deb822_validator_approval",
+        "question": question,
+        "response_mode": "yes/no",
+        "current_phase": harness.state.current_phase,
+        "active_profiles": list(harness.state.active_tool_profiles),
+        "thread_id": graph_state.thread_id,
+        "operation_id": record.operation_id,
+        "tool_name": tool_name,
+        "arguments": json_safe_value(args),
+        "validator_command": validator,
+        "host": host,
+        "user": user,
+        "signature": signature,
+        "recent_tool_outcomes": [r.to_summary_dict() for r in graph_state.last_tool_results[-3:]],
+        "created_at": time(),
+    }
+    harness.state.pending_interrupt = payload
+    graph_state.pending_interrupt = payload
+    graph_state.interrupt_payload = payload
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=question,
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "apt_deb822_validator_approval",
+                "host": host,
+                "user": user,
+                "validator_command": validator,
+            },
+        )
+    )
+    await harness._emit(
+        deps.event_handler,
+        UIEvent(
+            event_type=UIEventType.ALERT,
+            content=question,
+            data={
+                "interrupt": payload,
+                "status_activity": "awaiting apt validator approval...",
+                "ui_kind": "apt_deb822_validator_approval",
+            },
+        ),
+    )
+    harness._runlog(
+        "apt_deb822_validator_approval_requested",
+        "requested approval for deb822 validator after apt preflight block",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        host=host,
+        user=user,
+        validator_command=validator,
+    )
+    graph_state.final_result = {
+        "status": "needs_human",
+        "message": question,
+        "assistant": graph_state.last_assistant_text,
+        "thinking": graph_state.last_thinking_text,
+        "usage": graph_state.last_usage,
+        "interrupt": payload,
+    }
+    return True

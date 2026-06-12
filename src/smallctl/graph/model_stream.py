@@ -54,6 +54,10 @@ async def process_model_stream(
 ) -> StreamProcessingResult:
     """Stream a model call, process chunks, and return assembled results."""
     harness = deps.harness
+    if hasattr(harness, "state") and harness.state is not None:
+        scratchpad = getattr(harness.state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            scratchpad["_model_calls"] = int(scratchpad.get("_model_calls", 0)) + 1
     event_handler = getattr(harness, "event_handler", None)
     echo_to_stdout = event_handler is None
     graph_state.pending_tool_calls = []

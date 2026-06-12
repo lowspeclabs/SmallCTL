@@ -123,6 +123,7 @@ class UIStatusSnapshot:
     context_window: int = 0
     api_errors: int = 0
     fama_off: bool = False
+    recovery_banner: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +144,7 @@ class UIStatusSnapshot:
             "context_window": self.context_window,
             "api_errors": self.api_errors,
             "fama_off": self.fama_off,
+            "recovery_banner": self.recovery_banner,
         }
 
     @classmethod
@@ -168,6 +170,7 @@ class UIStatusSnapshot:
         token_total = 0
         token_limit = 0
         context_window = 0
+        recovery_banner = ""
 
         if api_errors is None and harness is not None:
             api_errors = int(getattr(harness.state, "scratchpad", {}).get("_ui_api_error_count", 0) or 0)
@@ -205,6 +208,7 @@ class UIStatusSnapshot:
                 or 0
             )
             context_window = int(server_context_limit or 0)
+            recovery_banner = str(getattr(harness.state, "scratchpad", {}).get("_ui_recovery_banner", "") or "")
 
         return cls(
             model=model,
@@ -224,4 +228,5 @@ class UIStatusSnapshot:
             context_window=max(0, context_window),
             api_errors=max(0, int(api_errors)),
             fama_off=fama_off,
+            recovery_banner=recovery_banner,
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_task
@@ -115,6 +116,116 @@ def detect_repeated_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal |
             repeated_tool=repeated_tool,
             counters=tripped,
         ),
+    )
+
+
+def detect_identical_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal | None:
+    history = getattr(state, "tool_history", None)
+    if not isinstance(history, list) or len(history) < max(1, int(threshold or 3)):
+        return None
+    threshold = max(1, int(threshold or 3))
+    recent = [str(item or "").strip() for item in history[-threshold:]]
+    if any(not item for item in recent):
+        return None
+    if len(set(recent)) != 1:
+        return None
+    fingerprint = recent[-1]
+    tool_name = fingerprint.split("|", 1)[0].strip() or None
+    next_action = (
+        "Do not call it again unchanged. Explain the blocker or try a different specific fix that can change the prompt/output state."
+    )
+    return FamaSignal(
+        kind=FamaFailureKind.LOOPING,
+        severity=2,
+        source="loop_guard",
+        evidence=fingerprint,
+        step=current_step(state),
+        tool_name=tool_name,
+        failure_class="repeated_action",
+        next_safe_action=next_action,
+    )
+
+
+def detect_interactive_installer_stall(state: Any, *, threshold: int = 2) -> FamaSignal | None:
+    history = [str(item or "").strip() for item in getattr(state, "tool_history", []) or [] if str(item or "").strip()]
+    threshold = max(1, int(threshold or 2))
+    if len(history) < (threshold * 2):
+        return None
+
+    pairs: list[tuple[str, str, str, str]] = []
+    for index in range(len(history) - 1):
+        send_entry = history[index]
+        read_entry = history[index + 1]
+        send_parts = send_entry.split("|")
+        read_parts = read_entry.split("|")
+        if len(send_parts) < 3 or len(read_parts) < 4:
+            continue
+        if send_parts[0].strip() != "ssh_session_send" or read_parts[0].strip() != "ssh_session_read":
+            continue
+        send_session = send_parts[1].strip()
+        read_session = read_parts[1].strip()
+        prompt = read_parts[2].strip()
+        status = read_parts[3].strip()
+        if not send_session or send_session != read_session:
+            continue
+        pairs.append((send_session, send_parts[2].strip(), prompt, status))
+
+    if len(pairs) < threshold + 1:
+        return None
+
+    tail = pairs[-(threshold + 1):]
+    session_id = tail[-1][0]
+    prompt = tail[-1][2]
+    status = tail[-1][3]
+    if not prompt:
+        return None
+    if any(item[0] != session_id or item[2] != prompt or item[3] != status for item in tail):
+        return None
+
+    return FamaSignal(
+        kind=FamaFailureKind.INTERACTIVE_SESSION_STALL,
+        severity=2,
+        source="interactive_session",
+        evidence=(
+            f"ssh_session_read returned the same prompt after repeated sends; session={session_id}; prompt={prompt}; status={status}"
+        ),
+        step=current_step(state),
+        tool_name="ssh_session_read",
+        failure_class="interactive_session_stall",
+        next_safe_action=(
+            "Do not keep polling the same prompt. Retry one `ssh_session_send` with explicit submit semantics, inspect the exact prompt state, or explain the blocker."
+        ),
+    )
+
+
+def detect_weak_verifier_logic(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+) -> FamaSignal | None:
+    if str(tool_name or "").strip() != "ssh_exec":
+        return None
+    if not bool(getattr(result, "success", False)):
+        return None
+    scratchpad = getattr(state, "scratchpad", None)
+    scratchpad = scratchpad if isinstance(scratchpad, dict) else {}
+    verdict = scratchpad.get("_last_verifier_verdict") or getattr(state, "last_verifier_verdict", None)
+    verdict = verdict if isinstance(verdict, dict) else {}
+    if str(verdict.get("verdict") or "").strip().lower() != "pass":
+        return None
+    combined = _result_text(result).lower()
+    if not any(marker in combined for marker in ("(y/n)", "continue?", "password:", "awaiting input", "prompt")):
+        return None
+    return FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="verifier",
+        evidence="Verifier passed even though ssh_exec output still shows an interactive prompt.",
+        step=current_step(state),
+        tool_name="ssh_exec",
+        failure_class="verifier_failed",
+        next_safe_action="Do not treat the install as complete. Continue the interactive flow or verify the real post-install outcome first.",
     )
 
 
@@ -428,6 +539,40 @@ def detect_bad_tool_args(
         operation_id=operation_id,
         failure_class="tool_schema_invalid",
         next_safe_action="Use the tool schema and emit one minimal valid call.",
+    )
+
+
+def detect_patch_target_not_found(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    if tool_name not in {"file_patch", "ssh_file_patch"}:
+        return None
+    if bool(getattr(result, "success", False)):
+        return None
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    error_kind = str(metadata.get("error_kind") or "").strip().lower()
+    error_text = str(getattr(result, "error", "") or metadata.get("error") or "").strip().lower()
+    if error_kind != "patch_target_not_found" and "target text" not in error_text:
+        return None
+    return FamaSignal(
+        kind=FamaFailureKind.BAD_TOOL_ARGS,
+        severity=2,
+        source="tool_result",
+        evidence=str(getattr(result, "error", "") or "patch target text was not found"),
+        step=current_step(state),
+        tool_name=tool_name,
+        operation_id=operation_id,
+        failure_class="patch_target_not_found",
+        next_safe_action=(
+            "Use the fresh file read, choose a smaller exact span copied from current content, "
+            "or verify the intended edit is already applied before retrying file_patch."
+        ),
+        suggested_mitigations=["patch_target_not_found_capsule", "evidence_reuse_capsule"],
     )
 
 
@@ -887,6 +1032,53 @@ def detect_repeated_remote_installer_failure(
         failure_class="repeated_remote_installer_failure",
         next_safe_action="The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
         suggested_mitigations=["repeated_remote_installer_failure_capsule", "evidence_reuse_capsule"],
+    )
+
+
+def detect_upstream_install_source_invalid(state: Any) -> FamaSignal | None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    diagnosis = scratchpad.get("_install_source_diagnosis")
+    if not isinstance(diagnosis, dict):
+        return None
+    if not bool(diagnosis.get("public_dns_nxdomain")) or not bool(diagnosis.get("network_ok")):
+        return None
+    invalid_fetch_count = int(diagnosis.get("invalid_fetch_count", 0) or 0)
+    resolve_fail_count = int(diagnosis.get("resolve_fail_count", 0) or 0)
+    if invalid_fetch_count <= 0 and resolve_fail_count <= 0:
+        return None
+    task_text = " ".join(
+        str(part or "")
+        for part in (
+            getattr(getattr(state, "run_brief", None), "original_task", ""),
+            getattr(getattr(state, "working_memory", None), "current_goal", ""),
+        )
+    ).lower()
+    if not re.search(r"\b(?:install|setup|deploy|configure)\b", task_text):
+        return None
+    host = str(diagnosis.get("source_host") or diagnosis.get("nxdomain_host") or "").strip()
+    evidence_parts = []
+    if invalid_fetch_count > 0:
+        evidence_parts.append(f"installer fetches were invalid {invalid_fetch_count} time(s)")
+    if host:
+        evidence_parts.append(f"package host {host} returned NXDOMAIN on public DNS")
+    if resolve_fail_count > 0 and host:
+        evidence_parts.append(f"package resolution also failed locally for {host}")
+    evidence_parts.append("general network access still works")
+    return FamaSignal(
+        kind=FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID,
+        severity=3,
+        source="tool_result",
+        evidence="; ".join(evidence_parts),
+        step=current_step(state),
+        tool_name="web_search",
+        failure_class="upstream_install_source_invalid",
+        next_safe_action=(
+            "Stop local DNS repair and repeated installer retries. Research the current official install path, "
+            "ask for approval for an alternate/manual path, or explain the blocker."
+        ),
+        suggested_mitigations=["source_invalid_install_capsule", "evidence_reuse_capsule", "tool_exposure_narrowing"],
     )
 
 

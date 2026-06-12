@@ -340,6 +340,11 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
 
 
 async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any]) -> ToolEnvelope:
+    # Track tools dispatched count (Fix 7)
+    if hasattr(harness, "state") and harness.state is not None:
+        scratchpad = getattr(harness.state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            scratchpad["_tools_dispatched"] = int(scratchpad.get("_tools_dispatched", 0)) + 1
     # Hard block: SSH tools are never valid for local coding tasks.
     task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
     if (

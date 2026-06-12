@@ -200,6 +200,7 @@ def namespace_preferences_for_task_mode(
         return NamespaceRouting(
             preferred=frozenset({"local_shell"}),
             allowed=frozenset({"coding", "debugging"}),
+            blocked=frozenset({"ssh_remote"}),
         )
     if normalized_task_mode == "remote_execute":
         return NamespaceRouting(

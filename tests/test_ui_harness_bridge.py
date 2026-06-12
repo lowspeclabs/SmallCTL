@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace
 
 from smallctl.models.events import UIEvent, UIEventType
+from smallctl.ui.display import _build_backend_rca_strip
 from smallctl.ui.harness_bridge import HarnessBridge, _serialize_recent_messages
 
 
@@ -242,3 +243,34 @@ def test_restore_serialization_excludes_tool_result_content() -> None:
     assert "RAW FILE CONTENT" not in "\n".join(str(message.get("content") or "") for message in serialized)
     assert serialized[1]["tool_calls"][0]["function"]["name"] == "file_read"
     assert serialized[2]["metadata"] == {"artifact_id": "A0001"}
+
+
+def test_build_backend_rca_strip_surfaces_tool_cancellation_without_args() -> None:
+    harness = SimpleNamespace(
+        state=SimpleNamespace(
+            last_verifier_verdict=None,
+            recent_errors=["Tool dispatch cancelled while waiting for `ssh_session_read` after 12.0s."],
+            scratchpad={},
+            tool_execution_records={
+                "op-1": {
+                    "tool_name": "ssh_session_read",
+                    "result": {
+                        "success": False,
+                        "metadata": {
+                            "reason": "tool_dispatch_cancelled",
+                            "tool_name": "ssh_session_read",
+                            "cancellation_source": "ui_stop_button",
+                            "elapsed_sec": 12.0,
+                            "args": {"session_id": "sshint-123", "input": "secret"},
+                        },
+                    },
+                }
+            },
+        )
+    )
+
+    strip = _build_backend_rca_strip(harness)
+
+    assert "ssh_session_read" in strip
+    assert "ui_stop_button" in strip
+    assert "secret" not in strip

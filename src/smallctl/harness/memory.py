@@ -500,6 +500,15 @@ class MemoryService:
         intent_tags = list(self.harness.state.intent_tags)
         environment_tags = infer_environment_tags(self.harness)
         entity_tags = infer_entity_tags(self.harness.state.run_brief.original_task)
+        # P3.2: Enrich SSH experience memories with contextual tags
+        if tool_name == "ssh_exec" and result.success:
+            cmd = str(result.metadata.get("command") or "").lower()
+            if "debian_frontend=noninteractive" in cmd or "--unattended" in cmd or "-y" in cmd:
+                environment_tags.append("noninteractive")
+            if "apt" in cmd or "apt-get" in cmd:
+                environment_tags.append("apt")
+            if " -t" in cmd or "tty" in cmd or "pty" in cmd:
+                environment_tags.append("tty")
         namespace = infer_memory_namespace(
             task_mode=task_mode,
             tool_name=tool_name,

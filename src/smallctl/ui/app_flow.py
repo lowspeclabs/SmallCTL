@@ -19,6 +19,8 @@ from ..models.events import UIEvent, UIEventType, UIStatusSnapshot
 from ..chat_sessions import (
     load_chat_session_state,
     load_chat_session_summaries,
+    load_chat_session_ui_transcript,
+    persist_chat_session_ui_transcript,
     record_chat_session_prompt,
 )
 from .app_approvals import handle_approval_prompt
@@ -34,6 +36,7 @@ from .display import (
     _CRITICAL_EVENTS,
     check_duplicate_promotion,
     compute_activity_for_event,
+    format_recovery_banner,
     format_restore_status,
     should_promote_tool_args_to_assistant,
     should_render_event,
@@ -86,6 +89,12 @@ class SmallctlAppFlowMixin:
                 await self._append_system_line(
                     f"Task {status}. Type a new message or press Ctrl+C to exit."
                 )
+                detail = _terminal_status_detail(result, self.harness)
+                if detail:
+                    await self._append_system_line(detail)
+                warning = str(result.get("unverified_change_warning") or "").strip()
+                if warning:
+                    await self._append_system_line(warning, force=True, kind="warning")
         except asyncio.CancelledError:
             console = self._get_console()
             if console is not None:
@@ -178,6 +187,7 @@ class SmallctlAppFlowMixin:
                 return
 
         self._update_activity_for_event(event)
+        self._update_recovery_banner_from_event(event)
 
         if event.data.get("ui_kind") == "approve_prompt":
             await handle_approval_prompt(self, event)
@@ -230,6 +240,7 @@ class SmallctlAppFlowMixin:
         console = self._get_console()
         if console is None:
             return
+        self._record_ui_transcript_event(event)
         await console.append_event(event)
 
     def _update_sidebar_objective(self, content: str) -> None:
@@ -262,6 +273,7 @@ class SmallctlAppFlowMixin:
         return "\n".join(result)
 
     def _on_run_log_row(self, row: dict[str, Any]) -> None:
+        self._update_recovery_banner_from_run_log_row(row)
         if not self._should_render_run_log_row(row):
             return
         event = str(row.get("event") or "")
@@ -277,8 +289,12 @@ class SmallctlAppFlowMixin:
         from .display import format_run_log_row
 
         text = format_run_log_row(row)
+        event_data: dict[str, Any] = {}
+        if event in _CRITICAL_EVENTS:
+            event_data["ui_kind"] = event
+            event_data["event_payload"] = dict(row.get("data") or {})
         emit = lambda: asyncio.create_task(
-            self.on_harness_event(UIEvent(event_type=UIEventType.SYSTEM, content=text))
+            self.on_harness_event(UIEvent(event_type=UIEventType.SYSTEM, content=text, data=event_data))
         )
         app_thread_id = getattr(self, "_loop_thread_id", None) or getattr(self, "_thread_id", None)
         if app_thread_id == threading.get_ident():
@@ -355,6 +371,7 @@ class SmallctlAppFlowMixin:
             payload["activity"] = activity
 
         payload["api_errors"] = max(0, int(self._api_error_count))
+        payload["recovery_banner"] = str(getattr(self, "_recovery_banner", "") or "")
         return payload
 
     def _refresh_status(
@@ -369,11 +386,12 @@ class SmallctlAppFlowMixin:
         self._latest_status_snapshot = state.__dict__.copy()
         self._status_activity = state.activity
         self._api_error_count = state.api_errors
-        if state.token_total >= 100000 and not getattr(self, "_token_runaway_alert_emitted", False):
+        if state.token_total >= 1000000 and not getattr(self, "_token_runaway_alert_emitted", False):
             self._token_runaway_alert_emitted = True
             asyncio.create_task(
                 self._append_system_line(
-                    "[bold red]ALERT: Cumulative token usage exceeded 100k. Session may be in a runaway loop.[/]",
+                    "ALERT: Cumulative token usage exceeds 1M. Session may be in a runaway loop.",
+                    kind="alert",
                     force=True,
                 )
             )
@@ -381,8 +399,8 @@ class SmallctlAppFlowMixin:
                 HarnessEvent(
                     UIEvent(
                         event_type=UIEventType.ALERT,
-                        content="Cumulative token usage exceeded 100k. Consider reviewing the session for runaway behavior.",
-                        data={"token_total": state.token_total, "threshold": 100000},
+                        content="Cumulative token usage exceeded 1M. Consider reviewing the session for runaway behavior.",
+                        data={"token_total": state.token_total, "threshold": 1000000},
                     )
                 )
             )
@@ -424,9 +442,30 @@ class SmallctlAppFlowMixin:
                     context_window=state.context_window,
                     api_errors=state.api_errors,
                     fama_off=getattr(state, "fama_off", False),
+                    recovery_banner=getattr(state, "recovery_banner", ""),
                 )
         except (NoMatches, ScreenStackError):
             return
+
+    def _update_recovery_banner_from_event(self, event: UIEvent) -> None:
+        event_name = str(event.data.get("event") or event.data.get("ui_kind") or "").strip()
+        banner = format_recovery_banner(event_name, event.data)
+        if not banner:
+            return
+        self._recovery_banner = banner
+        if self.harness is not None and isinstance(getattr(self.harness.state, "scratchpad", None), dict):
+            self.harness.state.scratchpad["_ui_recovery_banner"] = banner
+        self._refresh_status()
+
+    def _update_recovery_banner_from_run_log_row(self, row: dict[str, Any]) -> None:
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        banner = format_recovery_banner(str(row.get("event") or "").strip(), data)
+        if not banner:
+            return
+        self._recovery_banner = banner
+        if self.harness is not None and isinstance(getattr(self.harness.state, "scratchpad", None), dict):
+            self.harness.state.scratchpad["_ui_recovery_banner"] = banner
+        self._refresh_status()
 
     def _get_console(self) -> ConsolePane | None:
         try:
@@ -547,6 +586,7 @@ class SmallctlAppFlowMixin:
         requested_thread_id = str(self.restore_thread_id or "").strip()
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
+            fallback_ui_transcript: list[dict[str, Any]] = []
             result = await bridge.restore_graph_state(thread_id=self.restore_thread_id)
             restored = bool(result.get("restored"))
             if not restored:
@@ -557,6 +597,10 @@ class SmallctlAppFlowMixin:
                         "thread_id": self.restore_thread_id,
                     }
                 fallback_thread_id, state_payload = fallback
+                fallback_ui_transcript = load_chat_session_ui_transcript(
+                    cwd=cwd,
+                    thread_id=fallback_thread_id,
+                )
                 result = await bridge.replace_state_from_payload(state_payload)
                 restored = True
                 self.restore_thread_id = fallback_thread_id
@@ -568,15 +612,25 @@ class SmallctlAppFlowMixin:
                 "thread_id": str(result.get("thread_id") or self.restore_thread_id or ""),
                 "has_pending_interrupt": bool(result.get("has_pending_interrupt")),
             }
+            restored_thread_id = str(payload.get("thread_id") or "").strip()
+            checkpoint_ui_transcript = (
+                []
+                if fallback_ui_transcript or not restored_thread_id
+                else load_chat_session_ui_transcript(cwd=cwd, thread_id=restored_thread_id)
+            )
             restored_messages = result.get("recent_messages")
             if isinstance(restored_messages, list):
                 payload["recent_messages"] = restored_messages
+            ui_transcript = fallback_ui_transcript or checkpoint_ui_transcript
+            if ui_transcript:
+                payload["ui_transcript"] = ui_transcript
             interrupt = result.get("interrupt")
             if isinstance(interrupt, dict):
                 payload["interrupt"] = interrupt
             return payload
 
         restored = self.harness.restore_graph_state(thread_id=self.restore_thread_id)
+        fallback_ui_transcript: list[dict[str, Any]] = []
         if not restored:
             fallback = self._resolve_saved_chat_state(cwd=cwd, thread_id=requested_thread_id)
             if fallback is None:
@@ -585,6 +639,10 @@ class SmallctlAppFlowMixin:
                     "thread_id": self.restore_thread_id,
                 }
             fallback_thread_id, state_payload = fallback
+            fallback_ui_transcript = load_chat_session_ui_transcript(
+                cwd=cwd,
+                thread_id=fallback_thread_id,
+            )
             from ..state import LoopState
 
             self.harness.state = LoopState.from_dict(state_payload)
@@ -601,6 +659,15 @@ class SmallctlAppFlowMixin:
             "has_pending_interrupt": self.harness.has_pending_interrupt(),
         }
         payload["recent_messages"] = _serialize_recent_messages(self.harness.state)
+        restored_thread_id = str(payload.get("thread_id") or "").strip()
+        checkpoint_ui_transcript = (
+            []
+            if fallback_ui_transcript or not restored_thread_id
+            else load_chat_session_ui_transcript(cwd=cwd, thread_id=restored_thread_id)
+        )
+        ui_transcript = fallback_ui_transcript or checkpoint_ui_transcript
+        if ui_transcript:
+            payload["ui_transcript"] = ui_transcript
         interrupt = self.harness.get_pending_interrupt()
         if interrupt is not None:
             payload["interrupt"] = interrupt
@@ -632,6 +699,33 @@ class SmallctlAppFlowMixin:
     def _format_restore_status(status: dict[str, Any]) -> str:
         return format_restore_status(status)
 
+    def _record_ui_transcript_event(self, event: UIEvent) -> None:
+        if event.event_type == UIEventType.STATUS:
+            return
+        transcript = getattr(self, "_ui_transcript", None)
+        if not isinstance(transcript, list):
+            transcript = []
+            self._ui_transcript = transcript
+        transcript.append(event.to_dict())
+        del transcript[:-500]
+        self._persist_ui_transcript()
+
+    def _persist_ui_transcript(self) -> None:
+        harness = getattr(self, "harness", None)
+        if harness is None:
+            return
+        state = getattr(harness, "state", None)
+        cwd = str(getattr(state, "cwd", "") or "").strip()
+        thread_id = str(getattr(state, "thread_id", "") or "").strip()
+        transcript = getattr(self, "_ui_transcript", None)
+        if not cwd or not thread_id or not isinstance(transcript, list):
+            return
+        persist_chat_session_ui_transcript(
+            cwd=cwd,
+            thread_id=thread_id,
+            ui_transcript=transcript,
+        )
+
     async def _maybe_render_terminal_result(
         self,
         result: dict[str, Any],
@@ -652,21 +746,23 @@ class SmallctlAppFlowMixin:
             return
         if active_text and check_duplicate_promotion(final_text.lower(), active_text.lower()):
             return
-        await console.append_event(
-            UIEvent(
-                event_type=UIEventType.ASSISTANT,
-                content=final_text,
-                data={"promoted_from": "terminal_result"},
-            )
+        event = UIEvent(
+            event_type=UIEventType.ASSISTANT,
+            content=final_text,
+            data={"promoted_from": "terminal_result"},
         )
+        self._record_ui_transcript_event(event)
+        await console.append_event(event)
 
     async def _append_system_line(self, text: str, *, force: bool = False, kind: str = "system") -> None:
         if not force and not self._show_system_messages:
             return
         console = self._get_console()
         if console is not None:
+            self._record_ui_transcript_event(
+                UIEvent(event_type=UIEventType.SYSTEM, content=text, data={"kind": kind})
+            )
             await console.append_line(text, kind=kind)
-
     def _set_activity(self, text: str | None) -> None:
         self._status_activity = str(text or "").strip()
 
@@ -711,3 +807,14 @@ class SmallctlAppFlowMixin:
         )
 
 
+def _terminal_status_detail(result: dict[str, Any], harness: Any) -> str:
+    status = str(result.get("status") or "").strip().lower()
+    if status != "stopped":
+        return ""
+    reason = str(result.get("reason") or "").strip().lower()
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if isinstance(scratchpad, dict) and isinstance(scratchpad.get("_install_source_invalid_blocker"), dict):
+        return "Blocked: installer source invalid or unavailable. Research a current official install path or get approval for an alternate/manual path."
+    if reason == "no_tool_calls":
+        return "Stopped: no valid next tool call."
+    return f"Stopped: {reason}." if reason else "Stopped."

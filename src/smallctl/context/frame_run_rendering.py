@@ -16,6 +16,20 @@ MUTATION_TOOL_NAMES = {
 }
 
 
+def _suspicious_remote_target_reason(*, host: str, user: str = "") -> str:
+    normalized_host = str(host or "").strip().lower()
+    normalized_user = str(user or "").strip().lower()
+    if not normalized_host:
+        return "missing_host"
+    if any(char.isspace() for char in normalized_host) or any(char in normalized_host for char in '"\''):
+        return "invalid_host_format"
+    if any(char.isspace() for char in normalized_user) or any(char in normalized_user for char in '"\''):
+        return "invalid_user_format"
+    if normalized_host in {"pass", "password", "passwd", "secret"}:
+        return "password_like_host"
+    return ""
+
+
 def coding_anchor_lines(state: LoopState) -> list[str]:
     anchors: list[str] = []
     task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
@@ -220,6 +234,8 @@ def active_ssh_session_labels(state: LoopState) -> list[str]:
         if not host:
             continue
         user = str(value.get("user") or "").strip()
+        if _suspicious_remote_target_reason(host=host, user=user):
+            continue
         label = f"{user}@{host}" if user else host
         if label in seen:
             continue

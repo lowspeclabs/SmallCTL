@@ -122,6 +122,8 @@ def _record_write_session_recovery_failure(
     scratchpad = getattr(state, "scratchpad", None)
     if isinstance(scratchpad, dict):
         scratchpad["_last_failure_class"] = normalized_class
+        if str(normalized_class or "").strip() == "verifier_failed":
+            scratchpad["_verifier_failure_step"] = int(getattr(state, "step_count", 0))
 
     if not _attach_write_session_failure_via_service(harness, event):
         _attach_write_session_failure_direct(state, event)
@@ -214,8 +216,13 @@ def _mirror_write_session_working_memory_failure(state: Any, event: FailureEvent
 def _maybe_trigger_write_session_fallback(harness: Any, session: Any) -> bool:
     config = getattr(harness, "config", None)
     limit = config.failed_local_patch_limit if config else 3
+    abort_limit = max(limit + 2, 5)
     if session.write_failed_local_patches < limit:
         return False
+
+    if session.write_failed_local_patches >= abort_limit:
+        _abort_write_session(harness, session)
+        return True
 
     transition_write_session(
         session,
@@ -239,3 +246,35 @@ def _maybe_trigger_write_session_fallback(harness: Any, session: Any) -> bool:
             failed_local_patches=session.write_failed_local_patches,
         )
     return True
+
+
+def _abort_write_session(harness: Any, session: Any) -> None:
+    from ..write_session_fsm import archive_interrupted_write_session
+
+    archive_interrupted_write_session(
+        harness.state,
+        reason=f"write_session_aborted_after_{session.write_failed_local_patches}_failed_patches",
+    )
+    _record_write_session_recovery_failure(
+        harness,
+        session,
+        failure_class="write_session_stall",
+        message=f"Aborting write session `{session.write_session_id}` after {session.write_failed_local_patches} consecutive failures. Session archived. Use a single atomic file_write to start fresh.",
+        next_safe_action="Use file_write with replace_strategy='overwrite' to write the complete file in one shot.",
+        severity="hard",
+        metadata={"recovery_kind": "write_session_abort"},
+    )
+    harness.state.write_session = None
+    harness.state.active_intent = "write_file"
+    harness.state.secondary_intents = []
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        scratchpad["_last_failure_class"] = "write_session_stall"
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "write_session_aborted",
+            "Aborted write session after repeated stall failures",
+            session_id=str(getattr(session, "write_session_id", "") or "").strip(),
+            failed_local_patches=session.write_failed_local_patches,
+        )

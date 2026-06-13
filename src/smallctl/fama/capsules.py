@@ -36,6 +36,9 @@ CAPSULE_TEXT: dict[str, str] = {
 def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
     config = _scratch_config(state)
     if not _enabled(config):
+        override = _remote_interactive_override_capsule(state)
+        if override and token_budget > 0:
+            return [override]
         return []
     if token_budget <= 0:
         return []
@@ -93,6 +96,16 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
         else:
             scratchpad["_fama_empty_streak"] = 0
     return lines
+
+
+def _remote_interactive_override_capsule(state: Any) -> str | None:
+    if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
+        return None
+    errors = getattr(state, "recent_errors", None) or []
+    text = "\n".join(str(item or "") for item in errors).lower()
+    if "error opening terminal" not in text and "dialog" not in text and "tui" not in text:
+        return None
+    return "Remote command hit a dialog/TUI installer path. Use an interactive SSH session or documented unattended mode instead of repeating ssh_exec."
 
 
 def _scratch_config(state: Any) -> dict[str, Any]:

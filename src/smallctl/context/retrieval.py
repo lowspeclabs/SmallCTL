@@ -89,6 +89,8 @@ class RetrievalBundle:
     lane_routes: dict[str, list[str]] = field(default_factory=dict)
     ranked_candidates: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     miss_reasons: dict[str, list[str]] = field(default_factory=dict)
+    repeat_counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    applied_decays: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 class LexicalRetriever:
@@ -149,6 +151,57 @@ class LexicalRetriever:
             state.scratchpad.setdefault("_context_metrics", {})
             state.scratchpad["_context_metrics"]["retrieval_calls"] = self.retrieval_calls
 
+    @staticmethod
+    def _repeat_decay_multiplier(count: int) -> float:
+        if count <= 1:
+            return 1.0
+        if count == 2:
+            return 0.9
+        if count == 3:
+            return 0.75
+        return 0.55
+
+    @staticmethod
+    def _record_retrieved_id_history(
+        state: LoopState,
+        history_key: str,
+        ids: list[str],
+    ) -> None:
+        if not ids:
+            return
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        history: list[dict[str, Any]] = list(scratchpad.get(history_key) or [])
+        for item_id in ids:
+            item_id = str(item_id or "").strip()
+            if not item_id:
+                continue
+            history.append({
+                "id": item_id,
+                "retrieved_at_step": int(getattr(state, "step_count", 0) or 0),
+            })
+        max_history = 32
+        if len(history) > max_history:
+            history = history[-max_history:]
+        scratchpad[history_key] = history
+
+    @staticmethod
+    def _id_repeat_counts(state: LoopState, history_key: str) -> dict[str, int]:
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        history = scratchpad.get(history_key)
+        if not isinstance(history, list):
+            return {}
+        counts: dict[str, int] = {}
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("id") or "").strip()
+            if not item_id:
+                continue
+            counts[item_id] = counts.get(item_id, 0) + 1
+            if len(counts) >= 8:
+                break
+        return counts
+
     def retrieve_bundle(
         self,
         *,
@@ -178,12 +231,14 @@ class LexicalRetriever:
         if not needs_refinement:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
+            self._record_retrieved_experience_history(state, first_pass.experiences)
             return first_pass
 
         refined_query = self._build_refined_query(state=state, bundle=first_pass)
         if not refined_query or refined_query == base_query:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
+            self._record_retrieved_experience_history(state, first_pass.experiences)
             bundle = RetrievalBundle(
                 query=base_query,
                 initial_query=base_query,
@@ -221,6 +276,7 @@ class LexicalRetriever:
             second_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
             state.retrieval_cache = [snippet.artifact_id for snippet in second_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in second_pass.experiences]
+            self._record_retrieved_experience_history(state, second_pass.experiences)
             if "artifact signal is weak" in reason:
                 self._inject_failure_artifacts(state, second_pass)
             return second_pass
@@ -229,6 +285,7 @@ class LexicalRetriever:
         first_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
         state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
         state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
+        self._record_retrieved_experience_history(state, first_pass.experiences)
         if "artifact signal is weak" in reason:
             self._inject_failure_artifacts(state, first_pass)
         return first_pass
@@ -249,6 +306,11 @@ class LexicalRetriever:
             token_budget=token_budget,
         )
         state.retrieval_cache = [snippet.artifact_id for snippet in snippets]
+        self._record_retrieved_id_history(
+            state,
+            "_retrieved_artifact_history",
+            [snippet.artifact_id for snippet in snippets if snippet.artifact_id],
+        )
         return snippets
 
     def retrieve_summaries(
@@ -260,7 +322,13 @@ class LexicalRetriever:
     ) -> list[EpisodicSummary]:
         self._record_retrieval_call(state)
         ranked = self._rank_summaries(state=state, query=query)
-        return self._select_summaries(ranked, token_budget=token_budget)
+        selected = self._select_summaries(ranked, token_budget=token_budget)
+        self._record_retrieved_id_history(
+            state,
+            "_retrieved_summary_history",
+            [summary.summary_id for summary in selected if summary.summary_id],
+        )
+        return selected
 
     def retrieve_experiences(
         self,
@@ -273,6 +341,7 @@ class LexicalRetriever:
         ranked = self._rank_experiences(state=state, cold_store=cold_store)
         distinct = self._select_distinct_experiences([memory for _, memory in ranked], limit=limit)
         state.retrieved_experience_ids = [memory.memory_id for memory in distinct]
+        self._record_retrieved_experience_history(state, distinct)
         return distinct
 
     def _retrieve_pass(
@@ -311,9 +380,48 @@ class LexicalRetriever:
             else []
         )
 
+        experience_repeat_counts = self._experience_repeat_counts(state)
+        artifact_repeat_counts = self._id_repeat_counts(state, "_retrieved_artifact_history")
+        summary_repeat_counts = self._id_repeat_counts(state, "_retrieved_summary_history")
+
         if update_state:
             state.retrieval_cache = [snippet.artifact_id for snippet in artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in experiences]
+            self._record_retrieved_experience_history(state, experiences)
+            self._record_retrieved_id_history(
+                state,
+                "_retrieved_artifact_history",
+                [snippet.artifact_id for snippet in artifacts if snippet.artifact_id],
+            )
+            self._record_retrieved_id_history(
+                state,
+                "_retrieved_summary_history",
+                [summary.summary_id for summary in summaries if summary.summary_id],
+            )
+
+        applied_decays = {
+            "experiences": {
+                memory_id: self._repeat_decay_multiplier(count)
+                for memory_id, count in experience_repeat_counts.items()
+                if count >= 2
+            },
+            "artifacts": {
+                artifact_id: self._repeat_decay_multiplier(count)
+                for artifact_id, count in artifact_repeat_counts.items()
+                if count >= 2
+            },
+            "summaries": {
+                summary_id: self._repeat_decay_multiplier(count)
+                for summary_id, count in summary_repeat_counts.items()
+                if count >= 2
+            },
+        }
+        repeat_counts = {
+            "experiences": experience_repeat_counts,
+            "artifacts": artifact_repeat_counts,
+            "summaries": summary_repeat_counts,
+        }
+
         miss_reasons = self._retrieval_miss_reasons(
             state=state,
             ranked_artifacts=ranked_artifacts,
@@ -358,6 +466,8 @@ class LexicalRetriever:
                 ],
             },
             miss_reasons=miss_reasons,
+            repeat_counts=repeat_counts,
+            applied_decays=applied_decays,
         )
 
     def _retrieval_miss_reasons(
@@ -437,6 +547,7 @@ class LexicalRetriever:
 
         scored: list[tuple[float, ArtifactRecord]] = []
         latest_causal_remote_artifact_id = self._latest_causal_remote_failure_artifact_id(state)
+        artifact_repeat_counts = self._id_repeat_counts(state, "_retrieved_artifact_history")
         for index, artifact_id in enumerate(state.artifacts.keys()):
             artifact = state.artifacts[artifact_id]
             force_include_remote_repair_artifact = (
@@ -468,6 +579,9 @@ class LexicalRetriever:
             )
             if force_include_remote_repair_artifact:
                 score = max(score, 32.0 + index * 0.05)
+            count = artifact_repeat_counts.get(artifact_id, 0)
+            if count >= 2 and score > 0:
+                score *= self._repeat_decay_multiplier(count)
             if score > 0:
                 scored.append((score, artifact))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -494,6 +608,7 @@ class LexicalRetriever:
     ) -> list[tuple[float, EpisodicSummary]]:
         query_tokens = _tokens(query)
         stale_summary_ids = self._durably_stale_ids(state, key="_summary_staleness")
+        summary_repeat_counts = self._id_repeat_counts(state, "_retrieved_summary_history")
         scored: list[tuple[float, EpisodicSummary]] = []
         for index, summary in enumerate(state.episodic_summaries):
             if summary.summary_id and summary.summary_id in stale_summary_ids:
@@ -505,6 +620,9 @@ class LexicalRetriever:
                 state=state,
             )
             if score > 0:
+                count = summary_repeat_counts.get(summary.summary_id, 0)
+                if count >= 2:
+                    score *= self._repeat_decay_multiplier(count)
                 scored.append((score, summary))
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored
@@ -536,6 +654,7 @@ class LexicalRetriever:
             available_namespaces=available_namespaces,
         )
         scored: list[tuple[float, ExperienceMemory]] = []
+        repeat_counts = self._experience_repeat_counts(state)
         for memory in all_memories:
             score = self._score_experience(
                 memory,
@@ -544,9 +663,52 @@ class LexicalRetriever:
                 routing=routing,
             )
             if score > 0:
+                count = repeat_counts.get(memory.memory_id, 0)
+                if count >= 2:
+                    score *= self._repeat_decay_multiplier(count)
                 scored.append((score, memory))
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored
+
+    def _record_retrieved_experience_history(
+        self,
+        state: LoopState,
+        experiences: list[ExperienceMemory],
+    ) -> None:
+        if not experiences:
+            return
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        history_key = "_retrieved_experience_history"
+        history: list[dict[str, Any]] = list(scratchpad.get(history_key) or [])
+        for memory in experiences:
+            memory_id = str(getattr(memory, "memory_id", "") or "").strip()
+            if not memory_id:
+                continue
+            history.append({
+                "memory_id": memory_id,
+                "retrieved_at_step": int(getattr(state, "step_count", 0) or 0),
+            })
+        max_history = 32
+        if len(history) > max_history:
+            history = history[-max_history:]
+        scratchpad[history_key] = history
+
+    def _experience_repeat_counts(self, state: LoopState) -> dict[str, int]:
+        scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+        history = scratchpad.get("_retrieved_experience_history")
+        if not isinstance(history, list):
+            return {}
+        counts: dict[str, int] = {}
+        for entry in reversed(history):
+            if not isinstance(entry, dict):
+                continue
+            memory_id = str(entry.get("memory_id") or "").strip()
+            if not memory_id:
+                continue
+            counts[memory_id] = counts.get(memory_id, 0) + 1
+            if len(counts) >= 8:
+                break
+        return counts
 
     def _select_artifact_snippets(
         self,
@@ -890,10 +1052,54 @@ class LexicalRetriever:
                 if active_intent in {"requested_ssh_exec", "ssh_exec"}:
                     score *= 0.4
 
+        # Phase 2 Fix 7: penalize host-specific memories when the target host differs
+        if str(m.tool_name or "").strip().lower().startswith("ssh_"):
+            current_host = self._extract_target_host(state)
+            memory_host = self._extract_host_from_memory(m)
+            if current_host and memory_host and current_host != memory_host:
+                score *= 0.3
+
         return score
 
     _durably_stale_ids = staticmethod(durably_stale_ids)
     _is_durably_stale_experience = staticmethod(is_durably_stale_experience)
+
+    @staticmethod
+    def _extract_target_host(state: LoopState) -> str | None:
+        """Extract the current target host from state (e.g. from active SSH task or run_brief)."""
+        # Try active SSH target from state metadata
+        ssh_target = getattr(state, "ssh_target", None)
+        if isinstance(ssh_target, dict):
+            host = str(ssh_target.get("host") or "").strip().lower()
+            if host:
+                return host
+        # Try run_brief for IP/host mentions
+        task_text = str(getattr(state, "run_brief", None) and getattr(state.run_brief, "original_task", "") or "").strip().lower()
+        if task_text:
+            ip_match = re.search(r"\b(\d{1,3}\.){3}\d{1,3}\b", task_text)
+            if ip_match:
+                return ip_match.group(0)
+        # Try recent tool execution records for host
+        records = getattr(state, "tool_execution_records", {})
+        if isinstance(records, dict):
+            for record in reversed(list(records.values())):
+                if isinstance(record, dict):
+                    args = record.get("args", {})
+                    if isinstance(args, dict):
+                        host = str(args.get("host") or "").strip().lower()
+                        if host:
+                            return host
+        return None
+
+    @staticmethod
+    def _extract_host_from_memory(memory: ExperienceMemory) -> str | None:
+        """Extract the target host from an experience memory's notes or metadata."""
+        notes = str(getattr(memory, "notes", "") or "").strip().lower()
+        if notes:
+            ip_match = re.search(r"\b(\d{1,3}\.){3}\d{1,3}\b", notes)
+            if ip_match:
+                return ip_match.group(0)
+        return None
 
     @staticmethod
     def _resolved_memory_namespace(memory: ExperienceMemory, *, state: LoopState) -> str:

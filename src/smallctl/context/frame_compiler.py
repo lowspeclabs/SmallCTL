@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Iterable, Any
 
 from ..state import (
@@ -161,9 +162,14 @@ class PromptStateFrameCompiler:
             experiences=list(retrieved_experiences),
         )
         from ..harness.task_classifier import task_is_local_coding_target
+        from ..harness.task_classifier_support import task_has_local_scope_markers
         from ..memory_namespace import is_remote_only_memory
         task_text = str(getattr(state.run_brief, "original_task", "") or "")
-        if task_is_local_coding_target(task_text):
+        suppress_remote_memories = (
+            task_is_local_coding_target(task_text)
+            or task_has_local_scope_markers(task_text)
+        )
+        if suppress_remote_memories:
             filtered_experiences = []
             dropped_remote_ids = []
             for e in experiences:
@@ -174,7 +180,7 @@ class PromptStateFrameCompiler:
             if dropped_remote_ids:
                 state.scratchpad["_remote_memory_suppressed_for_local_task"] = {
                     "count": len(dropped_remote_ids),
-                    "reason": "local_coding_task",
+                    "reason": "local_scope_task",
                 }
             experiences = filtered_experiences
         # P2.1: Auto-recover blocked duplicate web_fetch by force-including the
@@ -231,13 +237,15 @@ class PromptStateFrameCompiler:
             next_allowed_action = self._render_write_session_next_action(state.write_session)
         if not next_allowed_action and state.working_memory.next_actions:
             next_allowed_action = state.working_memory.next_actions[-1]
-        if next_allowed_action and task_is_local_coding_target(task_text):
+        if next_allowed_action and (
+            task_is_local_coding_target(task_text) or task_has_local_scope_markers(task_text)
+        ):
             lowered_next = next_allowed_action.lower()
             if any(t in lowered_next for t in ("ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between")):
                 next_allowed_action = state.run_brief.current_phase_objective or state.run_brief.original_task
                 state.scratchpad["_remote_next_action_suppressed_for_local_task"] = {
                     "original_next_action": state.working_memory.next_actions[-1] if state.working_memory.next_actions else None,
-                    "reason": "local_coding_task",
+                    "reason": "local_scope_task",
                 }
         if not next_allowed_action:
             next_allowed_action = state.run_brief.current_phase_objective or state.run_brief.original_task

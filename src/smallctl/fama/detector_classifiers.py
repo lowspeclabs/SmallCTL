@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 _LOOP_COUNTERS = ("no_progress", "no_actionable_progress", "repeat_command", "repeat_patch")
 _READ_LOOP_TOOLS = {"artifact_read", "file_read", "dir_list", "ssh_file_read", "web_fetch"}
 _REMOTE_CONFUSION_REASONS = {

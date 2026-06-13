@@ -5,7 +5,10 @@ import json
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .app import HarnessEvent
 
 from textual import events
 from textual.app import ScreenStackError
@@ -442,6 +445,7 @@ class SmallctlAppFlowMixin:
                     context_window=state.context_window,
                     api_errors=state.api_errors,
                     fama_off=getattr(state, "fama_off", False),
+                    fama_mitigation=getattr(state, "fama_mitigation", ""),
                     recovery_banner=getattr(state, "recovery_banner", ""),
                 )
         except (NoMatches, ScreenStackError):

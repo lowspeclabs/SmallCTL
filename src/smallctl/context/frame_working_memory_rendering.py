@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from ..guards import is_four_b_or_under_model_name
 from ..state import LoopState
 from .artifact_visibility import is_prompt_visible_artifact, is_superseded_artifact
@@ -84,7 +86,9 @@ def render_working_memory(
     if memory.open_questions:
         sections.append("Open questions: " + " | ".join(memory.open_questions))
     if memory.known_facts:
-        sections.append("Known facts: " + " | ".join(memory.known_facts))
+        filtered_facts = [f for f in memory.known_facts if not _is_low_value_known_fact(f)]
+        if filtered_facts:
+            sections.append("Known facts: " + " | ".join(filtered_facts))
     sub4b_web_findings = render_sub4b_top_web_findings(state)
     if sub4b_web_findings:
         sections.append(sub4b_web_findings)
@@ -208,3 +212,19 @@ def render_sub4b_top_web_findings(state: LoopState) -> str:
     if not findings:
         return ""
     return "Top web findings: " + " | ".join(findings)
+
+
+def _is_low_value_known_fact(fact: str) -> bool:
+    """Suppress generic tool-schema facts that do not advance the task."""
+    text = str(fact or "").lower()
+    low_value_patterns = [
+        r"\btask_complete\b.*\bkeys\b",
+        r"\b\w+\b keys: \w+",
+        r"\bparameters\b.*\binclude\b",
+        r"\btool takes\b",
+        r"\btool accepts\b",
+        r"\brequires arguments\b",
+        r"\bargument names\b",
+        r"\bschema\b.*\bfields\b",
+    ]
+    return any(re.search(pattern, text) for pattern in low_value_patterns)

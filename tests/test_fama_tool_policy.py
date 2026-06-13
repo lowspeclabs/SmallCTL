@@ -271,3 +271,37 @@ def test_ssh_auth_failure_releases_done_gate() -> None:
     names = [entry["function"]["name"] for entry in schemas]
     assert "task_complete" in names
     assert "task_fail" in names
+
+
+def test_remote_transport_verifier_failure_does_not_hide_completion_tools() -> None:
+    state = LoopState()
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="done_gate",
+                reason="verifier failed",
+                source_signal="early_stop:0",
+                activated_step=0,
+                expires_after_step=2,
+            )
+        ],
+        max_active=2,
+    )
+    state.last_verifier_verdict = {
+        "tool": "ssh_exec",
+        "verdict": "fail",
+        "exit_code": 255,
+        "failure_mode": "environment",
+        "key_stderr": "ssh: connect to host 192.168.1.16 port 22: No route to host",
+    }
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail"), _schema("shell_exec")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "task_complete" in names
+    assert "task_fail" in names

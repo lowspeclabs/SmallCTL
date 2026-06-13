@@ -131,11 +131,11 @@ async def observe_tool_result(
                 dedupe=True,
             )
             # Circuit-breaker: SSH auth impossibility should not trap the agent
-            if _is_ssh_auth_impossibility(result):
+            if _is_ssh_transport_impossibility(result, tool_name=tool_name):
                 cleared = clear_mitigations(
                     state,
                     {"done_gate", "acceptance_checklist_capsule"},
-                    reason="ssh_auth_impossible",
+                    reason="ssh_transport_impossible",
                 )
                 for mitigation in cleared:
                     _runlog(
@@ -143,7 +143,7 @@ async def observe_tool_result(
                         "fama_mitigation_expired",
                         "FAMA mitigation cleared",
                         mitigation=mitigation.name,
-                        reason="ssh_auth_impossible",
+                        reason="ssh_transport_impossible",
                         step=current_step(state),
                     )
                 # Reset remote intent so local tools become available
@@ -151,8 +151,8 @@ async def observe_tool_result(
                 state.active_intent = "general_task"
                 _runlog(
                     harness,
-                    "fama_ssh_auth_circuit_breaker",
-                    "SSH auth failure triggered circuit breaker; released done_gate and reset to local_execute",
+                    "fama_ssh_transport_circuit_breaker",
+                    "SSH transport failure triggered circuit breaker; released done_gate and reset to local_execute",
                     step=current_step(state),
                 )
 
@@ -483,7 +483,7 @@ def _handle_signal(
                                 "fama_circuit_breaker",
                                 "FAMA circuit breaker: forcing strategic pivot after repeated same-failure escalation",
                                 failure_class=signal.failure_class,
-                                tool_name=tool_name,
+                                tool_name=signal.tool_name,
                                 pivot_count=pivot_count,
                                 cleared=mit.name,
                             )
@@ -720,24 +720,48 @@ def _successful_execution_clears_done_gate(
     return False
 
 
-def _is_ssh_auth_impossibility(result: Any) -> bool:
-    """Return True when an ssh_exec result failed with an authentication error."""
+def _is_ssh_transport_impossibility(result: Any, *, tool_name: str = "") -> bool:
+    """Return True when ssh_exec failed before useful remote verification ran."""
     if bool(getattr(result, "success", True)):
         return False
     metadata = getattr(result, "metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
-    tool_name = str(metadata.get("tool_name") or "").strip()
-    if tool_name != "ssh_exec":
+    resolved_tool_name = str(tool_name or metadata.get("tool_name") or "").strip()
+    if resolved_tool_name != "ssh_exec":
         return False
     error = str(getattr(result, "error", "") or "").lower()
     stderr = ""
+    exit_code = None
     output = metadata.get("output")
     if isinstance(output, dict):
         stderr = str(output.get("stderr") or "").lower()
+        exit_code = output.get("exit_code")
     else:
         stderr = str(metadata.get("stderr") or "").lower()
+        exit_code = metadata.get("exit_code")
     combined = f"{error}\n{stderr}"
-    return "permission denied" in combined and ("publickey" in combined or "password" in combined)
+    try:
+        if int(exit_code) == 255:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return any(
+        marker in combined
+        for marker in (
+            "permission denied (publickey",
+            "permission denied, please try again",
+            "no route to host",
+            "connection refused",
+            "connection timed out",
+            "network is unreachable",
+            "could not resolve hostname",
+        )
+    )
+
+
+def _is_ssh_auth_impossibility(result: Any) -> bool:
+    """Compatibility wrapper for tests/imports using the old helper name."""
+    return _is_ssh_transport_impossibility(result)
 
 
 def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:

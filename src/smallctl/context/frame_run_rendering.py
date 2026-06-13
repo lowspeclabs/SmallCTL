@@ -5,6 +5,40 @@ from ..state import LoopState, clip_text_value, normalize_intent_label
 from .artifact_visibility import artifact_path_candidates, is_prompt_visible_artifact, is_superseded_artifact
 from .frame_state_helpers import dedupe_nonempty
 
+_LOCAL_SCOPE_MARKERS = (
+    "current user",
+    "current user's",
+    "this user",
+    "this user's",
+    "my user",
+    "my user's",
+    "this host",
+    "this machine",
+    "local",
+    "locally",
+    "on this host",
+    "on this machine",
+)
+
+_LOCAL_SSH_FILE_MARKERS = (
+    "known_hosts",
+    "known hosts",
+    "authorized_keys",
+    "authorized keys",
+    "~/.ssh",
+    "/.ssh/",
+    ".ssh/",
+)
+
+
+def _task_has_local_scope_markers(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _LOCAL_SCOPE_MARKERS):
+        return True
+    return any(marker in text for marker in _LOCAL_SSH_FILE_MARKERS)
+
 MUTATION_TOOL_NAMES = {
     "ssh_file_write",
     "ssh_file_patch",
@@ -112,6 +146,8 @@ def render_run_brief(state: LoopState) -> str:
 
     if brief.original_task:
         parts.append(f"  Goal: {brief.original_task}")
+        if _task_has_local_scope_markers(brief.original_task):
+            parts.append("  Scope: local user task; prefer local file tools and shell_exec over ssh_exec")
 
     if brief.task_contract:
         parts.append(f"  Contract: {brief.task_contract}")

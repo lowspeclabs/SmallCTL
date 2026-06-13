@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from ..models.tool_result import ToolEnvelope
 from ..state import ArtifactRecord
@@ -307,8 +308,8 @@ def format_shell_exec_message(
     return msg
 
 
-def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
-    """Collapse 3+ shell_exec failures with identical first-200-char content into a summary line.
+def collapse_repeated_tool_failures(messages: list[Any]) -> list[Any]:
+    """Collapse 3+ repeated failures of the same tool with identical arguments into a summary line.
 
     Preserves the last 2 occurrences so the model still sees the most recent evidence,
     but replaces older identical failures with a compact token-saving summary.
@@ -316,25 +317,26 @@ def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
     if len(messages) < 3:
         return messages
 
-    # Find shell_exec tool-message indices and group by content signature
-    shell_indices: list[int] = []
+    # Find tool-message indices and group by (tool_name, first-200-char content) signature
+    tool_indices: list[int] = []
     for idx, msg in enumerate(messages):
         role = getattr(msg, "role", None)
         name = getattr(msg, "name", None)
-        if role == "tool" and name == "shell_exec":
-            shell_indices.append(idx)
+        if role == "tool" and name:
+            tool_indices.append(idx)
 
-    if len(shell_indices) < 3:
+    if len(tool_indices) < 3:
         return messages
 
-    signatures: dict[str, list[int]] = {}
-    for idx in shell_indices:
+    signatures: dict[tuple[str, str], list[int]] = {}
+    for idx in tool_indices:
+        name = str(getattr(messages[idx], "name", "") or "").strip()
         content = str(getattr(messages[idx], "content", "") or "").strip()
         # Only consider failure-looking content
         lowered = content.lower()
-        if not any(marker in lowered for marker in ("failed", "error:", "exited with code", "timed out")):
+        if not any(marker in lowered for marker in ("failed", "error:", "exited with code", "timed out", "does not exist", "not found")):
             continue
-        sig = content[:200]
+        sig = (name, content[:200])
         signatures.setdefault(sig, []).append(idx)
 
     # Determine which indices to replace (all but last 2 in each large group)
@@ -347,7 +349,7 @@ def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
         return messages
 
     result: list[Any] = []
-    summary_text = f"[{len(to_replace)} repeated shell_exec failures with identical error collapsed to save tokens. Last 2 occurrences preserved.]"
+    summary_text = f"[{len(to_replace)} repeated tool failures with identical error collapsed to save tokens. Last 2 occurrences preserved.]"
     summary_added = False
     for idx, msg in enumerate(messages):
         if idx in to_replace:
@@ -356,7 +358,7 @@ def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
                 result.append(
                     ConversationMessage(
                         role="tool",
-                        name="shell_exec",
+                        name="collapsed_failures",
                         content=summary_text,
                     )
                 )
@@ -365,3 +367,15 @@ def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
         result.append(msg)
 
     return result
+
+
+def collapse_repeated_shell_failures(messages: list[Any]) -> list[Any]:
+    """Collapse 3+ shell_exec failures with identical first-200-char content into a summary line.
+
+    Preserves the last 2 occurrences so the model still sees the most recent evidence,
+    but replaces older identical failures with a compact token-saving summary.
+    """
+    return collapse_repeated_tool_failures(messages)
+
+
+# End of file

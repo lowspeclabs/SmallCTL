@@ -52,21 +52,21 @@ def fama_hidden_tools_for_exposure(
     exported = {_tool_name(schema) for schema in schemas}
     hidden_tools: set[str] = set()
     if "done_gate" in active and "task_complete" in exported:
+        if _latest_verifier_is_remote_transport_failure(state):
+            pass
         # Repair-phase exemption: allow task_complete so the model can exit
         # after successfully patching a file that previously caused a timeout.
-        state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
-        active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
-        if state_phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}:
+        elif _repair_file_write_exemption(state):
             pass  # keep task_complete visible
         else:
             hidden_tools.add("task_complete")
     if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
+        if _latest_verifier_is_remote_transport_failure(state):
+            pass
         # Dead-end escape hatch: if the same verifier has rejected 5+ times
         # on the same target, let the model call task_fail to report the
         # blocker rather than cycling indefinitely.
-        rejection_count = _verifier_rejection_count(state)
-        same_target_streak = _same_target_rejection_streak(state)
-        if rejection_count < 5 or same_target_streak < 4:
+        elif _verifier_rejection_count(state) < 5 or _same_target_rejection_streak(state) < 4:
             hidden_tools.add("task_fail")
     if "remote_tool_exposure_guard" in active:
         # Don't hide local mutating tools when the current task explicitly
@@ -122,6 +122,8 @@ def enforce_fama_tool_call(
     verdict = str((verifier or {}).get("verdict") or "").strip().lower()
     if verdict == "pass" or bool(getattr(state, "acceptance_waived", False)):
         return None
+    if _latest_verifier_is_remote_transport_failure(state):
+        return None
     message = str((arguments or {}).get("message") or "")
     if diagnostic_failure_completion_allowed(state, message=message, verifier=verifier):
         return None
@@ -164,6 +166,40 @@ def _interactive_ssh_tools_exposed(state: Any) -> bool:
             or scratchpad.get("_expose_interactive_ssh_tools")
         )
     return False
+
+
+def _repair_file_write_exemption(state: Any) -> bool:
+    state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    return state_phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}
+
+
+def _latest_verifier_is_remote_transport_failure(state: Any) -> bool:
+    verifier = _latest_verifier(state)
+    if not verifier:
+        return False
+    if str(verifier.get("tool") or "").strip() != "ssh_exec":
+        return False
+    try:
+        if int(verifier.get("exit_code")) == 255:
+            return True
+    except (TypeError, ValueError):
+        pass
+    combined = "\n".join(
+        str(verifier.get(key) or "")
+        for key in ("key_stdout", "key_stderr", "failure_mode")
+    ).lower()
+    return any(
+        marker in combined
+        for marker in (
+            "no route to host",
+            "connection refused",
+            "connection timed out",
+            "network is unreachable",
+            "could not resolve hostname",
+            "permission denied (publickey",
+        )
+    )
 
 
 def _current_task_has_explicit_local_targets(state: Any) -> bool:

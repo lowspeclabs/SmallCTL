@@ -152,7 +152,12 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
 
     completed_limit = max(0, int(config.get("subtask_inject_completed_limit", 3) or 3))
     if ledger is not None and completed_limit:
-        completed = [task for task in ledger.subtasks if task.status == "done"][-completed_limit:]
+        suppressed_ids = set(state.scratchpad.get("_pivot_suppressed_subtask_ids") or [])
+        completed = [
+            task
+            for task in ledger.subtasks
+            if task.status == "done" and task.subtask_id not in suppressed_ids
+        ][-completed_limit:]
         for task in completed:
             lines.append(f"Completed subtask {task.subtask_id}: {task.title}")
 

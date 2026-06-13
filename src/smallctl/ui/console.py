@@ -94,24 +94,8 @@ class ConsolePane(VerticalScroll):
                 )
                 if nested:
                     return
-            # Nesting failed — no active turn, or no matching tool call detail.
-            # Create a fallback assistant turn with a synthetic tool call entry
-            # so the result always renders nested under its parent tool call
-            # instead of appearing as a separate top-level bubble.
-            await self._ensure_assistant_turn(speaker=speaker)
-            fallback_tool_name = event.content or "tool"
-            fallback_tool_call_id = _coerce_str(event.data.get("tool_call_id"))
-            await self._append_tool_call(
-                str(event.data.get("display_text") or f"[{fallback_tool_name}]"),
-                tool_name=fallback_tool_name,
-                tool_call_id=fallback_tool_call_id,
-            )
-            await self._append_tool_result(
-                str(event.data.get("display_text") or event.content),
-                tool_name=_coerce_str(event.data.get("tool_name")),
-                tool_call_id=fallback_tool_call_id,
-                data=event.data,
-            )
+            self._active_assistant_turn = None
+            await self._add_bubble("system", str(event.data.get("display_text") or event.content))
             return
 
         if event.event_type == UIEventType.SYSTEM and event.data.get("kind") == "test_time_scaling":

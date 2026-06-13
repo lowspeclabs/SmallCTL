@@ -250,6 +250,8 @@ def _serialize_recent_messages(state: Any) -> list[dict[str, Any]]:
         content_value = getattr(message, "content", None)
         content = "" if content_value is None else str(content_value)
         metadata = getattr(message, "metadata", None)
+        if isinstance(metadata, dict) and metadata.get("tui_visibility") == "tool_scoped_only":
+            continue
         if (
             role == "tool"
             and isinstance(metadata, dict)

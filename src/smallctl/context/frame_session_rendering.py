@@ -30,9 +30,15 @@ def render_session_notepad(state: LoopState) -> str:
 
 def render_write_session(state: LoopState) -> str:
     session = state.write_session
-    ws_bits = [f"Session: {session.write_session_id}"]
+    ws_bits = []
     if session.write_target_path:
         ws_bits.append(f"Target: {session.write_target_path}")
+    if session.write_current_section:
+        ws_bits.append(f"Current section: {session.write_current_section}")
+    if session.write_next_section:
+        ws_bits.append(f"Next section: {session.write_next_section}")
+    if session.write_sections_completed:
+        ws_bits.append(f"Completed sections: {', '.join(session.write_sections_completed)}")
     if session.write_staging_path:
         ws_bits.append(f"Staging: {session.write_staging_path}")
     if session.write_staging_path:
@@ -42,12 +48,6 @@ def render_write_session(state: LoopState) -> str:
     ws_bits.append(f"Mode: {session.write_session_mode}")
     ws_bits.append(f"Intent: {session.write_session_intent}")
     ws_bits.append(f"Status: {session.status}")
-    if session.write_current_section:
-        ws_bits.append(f"Current section: {session.write_current_section}")
-    if session.write_next_section:
-        ws_bits.append(f"Next section: {session.write_next_section}")
-    if session.write_sections_completed:
-        ws_bits.append(f"Completed sections: {', '.join(session.write_sections_completed)}")
     if session.suggested_sections:
         ws_bits.append(f"Suggested sections: {', '.join(session.suggested_sections)}")
     if session.write_failed_local_patches:
@@ -59,6 +59,7 @@ def render_write_session(state: LoopState) -> str:
     next_action = render_write_session_next_action(session)
     if next_action:
         ws_bits.append(f"Next action: {next_action}")
+    ws_bits.append(f"Session ID: {session.write_session_id}")
     verifier = session.write_last_verifier or {}
     if verifier:
         ws_bits.append(f"Last verifier verdict: {verifier.get('verdict', 'unknown')}")

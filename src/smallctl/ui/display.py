@@ -17,11 +17,11 @@ from ..models.events import (
     UIEvent,
     UIEventType,
     UIStatusSnapshot,
-    compute_activity_for_event,
 )
 
 
 _CRITICAL_EVENTS = {
+    "context_invalidated",
     "context_lane_dropped",
     "file_patch_read_autocontinue",
     "fama_health_warning",
@@ -32,6 +32,7 @@ _CRITICAL_EVENTS = {
     "reflexion_created",
     "recovery_human_resteer_recorded",
     "same_scope_iteration_recorded",
+    "subtask_transition",
     "task_interrupted",
     "terminal_control_failed",
     "verifier_loop_detected",
@@ -216,6 +217,27 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         reasons = data.get("reasons", [])
         reason_str = ", ".join(str(r) for r in reasons) if reasons else "pressure"
         return f"[harness] 📉 Message window reduced to {adjusted} ({reason_str})"
+    if event == "context_invalidated":
+        details = data.get("details") or {}
+        reason = str(data.get("reason") or details.get("reason") or "").strip()
+        if reason == "phase_advanced":
+            from_phase = str(details.get("from_phase") or "?").strip()
+            to_phase = str(details.get("to_phase") or "?").strip()
+            return f"[harness] Phase changed: {from_phase} -> {to_phase}"
+        artifact_count = int(data.get("invalidated_artifact_count", 0) or 0)
+        observation_count = int(data.get("invalidated_observation_count", 0) or 0)
+        summary_count = int(data.get("invalidated_summary_count", 0) or 0)
+        return (
+            f"[harness] Context invalidated: artifacts={artifact_count}, "
+            f"observations={observation_count}, summaries={summary_count}"
+        )
+    if event == "subtask_transition":
+        subtask_id = str(data.get("subtask_id") or "").strip()
+        title = str(data.get("title") or "").strip()
+        old_status = str(data.get("old_status") or "").strip()
+        new_status = str(data.get("new_status") or "").strip()
+        bits = [bit for bit in (f"{subtask_id}", title, f"{old_status}->{new_status}") if bit]
+        return f"[harness] Subtask update: {' | '.join(bits)}"
     msg = row.get("message") or ""
     if len(msg) > 1024:
         msg = msg[:1024] + "... [truncated]"
@@ -231,6 +253,12 @@ def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
     if event == "generic_tool_loop_nudge":
         tool_name = str(data.get("tool_name") or "tool").strip()
         return f"Recovery: loop guard nudged {tool_name}"
+    if event == "remote_tool_guard_nudge":
+        tool_name = str(data.get("tool_name") or "tool").strip()
+        return f"Blocked: local tool {tool_name} blocked for remote task. Clarify if you want local operations."
+    if event == "remote_tool_guard_nudge":
+        tool_name = str(data.get("tool_name") or "tool").strip()
+        return f"Blocked: local tool {tool_name} blocked for remote task. Clarify if you want local operations."
     if event == "recent_message_limit_tuned":
         adjusted = data.get("adjusted_limit")
         return f"Recovery: message window reduced to {adjusted}"

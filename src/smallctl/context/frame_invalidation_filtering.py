@@ -64,8 +64,23 @@ def filter_invalidated_observations(
             if observation_id:
                 dropped_ids.append(observation_id)
             continue
+        # Phase 2 Fix 6: preserve shell_exec success observations across phase invalidation
+        if _is_sticky_local_verification_observation(packet):
+            kept.append(packet)
+            continue
         kept.append(packet)
     return kept, dropped_ids, dropped_count
+
+
+def _is_sticky_local_verification_observation(packet: Any) -> bool:
+    """Preserve shell_exec success observations that verify local file existence."""
+    tool_name = str(getattr(packet, "tool_name", "") or "").strip().lower()
+    outcome = str(getattr(packet, "outcome", "") or "").strip().lower()
+    if tool_name == "shell_exec" and outcome == "success":
+        notes = str(getattr(packet, "notes", "") or "").strip().lower()
+        if any(marker in notes for marker in ("ls -la", "ls -l", "ls ", "exists", "found")):
+            return True
+    return False
 
 
 def filter_invalidated_context_briefs(

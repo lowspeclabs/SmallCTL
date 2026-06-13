@@ -782,6 +782,11 @@ def detect_tool_plan_hard_route(state: Any) -> bool:
         scratchpad["_fama_force_tool_plan_next_turn"] = True
         return True
 
+    # Condition 6: 3+ repeated filesystem tool failures (e.g., file_read on missing path)
+    if repeated_signal is not None and str(repeated_signal.tool_name or "").strip() in {"file_read", "file_write", "dir_list"}:
+        scratchpad["_fama_force_tool_plan_next_turn"] = True
+        return True
+
     return False
 
 

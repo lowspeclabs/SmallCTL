@@ -46,6 +46,7 @@ class StatusBar(Static):
         self._context_window = 0  # Total server context window
         self._api_errors = 0
         self._fama_off = False
+        self._fama_mitigation = ""
         self._recovery_banner = ""
         self._refresh_display()
 
@@ -77,6 +78,7 @@ class StatusBar(Static):
         context_window: int = 0, # total server context window
         api_errors: int = 0,
         fama_off: bool = False,
+        fama_mitigation: str = "",
         recovery_banner: str = "",
     ) -> None:
         self._model = model
@@ -96,6 +98,7 @@ class StatusBar(Static):
         self._context_window = max(0, context_window)
         self._api_errors = api_errors
         self._fama_off = fama_off
+        self._fama_mitigation = fama_mitigation
         self._recovery_banner = recovery_banner
         self._refresh_display()
 
@@ -129,6 +132,9 @@ class StatusBar(Static):
             parts.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
         if getattr(self, "_fama_off", False):
             parts.append("[bold #ffb000]FAMA:OFF[/]")
+        fama_mitigation = getattr(self, "_fama_mitigation", "")
+        if fama_mitigation:
+            parts.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
         if self._token_total >= 100000:
             parts.append("[bold red]TOKEN RUNAWAY[/]")
 
@@ -172,6 +178,9 @@ class StatusBar(Static):
             lines.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
         if getattr(self, "_fama_off", False):
             lines.append("[bold #ffb000]FAMA:OFF[/]")
+        fama_mitigation = getattr(self, "_fama_mitigation", "")
+        if fama_mitigation:
+            lines.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
         if self._token_total >= 100000:
             lines.append("[bold red]TOKEN RUNAWAY[/]")
 

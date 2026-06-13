@@ -27,6 +27,7 @@ from smallctl.graph.tool_call_parser import (
     _repair_empty_target_file_patch_to_file_write,
     _repair_active_write_session_args,
     allow_repeated_tool_call_once,
+    _detect_oversize_write_payload,
 )
 from smallctl.graph.tool_call_parser import _build_schema_repair_message
 from smallctl.graph.tool_loop_guards import _repeat_loop_limits
@@ -827,12 +828,11 @@ def test_file_patch_empty_target_text_on_empty_write_session_requires_file_write
     assert result["metadata"]["suggested_tools"] == ["file_write"]
     assert result["metadata"]["next_required_tool"] == {
         "tool_name": "file_write",
-        "required_fields": ["path", "content", "write_session_id", "section_name", "replace_strategy"],
+        "required_fields": ["path", "content", "section_name", "replace_strategy"],
         "required_arguments": {
             "path": str(target),
             "content": "#!/usr/bin/env python3\nprint('ready')\n",
             "replace_strategy": "overwrite",
-            "write_session_id": "ws-empty",
             "section_name": "imports",
         },
         "reason": "empty_or_new_file_requires_file_write_not_file_patch",
@@ -1406,7 +1406,9 @@ def test_repair_active_write_session_args_rebinds_mismatched_session_id_for_acti
     repaired = _repair_active_write_session_args(harness, pending)
 
     assert repaired is True
-    assert pending.args["write_session_id"] == "ws-active"
+    # Path-based implicit resolution means the harness no longer rewrites the
+    # model-supplied session ID; the tool layer matches by target path.
+    assert pending.args["write_session_id"] == "ws-model-guess"
     assert pending.args["section_name"] == "imports"
 
 
@@ -1428,8 +1430,39 @@ def test_repair_active_write_session_args_backfills_missing_session_id_for_activ
     repaired = _repair_active_write_session_args(harness, pending)
 
     assert repaired is True
-    assert pending.args["write_session_id"] == "ws-active"
+    assert "write_session_id" not in pending.args
     assert pending.args["section_name"] == "helpers"
+
+
+def test_oversize_write_guidance_recommends_chunking_with_path_and_section() -> None:
+    state = _make_state()
+    target = Path("temp/task_queue.py")
+    session = _make_open_write_session(target, session_id="ws-active")
+    state.write_session = session
+
+    class _FakeClient:
+        model = "qwen3-4b"
+
+    class _FakeConfig:
+        small_model_hard_write_chars = 50
+
+    harness = SimpleNamespace(state=state, client=_FakeClient(), config=_FakeConfig())
+    pending = PendingToolCall(
+        tool_name="file_write",
+        args={
+            "path": str(target),
+            "content": "x" * 100,
+        },
+    )
+
+    result = _detect_oversize_write_payload(harness, pending)
+
+    assert result is not None
+    message, meta = result
+    assert meta["reason"] == "session_context_missing"
+    assert "section_name" in message.lower()
+    assert "path" in message.lower()
+    assert "write_session_id" not in message.lower()
 
 
 def test_empty_target_file_patch_repaired_to_file_write_for_empty_write_session() -> None:
@@ -2858,8 +2891,12 @@ def test_shell_exec_blocks_unpromoted_write_session_target_with_resume_hint(tmp_
     assert result["metadata"]["reason"] == "write_session_unpromoted_target_path"
     assert result["metadata"]["next_required_tool"]["tool_name"] == "file_write"
     assert (
-        result["metadata"]["next_required_tool"]["required_arguments"]["write_session_id"]
-        == "ws-shell-guard"
+        result["metadata"]["next_required_tool"]["required_arguments"]["path"]
+        == str(target)
+    )
+    assert (
+        result["metadata"]["next_required_tool"]["required_arguments"]["section_name"]
+        == "tests_entrypoint"
     )
 
 
@@ -5628,7 +5665,9 @@ def test_interpret_chat_output_backfills_missing_write_session_metadata_for_acti
 
     assert route == LoopRoute.DISPATCH_TOOLS
     pending = graph_state.pending_tool_calls[0]
-    assert pending.args["write_session_id"] == "ws-active"
+    # Path-based implicit resolution means write_session_id is no longer
+    # backfilled; the tool layer matches by target path.
+    assert "write_session_id" not in pending.args
     assert pending.args["section_name"] == "imports"
     assert pending.args["next_section_name"] == "tests"
 

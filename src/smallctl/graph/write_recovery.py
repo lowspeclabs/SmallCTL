@@ -422,14 +422,3 @@ def write_recovery_kind(intent: RecoveredWriteIntent) -> str:
         if tag in evidence:
             return tag
     return "assistant_text"
-
-
-def _same_path(a: str, b: str, cwd: str | None) -> bool:
-    if str(a or "").strip() == str(b or "").strip():
-        return True
-    try:
-        from ..tools.fs import _same_target_path
-
-        return _same_target_path(a, b, cwd)
-    except Exception:
-        return False

@@ -200,6 +200,13 @@ def _recovered_write_content_is_plausible(content: str, *, target_path: str = ""
     if len(candidate) < 8:
         return False
 
+    suffix = str(target_path or "").strip().lower()
+    if suffix.endswith((".html", ".htm")):
+        lowered = candidate.lower()
+        html_starters = ("<!doctype", "<html", "<head", "<body", "<script", "<style")
+        if lowered.startswith(html_starters) and "</html>" not in lowered:
+            return False
+
     if re.fullmatch(r'(?s)(?:"""[^"]*"""|\'\'\'[^\']*\'\'\')', candidate):
         return False
 

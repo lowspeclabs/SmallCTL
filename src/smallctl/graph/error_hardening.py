@@ -543,6 +543,7 @@ def _maybe_pivot_upstream_install_source_invalid(
     }
     scratchpad["_install_source_invalid_blocker"] = blocker
     scratchpad["_ui_recovery_banner"] = "Blocked: installer source invalid or unavailable"
+    _suppress_unrelated_subtasks_on_pivot(harness)
 
     registry = getattr(harness, "registry", None)
     names_fn = getattr(registry, "names", None) if registry is not None else None
@@ -602,6 +603,36 @@ def _maybe_pivot_upstream_install_source_invalid(
         interrupt_kind="ask_human",
     )
     return True
+
+
+def _suppress_unrelated_subtasks_on_pivot(harness: Any) -> None:
+    """Mark completed subtasks/artifacts from unrelated side quests as suppressed
+    once the run pivots to upstream-source-invalid handling.
+    """
+    state = getattr(harness, "state", None)
+    if state is None:
+        return
+    ledger = getattr(state, "subtask_ledger", None)
+    if ledger is None:
+        return
+    suppressed_ids: list[str] = []
+    install_markers = ("install", "setup", "deploy", "configure")
+    for task in ledger.subtasks:
+        if task.status != "done":
+            continue
+        text = " ".join((task.title or "", task.goal or "")).lower()
+        # Escalation detours are always unrelated to the install objective
+        is_escalation = "escalat" in text and ("bigger" in text or "stronger" in text or "larger" in text or "model" in text)
+        if is_escalation or not any(m in text for m in install_markers):
+            suppressed_ids.append(task.subtask_id)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        state.scratchpad = scratchpad
+    if suppressed_ids:
+        existing = set(scratchpad.get("_pivot_suppressed_subtask_ids", []))
+        existing.update(suppressed_ids)
+        scratchpad["_pivot_suppressed_subtask_ids"] = sorted(existing)
 
 
 # ---------------------------------------------------------------------------

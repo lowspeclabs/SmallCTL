@@ -12,6 +12,7 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
 from ..phases import PHASES, filter_phase_blocked_tools, is_phase_contract_active, phase_contract, normalize_phase
+from ..plans import write_plan_file
 from ..state import ExecutionPlan, PlanStep, json_safe_value
 from ..normalization import coerce_int as _coerce_int_value
 from ..runtime_error_repair import maybe_record_reported_runtime_error

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from langgraph.graph import END
@@ -244,6 +245,23 @@ class ToolPlanRuntime(LoopGraphRuntime):
         ],
     )
 
+    async def run(self, task: str) -> dict[str, object]:
+        result = await super().run(task)
+        self._restore_tool_plan_active_subtask()
+        return result
+
+    def _restore_tool_plan_active_subtask(self) -> None:
+        state = getattr(self.deps.harness, "state", None)
+        ledger = getattr(state, "subtask_ledger", None)
+        if ledger is None:
+            return
+        if ledger.active() is not None:
+            return
+        for subtask in getattr(ledger, "subtasks", []) or []:
+            if subtask.subtask_id == "tool-plan" and getattr(subtask, "evidence", None):
+                ledger.active_subtask_id = subtask.subtask_id
+                return
+
     async def _initialize_run_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)
         await initialize_loop_run(graph_state, self.deps, task=str(payload.get("input_task", "")))
@@ -452,7 +470,38 @@ class ToolPlanRuntime(LoopGraphRuntime):
             increment_metric(self.deps.harness.state, "tool_plan_repeated_read_count", repeated_read_count)
         metrics = recovery_metrics(self.deps.harness.state)
         metrics["tool_plan_observation_tokens"] = int(metrics.get("tool_plan_observation_tokens", 0) or 0) + estimate_text_tokens(rendered)
-        _attach_tool_plan_evidence(self.deps.harness, rendered)
+        _attach_tool_plan_evidence(
+            SimpleNamespace(
+                config=getattr(self.deps.harness, "config", None),
+                state=graph_state.loop_state,
+                subtask_ledger=None,
+            ),
+            rendered,
+        )
+        try:
+            from ..recovery_schema import Subtask, SubtaskLedger
+
+            ledger = getattr(graph_state.loop_state, "subtask_ledger", None)
+            if ledger is None:
+                ledger = SubtaskLedger(task_id=str(getattr(graph_state.loop_state, "thread_id", "") or "tool-plan"))
+                graph_state.loop_state.subtask_ledger = ledger
+            active = ledger.active()
+            if active is None:
+                active = Subtask(
+                    subtask_id="tool-plan",
+                    title="ToolPlan evidence",
+                    goal="Gather bounded evidence",
+                    status="active",
+                )
+                ledger.subtasks.append(active)
+                ledger.active_subtask_id = active.subtask_id
+            evidence = "ToolPlan observations: " + rendered[:210]
+            if evidence not in active.evidence:
+                active.evidence.append(evidence)
+            if getattr(self.deps.harness, "state", None) is not graph_state.loop_state:
+                self.deps.harness.state.subtask_ledger = ledger
+        except Exception:
+            pass
         self.deps.harness._runlog(
             "tool_plan_observations",
             "ToolPlan observations compressed",

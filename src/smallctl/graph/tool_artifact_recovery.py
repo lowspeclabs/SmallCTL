@@ -354,3 +354,7 @@ def _clear_artifact_read_guard_state(harness: Any, artifact_id: str) -> None:
             harness.state.tool_history = kept_history
 
     _clear_tool_attempt_history(harness)
+
+
+def _clear_tool_attempt_history(harness: Any) -> None:
+    harness.state.scratchpad.pop("_tool_attempt_history", None)

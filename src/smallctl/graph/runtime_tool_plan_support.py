@@ -31,16 +31,31 @@ def _attach_tool_plan_evidence(harness: Any, observations_text: str) -> None:
     config = getattr(harness, "config", None)
     if not bool(getattr(config, "subtask_ledger_enabled", True)):
         return
+    evidence = "ToolPlan observations: " + _compact_evidence_text(observations_text, limit=210)
     service = getattr(harness, "subtask_ledger", None)
-    if service is None:
+    if service is not None:
+        try:
+            service.import_plan_if_needed()
+            active = service.infer_or_create_active_subtask()
+            service.attach_evidence(active.subtask_id, evidence)
+        except Exception:
+            pass
+    state = getattr(harness, "state", None)
+    if state is None:
         return
     try:
-        service.import_plan_if_needed()
-        active = service.infer_or_create_active_subtask()
-        service.attach_evidence(
-            active.subtask_id,
-            "ToolPlan observations: " + _compact_evidence_text(observations_text, limit=210),
-        )
+        from ..recovery_schema import Subtask, SubtaskLedger
+
+        ledger = getattr(state, "subtask_ledger", None)
+        if ledger is None:
+            ledger = SubtaskLedger(task_id=str(getattr(state, "thread_id", "") or "tool-plan"))
+            state.subtask_ledger = ledger
+        active = ledger.active()
+        if active is None:
+            active = Subtask(subtask_id="tool-plan", title="ToolPlan evidence", goal="Gather bounded evidence", status="active")
+            ledger.subtasks.append(active)
+            ledger.active_subtask_id = active.subtask_id
+        active.evidence.append(evidence)
     except Exception:
         return
 

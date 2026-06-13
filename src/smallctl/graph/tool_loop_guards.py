@@ -421,6 +421,27 @@ def _file_read_immediate_full_repeat_is_loop(harness: Any, pending: PendingToolC
     return False
 
 
+def _file_read_failed_repeat_is_loop(harness: Any, pending: PendingToolCall) -> bool:
+    """Detect repeated file_read calls that previously failed (e.g., path not found)."""
+    if pending.tool_name != "file_read":
+        return False
+    history = _tool_attempt_history(harness)
+    if not history:
+        return False
+    cwd = _cwd_for_fingerprint(harness)
+    candidate_fingerprint = _semantic_tool_call_fingerprint("file_read", pending.args, cwd=cwd)
+    for item in reversed(history[-6:]):
+        tool_name = str(item.get("tool_name", ""))
+        if tool_name != "file_read":
+            continue
+        if _history_fingerprint(item) != candidate_fingerprint:
+            continue
+        # Check if this prior attempt was recorded as a failure
+        if item.get("success") is False:
+            return True
+    return False
+
+
 def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | None:
     if pending.tool_name in {"task_complete", "task_fail", "ask_human"}:
         _clear_tool_attempt_history(harness)
@@ -486,6 +507,15 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
             (
                 "Guard tripped: repeated full file_read loop "
                 "(same canonical path already read and no mutation or verifier ran since)"
+            ),
+        )
+    if _file_read_failed_repeat_is_loop(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            (
+                "Guard tripped: repeated file_read failure loop "
+                "(same path failed previously; do not retry the same failing read)"
             ),
         )
     if _artifact_read_targets_mutation_result_loop(harness, pending):

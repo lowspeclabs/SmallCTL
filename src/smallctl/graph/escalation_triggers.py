@@ -5,10 +5,10 @@ from typing import Any
 
 from ..models.conversation import ConversationMessage
 from ..state import json_safe_value
-from ..harness.escalation_service import EscalationService
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 from .tool_loop_guards import _tool_call_fingerprint
 from .escalation_triggers_support import (
+    _APT_SOURCES_FAILURE_CLASSES,
     _consecutive_verifier_failure_class,
     _fama_signal_classes_from_scratchpad,
     _has_active_verifier_failure,
@@ -21,6 +21,12 @@ from .escalation_triggers_support import (
     _patch_stall_trigger,
     _latest_patch_stall_path,
 )
+
+
+def _escalation_service(harness: Any) -> Any:
+    from ..harness.escalation_service import EscalationService
+
+    return EscalationService(harness)
 
 async def _maybe_auto_trigger_escalation_for_tool_loop(
     *,
@@ -49,9 +55,7 @@ async def _maybe_auto_trigger_escalation_for_tool_loop(
         "arguments": json_safe_value(pending.args),
         "error": repeat_error,
     }
-    from ..harness.escalation_service import EscalationService
-
-    result = await EscalationService(harness).run(
+    result = await _escalation_service(harness).run(
         reason=f"Repeated `{pending.tool_name}` call was blocked by the tool-loop guard.",
         question="What is the smallest safe next evidence-gathering or repair step?",
         requested_output="next_action",
@@ -126,9 +130,7 @@ async def _maybe_auto_trigger_escalation_for_same_tool_failures(
             "tool_name": tool_name,
             "error": f"Same tool failed {count} times in one turn with different arguments.",
         }
-        from ..harness.escalation_service import EscalationService
-
-        result = await EscalationService(harness).run(
+        result = await _escalation_service(harness).run(
             reason=f"`{tool_name}` failed {count} times in one turn with different arguments.",
             question="What is the smallest safe next evidence-gathering or repair step?",
             requested_output="next_action",
@@ -220,9 +222,7 @@ async def _maybe_auto_trigger_escalation_for_patch_stall(
         "tool_name": "file_patch",
         "error": f"Patch/write-session stall detected: {trigger}.",
     }
-    from ..harness.escalation_service import EscalationService
-
-    result = await EscalationService(harness).run(
+    result = await _escalation_service(harness).run(
         reason=f"Patch/write-session stall detected after file mutation: {trigger}.",
         question="What is the smallest safe next evidence-gathering or repair step?",
         requested_output="next_action",
@@ -320,9 +320,7 @@ async def _maybe_auto_trigger_escalation_for_completion_block(
         "tool_name": "task_complete",
         "error": "Repeated task_complete calls were blocked by post-change verification while escalation was requested.",
     }
-    from ..harness.escalation_service import EscalationService
-
-    result = await EscalationService(harness).run(
+    result = await _escalation_service(harness).run(
         reason="User explicitly requested escalation after repeated task_complete verification blocks.",
         question="What is the smallest safe next step to resolve the stuck completion/verification loop?",
         requested_output="next_action",
@@ -471,9 +469,7 @@ async def _maybe_auto_trigger_escalation_for_verifier_stall(
         "tool_name": "verifier",
         "error": f"Verifier stalled with {threshold} consecutive {failure_class} failures.",
     }
-    from ..harness.escalation_service import EscalationService
-
-    result = await EscalationService(harness).run(
+    result = await _escalation_service(harness).run(
         reason=f"{threshold} consecutive verifier failures of class '{failure_class}'. Small model is stuck in a repair loop.",
         question="What is the smallest safe next evidence-gathering or repair step?",
         requested_output="next_action",
@@ -618,9 +614,7 @@ async def _maybe_auto_trigger_escalation_for_apt_sources_failure(
         "tool_name": "ssh_exec",
         "error": "apt sources malformed; escalating to bigger model for deb822 guidance.",
     }
-    from ..harness.escalation_service import EscalationService
-
-    result = await EscalationService(harness).run(
+    result = await _escalation_service(harness).run(
         reason="apt command reports malformed sources file error in stderr (exit code may be 0 but apt failed).",
         question=(
             "How should I fix a malformed apt sources file on a modern Debian/Ubuntu system that uses deb822 .sources format? "

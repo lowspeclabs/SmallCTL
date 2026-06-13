@@ -105,6 +105,15 @@ def format_tool_result_display(
             failure_mode = str(metadata.get("failure_mode") or metadata.get("ssh_error_class") or "").strip()
             if failure_mode == "remote_exit_nonzero":
                 error_text = f"SSH reached the remote host; remote command exited non-zero. {error_text}"
+            elif failure_mode == "interactive_installer_blocked":
+                error_text = f"SSH reached the remote host; installer/dialog interaction blocked execution. {error_text}"
+            elif failure_mode == "remote_installer_download_error":
+                output = result.output if isinstance(result.output, dict) else {}
+                exit_code = output.get("exit_code") if isinstance(output, dict) else None
+                prefix = "--- [ACTIONABLE FAILURE] ---"
+                if isinstance(exit_code, int):
+                    prefix = f"{prefix}\nExit code: {exit_code}"
+                error_text = f"{prefix}\n{error_text}"
         recovery_hint = _format_recovery_hint(metadata)
         if recovery_hint:
             error_text = f"{error_text}\n\n{recovery_hint}"

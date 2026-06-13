@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..models.tool_result import ToolEnvelope
 from ..state import WriteSession, json_safe_value
 from ..task_targets import extract_task_target_paths, primary_task_target_path
 from .state import PendingToolCall
@@ -41,20 +42,13 @@ from .tool_loop_guards import (
     _detect_hallucinated_tool_call,
     _detect_placeholder_tool_call,
     _detect_repeated_tool_loop,
-    _record_tool_attempt,
     _repeat_loop_limits,
-    _clear_tool_attempt_history,
     allow_repeated_tool_call_once,
 )
 from .tool_loop_guards_support import (
-    _normalize_json_like,
-    _normalize_path_token,
-    _normalize_shell_command,
-    _normalize_tool_args,
     _normalize_token,
     _placeholder_token,
     _placeholder_value_looks_generic,
-    _tool_call_fingerprint,
 )
 from .tool_write_session_policy import (
     _active_write_session_for_target,

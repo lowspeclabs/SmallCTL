@@ -208,9 +208,8 @@ def _repair_active_write_session_args(
                     args["section_name"] = section_name
                     repaired = True
         elif session_matches_target:
-            if session_id != session.write_session_id:
-                args["write_session_id"] = session.write_session_id
-                repaired = True
+            # Path-based implicit resolution: do NOT inject write_session_id.
+            # The tool layer will match the path to the active session.
             if _is_blank(args.get("path")) and str(session.write_target_path or "").strip():
                 args["path"] = session.write_target_path
                 repaired = True
@@ -296,7 +295,6 @@ def _salvage_active_write_session_append(
         repaired_args: dict[str, Any] = {
             "path": candidate_path or session.write_target_path,
             "content": str(candidate_content),
-            "write_session_id": session.write_session_id,
             "section_name": str(
                 candidate.args.get("section_name")
                 or candidate.args.get("section_id")
@@ -355,21 +353,26 @@ def _detect_oversize_write_payload(
         except Exception:
             target_path = None
             session_path = None
-        if target_path == session_path and (
-            not pending.args.get("write_session_id")
-            or pending.args.get("write_session_id") != write_session.write_session_id
-        ):
-            message = (
-                f"A write session `{write_session.write_session_id}` is already active for `{write_session.write_target_path}`. "
-                "You must include the correct `write_session_id` and section metadata to continue. "
-                "Do not attempt to overwrite the file directly during an active session."
+        if target_path == session_path:
+            has_section = bool(
+                str(pending.args.get("section_name") or "").strip()
+                or str(pending.args.get("section_id") or "").strip()
             )
-            return message, {
-                "tool_name": pending.tool_name,
-                "tool_call_id": pending.tool_call_id,
-                "reason": "session_context_missing",
-                "active_session_id": write_session.write_session_id,
-            }
+            has_next_section = bool(str(pending.args.get("next_section_name") or "").strip())
+            session_next = str(getattr(write_session, "write_next_section", "") or "").strip()
+            if not has_section and not has_next_section and not session_next:
+                message = (
+                    f"A write session is already active for `{write_session.write_target_path}`. "
+                    "This large payload needs a `section_name` so the harness can place it in the staged file. "
+                    "Use chunked authoring: send one logical section at a time with `path` and `section_name`, "
+                    "and omit `next_section_name` on the final section."
+                )
+                return message, {
+                    "tool_name": pending.tool_name,
+                    "tool_call_id": pending.tool_call_id,
+                    "reason": "session_context_missing",
+                    "active_session_path": write_session.write_target_path,
+                }
 
     threshold = _write_policy_value(harness, "small_model_hard_write_chars", 4000)
     if payload_size > threshold and not (write_session and pending.args.get("write_session_id")):
@@ -483,9 +486,9 @@ def _build_schema_repair_message(
                 next_hint = " Omit `next_section_name` on the final chunk to finalize the session."
             return _with_schema_hint(
                 f"Tool call '{pending.tool_name}' was emitted without arguments. "
-                f"Continue Write Session `{session.write_session_id}` for `{session.write_target_path}`. "
+                f"Continue writing to `{session.write_target_path}`. "
                 f"Resend `file_write` with these required fields: {required_text}, plus "
-                f"`write_session_id='{session.write_session_id}'` and `section_name='{section_name}'`."
+                f"`section_name='{section_name}'`."
                 f"{next_hint} Do not switch away from `file_write` or `file_read` unless you truly need local context for a repair."
                 " For a narrow repair inside the staged copy, use `file_patch` for exact text or `ast_patch` for structural edits instead of `file_write`."
             )

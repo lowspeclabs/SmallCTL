@@ -9,8 +9,10 @@ from .prompt_fragments import (
     _ARTIFACT_PAGING,
     _CONTRACT_PHASE_FOCUS_LARGE,
     _CONTRACT_PHASE_FOCUS_SMALL,
+    _EVIDENCE_ANCHORED_DIAGNOSIS_RULE,
     _LARGE_MODEL_STRUCTURED_REASONING,
     _LOCAL_ARTIFACT_TASK_PREFIX,
+    _LOCAL_SCOPE_PREFERENCE,
     _MEMORY_PERSIST_KEY_FACTS,
     _META_COGNITIVE_REPAIR_BRIEF,
     _PATCH_VERBATIM_RULE,
@@ -44,6 +46,7 @@ from .prompts_support import (
     _render_plan_step,
     _state_has_remote_cleanup_intent,
 )
+from .harness.task_classifier_support import task_has_local_scope_markers
 from .tools.fs_loop_guard import build_loop_guard_prompt
 from .tools.fs_write_sessions import write_session_contract
 
@@ -162,7 +165,7 @@ def build_system_prompt(
                 "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. "
                 "When using `file_write`, include these parameters: "
                 "`content`: REQUIRED. This must be a string containing the actual file content you want to write. Do not omit this field. Do not use `content_preview`, `content_bytes`, `content_chars`, or `content_sha256` as substitutes—the harness only reads the literal `content` field. "
-                "`write_session_id`: Use the ID provided by the harness. "
+                "`path`: REQUIRED. The target file path. The harness matches the path to any active Write Session automatically. "
                 "`section_name` or `section_id`: A descriptive name for the current chunk (e.g., 'imports'). "
                 "`section_role`: Optional role label for the chunk. "
                 "`next_section_name`: The name of the section you will write next. Omit this for the final chunk to finalize the session. "
@@ -203,6 +206,8 @@ def build_system_prompt(
             + f"{', '.join(local_artifacts)}. "
             + "Use local file_write for the report; use SSH tools only for evidence gathering."
         )
+    if _task_has_local_scope(state):
+        parts.append(_LOCAL_SCOPE_PREFERENCE)
     if state.contract_phase() == "repair":
         repair_bits = []
         if state.last_failure_class:
@@ -254,11 +259,11 @@ def build_system_prompt(
         ws_contract = write_session_contract(session)
         parts.append(
             "\n\n### WRITE SESSION CONTRACT\n"
-            f"active_write_session_id: {ws_contract['active_write_session_id']}\n"
+            f"target_path: {ws_contract['target_path']}\n"
             f"checkpointed_sections_ordered: {json.dumps(ws_contract['checkpointed_sections'])}\n"
             f"next_legal_operation: {ws_contract['next_legal_operation']}\n"
-            "Before every authoring write, copy this contract into the tool arguments by using the active write_session_id, "
-            "target only the next legal section, and never write an already-checkpointed section. "
+            "Continue authoring by writing to the target path. The harness matches the path to the active session automatically. "
+            "Target only the next legal section, and never write an already-checkpointed section. "
             "The only exception is an explicit full staged overwrite: section_name='full_file' and replace_strategy='overwrite'."
         )
         if small_model:
@@ -275,7 +280,7 @@ def build_system_prompt(
             if session.write_sections_completed:
                 completed_hint = f"completed={', '.join(session.write_sections_completed)} | "
             parts.append(
-                f"\nWRITE SESSION: {session.write_session_id} | target={session.write_target_path} | "
+                f"\nWRITE SESSION: target={session.write_target_path} | "
                 f"{completed_hint}next={session.write_next_section or 'finish'}. "
                 f"Continue writing or use file_patch/ast_patch for edits."
             )
@@ -352,7 +357,7 @@ def build_system_prompt(
                 )
             else:
                 recovery_guidance = (
-                    f"Continue from the active section instead of restarting the file. Resume with `file_write` plus the active session metadata for chunk continuation, "
+                    f"Continue from the active section instead of restarting the file. Resume with `file_write` to the target path for chunk continuation, "
                     "or use `file_patch` for a narrow exact edit inside the staged copy, or `ast_patch` for a narrow structural edit. If prior chunks are not fully visible "
                     f"because previews were truncated or compacted, recover the current staged content first with `file_read(path='{session.write_target_path}')` or "
                     f"`artifact_read(artifact_id='{session.write_session_id}__stage')`. If you use `artifact_read` for the staged artifact, keep paging `start_line` forward "
@@ -388,13 +393,19 @@ def build_system_prompt(
         parts.append("LATEST VERIFIER: " + " | ".join(verifier_bits) + ". ")
         if str(verifier_verdict.get("verdict") or "").strip() not in {"", "pass"} and not state.acceptance_waived:
             rejection_count = int(state.scratchpad.get("_verifier_rejection_count", 0) or 0)
-            if rejection_count >= 3:
-                # Auto-waive: mark acceptance as waived and inject nudge
-                state.acceptance_waived = True
+            required_classes = state.scratchpad.get("_verifier_loop_required_action_classes")
+            if isinstance(required_classes, list) and required_classes and rejection_count >= 3:
                 parts.append(
-                    "VERIFIER GUARD WAIVED: The verifier has rejected completion 3+ times. "
-                    "This may be a false positive for audit tasks. You may now call task_complete "
-                    "if you have sufficient evidence that the task is done correctly."
+                    "VERIFIER LOOP HARD STOP: The verifier has rejected completion 3+ times. "
+                    f"Your next action MUST change class. Allowed classes: {', '.join(required_classes)}. "
+                    "Research means web_search/web_fetch/ask_human; mutation means a concrete file/SSH write or patch; "
+                    "ask_user means ask_human or escalate_to_bigger_model; stop_blocked means task_fail. "
+                    "Do not run another verifier in the same class as the failing one."
+                )
+            elif rejection_count >= 3:
+                parts.append(
+                    "VERIFIER LOOP WARNING: The verifier has rejected completion 3+ times. "
+                    "Do not repeat the same verifier. Change strategy: research the blocker, make a targeted mutation, ask the user, or stop blocked."
                 )
             else:
                 parts.append(
@@ -576,6 +587,11 @@ def build_system_prompt(
                     "If exact weather cannot be verified from the available evidence, say that directly."
                 )
     if state.run_brief.original_task:
+        task = str(state.run_brief.original_task).lower()
+        is_install_task = any(marker in task for marker in ("install", "setup", "deploy", "configure"))
+        is_repair = state.contract_phase() == "repair"
+        if is_install_task or is_repair:
+            parts.append(_EVIDENCE_ANCHORED_DIAGNOSIS_RULE)
         parts.append(
             f"\nTASK: {state.run_brief.original_task}\n"
             "Fulfill all requirements. Once finished, you MUST call `task_complete(message='...')`. "
@@ -704,3 +720,13 @@ def build_planning_prompt(
     if state.planner_requested_output_path:
         planning_sections.append(f"Export target: {state.planner_requested_output_path}")
     return f"{prompt}\n\n---\n" + "\n\n".join(planning_sections)
+
+
+def _task_has_local_scope(state: LoopState) -> bool:
+    texts: list[str] = []
+    if state.run_brief.original_task:
+        texts.append(state.run_brief.original_task)
+    if state.working_memory.current_goal:
+        texts.append(state.working_memory.current_goal)
+    combined = " ".join(texts)
+    return task_has_local_scope_markers(combined)

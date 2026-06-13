@@ -11,6 +11,9 @@ from .request_budget import approx_token_count as _budget_approx_token_count
 
 def request_first_token_timeout_sec(client: Any, tools: list[dict[str, Any]]) -> float:
     timeout = float(client.first_token_timeout_sec)
+    if _request_has_write_heavy_tool(client, tools):
+        multiplier = float(getattr(client, "WRITE_HEAVY_FIRST_TOKEN_TIMEOUT_MULTIPLIER", 2.0))
+        return max(timeout, timeout * multiplier)
     if client.provider_profile != "lmstudio":
         return timeout
     if client.is_small_model and not tools:
@@ -24,6 +27,26 @@ def request_first_token_timeout_sec(client: Any, tools: list[dict[str, Any]]) ->
         if "gemma" in normalized_model:
             return max(timeout, 60.0)
     return timeout
+
+
+def _request_has_write_heavy_tool(client: Any, tools: list[dict[str, Any]]) -> bool:
+    if not tools:
+        return False
+    write_tool_names = set(getattr(client, "_WRITE_HEAVY_TOOL_NAMES", set()) or set())
+    write_argument_fields = set(getattr(client, "_WRITE_HEAVY_ARGUMENT_FIELDS", set()) or set())
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        tool_name = str(function.get("name") or "").strip()
+        parameters = function.get("parameters")
+        properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+        property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
+        if tool_name in write_tool_names or property_names & write_argument_fields:
+            return True
+    return False
 
 
 def llamacpp_model_unloaded_details(

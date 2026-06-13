@@ -147,11 +147,10 @@ def _empty_target_patch_file_write_metadata(
     }
     required_fields = ["path", "content"]
     if session_matches_target and active_session_id:
-        required_arguments["write_session_id"] = active_session_id
         required_arguments["section_name"] = (
             str(getattr(session, "write_next_section", "") or "").strip() or "initial_content"
         )
-        required_fields.extend(["write_session_id", "section_name", "replace_strategy"])
+        required_fields.extend(["section_name", "replace_strategy"])
 
     return {
         "path": str(target),

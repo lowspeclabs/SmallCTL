@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from smallctl.harness.task_classifier import classify_task_mode, task_is_local_coding_target
 from smallctl.harness.task_classifier_support import has_remote_execution_target
+from smallctl.harness.task_intent import extract_intent_state
 from smallctl.harness.tool_visibility import filter_tools_for_runtime_state, _append_retry_tool_exposures
 from smallctl.harness.run_mode import ensure_remote_tool_profile
 from smallctl.remote_scope import remote_scope_is_active
 from smallctl.state import LoopState
+from smallctl.tools.profiles import classify_tool_profiles
 
 
 def test_task_is_local_coding_target_detects_py_script() -> None:
@@ -115,3 +119,24 @@ def test_ensure_remote_tool_profile_skips_network_for_local_coding() -> None:
     harness = type("Harness", (), {"state": state})()
     ensure_remote_tool_profile(harness)
     assert "network" not in state.active_tool_profiles
+
+
+def test_current_user_known_hosts_ip_cleanup_stays_local() -> None:
+    task = "remove entries related to 192.168.1.16* from the known hosts file of the current user"
+
+    assert classify_task_mode(task) == "local_execute"
+
+    harness = SimpleNamespace(
+        state=SimpleNamespace(
+            current_phase="execute",
+            working_memory=SimpleNamespace(failures=[], next_actions=[]),
+        ),
+        _looks_like_shell_request=lambda value: True,
+    )
+    primary, _secondary, tags = extract_intent_state(harness, task)
+    assert primary != "requested_ssh_exec"
+    assert "ssh_exec" not in tags
+
+    profiles = classify_tool_profiles(task)
+    assert "network" not in profiles
+    assert "network_read" not in profiles

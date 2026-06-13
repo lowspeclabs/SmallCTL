@@ -7,6 +7,7 @@ import sys
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from smallctl.config import SmallctlConfig, resolve_config
 from smallctl.config_support import _env_config_key_names
@@ -867,16 +868,19 @@ def test_loop_guard_decision_and_emit_block() -> None:
 def test_task_classification_rules_table_preserves_precedence() -> None:
     from smallctl.harness.task_classifier import _TASK_CLASSIFICATION_RULES, classify_task_mode
 
-    # Precedence: local_execute > chat > plan_only > remote_execute > debug_inspect > analysis
+    # Precedence: local_execute > hybrid_execute > chat > plan_only > remote_execute > debug_inspect > analysis
     assert _TASK_CLASSIFICATION_RULES[0].mode == "local_execute"
     assert _TASK_CLASSIFICATION_RULES[1].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[2].mode == "chat"
-    assert _TASK_CLASSIFICATION_RULES[3].mode == "plan_only"
-    assert _TASK_CLASSIFICATION_RULES[4].mode == "remote_execute"
-    assert _TASK_CLASSIFICATION_RULES[5].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[6].mode == "debug_inspect"
-    assert _TASK_CLASSIFICATION_RULES[7].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[8].mode == "analysis"
+    assert _TASK_CLASSIFICATION_RULES[2].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[3].mode == "hybrid_execute"
+    assert _TASK_CLASSIFICATION_RULES[4].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[5].mode == "chat"
+    assert _TASK_CLASSIFICATION_RULES[6].mode == "plan_only"
+    assert _TASK_CLASSIFICATION_RULES[7].mode == "remote_execute"
+    assert _TASK_CLASSIFICATION_RULES[8].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[9].mode == "debug_inspect"
+    assert _TASK_CLASSIFICATION_RULES[10].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[11].mode == "analysis"
     # Default fallback
     assert classify_task_mode("") == "chat"
     assert classify_task_mode("hi") == "chat"
@@ -1585,11 +1589,10 @@ def test_control_write_session_helpers_build_resume_actions_and_warning() -> Non
     assert action["tool_name"] == "file_write"
     assert action["required_arguments"] == {
         "path": "src/app.py",
-        "write_session_id": "ws-1",
         "section_name": "body",
     }
     assert "Last schema failure was missing: content" in action["notes"]
-    assert "write_session_id='ws-1'" in str(write_session_warning(state))
+    assert "Next expected section: `body`" in str(write_session_warning(state))
 
     session.write_sections_completed = True
     session.write_next_section = ""

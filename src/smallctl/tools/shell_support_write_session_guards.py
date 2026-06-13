@@ -142,7 +142,7 @@ def _shell_write_session_artifact_delete_guard(state: LoopState, command: str) -
         error_kind="write_session_artifact_delete_blocked",
         next_required_tool={
             "tool_name": "finalize_write_session" if _write_session_can_finalize(session) else "file_write",
-            "required_fields": [] if _write_session_can_finalize(session) else ["path", "content", "write_session_id", "section_name"],
+            "required_fields": [] if _write_session_can_finalize(session) else ["path", "content", "section_name"],
             "required_arguments": {} if _write_session_can_finalize(session) else _write_session_resume_metadata(session, path=target_path).get("required_arguments", {}),
             "optional_fields": [] if _write_session_can_finalize(session) else ["next_section_name"],
             "notes": [

@@ -5,6 +5,7 @@ import shutil
 from typing import Any
 
 from .ssh_parsing import normalize_ssh_target, shell_join
+from .ansi_utils import detect_tui_application
 
 _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS = (
     "not found",
@@ -127,6 +128,10 @@ def ssh_failure_kind(*, exit_code: int, stderr: str) -> str:
 
 def ssh_error_class(*, exit_code: int, stderr: str) -> str:
     lowered = str(stderr or "").strip().lower()
+    if detect_tui_application(stderr) is not None and (
+        "installer" in lowered or "dialog" in lowered or "error opening terminal" in lowered
+    ):
+        return "interactive_installer_blocked"
     if "permission denied" in lowered:
         return "auth_permission_denied"
     if "host key verification failed" in lowered or "remote host identification has changed" in lowered:

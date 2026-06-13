@@ -341,6 +341,19 @@ def classify_shell_outcome(command: str, returncode: int, stdout: str, stderr: s
     cmd = str(command or "").strip()
     if returncode == 0:
         return {"status": "success", "kind": "ok"}
+    combined = f"{stdout}\n{stderr}".lower()
+    if (
+        ("curl" in cmd.lower() or "wget" in cmd.lower())
+        and (" sh " in f" {cmd.lower()} " or " bash " in f" {cmd.lower()} ")
+        and ("404" in combined or "not found" in combined)
+    ):
+        return {
+            "status": "failure",
+            "kind": "error",
+            "exit_code": returncode,
+            "failure_mode": "remote_installer_download_error",
+            "next_required_action": "Stop executing the downloaded file; fetch and inspect the installer source or verify the URL first.",
+        }
     absence_patterns = [
         (r'\bfind\s+.*-name\s+', "absence_probe"),
         (r'\bwhich\s+', "absence_probe"),

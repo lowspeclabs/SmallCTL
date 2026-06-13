@@ -7,7 +7,6 @@ from typing import Any, TYPE_CHECKING
 
 from ..client import OpenAICompatClient
 from .memory import assess_write_task_complexity
-from ..guards import is_four_b_or_under_model_name
 from ..interrupt_replies import (
     is_interrupt_affirmative_response,
     is_interrupt_response,
@@ -65,8 +64,6 @@ def should_enable_complex_write_chat_draft(
     """Return True when complex write tasks should take the chat drafting path."""
     text = str(task or "").strip()
     if not text:
-        return False
-    if not is_four_b_or_under_model_name(model_name):
         return False
 
     analysis = assess_write_task_complexity(text, cwd=cwd)

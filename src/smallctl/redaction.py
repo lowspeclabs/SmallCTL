@@ -58,6 +58,7 @@ _SENSITIVE_TEXT_PATTERNS = (
     re.compile(r"(\bpassword\s+is\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(\bpassword\s*(?:is\s+|=|:)?\s*")([^"\r\n]+)(")', re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s*')([^'\r\n]+)(')", re.IGNORECASE),
+    re.compile(r"(\bpassword\s*[=:]\s*)([^\s,;]+)", re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(("|\')password("|\')\s*:\s*("|\'))([^"\r\n]+)(("|\'))', re.IGNORECASE),
     re.compile(

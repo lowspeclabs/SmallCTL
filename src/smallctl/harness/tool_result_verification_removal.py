@@ -104,6 +104,24 @@ def _absence_probe_found_resources(
     return False
 
 
+def _looks_like_ssh_transport_failure(*, exit_code: Any, stdout: str, stderr: str) -> bool:
+    if exit_code_matches(exit_code, {255}):
+        return True
+    combined = f"{stdout}\n{stderr}".lower()
+    return any(
+        marker in combined
+        for marker in (
+            "no route to host",
+            "connection refused",
+            "connection timed out",
+            "network is unreachable",
+            "could not resolve hostname",
+            "permission denied (publickey",
+            "permission denied, please try again",
+        )
+    )
+
+
 def _classify_removal_absence_probe(
     state: Any,
     *,
@@ -111,6 +129,7 @@ def _classify_removal_absence_probe(
     exit_code: Any,
     stdout: str,
     stderr: str,
+    tool_name: str = "",
 ) -> dict[str, Any]:
     default = {
         "is_absence_probe": False,
@@ -126,6 +145,12 @@ def _classify_removal_absence_probe(
 
     out = str(stdout or "").strip()
     err = str(stderr or "").strip()
+    if str(tool_name or "").strip() == "ssh_exec" and _looks_like_ssh_transport_failure(
+        exit_code=exit_code,
+        stdout=out,
+        stderr=err,
+    ):
+        return default
     combined = "\n".join(part for part in (out, err) if part).strip()
     found_resources = _absence_probe_found_resources(command=cmd, stdout=out, stderr=err, exit_code=exit_code)
     if found_resources:

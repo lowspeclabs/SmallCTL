@@ -212,6 +212,8 @@ class PromptBuilderService:
             ],
             lane_routes=retrieval_bundle.lane_routes,
             stale_lane_counts=stale_lane_counts,
+            repeat_counts=retrieval_bundle.repeat_counts,
+            applied_decays=retrieval_bundle.applied_decays,
             experience_suppression_reason=(
                 "fresh_run"
                 if fresh_run_active

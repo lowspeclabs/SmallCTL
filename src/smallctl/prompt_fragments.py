@@ -69,6 +69,15 @@ _PATCH_VERBATIM_RULE = (
     "Do not reconstruct target text from memory, summaries, or previews. If the file may have changed since your last read, re-read it immediately before patching. "
 )
 
+_EVIDENCE_ANCHORED_DIAGNOSIS_RULE = (
+    "DIAGNOSIS RULE: Before stating a cause, anchor it to evidence with four fields: "
+    "(1) observed line: the exact tool output line you are interpreting; "
+    "(2) interpretation: what that line means in plain language; "
+    "(3) confidence: high/medium/low and why; "
+    "(4) next differentiating action: the one tool call that would confirm or refute the interpretation. "
+    "Do not state causes like 'HTTP 503' or 'local DNS issue' unless a tool output explicitly supports them."
+)
+
 _SMALL_GEMMA_STRICT_FORMAT = (
     "SMALL GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
     "`<channel|>`, `<thought>`, angle-bracket function wrappers like `<task_complete(...)>`, "
@@ -152,6 +161,11 @@ _STDERR_CIRCUIT_BREAKER_PREFIX = (
 
 _LOCAL_ARTIFACT_TASK_PREFIX = (
     "LOCAL ARTIFACT TASK: Remote evidence collection is required, but the final report must be written to local path(s): "
+)
+
+_LOCAL_SCOPE_PREFERENCE = (
+    "SCOPE: If the task mentions 'current user', 'this host', or local files such as ~/.ssh/known_hosts, "
+    "prefer local file tools and shell_exec over ssh_exec, even if an IP address appears in the task text. "
 )
 
 _REMOTE_CLEANUP_TASK_KEYWORDS = (

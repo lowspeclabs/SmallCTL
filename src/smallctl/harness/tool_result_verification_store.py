@@ -15,6 +15,9 @@ from .tool_result_verification_constants import _INTERACTIVE_PROMPT_RE
 from .tool_result_verification_helpers import (
     classify_execution_failure,
     command_is_binary_probe,
+    command_is_install_absence_probe,
+    exit_code_matches,
+    install_absence_probe_confirmed,
     looks_like_infinite_loop,
     output_confirms_not_found,
     snip_text,
@@ -83,6 +86,7 @@ def _store_verifier_verdict(
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
+        tool_name=tool_name,
     )
     status = str(result.status or metadata.get("status") or "").strip()
     approval_denied = bool(metadata.get("approval_denied"))
@@ -121,6 +125,15 @@ def _store_verifier_verdict(
         # which, whereis, etc.) that confirms the resource is absent is
         # informational negative intelligence, not a failure.
         verdict = "pass"
+    elif (
+        exit_code == 1
+        and command_is_install_absence_probe(command)
+        and install_absence_probe_confirmed(command=command, exit_code=exit_code, stdout=raw_stdout, stderr=raw_stderr)
+    ):
+        # Exit 1 from a piped absence probe such as `dpkg -l | grep -i fog`
+        # with no matches is valid negative intelligence for install tasks.
+        verdict = "pass"
+        semantic_failure = "install absence probe returned no matches"
     else:
         verdict = "fail"
 
@@ -162,6 +175,8 @@ def _store_verifier_verdict(
             semantic_failure = install_weak_reason
 
     failure_class = "approval_denied" if approval_denied else classify_execution_failure(result.error or stderr or stdout)
+    if not approval_denied and tool_name == "ssh_exec" and exit_code_matches(exit_code, {255}):
+        failure_class = "environment"
     if insufficient_verifier:
         failure_class = "insufficient_verifier"
     if install_verifier_weak:

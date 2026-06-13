@@ -39,6 +39,7 @@ def classify_tool_profiles(
     profiles: set[ToolProfile] = set(DEFAULT_PROFILES)
     if not text:
         return profiles
+    local_ssh_file_task = _looks_like_local_ssh_file_task(text)
 
     if _matches_any(
         text,
@@ -57,7 +58,7 @@ def classify_tool_profiles(
     ):
         profiles.add(DATA_PROFILE)
 
-    if _matches_any(
+    if not local_ssh_file_task and _matches_any(
         text,
         (
             "http",
@@ -79,23 +80,26 @@ def classify_tool_profiles(
         profiles.add(NETWORK_PROFILE)
         profiles.add(NETWORK_RAW_PROFILE)
 
-    if _matches_any(
-        text,
-        (
-            "ssh",
-            "scp",
-            "sftp",
-            "sshd",
-            "remote host",
-            "remote server",
-            "remote command",
-            "username",
-            "password",
-        ),
-    ) or _looks_like_remote_access_request(text):
+    if not local_ssh_file_task and (
+        _matches_any(
+            text,
+            (
+                "ssh",
+                "scp",
+                "sftp",
+                "sshd",
+                "remote host",
+                "remote server",
+                "remote command",
+                "username",
+                "password",
+            ),
+        )
+        or _looks_like_remote_access_request(text)
+    ):
         profiles.add(NETWORK_PROFILE)
 
-    if _matches_any(
+    if not local_ssh_file_task and _matches_any(
         text,
         (
             "latest",
@@ -239,25 +243,41 @@ def _matches_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
 
 
+def _looks_like_local_ssh_file_task(text: str) -> bool:
+    has_ssh_file = _matches_any(
+        text,
+        ("known_hosts", "known hosts", "authorized_keys", "authorized keys", "~/.ssh", "/.ssh/", ".ssh/"),
+    )
+    if not has_ssh_file:
+        return False
+    if _matches_any(
+        text,
+        (
+            "current user",
+            "current user's",
+            "this user",
+            "this user's",
+            "my user",
+            "my user's",
+            "this host",
+            "this machine",
+            "local",
+            "locally",
+            "on this host",
+            "on this machine",
+        ),
+    ):
+        return True
+    return not _matches_any(text, ("ssh to", "connect to", "remote host", "remote server", "target host", "over ssh", "via ssh"))
+
+
 def _looks_like_remote_access_request(text: str) -> bool:
     if _USER_AT_HOST_RE.search(text):
         return True
     has_ip = bool(_IPV4_RE.search(text))
     if not has_ip:
         return False
-    return _matches_any(
+    return re.search(
+        r"\b(?:username|password|remote|host|server|ssh|docker|install|deploy|configure)\b|\bspin\s+up\b",
         text,
-        (
-            "username",
-            "password",
-            "remote",
-            "host",
-            "server",
-            "ssh",
-            "docker",
-            "install",
-            "deploy",
-            "configure",
-            "spin up",
-        ),
-    )
+    ) is not None

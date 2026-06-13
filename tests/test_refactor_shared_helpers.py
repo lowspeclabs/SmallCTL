@@ -14,7 +14,7 @@ from smallctl.graph.shell_outcomes import (
     _shell_ssh_retry_hint,
     _shell_workspace_relative_retry_hint,
 )
-from smallctl.harness.shell_attempts import (
+from smallctl.shell_utils import (
     file_read_cache_key,
     shell_attempt_family_key,
     shell_attempt_is_diagnostic,

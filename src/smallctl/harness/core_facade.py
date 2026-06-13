@@ -28,6 +28,7 @@ from ..state import (
     json_safe_value,
 )
 from ..normalization import dedupe_keep_tail
+from ..redaction import redact_sensitive_text
 from ..tools import build_registry
 from ..tools.profiles import (
     MUTATE_PROFILE,
@@ -36,7 +37,9 @@ from ..tools.profiles import (
     NETWORK_READ_PROFILE,
     classify_tool_profiles,
 )
+from ..tools.control_phase_gates import task_involves_interactive_program
 from .task_intent import completion_next_action, extract_intent_state, next_action_for_task
+from .task_classifier_support import task_is_local_ssh_file_target
 from .tool_message_compaction import trim_recent_messages_window
 
 
@@ -68,8 +71,17 @@ async def _emit(
 ) -> None:
     if handler is None:
         return
+    scratchpad = getattr(self.state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        ledger = scratchpad.setdefault("_ui_event_ledger", [])
+        if isinstance(ledger, list):
+            ledger.append({
+                "event_type": str(getattr(event.event_type, "value", event.event_type)),
+                "content": redact_sensitive_text(str(event.content or "")),
+            })
+            if len(ledger) > 80:
+                del ledger[:-80]
     if event.data.get("is_api_error"):
-        scratchpad = getattr(self.state, "scratchpad", None)
         if isinstance(scratchpad, dict):
             scratchpad["_ui_api_error_count"] = int(scratchpad.get("_ui_api_error_count", 0) or 0) + 1
     maybe = handler(event)
@@ -581,6 +593,95 @@ def _looks_like_soft_resteer(current_task: str, last_task: str) -> bool:
     return similarity >= 0.6
 
 
+_REMOTE_INSTALL_MARKERS: tuple[str, ...] = (
+    "install",
+    "setup",
+    "deploy",
+    "installer",
+    "installfog",
+    "bootstrap",
+)
+
+_INTERACTIVE_REMOTE_INSTALLER_MARKERS: tuple[str, ...] = (
+    "installfog",
+    "installfog.sh",
+    "fog",
+    "pxe",
+    "installer",
+    "setup",
+    "package config",
+    "follow prompts",
+    "interactive install",
+    "run the installer",
+)
+
+
+def _looks_like_remote_install_task(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _REMOTE_INSTALL_MARKERS)
+
+
+def _looks_like_interactive_remote_installer(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _INTERACTIVE_REMOTE_INSTALLER_MARKERS)
+
+
+def _state_signals_interactive_program(state: Any) -> bool:
+    try:
+        return bool(task_involves_interactive_program(state))
+    except Exception:
+        return False
+
+
+def _numeric_scratchpad_signal(scratchpad: dict[str, Any], keys: tuple[str, ...]) -> bool:
+    for key in keys:
+        try:
+            if int(scratchpad.get(key, 0) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _state_signals_remote_install_recovery(state: Any) -> bool:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    if scratchpad.get("_install_source_invalid_blocker"):
+        return True
+    diagnosis = scratchpad.get("_install_source_diagnosis")
+    if isinstance(diagnosis, dict):
+        if diagnosis.get("public_dns_nxdomain") and diagnosis.get("network_ok"):
+            if _numeric_scratchpad_signal(diagnosis, ("invalid_fetch_count", "resolve_fail_count")):
+                return True
+        if diagnosis.get("install_context_resolve_failed"):
+            return True
+    if _numeric_scratchpad_signal(
+        scratchpad,
+        (
+            "_install_source_invalid_fetch_count",
+            "_install_source_resolve_fail_count",
+            "_remote_install_fetch_fail_count",
+            "_remote_install_resolve_fail_count",
+        ),
+    ):
+        return True
+    preflight = scratchpad.get("_remote_installer_preflight")
+    if isinstance(preflight, dict):
+        for entry in preflight.values():
+            if isinstance(entry, dict) and str(entry.get("status") or "").strip() in {
+                "required",
+                "missing_critical_files",
+                "corrupt",
+            }:
+                return True
+    return False
+
+
 def _activate_tool_profiles(self: Any, task: str) -> None:
     # Fix 6: Freeze tool profiles on soft resteers to prevent tool whiplash
     existing_profiles = list(getattr(self.state, "active_tool_profiles", []) or [])
@@ -610,6 +711,8 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
             # small models from hallucinating remote operations during local work.
             profiles.discard(NETWORK_PROFILE)
             profiles.discard(NETWORK_RAW_PROFILE)
+            if task_is_local_ssh_file_target(task):
+                profiles.discard(NETWORK_READ_PROFILE)
         resolved_remote = self.state.scratchpad.get("_resolved_remote_followup")
         if isinstance(resolved_remote, dict) and resolved_remote:
             profiles.add(NETWORK_PROFILE)
@@ -651,6 +754,30 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
                 or task_matches_remote_continuation(self.state, task)
             ):
                 profiles.add(NETWORK_READ_PROFILE)
+
+    task_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
+    if task_mode == "remote_execute":
+        if _looks_like_remote_install_task(task) or _state_signals_remote_install_recovery(self.state):
+            if NETWORK_READ_PROFILE not in profiles:
+                profiles.add(NETWORK_READ_PROFILE)
+                self._runlog(
+                    "tool_profiles",
+                    "added network_read for remote install recovery",
+                    task=task,
+                    source="remote_install_recovery_network_read",
+                )
+        if _looks_like_remote_install_task(task) and (
+            _looks_like_interactive_remote_installer(task) or _state_signals_interactive_program(self.state)
+        ):
+            scratchpad = self.state.scratchpad if isinstance(getattr(self.state, "scratchpad", None), dict) else {}
+            if not scratchpad.get("_expose_interactive_session_tools"):
+                scratchpad["_expose_interactive_session_tools"] = True
+                self._runlog(
+                    "tool_profiles",
+                    "exposed interactive session tools for remote installer",
+                    task=task,
+                    source="remote_installer_interactive_session",
+                )
 
     self.state.active_tool_profiles = sorted(profiles)
     self.state.scratchpad["_last_task_text"] = task

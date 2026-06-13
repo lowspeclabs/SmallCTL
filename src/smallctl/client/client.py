@@ -36,6 +36,7 @@ class OpenAICompatClient:
     LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 135.0
     LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 90.0
     WRITE_HEAVY_TOOL_CALL_CONTINUATION_TIMEOUT_MULTIPLIER = 2.0
+    WRITE_HEAVY_FIRST_TOKEN_TIMEOUT_MULTIPLIER = 2.0
     WRITE_HEAVY_MAX_COMPLETION_TOKENS_MULTIPLIER = 2.0
     OPENROUTER_AUTO_MAX_COMPLETION_TOKENS = _DEFAULT_MAX_COMPLETION_TOKENS
     _WRITE_HEAVY_TOOL_NAMES: ClassVar[set[str]] = {
@@ -131,6 +132,8 @@ class OpenAICompatClient:
         "backend wedged" failures.
         """
         timeout = float(self.first_token_timeout_sec)
+        if self._request_has_write_heavy_tool(tools):
+            return max(timeout, timeout * float(self.WRITE_HEAVY_FIRST_TOKEN_TIMEOUT_MULTIPLIER))
         if self.provider_profile != "lmstudio":
             return timeout
         # Tool-bearing requests on LM Studio often need more time for prompt ingestion,
@@ -147,6 +150,25 @@ class OpenAICompatClient:
             if "gemma" in normalized_model:
                 return max(timeout, 60.0)
         return timeout
+
+    def _request_has_write_heavy_tool(self, tools: list[dict[str, Any]]) -> bool:
+        if not tools:
+            return False
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            tool_name = str(function.get("name") or "").strip()
+            parameters = function.get("parameters")
+            properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
+            property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
+            if tool_name in self._WRITE_HEAVY_TOOL_NAMES:
+                return True
+            if property_names & self._WRITE_HEAVY_ARGUMENT_FIELDS:
+                return True
+        return False
 
     def _resolve_tool_call_continuation_timeout_sec(self, override: float | None) -> float:
         if override is not None:
@@ -168,28 +190,7 @@ class OpenAICompatClient:
 
     def _request_tool_call_continuation_timeout_sec(self, tools: list[dict[str, Any]]) -> float:
         timeout = float(self.tool_call_continuation_timeout_sec)
-        if not tools:
-            return timeout
-
-        write_heavy = False
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            function = tool.get("function")
-            if not isinstance(function, dict):
-                continue
-            tool_name = str(function.get("name") or "").strip()
-            parameters = function.get("parameters")
-            properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
-            property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
-            if tool_name in self._WRITE_HEAVY_TOOL_NAMES:
-                write_heavy = True
-                break
-            if property_names & self._WRITE_HEAVY_ARGUMENT_FIELDS:
-                write_heavy = True
-                break
-
-        if not write_heavy:
+        if not self._request_has_write_heavy_tool(tools):
             return timeout
         return max(timeout, timeout * float(self.WRITE_HEAVY_TOOL_CALL_CONTINUATION_TIMEOUT_MULTIPLIER))
 

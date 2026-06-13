@@ -143,6 +143,10 @@ def _install_task_requires_strong_verifier(state: Any, *, command: str) -> tuple
         return False, ""
 
     normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    kind = verifier_kind_for_command(command)
+    if verifier_strength(kind) >= verifier_strength("install_service_status"):
+        # Strong install verifier (service status, package, port, version)
+        return False, ""
     # Weak verifiers for install tasks: only check file existence
     weak_patterns = [
         (r"\bls\s+-la?\s+\S+", "file existence check"),

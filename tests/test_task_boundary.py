@@ -1233,3 +1233,24 @@ def test_bare_option_number_does_not_trigger_hard_task_switch() -> None:
     assert tx.get("turn_type") == "ITERATION"
     # Memory should be preserved, not wiped
     assert state.working_memory.current_goal == prior
+
+
+def test_local_ssh_file_followup_preserves_working_memory() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "find the known_hosts file for this user on this host"
+    new_task = "remove entries related to 192.168.1.16 from the known_hosts file of the current user"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.working_memory.known_facts.append("known_hosts path is /home/stephen/.ssh/known_hosts")
+
+    harness = _make_harness(state)
+
+    Harness._maybe_reset_for_new_task(harness, new_task, raw_task=new_task)
+    Harness._initialize_run_brief(harness, new_task, raw_task=new_task)
+
+    assert state.run_brief.original_task == new_task
+    # Durable context should be preserved because the new task is a same-scope
+    # continuation of a local SSH file operation.
+    assert "known_hosts path is /home/stephen/.ssh/known_hosts" in state.working_memory.known_facts
+    tx = state.scratchpad.get("_task_transaction", {})
+    assert tx.get("turn_type") in {"ITERATION", "CONTINUATION"}

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from ..context import ChildRunRequest, ChildRunResult
+from ..models.events import UIEvent
 
 if TYPE_CHECKING:
     from ..harness import Harness

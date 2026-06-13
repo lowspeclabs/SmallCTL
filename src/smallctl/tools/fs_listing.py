@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import difflib
 from pathlib import Path
@@ -13,7 +14,7 @@ from .fs_sessions import _record_repair_cycle_read
 
 def _resolve(path: str, cwd: str | None = None) -> Path:
     base = Path(cwd) if cwd else Path.cwd()
-    candidate = Path(path)
+    candidate = Path(os.path.expanduser(path))
     if not candidate.is_absolute():
         # Guard against paths that already encode the CWD as relative segments
         base_str = str(base).rstrip("/")
@@ -164,6 +165,12 @@ def _missing_path_error(*, requested_path: str, resolved_path: Path, cwd: str | 
             )
     except Exception:
         pass
+    # If the path contains a literal tilde, warn about expansion
+    if "~" in requested_path:
+        message += (
+            f" Note: the path contains `~`, which was expanded to `{resolved_path}`. "
+            f"If you meant a literal `~` directory, use an absolute path or `shell_exec` to expand it."
+        )
     return message
 
 

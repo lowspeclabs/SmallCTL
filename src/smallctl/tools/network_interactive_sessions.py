@@ -136,6 +136,20 @@ async def ssh_session_start(
     except ValueError as exc:
         return fail(str(exc), metadata={"host": host, "user": user, "command": command})
     command, stripped_root_sudo = _strip_redundant_root_sudo(command, user)
+    for active_id, active in list(_SSH_INTERACTIVE_SESSIONS.items()):
+        proc = active.get("proc") if isinstance(active, dict) else None
+        if getattr(proc, "returncode", None) is not None:
+            continue
+        if str(active.get("host") or "") == host and str(active.get("user") or "") == str(user or ""):
+            return fail(
+                "An interactive SSH session is already active for this target.",
+                metadata={
+                    "reason": "active_interactive_session_exists",
+                    "active_session_id": active_id,
+                    "host": host,
+                    "user": user,
+                },
+            )
 
     proc = None
     try:

@@ -19,6 +19,10 @@ _VERIFIER_KIND_STRENGTH = {
     "diagnostic": 2,
     "run_target": 3,
     "test_suite": 4,
+    "install_service_status": 4,
+    "install_package_status": 4,
+    "install_port_listener": 4,
+    "install_version_command": 4,
 }
 
 
@@ -35,6 +39,15 @@ def verifier_kind_for_command(command: str) -> str:
         return "lint_typecheck"
     if re.search(r"\bpython(?:3(?:\.\d+)?)?\b.*\.py\b", normalized):
         return "run_target"
+    # Install-task verifiers: service status, package presence, listening ports, version commands
+    if re.search(r"\bsystemctl\s+(?:status|is-active|is-enabled)\b", normalized):
+        return "install_service_status"
+    if re.search(r"\b(?:dpkg\s+-[lL]|apt\s+list|apt-cache\s+policy|rpm\s+-[qQ]|dpkg-query\s+-[lW])\b", normalized):
+        return "install_package_status"
+    if re.search(r"\b(?:ss\s+-tlnp|netstat\s+-tlnp|lsof\s+-i\s+:\d+|ss\s+-plnt)\b", normalized):
+        return "install_port_listener"
+    if re.search(r"\b(?:\S+\s+--version|\S+\s+-version|\S+\s+-v\b|which\s+\S+|whereis\s+\S+)\b", normalized):
+        return "install_version_command"
     return "diagnostic"
 
 
@@ -71,7 +84,15 @@ def classify_execution_failure(text: str) -> str:
         return "apt_sources_malformed"
     if "deb822" in lowered or "invalid line" in lowered and "sources.list" in lowered:
         return "apt_sources_malformed"
-    if "timed out" in lowered or "timeout" in lowered or "connection timed out" in lowered:
+    if (
+        "timed out" in lowered
+        or "timeout" in lowered
+        or "connection timed out" in lowered
+        or "connection refused" in lowered
+        or "no route to host" in lowered
+        or "network is unreachable" in lowered
+        or "could not resolve hostname" in lowered
+    ):
         return "environment"
     if "permission denied" in lowered or "password" in lowered or "sudo" in lowered:
         return "environment"
@@ -126,6 +147,10 @@ def command_has_write_or_heredoc_shape(command: str) -> bool:
         return False
     if "<<" in lowered:
         return True
+    if re.search(r"(?:^|[;&|]\s*)(?:mv|cp|rm|sed\s+-i|perl\s+-i)\b", lowered):
+        return True
+    if re.search(r"(?:^|[^<])>>?(?:[^&]|$)", lowered):
+        return True
     if re.search(r"(?:^|[;&|]\s*)(?:cat|printf|echo)\b[^\n;&|]*(?:>>|>)", lowered):
         return True
     if re.search(r"(?:^|[;&|]\s*)tee(?:\s+-a)?\s+", lowered):
@@ -145,3 +170,48 @@ def snip_text(value: Any, *, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+# Install-task absence probes: e.g. `dpkg -l | grep -i fog` returning exit 1 with no output.
+_INSTALL_ABSENCE_LEFT_RE = re.compile(
+    r"\b(?:dpkg\s+-[lL]|apt\s+(?:list|show|search)|rpm\s+-[qQ]|systemctl\s+(?:status|is-active|is-enabled)|service\s+\S+\s+status)\b",
+    re.IGNORECASE,
+)
+_INSTALL_ABSENCE_RIGHT_RE = re.compile(
+    r"\|\s*(?:grep|egrep|fgrep)\b",
+    re.IGNORECASE,
+)
+
+
+def command_is_install_absence_probe(command: str) -> bool:
+    """Return True for pipe commands that probe for package/service absence."""
+    cmd = str(command or "").strip()
+    if not cmd:
+        return False
+    if not _INSTALL_ABSENCE_RIGHT_RE.search(cmd):
+        return False
+    return _INSTALL_ABSENCE_LEFT_RE.search(cmd) is not None
+
+
+def install_absence_probe_confirmed(
+    *,
+    command: str,
+    exit_code: Any,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    """Return True when an install absence probe confirms the resource is absent."""
+    if not command_is_install_absence_probe(command):
+        return False
+    if not exit_code_matches(exit_code, {0, 1}):
+        return False
+    out = str(stdout or "").strip()
+    err = str(stderr or "").strip()
+    combined = "\n".join(part for part in (out, err) if part).strip()
+    # Empty/whitespace-only output after grep with exit 1 means no matches.
+    if not combined:
+        return True
+    # If output is very short and looks like a header/no-data marker, treat as absence.
+    if len(combined) <= 80 and not any(marker in combined.lower() for marker in ("ii ", "active", "running", "installed")):
+        return True
+    return False

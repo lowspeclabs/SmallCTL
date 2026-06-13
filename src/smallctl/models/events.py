@@ -123,6 +123,7 @@ class UIStatusSnapshot:
     context_window: int = 0
     api_errors: int = 0
     fama_off: bool = False
+    fama_mitigation: str = ""
     recovery_banner: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,6 +145,7 @@ class UIStatusSnapshot:
             "context_window": self.context_window,
             "api_errors": self.api_errors,
             "fama_off": self.fama_off,
+            "fama_mitigation": self.fama_mitigation,
             "recovery_banner": self.recovery_banner,
         }
 
@@ -178,6 +180,7 @@ class UIStatusSnapshot:
             api_errors = 0
 
         fama_off = False
+        fama_mitigation = ""
         if harness is not None:
             fama_off = not bool(getattr(harness.state, "scratchpad", {}).get("_fama_config", {}).get("enabled", True))
             phase = str(getattr(harness.state, "current_phase", phase) or phase)
@@ -209,6 +212,15 @@ class UIStatusSnapshot:
             )
             context_window = int(server_context_limit or 0)
             recovery_banner = str(getattr(harness.state, "scratchpad", {}).get("_ui_recovery_banner", "") or "")
+            # Build FAMA mitigation summary for TUI
+            from ..fama.state import active_mitigations
+            mitigations = active_mitigations(harness.state)
+            if mitigations:
+                parts = []
+                for m in mitigations:
+                    remaining = max(0, m.expires_after_step - int(step))
+                    parts.append(f"{m.name}({remaining})")
+                fama_mitigation = ", ".join(parts)
 
         return cls(
             model=model,
@@ -228,5 +240,6 @@ class UIStatusSnapshot:
             context_window=max(0, context_window),
             api_errors=max(0, int(api_errors)),
             fama_off=fama_off,
+            fama_mitigation=fama_mitigation,
             recovery_banner=recovery_banner,
         )

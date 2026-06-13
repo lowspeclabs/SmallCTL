@@ -406,12 +406,18 @@ def _handle_verifier_loop_hard_stop(
     verifier_verdict: dict[str, Any] | None,
     rejection_count: int,
 ) -> None:
-    """When verifier has rejected task_complete >=3 times, either auto-run the
-    missing verifier or inject a hard-stop system message."""
+    """When verifier has rejected task_complete >=3 times, enforce a required
+    action-class change instead of allowing another same-class verifier.
+    """
     if not isinstance(verifier_verdict, dict):
         return
     state = service.harness.state
     from ..models.conversation import ConversationMessage
+
+    allowed_classes = ["research", "mutation", "ask_user", "stop_blocked"]
+    state.scratchpad["_verifier_loop_required_action_classes"] = allowed_classes
+    state.scratchpad["_verifier_loop_rejection_count"] = rejection_count
+
     command = str(verifier_verdict.get("command") or "").strip()
     tool = str(verifier_verdict.get("tool") or "").strip()
     target = str(verifier_verdict.get("target") or "").strip()
@@ -438,7 +444,8 @@ def _handle_verifier_loop_hard_stop(
             ConversationMessage(
                 role="system",
                 content=(
-                    f"The verifier has rejected task_complete {rejection_count} times. "
+                    f"VERIFIER LOOP HARD STOP: The verifier has rejected task_complete {rejection_count} times. "
+                    f"Your next action must change class. Allowed classes: research, mutation, ask_user, stop_blocked. "
                     f"Auto-executing required verification: {readback_tool}({readback_args})."
                 ),
                 metadata={
@@ -447,6 +454,7 @@ def _handle_verifier_loop_hard_stop(
                     "rejection_count": rejection_count,
                     "auto_tool": readback_tool,
                     "auto_args": readback_args,
+                    "allowed_action_classes": allowed_classes,
                 },
             )
         )
@@ -455,13 +463,16 @@ def _handle_verifier_loop_hard_stop(
             ConversationMessage(
                 role="system",
                 content=(
-                    f"The verifier has rejected task_complete {rejection_count} times. "
-                    "You must either perform the required verification or call task_fail."
+                    f"VERIFIER LOOP HARD STOP: The verifier has rejected task_complete {rejection_count} times. "
+                    "Your next action MUST change class. Allowed classes: research (web_search/web_fetch/ask_human), "
+                    "mutation (file/SSH write or patch), ask_user (ask_human/escalate), or stop_blocked (task_fail). "
+                    "Do not run another verifier in the same class as the failing one."
                 ),
                 metadata={
                     "is_recovery_nudge": True,
                     "recovery_kind": "verifier_loop_hard_stop_nudge",
                     "rejection_count": rejection_count,
+                    "allowed_action_classes": allowed_classes,
                 },
             )
         )

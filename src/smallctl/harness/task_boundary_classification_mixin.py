@@ -38,6 +38,7 @@ from .task_classifier import (
     looks_like_write_file_request,
     looks_like_write_patch_request,
 )
+from .task_classifier_support import task_has_local_scope_markers
 from .task_intent import derive_task_contract, next_action_for_task
 from .task_transactions import (
     FollowupClassification,
@@ -392,6 +393,8 @@ class TaskBoundaryClassificationMixin:
         effective_task: str,
         previous_task: str,
     ) -> bool:
+        if self._is_local_file_operation_followup(raw_task, previous_task):
+            return True
         if self._looks_like_remote_artifact_cleanup_followup(raw_task, self.last_task_handoff()):
             return True
         if self._is_contextual_followup(raw_task):
@@ -427,6 +430,35 @@ class TaskBoundaryClassificationMixin:
         if candidate_paths and self._is_sequential_remote_followup(raw_task, candidate_paths):
             return True
         return False
+
+    def _is_local_file_operation_followup(self, raw_task: str, previous_task: str) -> bool:
+        """Treat consecutive local-file operations on the same subject as same-scope.
+
+        This prevents the harness from dropping local context when a user moves from
+        "find the known_hosts file" to "remove entries from the known_hosts file".
+        """
+        if not task_has_local_scope_markers(raw_task):
+            return False
+        if not task_has_local_scope_markers(previous_task):
+            return False
+        current_lower = raw_task.lower()
+        previous_lower = previous_task.lower()
+        local_subjects = (
+            "known_hosts",
+            "known hosts",
+            "authorized_keys",
+            "authorized keys",
+            "~/.ssh",
+            "/.ssh/",
+            ".ssh/",
+        )
+        shared_subjects = [s for s in local_subjects if s in current_lower and s in previous_lower]
+        if shared_subjects:
+            return True
+        # Also share scope if both mention the same explicit local path.
+        current_paths = extract_task_target_paths(raw_task) or []
+        previous_paths = extract_task_target_paths(previous_task) or []
+        return bool(current_paths and previous_paths and self._target_paths_overlap(current_paths, previous_paths))
 
     def _followup_allowed_paths(
         self,

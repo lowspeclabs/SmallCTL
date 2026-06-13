@@ -12,6 +12,81 @@ from .task_classifier_constants import (
     REMOTE_HINTS_WORD_BOUNDARIES_RE,
 )
 
+
+_LOCAL_SSH_FILE_MARKERS = (
+    "known_hosts",
+    "known hosts",
+    "authorized_keys",
+    "authorized keys",
+    "~/.ssh",
+    "/.ssh/",
+    ".ssh/",
+)
+
+_LOCAL_SCOPE_MARKERS = (
+    "current user",
+    "current user's",
+    "this user",
+    "this user's",
+    "my user",
+    "my user's",
+    "this host",
+    "this machine",
+    "local",
+    "locally",
+    "on this host",
+    "on this machine",
+)
+
+_EXPLICIT_REMOTE_EXECUTION_MARKERS = (
+    "ssh to",
+    "connect to",
+    "remote host",
+    "remote server",
+    "target host",
+    "over ssh",
+    "via ssh",
+)
+
+_REMOTE_EXECUTION_NEGATION_RE = re.compile(
+    r"\b(?:do\s+not|never|don't|dont)\b[^.;\n]*\b(?:ssh\s+to|connect\s+to|use\s+ssh|ssh_exec)\b"
+    r"|"
+    r"\b(?:no\s+ssh|no\s+ssh_exec)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_remote_execution_scope(text: str) -> bool:
+    if any(marker in text for marker in _EXPLICIT_REMOTE_EXECUTION_MARKERS):
+        return True
+    return bool("@" in text and any(marker in text for marker in ("ssh", "scp", "sftp")))
+
+
+def task_has_local_scope_markers(task: str) -> bool:
+    """Return True when the task text contains explicit local-scope markers."""
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _LOCAL_SCOPE_MARKERS):
+        return True
+    return any(marker in text for marker in _LOCAL_SSH_FILE_MARKERS)
+
+
+def task_is_local_ssh_file_target(task: str) -> bool:
+    """Detect tasks scoped to this user's local SSH metadata files."""
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    has_ssh_file = any(marker in text for marker in _LOCAL_SSH_FILE_MARKERS)
+    if not has_ssh_file:
+        return False
+    has_local_scope = any(marker in text for marker in _LOCAL_SCOPE_MARKERS)
+    if has_local_scope:
+        return True
+    # A bare known_hosts cleanup normally treats the IP as data in the file,
+    # not as an SSH destination. Explicit remote phrasing still wins.
+    return not _has_explicit_remote_execution_scope(text)
+
 def is_smalltalk(task: str) -> bool:
     text = task.strip().lower()
     smalltalk = {
@@ -42,12 +117,18 @@ def has_remote_execution_target(task: str) -> bool:
     text = task.strip().lower()
     if not text:
         return False
-    if IP_ADDRESS_PATTERN.search(text):
+    if "working only inside" in text or "only inside ./temp" in text:
+        return False
+    if _REMOTE_EXECUTION_NEGATION_RE.search(text):
+        return False
+    for match in IP_ADDRESS_PATTERN.finditer(text):
+        ip = match.group(0)
+        if ip.startswith(("0.", "127.")):
+            continue
         return True
     if "@" in text and any(marker in text for marker in ("ssh", "scp", "sftp")):
         return True
-    # Use word-boundary matching to avoid false positives on words like "hosts", "serverless"
-    return bool(REMOTE_HINTS_WORD_BOUNDARIES_RE.search(text))
+    return _has_explicit_remote_execution_scope(text)
 
 
 def looks_like_debug_inspection_request(task: str) -> bool:
@@ -85,6 +166,48 @@ def looks_like_analysis_request(task: str) -> bool:
     from .task_classifier_content_lookup import needs_loop_for_content_lookup
     if needs_loop_for_content_lookup(task) and not looks_like_debug_inspection_request(task):
         return any(target in text for target in READONLY_FILE_TARGETS)
+    return False
+
+
+def task_is_local_system_target(task: str) -> bool:
+    """Detect local system administration tasks (e.g. cleaning SSH keys, local config)."""
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if task_is_local_ssh_file_target(text):
+        return True
+    # Strong local-system markers that indicate the user wants local ops
+    strong_local_system_markers = (
+        "local .ssh",
+        "local ssh",
+        "authorized_keys",
+        "known_hosts",
+        "on this host",
+        "on this machine",
+        "locally",
+        "local config",
+        "local system",
+    )
+    # Weaker markers that need additional context
+    weak_local_markers = (
+        "clean up",
+        "cleanup",
+        "remove",
+        "delete",
+    )
+    has_strong_marker = any(m in text for m in strong_local_system_markers)
+    has_weak_marker = any(m in text for m in weak_local_markers)
+    # Exclude only if there are REAL remote execution targets (IPs, user@host ssh patterns)
+    # Do NOT exclude just because the word "host" or "remote" appears — those can be local context
+    has_real_remote_target = _has_explicit_remote_execution_scope(text)
+    if has_strong_marker and not has_real_remote_target:
+        return True
+    # Weak markers only count if there's also a local-system context word
+    if has_weak_marker and not has_real_remote_target:
+        local_context_words = ("local", "this host", "here", "on this machine")
+        has_local_context = any(w in text for w in local_context_words)
+        if has_local_context:
+            return True
     return False
 
 

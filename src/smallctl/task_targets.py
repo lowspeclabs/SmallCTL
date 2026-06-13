@@ -31,7 +31,7 @@ def _normalize_candidate_path(value: str) -> str | None:
 
 def _is_implement_task(text: str) -> bool:
     lowered = str(text or "").lower()
-    return any(word in lowered for word in ("implement", "create", "build", "generate", "produce"))
+    return "implement" in lowered
 
 
 def _derive_output_target_from_spec(read_path: str) -> str | None:

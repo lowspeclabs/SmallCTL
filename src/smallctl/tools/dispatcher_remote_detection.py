@@ -8,10 +8,11 @@ _SSH_TASK_TARGET_RE = None
 _AT_HOST_TARGET_RE = None
 _IPV4_RE = None
 _REMOTE_TASK_HINT_RE = None
+_LOCAL_CLARIFICATION_RE = None
 
 
 def _ensure_regexes():
-    global _SSH_TASK_TARGET_RE, _AT_HOST_TARGET_RE, _IPV4_RE, _REMOTE_TASK_HINT_RE
+    global _SSH_TASK_TARGET_RE, _AT_HOST_TARGET_RE, _IPV4_RE, _REMOTE_TASK_HINT_RE, _LOCAL_CLARIFICATION_RE
     if _SSH_TASK_TARGET_RE is None:
         import re
         _SSH_TASK_TARGET_RE = re.compile(
@@ -21,6 +22,14 @@ def _ensure_regexes():
         _AT_HOST_TARGET_RE = re.compile(r"\b[A-Za-z0-9._-]+@(?P<host>[A-Za-z0-9._-]+)\b", re.IGNORECASE)
         _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
         _REMOTE_TASK_HINT_RE = re.compile(r"\b(?:remote|ssh|username|password|server|host)\b", re.IGNORECASE)
+        _LOCAL_CLARIFICATION_RE = re.compile(
+            r"\b(?:local(?:ly)?\s+(?:first|now|here|on\s+this\s+host|on\s+this\s+machine)|"
+            r"on\s+this\s+host\s+(?:first|now)|"
+            r"start\s+(?:with|on)\s+(?:the\s+)?local|"
+            r"do\s+this\s+locally|"
+            r"what\s+about\s+(?:the\s+)?local)\b",
+            re.IGNORECASE,
+        )
 
 
 def task_clearly_targets_remote_ssh_host(state: Any | None) -> bool:
@@ -30,6 +39,9 @@ def task_clearly_targets_remote_ssh_host(state: Any | None) -> bool:
     for text in _ssh_task_context_texts(state):
         if not text:
             continue
+        # If the user explicitly asked for local operations, do not classify as remote
+        if _LOCAL_CLARIFICATION_RE.search(text) is not None:
+            return False
         if _SSH_TASK_TARGET_RE.search(text) is not None:
             return True
         if _AT_HOST_TARGET_RE.search(text) is not None:

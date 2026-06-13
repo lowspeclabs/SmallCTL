@@ -98,10 +98,6 @@ def _close_process_pipe(pipe: Any) -> None:
             transport.close()
         except Exception:
             pass
-        try:
-            setattr(pipe, attr_name, None)
-        except Exception:
-            pass
 
 
 def _close_process_transports(proc: Any) -> None:
@@ -112,10 +108,6 @@ def _close_process_transports(proc: Any) -> None:
     if transport is not None:
         try:
             transport.close()
-        except Exception:
-            pass
-        try:
-            proc._transport = None
         except Exception:
             pass
 
@@ -308,7 +300,9 @@ async def run_chat_with_events(
     state = getattr(self, "state", None)
     if state is not None:
         state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        state.touch()
+        touch = getattr(state, "touch", None)
+        if callable(touch):
+            touch()
 
     log_kv(
         self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
@@ -343,7 +337,9 @@ async def run_auto_with_events(
     state = getattr(self, "state", None)
     if state is not None:
         state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        state.touch()
+        touch = getattr(state, "touch", None)
+        if callable(touch):
+            touch()
 
     # Lifecycle telemetry (Fix 1)
     log_kv(
@@ -481,7 +477,8 @@ def _autosave_chat_session_state(self: Any) -> None:
     # Skip autosaving if session is idle (Fix 2)
     step_count = int(getattr(state, "step_count", 0) or 0)
     task_received_at = str(getattr(state, "task_received_at", "") or "").strip()
-    if step_count == 0 and not task_received_at:
+    recent_messages = getattr(state, "recent_messages", None)
+    if step_count == 0 and not task_received_at and isinstance(recent_messages, list) and not recent_messages:
         return
     try:
         client = getattr(self, "client", None)
@@ -609,7 +606,9 @@ async def run_task_with_events(
     state = getattr(self, "state", None)
     if state is not None:
         state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        state.touch()
+        touch = getattr(state, "touch", None)
+        if callable(touch):
+            touch()
 
     log_kv(
         self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),

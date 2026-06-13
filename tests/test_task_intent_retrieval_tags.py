@@ -1344,7 +1344,77 @@ def test_retrieval_prefers_summary_matching_write_target_and_failure_mode() -> N
     assert summaries[0].summary_id == "S-app"
 
 
-def test_retrieval_skips_durably_stale_experiences() -> None:
+def test_retrieval_decay_repeated_experiences_after_several_turns() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "repair"
+    state.active_intent = "requested_ssh_exec"
+    state.intent_tags = ["ssh_exec", "phase_repair"]
+    state.last_failure_class = "verifier_failed"
+    state.run_brief.original_task = "install FOG on Debian"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-ssh-retry",
+            tool_name="ssh_exec",
+            intent="requested_ssh_exec",
+            outcome="failure",
+            failure_mode="verifier_failed",
+            confidence=0.8,
+            notes="Retried ssh_exec verifier failed.",
+        ),
+        ExperienceMemory(
+            memory_id="mem-interactive",
+            tool_name="ssh_session_start",
+            intent="requested_ssh_exec",
+            outcome="success",
+            failure_mode="",
+            confidence=0.75,
+            notes="Interactive SSH session succeeded for installer.",
+        ),
+    ]
+    state.scratchpad["_retrieved_experience_history"] = [
+        {"memory_id": "mem-ssh-retry", "retrieved_at_step": i} for i in range(5)
+    ]
+
+    bundle = LexicalRetriever().retrieve_bundle(
+        state=state,
+        query=state.run_brief.original_task,
+        include_experiences=True,
+    )
+
+    assert bundle.experiences
+    assert bundle.experiences[0].memory_id == "mem-interactive"
+    assert "mem-ssh-retry" != bundle.experiences[0].memory_id
+
+
+def test_retrieval_history_is_recorded_after_selection() -> None:
+    state = LoopState(cwd="/tmp")
+    state.current_phase = "execute"
+    state.active_intent = "requested_ssh_exec"
+    state.run_brief.original_task = "deploy app on remote host"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.warm_experiences = [
+        ExperienceMemory(
+            memory_id="mem-deploy",
+            tool_name="ssh_exec",
+            intent="requested_ssh_exec",
+            outcome="success",
+            confidence=0.8,
+            notes="Deploy succeeded.",
+        ),
+    ]
+
+    LexicalRetriever().retrieve_bundle(
+        state=state,
+        query=state.run_brief.original_task,
+        include_experiences=True,
+    )
+
+    history = state.scratchpad.get("_retrieved_experience_history")
+    assert isinstance(history, list)
+    assert any(entry.get("memory_id") == "mem-deploy" for entry in history)
+    assert state.retrieved_experience_ids == ["mem-deploy"]
+
     state = LoopState(cwd="/tmp")
     state.current_phase = "repair"
     state.active_intent = "requested_file_patch"

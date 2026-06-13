@@ -96,6 +96,11 @@ def _guard_remote_file_tool_request(
     if tool_name not in _REMOTE_GUARDED_FILE_TOOLS or not isinstance(arguments, dict):
         return None
 
+    # Fix: if task was explicitly reclassified to local_execute, allow local filesystem tools
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode in {"local_execute", "chat", "plan_only"}:
+        return None
+
     from .dispatcher_remote_paths import looks_like_remote_absolute_path
     path = str(arguments.get("path") or "").strip()
     if not path or not looks_like_remote_absolute_path(path, state=state):
@@ -147,6 +152,12 @@ def _guard_remote_shell_tool_request(
         return None
     if _recent_ssh_auth_failure(state):
         return None
+
+    # Fix: if task was explicitly reclassified to local_execute, allow local shell tools
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode in {"local_execute", "chat", "plan_only"}:
+        return None
+
     if not (_remote_scope_is_active(state) or _has_single_confirmed_ssh_target(state)):
         return None
 

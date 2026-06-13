@@ -146,8 +146,8 @@ def test_interactive_guard_tool_result_nests_under_session_start() -> None:
 
             turn = console._active_assistant_turn
             assert turn is not None
-            body = turn.query_one(".assistant-turn-body", Vertical)
-            tool_group = next(child for child in body.children if isinstance(child, ToolCallsContainerWidget))
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            tool_group = next(child for child in content.children if isinstance(child, ToolCallsContainerWidget))
             tool_detail = next(
                 child for child in tool_group.query_one(".tool-calls-container", Vertical).children
                 if isinstance(child, ToolCallDetailWidget)

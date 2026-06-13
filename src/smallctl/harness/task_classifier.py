@@ -39,6 +39,9 @@ from .task_classifier_support import (
     looks_like_debug_inspection_request,
     looks_like_plan_only_request,
     task_is_local_coding_target,
+    task_has_local_scope_markers,
+    task_is_local_ssh_file_target,
+    task_is_local_system_target,
 )
 
 
@@ -69,6 +72,18 @@ _TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
     ),
     TaskClassificationRule(
         "local_coding_target", task_is_local_coding_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "local_ssh_file_target", task_is_local_ssh_file_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "hybrid_execute",
+        lambda t: has_remote_execution_target(t)
+        and any(marker in t.lower() for marker in ("local ", "locally", "./", "../")),
+        "hybrid_execute",
+    ),
+    TaskClassificationRule(
+        "local_system_target", task_is_local_system_target, "local_execute"
     ),
     TaskClassificationRule(
         "smalltalk", is_smalltalk, "chat"
@@ -561,6 +576,8 @@ def looks_like_complex_task(task: str) -> bool:
     mixed local/remote operations that benefit from structured planning."""
     text = str(task or "").strip().lower()
     if not text:
+        return False
+    if "do not connect" in text and "remote" in text and ("./" in text or "local" in text):
         return False
 
     # Multi-step sequencing language

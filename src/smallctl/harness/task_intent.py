@@ -13,6 +13,7 @@ from .task_classifier import (
     looks_like_write_patch_request,
 )
 from .task_classifier_constants import LOCAL_SHELL_OVERRIDE_RE as _LOCAL_SHELL_OVERRIDE_RE
+from .task_classifier_support import task_is_local_ssh_file_target, task_is_local_system_target
 
 _MEMORY_MARKERS = (
     "save this in memory",
@@ -153,6 +154,14 @@ def infer_requested_tool_name(harness: Any, task: str) -> str:
             return "read_file"
         if "write_file" in text:
             return "write_file"
+        if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
+            return "shell_exec"
+        return ""
+    if task_is_local_ssh_file_target(task) or task_is_local_system_target(task):
+        if any(marker in text for marker in ("remove", "delete", "clean", "cleanup", "edit", "patch", "update")):
+            return "shell_exec"
+        if any(marker in text for marker in ("find", "read", "show", "list", "where", "grep", "check")):
+            return "read_file"
         if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
             return "shell_exec"
         return ""

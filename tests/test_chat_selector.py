@@ -8,17 +8,17 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.widgets import Button
 
-from smallctl.chat_sessions import persist_chat_session_state
+from smallctl.chat_sessions import (
+    ChatSessionSummary,
+    format_relative_age,
+    load_chat_session_summaries,
+    persist_chat_session_state,
+    record_chat_session_prompt,
+)
 from smallctl.models.conversation import ConversationMessage
 from smallctl.state import LoopState
 from smallctl.ui.app import SmallctlApp
 from smallctl.ui.chat_selector import ChatMenuScreen, ChatSelectButton, ChatSessionSelectScreen
-from smallctl.ui.chat_sessions import (
-    ChatSessionSummary,
-    format_relative_age,
-    load_chat_session_summaries,
-    record_chat_session_prompt,
-)
 from smallctl.ui.harness_bridge import _serialize_recent_messages
 
 

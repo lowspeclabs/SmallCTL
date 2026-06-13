@@ -109,6 +109,34 @@ def test_removal_task_heredoc_write_is_not_absence_probe() -> None:
     assert verdict.get("failure_mode") != "removal_residue"
 
 
+def test_failed_ssh_transport_mutation_is_not_removal_absence_probe() -> None:
+    state = LoopState()
+    state.run_brief.original_task = (
+        "remove entries related to 192.168.1.16 from the known_hosts file of the current user"
+    )
+    result = ToolEnvelope(
+        success=False,
+        output={"exit_code": 255, "stdout": "", "stderr": "ssh: connect to host 192.168.1.16 port 22: No route to host"},
+        error="Remote SSH command exited with code 255",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.16",
+            "user": "root",
+            "command": "grep -v '192.168.1.16' /root/.ssh/known_hosts > /tmp/known_hosts && mv /tmp/known_hosts /root/.ssh/known_hosts",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict.get("verifier_kind") != "removal_absence_probe"
+    assert verdict.get("failure_mode") == "environment"
+
+
 def test_non_removal_grep_exit_one_still_fails() -> None:
     state = LoopState()
     state.run_brief.original_task = "Check whether FOG is installed."

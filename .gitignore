@@ -9,6 +9,12 @@ __pycache__/
 .env
 .env.*
 
+# Caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.opencode/
+
 # Project specific
 .codex/
 .codex
@@ -24,6 +30,13 @@ tmp/
 temp/
 /.tmp_test/
 *.log
+
+# Generated HTML reports and ad-hoc scripts
+*.html
+run_verification.py
+logwatch.py
+md_to_report_html.py
+hello.sh
 
 # Test & dev artifacts
 /checkpoints.json
@@ -51,6 +64,16 @@ evals/
 !evals/test_time_scaling/*.jsonl
 !evals/test_time_scaling/README.md
 
+# Plans and ad-hoc docs (keep README.md and AGENTS.md tracked manually)
+*.md
+!README.md
+!AGENTS.md
+*.text
+*.txt
+interactive-tool-use.md
+cleanup_plan.md
+bug_report.md
+
 # Generated artifacts
 *.swp
 *.swo
@@ -58,8 +81,12 @@ evals/
 *.egg-info/
 fizzbuzz.py
 
-#Plans
-*.md
-!README.md
-*.text
-*.txt
+# Aho generated artifacts
+aho/challenges.text
+aho/run_*.log
+
+# Ad-hoc work directories
+Redo/
+refactor_case/
+phase_plans/
+home/

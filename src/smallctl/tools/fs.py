@@ -78,6 +78,32 @@ from .common import fail, ok
 FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 
 
+def _looks_like_truncated_write_payload(content: str, path: str | Path) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if len(text) < 80 and text.startswith('{"tool_name'):
+        return True
+    suffix = str(path or "").strip().lower()
+    if suffix.endswith((".html", ".htm")) and len(text) < 120:
+        lowered = text.lower()
+        html_starters = ("<!doctype", "<html", "<head", "<body", "<script", "<style")
+        if lowered.startswith(html_starters) and "</html>" not in lowered:
+            return True
+    return False
+
+
+def _looks_like_poisoned_truncated_file(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text or len(text) >= 120:
+        return False
+    if text.startswith('{"tool_name'):
+        return True
+    lowered = text.lower()
+    html_starters = ("<!doctype", "<html", "<head", "<body", "<script", "<style")
+    return lowered.startswith(html_starters) and "</html>" not in lowered
+
+
 def is_file_mutating_tool(tool_name: str) -> bool:
     return str(tool_name or "").strip() in FILE_MUTATING_TOOLS
 
@@ -117,6 +143,23 @@ async def file_write(
                 },
             },
         )
+
+    if not write_session_id and _looks_like_truncated_write_payload(content, path):
+        return fail(
+            f"file_write to `{path}` was rejected because the content looks like a truncated or malformed tool payload, not file contents. "
+            "Retry with the complete file content in the `content` argument.",
+            metadata={
+                "path": str(target),
+                "error_kind": "truncated_write_payload",
+                "content_chars": len(str(content or "")),
+                "next_required_tool": {
+                    "tool_name": "file_write",
+                    "required_fields": ["path", "content"],
+                    "required_arguments": {"path": path},
+                    "notes": ["Provide the complete target file contents, not a partial tool-call fragment."],
+                },
+            },
+        )
     
     if write_session_id and state is not None:
         _terminal_session = getattr(state, "write_session", None)
@@ -138,21 +181,36 @@ async def file_write(
             write_session_id = None
 
     if write_session_id:
-        return handle_file_write_session(
-            path=path,
-            content=content,
-            cwd=cwd,
-            encoding=encoding,
-            state=state,
-            session_id=session_id,
-            write_session_id=write_session_id,
-            section_name=section_name,
-            section_id=section_id,
-            section_role=section_role,
-            next_section_name=next_section_name,
-            replace_strategy=replace_strategy,
-            expected_followup_verifier=expected_followup_verifier,
+        _active_session = getattr(state, "write_session", None) if state is not None else None
+        _active_session_id = str(getattr(_active_session, "write_session_id", "") or "").strip()
+        if _active_session_id and _active_session_id == str(write_session_id).strip():
+            return handle_file_write_session(
+                path=path,
+                content=content,
+                cwd=cwd,
+                encoding=encoding,
+                state=state,
+                session_id=session_id,
+                write_session_id=write_session_id,
+                section_name=section_name,
+                section_id=section_id,
+                section_role=section_role,
+                next_section_name=next_section_name,
+                replace_strategy=replace_strategy,
+                expected_followup_verifier=expected_followup_verifier,
+            )
+        record_write_session_event(
+            state,
+            event="unknown_write_session_id_fallback_to_direct_write",
+            session=_active_session,
+            details={
+                "path": str(target),
+                "provided_write_session_id": str(write_session_id).strip(),
+                "active_write_session_id": _active_session_id,
+                "reason": "unknown_write_session_id",
+            },
         )
+        write_session_id = None
 
     # Fix 1: Intercept bare file_write to a session-owned canonical path.
     # A model that omits write_session_id while a session is open gets a silent
@@ -217,7 +275,9 @@ async def file_write(
     if target.exists() and target.is_file() and target.stat().st_size > 0 and not write_session_id and not _has_completed_session:
         try:
             existing_content = target.read_text(encoding=encoding)
-            if existing_content.strip() and content.strip():
+            if _looks_like_poisoned_truncated_file(existing_content):
+                pass
+            elif existing_content.strip() and content.strip():
                 existing_lines = set(existing_content.strip().splitlines())
                 new_lines = set(content.strip().splitlines())
                 if existing_lines and new_lines:

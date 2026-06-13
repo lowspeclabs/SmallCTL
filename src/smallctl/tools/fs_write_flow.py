@@ -71,7 +71,9 @@ def handle_file_write_session(
         )
     if state is None or state.write_session is None:
         return fail(
-            f"No active write session found for session ID `{write_session_id}`. Start a session or write directly.",
+            f"No active write session found for session ID `{write_session_id}`. "
+            "If you want to write the file directly, omit `write_session_id`. "
+            "If you want staged/chunked authoring, start a write session explicitly.",
             metadata={
                 "path": str(target),
                 "error_kind": "missing_active_write_session",
@@ -83,15 +85,12 @@ def handle_file_write_session(
                 "staged_only": True,
                 "next_required_tool": {
                     "tool_name": "file_write",
-                    "required_fields": ["path", "content", "write_session_id"],
-                    "required_arguments": {
-                        "path": path,
-                        "write_session_id": str(write_session_id or "").strip(),
-                    },
-                    "optional_fields": ["section_name", "next_section_name", "replace_strategy"],
+                    "required_fields": ["path", "content"],
+                    "required_arguments": {"path": path},
+                    "optional_fields": ["replace_strategy"],
                     "notes": [
-                        "The harness can recover a missing first write session from the failed tool payload.",
-                        "Do not ask the model to resend full file content if the payload is still available.",
+                        "Omit `write_session_id` to write directly to the target path.",
+                        "Do not reuse a session ID that is not currently active.",
                     ],
                 },
             },

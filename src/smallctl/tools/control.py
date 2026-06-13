@@ -143,6 +143,8 @@ async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> d
                             ),
                         },
                     )
+                    from .fs_write_sessions import _remove_active_write_session
+                    _remove_active_write_session(state, session)
                     state.write_session = None
                     scratchpad = state.scratchpad
                     scratchpad.pop("_task_complete_last_blocker", None)
@@ -177,6 +179,8 @@ async def _task_complete_gate_write_session(state: LoopState, harness: Any) -> d
                             "rejection_count": scratchpad["_task_complete_blocker_count"],
                         },
                     )
+                    from .fs_write_sessions import _remove_active_write_session
+                    _remove_active_write_session(state, session)
                     state.write_session = None
                     scratchpad.pop("_task_complete_last_blocker", None)
                     scratchpad.pop("_task_complete_blocker_count", None)
@@ -437,7 +441,8 @@ async def step_fail(message: str, state: LoopState, harness: Any) -> dict:
 async def finalize_write_session(state: LoopState, harness: Any) -> dict:
     session = state.write_session
     if not session:
-        return fail("No active write session to finalize.")
+        # Idempotent: no active session is already a success state.
+        return ok({"status": "no_active_session", "message": "No active write session to finalize."})
     if str(session.status or "").strip().lower() == "complete":
         target_path = str(getattr(session, "write_target_path", "") or "").strip()
         message = "Write session is already complete."

@@ -21,6 +21,7 @@ def register_filesystem_tools(
                 name="file_read",
                 description=(
                     "Read a LOCAL text file with optional line slicing. Paths resolve relative to the current cwd. "
+                    "The `~` character is expanded to the user's home directory (e.g. `~/.bashrc` becomes `/home/user/.bashrc`). "
                     "For large files, the full content is stored as an artifact; use artifact_read with the returned artifact_id for paging. "
                     "If a file was recently written in 'chunked_build' mode, verify the final output after the last section is written. "
                     "This tool operates on the LOCAL orchestrator filesystem ONLY. Never use it to verify remote files."
@@ -44,7 +45,7 @@ def register_filesystem_tools(
             ),
             make_registration(
                 name="dir_list",
-                description="List LOCAL directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path. This tool operates on the LOCAL orchestrator filesystem ONLY.",
+                description="List LOCAL directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path. The `~` character is expanded to the user's home directory (e.g. `~/.ssh` becomes `/home/user/.ssh`). This tool operates on the LOCAL orchestrator filesystem ONLY.",
                 schema={
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -61,7 +62,10 @@ def register_filesystem_tools(
                 name="file_write",
                 description=(
                     "Write content to a LOCAL file. For large files or complex implementations, use chunked mode by providing "
-                    "`write_session_id`, section metadata, and an optional `replace_strategy`. Overwrites existing files unless in an active session. "
+                    "the target `path`, a `section_name` for the current logical block, and an optional `next_section_name`. "
+                    "The harness will stage the file and promote it when the last section is written. "
+                    "`write_session_id` is handled internally and should normally be omitted. "
+                    "The `~` character is expanded to the user's home directory (e.g. `~/.bashrc` becomes `/home/user/.bashrc`). "
                     "During an active write session, always pass the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only. "
                     "This tool operates on the LOCAL orchestrator filesystem ONLY."
                 ),
@@ -70,7 +74,7 @@ def register_filesystem_tools(
                     "properties": {
                         "path": {"type": "string", "description": "Path to file."},
                         "content": {"type": "string", "description": "Content to write."},
-                        "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
+                        "write_session_id": {"type": "string", "description": "Legacy/internal. The harness matches the target path automatically; omit this field."},
                         "section_name": {"type": "string", "description": "Brief name for this logical block (e.g. 'imports', 'class_def')."},
                         "section_id": {"type": "string", "description": "Optional stable section identifier for chunk-mode writes."},
                         "section_role": {"type": "string", "description": "Optional section role such as 'imports', 'helpers', or 'core_logic'."},
@@ -94,7 +98,8 @@ def register_filesystem_tools(
                     "Use this for small, precise edits to an existing file or active staged write session. "
                     "Use `dry_run=true` to preview the diff without writing. "
                     "Never use `target_text=''` to create or replace a file; use `file_write` with `replace_strategy='overwrite'` for initial content or full replacement. "
-                    "During an active write session, always patch the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only."
+                    "During an active write session, patch the target file path as `path`; the harness applies edits to the staged copy automatically. "
+                    "`write_session_id` is handled internally and should normally be omitted."
                 ),
                 schema={
                     "type": "object",
@@ -109,7 +114,7 @@ def register_filesystem_tools(
                         "multiline": {"type": "boolean", "description": "Regex mode only: make ^ and $ match line boundaries."},
                         "dotall": {"type": "boolean", "description": "Regex mode only: make . match newlines."},
                         "dry_run": {"type": "boolean", "description": "Preview the patch and unified diff without writing or mutating write-session state."},
-                        "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
+                        "write_session_id": {"type": "string", "description": "Legacy/internal. The harness matches the target path automatically; omit this field."},
                         "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
                     },
                     "required": ["path", "target_text", "replacement_text"],
@@ -126,8 +131,8 @@ def register_filesystem_tools(
                 description=(
                     "Patch a Python file by targeting structural anchors such as imports, functions, calls, or class fields. "
                     "Use this when an edit is easier to describe by structure than by exact text. "
-                    "During an active write session, always patch the target file path as `path`; staged copy paths under "
-                    "`.smallctl/write_sessions/` are for read/verify only."
+                    "During an active write session, patch the target file path as `path`; the harness applies edits to the staged copy automatically. "
+                    "`write_session_id` is handled internally and should normally be omitted."
                 ),
                 schema={
                     "type": "object",
@@ -137,7 +142,7 @@ def register_filesystem_tools(
                         "operation": {"type": "string", "description": "Structural edit operation such as `add_import` or `replace_function`."},
                         "target": {"type": "object", "description": "Operation-specific locator data."},
                         "payload": {"type": "object", "description": "Operation-specific replacement or insertion data."},
-                        "write_session_id": {"type": "string", "description": "ID of the active write session (if any)."},
+                        "write_session_id": {"type": "string", "description": "Legacy/internal. The harness matches the target path automatically; omit this field."},
                         "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as `python -m py_compile`."},
                         "dry_run": {"type": "boolean", "description": "Preview the structural edit without writing it."},
                     },

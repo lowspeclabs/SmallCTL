@@ -242,6 +242,20 @@ def _coerce_prompt_budget(value: Any) -> Any:
     return PromptBudgetSnapshot()
 
 
+def _coerce_active_write_sessions_by_path(value: Any) -> dict[str, WriteSession]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, WriteSession] = {}
+    for key, item in value.items():
+        key_str = str(key or "").strip()
+        if not key_str:
+            continue
+        session = _coerce_write_session(item)
+        if session is not None:
+            result[key_str] = session
+    return result
+
+
 def _coerce_write_session(value: Any) -> Any:
     if isinstance(value, WriteSession):
         return value

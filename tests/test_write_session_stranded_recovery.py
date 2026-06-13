@@ -761,5 +761,5 @@ class TestResumeActionAndTaskComplete:
         state = LoopState(cwd="/tmp")
         harness = _FakeHarness(session=None, cwd="/tmp")
         result = asyncio.run(finalize_write_session(state, harness))
-        assert result["success"] is False
-        assert "No active write session" in result["error"]
+        assert result["success"] is True
+        assert result["output"]["status"] == "no_active_session"

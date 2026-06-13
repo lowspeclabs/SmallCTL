@@ -190,8 +190,6 @@ def _coerce_run_brief(value: Any) -> Any:
 
 
 def _coerce_conversation_message(value: Any) -> Any | None:
-    from .models.conversation import ConversationMessage
-
     if not isinstance(value, dict):
         return None
     normalized = json_safe_value(value)

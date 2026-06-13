@@ -118,7 +118,8 @@ def _recover_patch_existing_recovery_session(
         write_target_existed_at_start=True,
         status="open",
     )
-    harness.state.write_session = recovered_session
+    from ..tools.fs_write_sessions import _store_active_write_session
+    _store_active_write_session(harness.state, recovered_session)
     return recovered_session
 
 

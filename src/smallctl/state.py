@@ -58,6 +58,7 @@ from .state_coercion import (
     _coerce_turn_bundle,
     _coerce_memory_entry_list,
 )
+from .state_session_records import _coerce_active_write_sessions_by_path
 from .recovery_coercion import (
     _coerce_failure_event,
     _coerce_reflection_memory,
@@ -159,6 +160,7 @@ class LoopState(LoopStateFlowMixin):
     last_completion_tokens: int = 0
     tool_history: list[str] = field(default_factory=list)
     write_session: WriteSession | None = None
+    active_write_sessions_by_path: dict[str, WriteSession] = field(default_factory=dict)
     task_received_at: str = ""
     log: logging.Logger = field(default_factory=lambda: logging.getLogger("smallctl.state"))
     
@@ -267,6 +269,10 @@ class LoopState(LoopStateFlowMixin):
             "task_exposed_tools": json_safe_value(sorted(self.task_exposed_tools)),
             "tool_history": json_safe_value(self.tool_history),
             "write_session": self.write_session.to_dict() if self.write_session else None,
+            "active_write_sessions_by_path": {
+                key: (session.to_dict() if session else None)
+                for key, session in (self.active_write_sessions_by_path or {}).items()
+            },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "recent_message_limit": self.recent_message_limit,
@@ -413,6 +419,9 @@ class LoopState(LoopStateFlowMixin):
         raw["task_exposed_tools"] = set(_coerce_string_list(migrated.get("task_exposed_tools")))
         raw["tool_history"] = _coerce_string_list(migrated.get("tool_history"))
         raw["write_session"] = _coerce_write_session(migrated.get("write_session"))
+        raw["active_write_sessions_by_path"] = _coerce_active_write_sessions_by_path(
+            migrated.get("active_write_sessions_by_path")
+        )
         raw["created_at"] = _coerce_timestamp_string(migrated.get("created_at"))
         raw["updated_at"] = _coerce_timestamp_string(migrated.get("updated_at"))
         raw["last_completion_tokens"] = _coerce_int(migrated.get("last_completion_tokens"), default=0)

@@ -165,22 +165,58 @@ def archive_terminal_write_session(
 ) -> dict[str, Any] | None:
     if state is None:
         return None
-    session = getattr(state, "write_session", None)
-    if session is None or not is_terminal_write_session(session):
+    # Archive all terminal sessions from the path map, not just the alias.
+    active_map = getattr(state, "active_write_sessions_by_path", None)
+    terminal_sessions: list[Any] = []
+    if isinstance(active_map, dict):
+        for session in list(active_map.values()):
+            if session is not None and is_terminal_write_session(session):
+                terminal_sessions.append(session)
+    alias_session = getattr(state, "write_session", None)
+    if alias_session is not None and is_terminal_write_session(alias_session):
+        if alias_session not in terminal_sessions:
+            terminal_sessions.append(alias_session)
+    if not terminal_sessions:
         return None
-    payload = _append_archived_write_session(
-        state,
-        _write_session_archive_payload(session, reason=reason),
-    )
-    record_write_session_event(
-        state,
-        event="terminal_write_session_cleared_on_continue",
-        session=session,
-        details={"reason": payload["reason"]},
-    )
-    _record_dead_write_session_id(state, payload.get("write_session_id"))
-    state.write_session = None
-    return payload
+    payloads: list[dict[str, Any]] = []
+    for session in terminal_sessions:
+        payload = _append_archived_write_session(
+            state,
+            _write_session_archive_payload(session, reason=reason),
+        )
+        payloads.append(payload)
+        _record_dead_write_session_id(state, payload.get("write_session_id"))
+    state.active_write_sessions_by_path = {
+        key: session
+        for key, session in (active_map or {}).items()
+        if session is not None and not is_terminal_write_session(session)
+    }
+    _refresh_write_session_alias(state)
+    if payloads:
+        record_write_session_event(
+            state,
+            event="terminal_write_session_cleared_on_continue",
+            session=terminal_sessions[-1],
+            details={"reason": payloads[-1]["reason"], "count": len(payloads)},
+        )
+        return payloads[-1]
+    return None
+
+
+def _refresh_write_session_alias(state: Any) -> None:
+    """Point state.write_session at the most recently started non-terminal session, if any."""
+    if state is None:
+        return
+    candidates = [
+        session
+        for session in (getattr(state, "active_write_sessions_by_path", {}) or {}).values()
+        if session is not None and not is_terminal_write_session(session)
+    ]
+    if candidates:
+        candidates.sort(key=lambda s: float(getattr(s, "write_session_started_at", 0.0) or 0.0), reverse=True)
+        state.write_session = candidates[0]
+    else:
+        state.write_session = None
 
 
 def archive_interrupted_write_session(
@@ -190,21 +226,40 @@ def archive_interrupted_write_session(
 ) -> dict[str, Any] | None:
     if state is None:
         return None
-    session = getattr(state, "write_session", None)
-    if session is None or is_terminal_write_session(session):
+    active_map = getattr(state, "active_write_sessions_by_path", None)
+    interrupted_sessions: list[Any] = []
+    if isinstance(active_map, dict):
+        for session in list(active_map.values()):
+            if session is not None and not is_terminal_write_session(session):
+                interrupted_sessions.append(session)
+    alias_session = getattr(state, "write_session", None)
+    if alias_session is not None and not is_terminal_write_session(alias_session):
+        if alias_session not in interrupted_sessions:
+            interrupted_sessions.append(alias_session)
+    if not interrupted_sessions:
         return None
-    payload = _append_archived_write_session(
-        state,
-        _write_session_archive_payload(session, reason=reason),
-    )
-    record_write_session_event(
-        state,
-        event="interrupted_write_session_archived",
-        session=session,
-        details={"reason": payload["reason"]},
-    )
-    _record_dead_write_session_id(state, payload.get("write_session_id"))
-    return payload
+    payloads: list[dict[str, Any]] = []
+    for session in interrupted_sessions:
+        payload = _append_archived_write_session(
+            state,
+            _write_session_archive_payload(session, reason=reason),
+        )
+        payloads.append(payload)
+        _record_dead_write_session_id(state, payload.get("write_session_id"))
+    state.active_write_sessions_by_path = {}
+    if payloads:
+        # Preserve the legacy alias pointing at the last archived session for
+        # callers that expect it, while the map is now empty.
+        state.write_session = interrupted_sessions[-1]
+        record_write_session_event(
+            state,
+            event="interrupted_write_session_archived",
+            session=interrupted_sessions[-1],
+            details={"reason": payloads[-1]["reason"], "count": len(payloads)},
+        )
+        return payloads[-1]
+    state.write_session = None
+    return None
 
 
 def _record_dead_write_session_id(state: Any, session_id: str | None) -> None:

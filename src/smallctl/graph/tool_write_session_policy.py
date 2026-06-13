@@ -7,20 +7,8 @@ from typing import Any
 
 from ..state import WriteSession
 from ..write_session_fsm import _ARCHIVED_WRITE_SESSIONS_KEY, new_write_session, record_write_session_event
+from ..tools.fs_sessions import _suggested_chunk_sections
 from .state import PendingToolCall
-
-
-def _suggested_chunk_sections(path: str) -> list[str]:
-    ext = Path(path).suffix.lower()
-    if ext == ".py":
-        return ["imports", "types/interfaces", "constants/globals", "helpers", "main_logic", "tests/entrypoint"]
-    if ext in {".js", ".ts", ".tsx"}:
-        return ["imports", "types", "constants", "utils", "main_component/logic", "exports"]
-    if ext == ".go":
-        return ["package", "imports", "types", "const/var", "helpers", "main_logic"]
-    if ext in {".md", ".txt"}:
-        return ["header", "overview", "details", "footer"]
-    return ["header", "implementation", "footer"]
 
 
 def _write_policy_value(harness: Any, name: str, default: Any) -> Any:
@@ -224,6 +212,7 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     intent = infer_write_session_intent(target, getattr(harness.state, "cwd", None))
     if intent == "patch_existing" and _is_write_first_task(harness.state):
         intent = "replace_file"
+    from ..tools.fs_write_sessions import _store_active_write_session
     session = new_write_session(
         session_id=new_write_session_id(),
         target_path=target,
@@ -232,7 +221,7 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
         suggested_sections=suggestions,
         next_section=suggestions[0] if suggestions else "",
     )
-    harness.state.write_session = session
+    _store_active_write_session(harness.state, session)
     migrated_archived_stage = _migrate_archived_stage_into_session(harness, session, target)
 
     if migrated_archived_stage is not None:

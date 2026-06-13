@@ -166,11 +166,13 @@ async def file_delete(
                     Path(staging_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+            from ..tools.fs_write_sessions import _remove_active_write_session
             from ..write_session_fsm import archive_interrupted_write_session
             archive_interrupted_write_session(
                 state,
                 reason="file_delete_aborted_session",
             )
+            _remove_active_write_session(state, active_session)
             state.write_session = None
             result_metadata.update(
                 {

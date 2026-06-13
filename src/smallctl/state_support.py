@@ -8,11 +8,9 @@ from typing import Any
 
 from .normalization import (
     coerce_datetime as _coerce_datetime,
-    coerce_dict_payload as _coerce_dict_payload,
     coerce_float as _coerce_float,
     coerce_int,
     coerce_json_dict_payload,
-    coerce_list_payload as _coerce_list_payload,
     coerce_string_list,
     coerce_timestamp_string as _coerce_timestamp_string,
 )
@@ -82,6 +80,12 @@ def _migrate_loop_state_payload(payload: dict[str, Any], *, incoming_version: in
         if ws.get("lifecycle_status") and not ws.get("status"):
             ws["status"] = ws.get("lifecycle_status")
         migrated["write_session"] = ws
+        # Migrate legacy single-session checkpoints into the multi-session map.
+        active_map = migrated.get("active_write_sessions_by_path")
+        if not isinstance(active_map, dict) or not active_map:
+            target = str(ws.get("write_target_path") or "").strip()
+            if target:
+                migrated["active_write_sessions_by_path"] = {target: dict(ws)}
     if incoming_version < LOOP_STATE_SCHEMA_VERSION and "reasoning_graph" not in migrated:
         migrated["reasoning_graph"] = {}
     return migrated

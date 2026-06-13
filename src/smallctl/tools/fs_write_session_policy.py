@@ -51,10 +51,9 @@ def _write_session_resume_metadata(session: Any, *, path: str) -> dict[str, Any]
     ).strip() or "imports"
     return {
         "tool_name": "file_write",
-        "required_fields": ["path", "content", "write_session_id", "section_name"],
+        "required_fields": ["path", "content", "section_name"],
         "required_arguments": {
             "path": str(getattr(session, "write_target_path", "") or path or "").strip(),
-            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
             "section_name": section_name,
         },
         "optional_fields": ["next_section_name"],
@@ -81,10 +80,9 @@ def _write_session_staging_mutation_failure(
         )
         next_required_tool = {
             "tool_name": tool_name,
-            "required_fields": ["path", "content", "write_session_id", "section_name"],
+            "required_fields": ["path", "content", "section_name"],
             "required_arguments": {
                 "path": target_path,
-                "write_session_id": write_session_id,
                 "section_name": recommended_section,
             },
             "optional_fields": ["next_section_name"],
@@ -99,7 +97,6 @@ def _write_session_staging_mutation_failure(
             "required_fields": ["path", "target_text", "replacement_text"],
             "required_arguments": {
                 "path": target_path,
-                "write_session_id": write_session_id,
             },
             "optional_fields": ["expected_occurrences"],
             "notes": [
@@ -113,7 +110,6 @@ def _write_session_staging_mutation_failure(
             "required_fields": ["path", "language", "operation", "target"],
             "required_arguments": {
                 "path": target_path,
-                "write_session_id": write_session_id,
             },
             "optional_fields": ["payload", "dry_run", "expected_followup_verifier"],
             "notes": [

@@ -249,6 +249,19 @@ def new_write_session_id() -> str:
     return f"ws_{uuid.uuid4().hex[:6]}"
 
 
+def _suggested_chunk_sections(path: str) -> list[str]:
+    ext = Path(path).suffix.lower()
+    if ext == ".py":
+        return ["imports", "types/interfaces", "constants/globals", "helpers", "main_logic", "tests/entrypoint"]
+    if ext in {".js", ".ts", ".tsx"}:
+        return ["imports", "types", "constants", "utils", "main_component/logic", "exports"]
+    if ext == ".go":
+        return ["package", "imports", "types", "const/var", "helpers", "main_logic"]
+    if ext in {".md", ".txt"}:
+        return ["header", "overview", "details", "footer"]
+    return ["header", "implementation", "footer"]
+
+
 def infer_write_session_intent(path: str, cwd: str | None = None) -> str:
     from .fs_write_sessions import _resolve
 

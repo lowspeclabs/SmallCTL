@@ -115,7 +115,8 @@ async def _validate_pending_tool_calls(harness: Any, graph_state: Any, deps: Any
             suggestions = _get_suggested_sections(target_path)
             session_id = new_write_session_id()
 
-            harness.state.write_session = new_write_session(
+            from ..tools.fs_write_sessions import _store_active_write_session
+            session = new_write_session(
                 session_id=session_id,
                 target_path=target_path,
                 intent=infer_write_session_intent(
@@ -126,11 +127,12 @@ async def _validate_pending_tool_calls(harness: Any, graph_state: Any, deps: Any
                 suggested_sections=suggestions,
                 next_section=suggestions[0] if suggestions else "",
             )
-            _register_write_session_stage_artifact(harness, harness.state.write_session)
+            _store_active_write_session(harness.state, session)
+            _register_write_session_stage_artifact(harness, session)
             record_write_session_event(
                 harness.state,
                 event="session_opened",
-                session=harness.state.write_session,
+                session=session,
                 details={"source": "chunk_mode_trigger", "size": len(content)},
             )
 

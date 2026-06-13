@@ -12,6 +12,7 @@ from ..write_session_fsm import record_write_session_event
 from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
+    _looks_like_complete_html_document,
     _normalize_replace_strategy,
     _normalize_section_name,
     _repair_cycle_session_id_failure,
@@ -59,7 +60,9 @@ from .fs_write_sessions import (
     _write_session_dir,
     _write_text_file,
     format_write_session_status_block,
+    maybe_create_implicit_write_session,
     promote_write_session_target,
+    resolve_write_session_for_path,
     restore_write_session_snapshot,
     write_session_status_snapshot,
     write_session_verify_path,
@@ -102,6 +105,27 @@ def _looks_like_poisoned_truncated_file(content: str) -> bool:
     lowered = text.lower()
     html_starters = ("<!doctype", "<html", "<head", "<body", "<script", "<style")
     return lowered.startswith(html_starters) and "</html>" not in lowered
+
+
+def _infer_implicit_section_name(
+    session: Any,
+    content: str,
+    replace_strategy: str | None,
+) -> str | None:
+    """Best-effort section label when the model omits section_name during a session."""
+    next_section = str(getattr(session, "write_next_section", "") or "").strip()
+    if next_section:
+        return next_section
+    current_section = str(getattr(session, "write_current_section", "") or "").strip()
+    if current_section:
+        return current_section
+    strategy = _normalize_replace_strategy(replace_strategy)
+    if strategy == "overwrite" or _looks_like_complete_html_document(content):
+        return "full_file"
+    if session.write_sections_completed:
+        # Ambiguous: previous sections exist but no next/current section was named.
+        return None
+    return None
 
 
 def is_file_mutating_tool(tool_name: str) -> bool:
@@ -180,6 +204,93 @@ async def file_write(
             )
             write_session_id = None
 
+    # Path-based implicit session resolution takes precedence over explicit IDs.
+    # If an active non-terminal session owns the target path, route the write into
+    # the session regardless of whether the model supplied a matching, stale, or
+    # missing write_session_id.
+    implicit_session = resolve_write_session_for_path(state, path, cwd)
+    if implicit_session is not None:
+        if write_session_id:
+            provided_id = str(write_session_id).strip()
+            active_id = str(getattr(implicit_session, "write_session_id", "") or "").strip()
+            if provided_id != active_id:
+                record_write_session_event(
+                    state,
+                    event="implicit_session_continued",
+                    session=implicit_session,
+                    details={
+                        "path": str(target),
+                        "provided_write_session_id": provided_id,
+                        "active_write_session_id": active_id,
+                        "reason": "path_match_overrides_unknown_id",
+                    },
+                )
+            else:
+                record_write_session_event(
+                    state,
+                    event="implicit_session_continued",
+                    session=implicit_session,
+                    details={
+                        "path": str(target),
+                        "provided_write_session_id": provided_id,
+                        "reason": "path_and_id_match",
+                    },
+                )
+        else:
+            record_write_session_event(
+                state,
+                event="implicit_session_resolved",
+                session=implicit_session,
+                details={"path": str(target), "reason": "path_match_no_id"},
+            )
+
+        if not section_name and not section_id:
+            inferred = _infer_implicit_section_name(
+                implicit_session, content, replace_strategy
+            )
+            if inferred is None:
+                return fail(
+                    f"file_write to `{path}` continues an active Write Session, but the section name is ambiguous. "
+                    "Provide `section_name` to choose which section to write or replace.",
+                    metadata={
+                        "path": str(target),
+                        "error_kind": "implicit_session_section_ambiguous",
+                        "write_session_id": str(getattr(implicit_session, "write_session_id", "") or "").strip(),
+                        "write_sections_completed": list(getattr(implicit_session, "write_sections_completed", []) or []),
+                        "write_next_section": str(getattr(implicit_session, "write_next_section", "") or "").strip(),
+                        "write_current_section": str(getattr(implicit_session, "write_current_section", "") or "").strip(),
+                        "staged_only": True,
+                        "next_required_tool": {
+                            "tool_name": "file_write",
+                            "required_fields": ["path", "content", "section_name"],
+                            "required_arguments": {"path": path},
+                            "optional_fields": ["next_section_name", "replace_strategy"],
+                            "notes": [
+                                "Use the target path and section_name to continue the session.",
+                                "Use section_name='full_file' with replace_strategy='overwrite' for a complete staged-file replacement.",
+                            ],
+                        },
+                    },
+                )
+            section_name = inferred
+
+        return handle_file_write_session(
+            path=path,
+            content=content,
+            cwd=cwd,
+            encoding=encoding,
+            state=state,
+            session_id=session_id,
+            write_session_id=None,
+            section_name=section_name,
+            section_id=section_id,
+            section_role=section_role,
+            next_section_name=next_section_name,
+            replace_strategy=replace_strategy,
+            expected_followup_verifier=expected_followup_verifier,
+            session=implicit_session,
+        )
+
     if write_session_id:
         _active_session = getattr(state, "write_session", None) if state is not None else None
         _active_session_id = str(getattr(_active_session, "write_session_id", "") or "").strip()
@@ -212,44 +323,35 @@ async def file_write(
         )
         write_session_id = None
 
-    # Fix 1: Intercept bare file_write to a session-owned canonical path.
-    # A model that omits write_session_id while a session is open gets a silent
-    # direct-write success, the FSM never advances, and task_complete is blocked
-    # later with no actionable context.  Block it here instead.
-    if state is not None:
-        _active_session = getattr(state, "write_session", None)
-        if (
-            _active_session is not None
-            and str(getattr(_active_session, "status", "") or "").strip().lower() not in {"complete"}
-            and _same_target_path(
-                str(getattr(_active_session, "write_target_path", "") or ""), path, cwd
-            )
-        ):
-            from .control import _write_session_resume_action
-            _ws_id = str(getattr(_active_session, "write_session_id", "") or "").strip()
-            _next_section = str(getattr(_active_session, "write_next_section", "") or "").strip() or "imports"
-            record_write_session_event(
-                state,
-                event="bare_write_intercepted",
-                session=_active_session,
-                details={"path": str(target), "reason": "write_session_id_missing"},
-            )
-            return fail(
-                f"file_write to `{path}` was rejected because Write Session `{_ws_id}` is "
-                f"still open for that path. You must continue the session: provide "
-                f"`write_session_id='{_ws_id}'` and `section_name='{_next_section}'` in this "
-                f"call. A bare file_write without `write_session_id` bypasses the session FSM "
-                f"and will leave the session permanently open. Use `loop_status` to see the "
-                f"current session state and the required next section.",
-                metadata={
-                    "path": str(target),
-                    "error_kind": "bare_write_to_session_owned_path",
-                    "write_session_id": _ws_id,
-                    "write_next_section": _next_section,
-                    "staged_only": False,
-                    "next_required_tool": _write_session_resume_action(state, None),
-                },
-            )
+    # Implicit session creation for path-based chunked authoring.
+    implicit_session = maybe_create_implicit_write_session(
+        state,
+        path,
+        content,
+        section_name=section_name,
+        next_section_name=next_section_name,
+        replace_strategy=replace_strategy,
+        cwd=cwd,
+    )
+    if implicit_session is not None:
+        if not section_name and not section_id:
+            section_name = str(getattr(implicit_session, "write_current_section", "") or "").strip()
+        return handle_file_write_session(
+            path=path,
+            content=content,
+            cwd=cwd,
+            encoding=encoding,
+            state=state,
+            session_id=session_id,
+            write_session_id=None,
+            section_name=section_name,
+            section_id=section_id,
+            section_role=section_role,
+            next_section_name=next_section_name,
+            replace_strategy=replace_strategy,
+            expected_followup_verifier=expected_followup_verifier,
+            session=implicit_session,
+        )
 
     if not _repair_cycle_allows_patch(state, target):
         _mark_repeat_patch(state)

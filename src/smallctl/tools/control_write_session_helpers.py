@@ -43,7 +43,6 @@ def write_session_resume_action(
     ).strip() or "imports"
     required_arguments = {
         "path": str((failure or {}).get("target_path") or getattr(session, "write_target_path", None) or "").strip(),
-        "write_session_id": str(getattr(session, "write_session_id", None) or ""),
         "section_name": section_name,
     }
     notes = ["Provide non-empty `content` for this section."]
@@ -60,7 +59,7 @@ def write_session_resume_action(
             )
     return {
         "tool_name": "file_write",
-        "required_fields": ["path", "content", "write_session_id", "section_name"],
+        "required_fields": ["path", "content", "section_name"],
         "required_arguments": required_arguments,
         "optional_fields": ["next_section_name"],
         "notes": notes,
@@ -79,9 +78,9 @@ def write_session_warning(state: Any) -> str | None:
     if not ws_id_hint or not ws_path_hint:
         return None
     return (
-        f"Write Session `{ws_id_hint}` is open for `{ws_path_hint}`. "
-        f"All file_write / file_patch / ast_patch calls to that path MUST include "
-        f"`write_session_id='{ws_id_hint}'` and `section_name='{ws_next_hint}'`. "
-        f"A bare file_write without write_session_id will be rejected and will NOT "
-        f"advance the session. task_complete will be blocked until the session is finalized."
+        f"Write Session is open for `{ws_path_hint}`. "
+        f"All file_write / file_patch / ast_patch calls to that path use the target path; "
+        f"the harness will match them to the active session. "
+        f"Next expected section: `{ws_next_hint}`. "
+        f"task_complete will be blocked until the session is finalized."
     )

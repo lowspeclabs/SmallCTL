@@ -54,22 +54,29 @@ def handle_file_write_session(
     encoding: str,
     state: LoopState | None,
     session_id: str | None,
-    write_session_id: str,
+    write_session_id: str | None,
     section_name: str | None,
     section_id: str | None,
     section_role: str | None,
     next_section_name: str | None,
     replace_strategy: str | None,
     expected_followup_verifier: str | None,
+    session: Any | None = None,
 ) -> dict[str, Any]:
     target = _resolve(path, cwd)
-    if _looks_like_system_repair_cycle_id(write_session_id):
+    if session is not None:
+        effective_session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    else:
+        effective_session_id = str(write_session_id or "").strip()
+    if _looks_like_system_repair_cycle_id(effective_session_id):
         return _repair_cycle_session_id_failure(
-            supplied_id=str(write_session_id or "").strip(),
+            supplied_id=effective_session_id,
             path=path,
             state=state,
         )
-    if state is None or state.write_session is None:
+    if session is not None:
+        pass
+    elif state is None or state.write_session is None:
         return fail(
             f"No active write session found for session ID `{write_session_id}`. "
             "If you want to write the file directly, omit `write_session_id`. "
@@ -95,21 +102,24 @@ def handle_file_write_session(
                 },
             },
         )
-    session = state.write_session
-    if session.write_session_id != write_session_id:
-        return fail(
-            f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.",
-            metadata={
-                "error_kind": "write_session_id_mismatch",
-                "expected_session_id": session.write_session_id,
-                "provided_session_id": write_session_id,
-                "next_required_tool": {
-                    "tool_name": "file_write",
-                    "required_fields": ["path", "content", "write_session_id"],
-                    "required_arguments": {"path": path, "write_session_id": session.write_session_id},
+    else:
+        session = state.write_session
+        if write_session_id and session.write_session_id != write_session_id:
+            return fail(
+                f"Session ID mismatch: expected `{session.write_session_id}`, got `{write_session_id}`.",
+                metadata={
+                    "error_kind": "write_session_id_mismatch",
+                    "expected_session_id": session.write_session_id,
+                    "provided_session_id": write_session_id,
+                    "next_required_tool": {
+                        "tool_name": "file_write",
+                        "required_fields": ["path", "content", "write_session_id"],
+                        "required_arguments": {"path": path, "write_session_id": session.write_session_id},
+                    },
                 },
-            },
-        )
+            )
+
+    write_session_id = effective_session_id
 
     session_status = str(getattr(session, "status", "") or "open").strip().lower() or "open"
     if session_status not in {"open", "local_repair", "fallback"}:
@@ -177,8 +187,8 @@ def handle_file_write_session(
                     "provided_path": path,
                     "next_required_tool": {
                         "tool_name": "file_write",
-                        "required_fields": ["path", "content", "write_session_id"],
-                        "required_arguments": {"path": session.write_target_path, "write_session_id": write_session_id},
+                        "required_fields": ["path", "content"],
+                        "required_arguments": {"path": session.write_target_path},
                     },
                 },
             )
@@ -233,10 +243,9 @@ def handle_file_write_session(
                     "staged_only": True,
                     "next_required_tool": {
                         "tool_name": "file_write",
-                        "required_fields": ["path", "content", "write_session_id", "section_name"],
+                        "required_fields": ["path", "content", "section_name"],
                         "required_arguments": {
                             "path": path,
-                            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
                             "section_name": str(getattr(session, "write_next_section", "") or normalized_section_name).strip(),
                         },
                         "optional_fields": ["next_section_name", "replace_strategy"],
@@ -279,10 +288,9 @@ def handle_file_write_session(
                     "error_kind": "patch_existing_requires_explicit_replace_strategy",
                     "next_required_tool": {
                         "tool_name": "file_write",
-                        "required_fields": ["path", "content", "write_session_id", "replace_strategy"],
+                        "required_fields": ["path", "content", "replace_strategy"],
                         "required_arguments": {
                             "path": path,
-                            "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
                             "replace_strategy": "overwrite",
                         },
                         "notes": [
@@ -441,9 +449,9 @@ def handle_file_write_session(
                 "staged_only": True,
                 "next_required_tool": {
                     "tool_name": "file_write" if next_section else "finalize_write_session",
-                    "required_fields": ["path", "content", "write_session_id", "section_name"] if next_section else [],
+                    "required_fields": ["path", "content", "section_name"] if next_section else [],
                     "required_arguments": (
-                        {"path": path, "write_session_id": write_session_id, "section_name": next_section}
+                        {"path": path, "section_name": next_section}
                         if next_section
                         else {}
                     ),
@@ -468,10 +476,9 @@ def handle_file_write_session(
                 "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
                 "next_required_tool": {
                     "tool_name": "file_write",
-                    "required_fields": ["path", "content", "write_session_id"],
+                    "required_fields": ["path", "content"],
                     "required_arguments": {
                         "path": path,
-                        "write_session_id": str(getattr(session, "write_session_id", "") or "").strip(),
                     },
                     "notes": ["Retry the same section write; if the error persists, call file_read on the staged copy first."],
                 },

@@ -151,6 +151,7 @@ async def _maybe_recover_missing_first_write_session(
     ).strip()
     next_section = section_name or (suggestions[0] if suggestions else "initial_content")
     intent = infer_write_session_intent(path, getattr(state, "cwd", None))
+    from ..tools.fs_write_sessions import _store_active_write_session
     session = new_write_session(
         session_id=session_id,
         target_path=path,
@@ -159,7 +160,7 @@ async def _maybe_recover_missing_first_write_session(
         suggested_sections=suggestions,
         next_section=next_section,
     )
-    state.write_session = session
+    _store_active_write_session(state, session)
 
     replay_args = dict(args)
     replay_args.pop("session_id", None)
@@ -641,8 +642,9 @@ async def handle_repeated_tool_loop(
             stage_path = ""
             write_session = getattr(harness.state, "write_session", None)
             if write_session is not None:
-                from ..tools.fs_write_sessions import write_session_verify_path
+                from ..tools.fs_write_sessions import write_session_verify_path, _remove_active_write_session
                 stage_path = write_session_verify_path(write_session, getattr(harness.state, "cwd", None))
+                _remove_active_write_session(harness.state, write_session)
                 harness.state.write_session = None
 
             if stage_path:

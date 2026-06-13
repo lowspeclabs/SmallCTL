@@ -451,23 +451,29 @@ class TaskBoundaryLifecycleMixin:
         # Artifacts are durable session handles. Keep them across task switches so
         # follow-up and resteered tasks can still inspect outputs from earlier work.
         self.harness.state.artifacts = preserved_artifacts
-        if self.harness.state.write_session and self.harness.state.write_session.status != "complete":
-            self.harness._runlog(
-                "write_session_abandoned",
-                "incomplete write session abandoned on task switch",
-                session_id=self.harness.state.write_session.write_session_id,
-                stage_target=self.harness.state.write_session.write_target_path,
-                status=self.harness.state.write_session.status,
-            )
+        if self.harness.state.active_write_sessions_by_path:
             from ..graph.tool_outcomes import _register_write_session_stage_artifact
             from ..write_session_fsm import archive_interrupted_write_session
 
-            _register_write_session_stage_artifact(self.harness, self.harness.state.write_session)
+            for session in list(self.harness.state.active_write_sessions_by_path.values()):
+                if session is None:
+                    continue
+                if str(getattr(session, "status", "") or "").strip().lower() == "complete":
+                    continue
+                self.harness._runlog(
+                    "write_session_abandoned",
+                    "incomplete write session abandoned on task switch",
+                    session_id=session.write_session_id,
+                    stage_target=session.write_target_path,
+                    status=session.status,
+                )
+                _register_write_session_stage_artifact(self.harness, session)
             archive_interrupted_write_session(
                 self.harness.state,
                 reason="task_switch_abandoned",
             )
             self.harness.state.write_session = None
+            self.harness.state.active_write_sessions_by_path = {}
         self.harness.state.episodic_summaries = preserved_summaries if preserve_summaries else []
         self.harness.state.context_briefs = preserved_context_briefs if preserve_summaries else []
         if task_boundary_brief is not None:
@@ -597,7 +603,8 @@ class TaskBoundaryLifecycleMixin:
                 self.store_task_handoff(raw_task=previous_task, effective_task=previous_task)
             if turn_type == "CLARIFICATION":
                 reset_reason = "task_clarification"
-                last_failed = handoff.get("last_failed_tool") or {}
+                handoff = self.last_task_handoff()
+                last_failed = handoff.get("last_failed_tool") or {} if isinstance(handoff, dict) else {}
                 if isinstance(last_failed, dict) and last_failed.get("approval_denied"):
                     self.harness.state.append_message(
                         ConversationMessage(

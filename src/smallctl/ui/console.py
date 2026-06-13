@@ -9,10 +9,14 @@ from .display import _CRITICAL_EVENTS, format_test_time_scaling_event
 
 
 class ConsolePane(VerticalScroll):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, verbose: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._active_assistant_turn: AssistantTurnWidget | None = None
         self._last_system_message: str = ""
+        self._verbose = bool(verbose)
+
+    def set_verbose(self, verbose: bool) -> None:
+        self._verbose = bool(verbose)
 
     async def on_mount(self) -> None:
         await self.mount(Vertical(id="bubble-stack"))
@@ -114,7 +118,8 @@ class ConsolePane(VerticalScroll):
             return
 
         # P2.2: critical backend events render as compact inline interruptions
-        if event.event_type == UIEventType.SYSTEM and event.data.get("ui_kind") in _CRITICAL_EVENTS:
+        # only when verbose mode is enabled (default off).
+        if self._verbose and event.event_type == UIEventType.SYSTEM and event.data.get("ui_kind") in _CRITICAL_EVENTS:
             await self._append_critical_interrupt(event)
             return
 

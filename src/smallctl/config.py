@@ -225,6 +225,7 @@ class SmallctlConfig:
     subtask_max_active: int = 1
     subtask_max_history: int = 12
     subtask_inject_completed_limit: int = 3
+    verbose: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

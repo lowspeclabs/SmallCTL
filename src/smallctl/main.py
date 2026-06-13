@@ -191,6 +191,7 @@ def build_harness_config_kwargs(
         "subtask_max_active": getattr(config, "subtask_max_active", 1),
         "subtask_max_history": getattr(config, "subtask_max_history", 12),
         "subtask_inject_completed_limit": getattr(config, "subtask_inject_completed_limit", 3),
+        "verbose": getattr(config, "verbose", False),
         **({"task": task} if task is not None else {}),
     }
 
@@ -349,6 +350,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-file",
         help="Optional log file path",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Show verbose backend/interrupt messages in assistant turns",
     )
     parser.add_argument(
         "--cleanup",

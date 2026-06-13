@@ -9,6 +9,7 @@ from smallctl.models.events import UIEvent, UIEventType
 from smallctl.state import LoopState
 from smallctl.tools import control
 from smallctl.ui.app_flow import _terminal_status_detail
+from smallctl.ui.console import ConsolePane
 from smallctl.ui.display import (
     _build_backend_rca_strip,
     format_recovery_banner,
@@ -266,3 +267,58 @@ def test_format_run_log_row_same_scope_iteration_visible() -> None:
 
     assert should_render_run_log_row(row) is True
     assert format_run_log_row(row) == "[harness] Same-scope follow-up recorded: ITERATION"
+
+
+def test_critical_backend_interrupt_suppressed_by_default() -> None:
+    console = ConsolePane(verbose=False)
+    calls: list[str] = []
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        data={"ui_kind": "context_invalidated", "display_text": "Context invalidated"},
+        content="Context invalidated",
+    )
+
+    async def _record_critical_interrupt(event: UIEvent) -> None:
+        calls.append("critical_interrupt")
+
+    async def _record_add_bubble(kind: str, text: str) -> object:
+        calls.append(f"bubble:{kind}")
+        return None
+
+    console._append_critical_interrupt = _record_critical_interrupt  # type: ignore[assignment]
+    console._add_bubble = _record_add_bubble  # type: ignore[assignment]
+    asyncio.run(console.append_event(event))
+    assert "critical_interrupt" not in calls
+    assert any("bubble:system" in c for c in calls)
+
+
+def test_critical_backend_interrupt_rendered_when_verbose() -> None:
+    console = ConsolePane(verbose=True)
+    calls: list[str] = []
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        data={"ui_kind": "context_invalidated", "display_text": "Context invalidated"},
+        content="Context invalidated",
+    )
+
+    async def _record_critical_interrupt(event: UIEvent) -> None:
+        calls.append("critical_interrupt")
+
+    async def _record_add_bubble(kind: str, text: str) -> object:
+        calls.append(f"bubble:{kind}")
+        return None
+
+    console._append_critical_interrupt = _record_critical_interrupt  # type: ignore[assignment]
+    console._add_bubble = _record_add_bubble  # type: ignore[assignment]
+    asyncio.run(console.append_event(event))
+    assert "critical_interrupt" in calls
+    assert not any(c.startswith("bubble:") for c in calls)
+
+
+def test_console_verbose_toggle() -> None:
+    console = ConsolePane(verbose=False)
+    assert console._verbose is False
+    console.set_verbose(True)
+    assert console._verbose is True
+    console.set_verbose(False)
+    assert console._verbose is False

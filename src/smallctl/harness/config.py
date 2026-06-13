@@ -174,3 +174,6 @@ class HarnessConfig:
     escalation_repeated_failure_threshold: int = 2
     escalation_require_tool_plan_evidence: bool = True
     escalation_redact_secrets: bool = True
+    verbose: bool = False
+
+

@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..client.request_budget import build_request_budget
 
 
 _PROVIDER_REQUEST_BUDGET_PROFILES = {"llamacpp"}
+
+# Best-effort context ceilings for common model families. These act as a safety
+# rail when the backend does not advertise a context limit and the user asks for
+# a prompt budget that exceeds the model's known window.
+_MODEL_NAME_CONTEXT_CEILINGS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"qwen3(\.5)?\b", re.IGNORECASE), 128_000),
+    (re.compile(r"qwen2(\.5)?\b", re.IGNORECASE), 128_000),
+    (re.compile(r"llama[-_]?3(\.[123])?\b", re.IGNORECASE), 128_000),
+    (re.compile(r"llama[-_]?3\b", re.IGNORECASE), 8_192),
+    (re.compile(r"gemma[-_]?(2|3)\b", re.IGNORECASE), 128_000),
+    (re.compile(r"phi[-_]?(3|4)\b", re.IGNORECASE), 128_000),
+    (re.compile(r"mistral[-_]?(small|large)?\b", re.IGNORECASE), 32_768),
+    (re.compile(r"mixtral\b", re.IGNORECASE), 32_768),
+    (re.compile(r"deepseek[-_]?v3\b", re.IGNORECASE), 64_000),
+    (re.compile(r"deepseek[-_]?r1\b", re.IGNORECASE), 64_000),
+    (re.compile(r"command[-_]?r\b", re.IGNORECASE), 128_000),
+]
+
+
+def _derive_context_limit_from_model_name(model_name: str | None) -> int | None:
+    if not model_name:
+        return None
+    text = str(model_name)
+    for pattern, limit in _MODEL_NAME_CONTEXT_CEILINGS:
+        if pattern.search(text):
+            return limit
+    return None
 
 
 def resolve_effective_prompt_budget(
@@ -16,10 +44,18 @@ def resolve_effective_prompt_budget(
     current_max_prompt_tokens: int | None = None,
     observed_n_keep: int | None = None,
     provider_profile: str | None = None,
+    model_name: str | None = None,
 ) -> int | None:
     candidates: list[int] = []
     if configured_max_prompt_tokens is not None and configured_max_prompt_tokens_explicit:
         candidates.append(max(64, int(configured_max_prompt_tokens)))
+
+        # Only cap an explicit user-configured prompt budget by a known model
+        # context window. Avoid imposing a default ceiling when the user did not
+        # ask for a specific budget.
+        model_context_limit = _derive_context_limit_from_model_name(model_name)
+        if model_context_limit is not None:
+            candidates.append(model_context_limit)
 
     derived_server_budget = derive_prompt_budget_from_context_limit(
         server_context_limit,
@@ -71,6 +107,8 @@ def apply_server_context_limit(
         and harness.server_context_limit is not None
         and observed_n_keep >= harness.server_context_limit
     )
+    model_name = getattr(getattr(harness, "client", None), "model", None)
+    model_context_limit = _derive_context_limit_from_model_name(model_name)
     effective_max_prompt_tokens = resolve_effective_prompt_budget(
         configured_max_prompt_tokens=configured_budget,
         configured_max_prompt_tokens_explicit=configured_budget_explicit,
@@ -78,7 +116,23 @@ def apply_server_context_limit(
         current_max_prompt_tokens=harness.context_policy.max_prompt_tokens,
         observed_n_keep=observed_n_keep if overflow_detected else None,
         provider_profile=getattr(harness, "provider_profile", None),
+        model_name=model_name,
     )
+
+    if (
+        configured_budget is not None
+        and configured_budget_explicit
+        and model_context_limit is not None
+        and configured_budget > model_context_limit
+    ):
+        harness._runlog(
+            "context_limit",
+            "configured prompt budget exceeds known model context window",
+            configured_max_prompt_tokens=configured_budget,
+            model_context_limit=model_context_limit,
+            effective_max_prompt_tokens=effective_max_prompt_tokens,
+            model_name=model_name,
+        )
 
     # Boost context budget for local coding tasks to reduce lane dropping
     from ..harness.task_classifier import task_is_local_coding_target

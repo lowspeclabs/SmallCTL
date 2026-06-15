@@ -20,6 +20,7 @@ def _resolve_effective_prompt_budget(
     current_max_prompt_tokens: int | None = None,
     observed_n_keep: int | None = None,
     provider_profile: str | None = None,
+    model_name: str | None = None,
 ) -> int | None:
     return _resolve_effective_prompt_budget_helper(
         configured_max_prompt_tokens=configured_max_prompt_tokens,
@@ -28,6 +29,7 @@ def _resolve_effective_prompt_budget(
         current_max_prompt_tokens=current_max_prompt_tokens,
         observed_n_keep=observed_n_keep,
         provider_profile=provider_profile,
+        model_name=model_name,
     )
 
 

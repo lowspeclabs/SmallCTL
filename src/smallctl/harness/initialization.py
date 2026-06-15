@@ -199,6 +199,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         configured_max_prompt_tokens_explicit=self.configured_max_prompt_tokens_explicit,
         server_context_limit=known_server_context_limit,
         provider_profile=self.provider_profile,
+        model_name=config.model,
     )
     if effective_max_prompt_tokens is None and self.configured_max_prompt_tokens is not None:
         effective_max_prompt_tokens = max(64, int(self.configured_max_prompt_tokens))

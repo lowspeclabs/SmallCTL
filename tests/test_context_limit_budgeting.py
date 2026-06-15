@@ -353,3 +353,64 @@ def test_prompt_assembler_prioritizes_latest_observations_under_budget_pressure(
     assert "observation-4" in rendered
     assert "observation-5" in rendered
     assert assembly.section_tokens["normalized_observations"] > 120
+
+
+def test_model_name_ceiling_clamps_explicit_prompt_budget_when_server_limit_unknown() -> None:
+    from smallctl.harness.context_limits import resolve_effective_prompt_budget
+
+    effective = resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=200_000,
+        configured_max_prompt_tokens_explicit=True,
+        server_context_limit=None,
+        model_name="Qwen3.5-9b",
+    )
+
+    assert effective == 128_000
+
+
+def test_server_context_limit_takes_precedence_over_model_name_ceiling() -> None:
+    from smallctl.harness.context_limits import resolve_effective_prompt_budget
+
+    effective = resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=200_000,
+        configured_max_prompt_tokens_explicit=True,
+        server_context_limit=32_768,
+        model_name="Qwen3.5-9b",
+    )
+
+    assert effective == 28_672
+
+
+def test_unknown_model_name_does_not_clamp_explicit_budget() -> None:
+    from smallctl.harness.context_limits import resolve_effective_prompt_budget
+
+    effective = resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=200_000,
+        configured_max_prompt_tokens_explicit=True,
+        server_context_limit=None,
+        model_name="unknown-custom-9b",
+    )
+
+    assert effective == 200_000
+
+
+def test_apply_server_context_limit_logs_when_configured_budget_exceeds_model_ceiling() -> None:
+    harness = _make_harness(max_prompt_tokens=200_000)
+    harness.client = SimpleNamespace(model="qwen3.5-9b")
+    log_calls: list[dict[str, object]] = []
+    original_runlog = harness._runlog
+
+    def _capturing_runlog(event: str, message: str, **kwargs: object) -> None:
+        log_calls.append({"event": event, "message": message, **kwargs})
+        original_runlog(event, message, **kwargs)
+
+    harness._runlog = _capturing_runlog
+
+    apply_server_context_limit(harness, 256_000, source="runtime_probe")
+
+    assert harness.context_policy.max_prompt_tokens == 128_000
+    assert any(
+        call.get("event") == "context_limit"
+        and "exceeds known model context window" in str(call.get("message", ""))
+        for call in log_calls
+    )

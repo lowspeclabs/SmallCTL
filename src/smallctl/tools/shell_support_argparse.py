@@ -59,4 +59,56 @@ def _detect_unsupported_shell_syntax(command: str) -> str | None:
             "commands through /bin/sh on Unix. Rewrite it with POSIX syntax (for example, "
             "use `printf` piped into the command) or wrap the whole command in `bash -lc`."
         )
+    unbalanced = _detect_unbalanced_quotes(command)
+    if unbalanced:
+        return unbalanced
     return None
+
+
+def _detect_unbalanced_quotes(command: str) -> str | None:
+    """Return a diagnostic string when single/double quotes or backticks are unbalanced."""
+    text = str(command or "")
+    # Track quotes outside of simple ${...} expansions so we do not false-positive
+    # on apostrophes inside words like "don't".
+    in_single = False
+    in_double = False
+    in_backtick = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if in_double:
+            if ch == '"':
+                in_double = False
+            continue
+        if in_backtick:
+            if ch == "`":
+                in_backtick = False
+            continue
+        if in_single:
+            if ch == "'":
+                in_single = False
+            continue
+        if ch == '"':
+            in_double = True
+        elif ch == "`":
+            in_backtick = True
+        elif ch == "'":
+            in_single = True
+    parts: list[str] = []
+    if in_single:
+        parts.append("unmatched single quote (`'`)")
+    if in_double:
+        parts.append("unmatched double quote (`\"`)")
+    if in_backtick:
+        parts.append(r"unmatched backtick (` `` `)")
+    if not parts:
+        return None
+    return (
+        f"Command has {' and '.join(parts)}. "
+        "Close every opening quote/backtick or rewrite the command so it can be parsed by the shell."
+    )

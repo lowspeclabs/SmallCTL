@@ -1412,3 +1412,56 @@ def test_handle_sudo_password_prompt_prefers_bridge_resolution_after_thread_spli
     assert app._harness_bridge.resolutions == [("sudo-123", "secret")]
     assert app._status_activity == "running shell..."
     assert app._active_approval_prompt is None
+
+
+def test_action_cancel_task_handles_race_where_active_task_becomes_none() -> None:
+    cancelled: list[asyncio.Task[None]] = []
+
+    class _Task:
+        def __init__(self) -> None:
+            self._done = False
+
+        def done(self) -> bool:
+            return self._done
+
+        def cancel(self) -> None:
+            cancelled.append(self)  # type: ignore[arg-type]
+
+    class _Actions(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self.harness = None
+            self._harness_bridge = None
+            self.active_task: _Task | None = _Task()
+            self._app_logger = logging.getLogger("test.ui_flow_regressions.cancel_race")
+            self._lines: list[str] = []
+
+        def _dismiss_active_approval_prompt(self) -> None:
+            return None
+
+        def _get_console(self) -> None:
+            return None
+
+        async def _append_system_line(self, text: str, *, force: bool = False, kind: str | None = None) -> None:
+            self._lines.append(text)
+
+        def _refresh_status(self, step_override: int | str | None = None, *, snapshot: dict[str, object] | None = None) -> None:
+            return None
+
+    actions = _Actions()
+
+    async def _run() -> None:
+        # Simulate the race: after the cancel task starts checking, the task
+        # finishes and clears self.active_task before the await resumes.
+        task = actions.active_task
+        assert task is not None
+
+        async def _clear_active_task_after_yield() -> None:
+            await asyncio.sleep(0)
+            actions.active_task = None
+
+        asyncio.create_task(_clear_active_task_after_yield())
+        await actions.action_cancel_task()
+        assert actions.active_task is None
+        assert not cancelled
+
+    asyncio.run(_run())

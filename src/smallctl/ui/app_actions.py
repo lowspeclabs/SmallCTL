@@ -87,10 +87,14 @@ class SmallctlAppActionsMixin:
             bridge.cancel(source="ui_stop_button")
         elif self.harness is not None:
             self.harness.cancel(source="ui_stop_button")
-        if self.active_task and not self.active_task.done():
+        active_task = self.active_task
+        if active_task is not None and not active_task.done():
             await asyncio.sleep(0.05)
-            self.active_task.cancel()
-            log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")
+            if active_task is not self.active_task or active_task.done():
+                active_task = self.active_task
+            if active_task is not None and not active_task.done():
+                active_task.cancel()
+                log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Active task cancelled.")

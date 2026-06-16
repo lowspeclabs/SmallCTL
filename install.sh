@@ -3,15 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$SCRIPT_DIR"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+REQUIRED_PYTHON_MAJOR="${REQUIRED_PYTHON_MAJOR:-3}"
+REQUIRED_PYTHON_MINOR="${REQUIRED_PYTHON_MINOR:-13}"
+DEFAULT_PYTHON_BIN="python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}"
+PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
 VENV_DIR="${VENV_DIR:-$BUNDLE_ROOT/.venv}"
 SMALLCTL_DEV_MODE="${SMALLCTL_DEV_MODE:-}"
 
-# ------------------------------------------------------------------
-# CLI introspection flags  (Issue 6)
-# ------------------------------------------------------------------
 show_help() {
-  cat <<EOF
+  cat <<EOF_HELP
 Usage: install.sh [OPTION]
 
 Install smallctl and its dependencies into an isolated virtual environment.
@@ -22,7 +23,26 @@ Options:
   --check           Check prerequisites without installing anything
   --no-env-setup    Skip the interactive .env setup wizard
   --env-only        Run the .env setup wizard and exit (skips install)
-EOF
+
+Environment:
+  PYTHON_BIN         Python executable to use (default: $DEFAULT_PYTHON_BIN)
+  VENV_DIR           Virtual environment path (default: .venv)
+  SMALLCTL_DEV_MODE  Install editable when non-empty
+EOF_HELP
+}
+
+show_prereq_hint() {
+  cat >&2 <<EOF_HINT
+
+Install the startup prerequisites first.
+
+Debian/Ubuntu:
+  sudo apt-get update
+  sudo apt-get install -y python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-venv python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-dev python3-pip
+
+If Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} is installed somewhere else:
+  PYTHON_BIN=/path/to/python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} ./install.sh
+EOF_HINT
 }
 
 show_version() {
@@ -33,22 +53,67 @@ with open('$BUNDLE_ROOT/pyproject.toml', 'rb') as f:
 "
 }
 
-check_prereqs() {
-  local ok=0
+python_version() {
+  "$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+}
 
-  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    echo "FAIL: $PYTHON_BIN not found on PATH" >&2
-    ok=1
-  else
-    local pyver
-    pyver=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if "$PYTHON_BIN" -c "import sys; exit(0 if sys.version_info >= (3,10) else 1)"; then
-      echo "PASS: Python $pyver (>= 3.10)"
-    else
-      echo "FAIL: Python $pyver (< 3.10 required)" >&2
-      ok=1
-    fi
+python_is_supported() {
+  "$PYTHON_BIN" -c "import sys; exit(0 if sys.version_info >= (${REQUIRED_PYTHON_MAJOR}, ${REQUIRED_PYTHON_MINOR}) else 1)"
+}
+
+check_python_command() {
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    return 0
   fi
+
+  echo "FAIL: $PYTHON_BIN not found on PATH" >&2
+  show_prereq_hint
+  return 1
+}
+
+check_python_version() {
+  local pyver
+  pyver="$(python_version)"
+
+  if python_is_supported; then
+    echo "PASS: Python $pyver (>= ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR})"
+    return 0
+  fi
+
+  echo "FAIL: Python $pyver (< ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} required)" >&2
+  show_prereq_hint
+  return 1
+}
+
+check_python_venv() {
+  if "$PYTHON_BIN" -c "import venv" >/dev/null 2>&1; then
+    echo "PASS: venv module available"
+    return 0
+  fi
+
+  echo "FAIL: venv module not available for $PYTHON_BIN" >&2
+  show_prereq_hint
+  return 1
+}
+
+check_python_pip_bootstrap() {
+  if "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+    echo "PASS: pip available for $PYTHON_BIN"
+    return 0
+  fi
+
+  if "$PYTHON_BIN" -c "import ensurepip" >/dev/null 2>&1; then
+    echo "PASS: pip can be bootstrapped with ensurepip"
+    return 0
+  fi
+
+  echo "FAIL: pip is not available and ensurepip cannot bootstrap it for $PYTHON_BIN" >&2
+  show_prereq_hint
+  return 1
+}
+
+check_source_tree() {
+  local ok=0
 
   if [ -f "$BUNDLE_ROOT/pyproject.toml" ]; then
     echo "PASS: pyproject.toml found"
@@ -64,117 +129,174 @@ check_prereqs() {
     ok=1
   fi
 
-  if "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
-    echo "PASS: pip available"
-  else
-    echo "FAIL: pip not available for $PYTHON_BIN" >&2
-    ok=1
+  return "$ok"
+}
+
+check_prereqs() {
+  local ok=0
+
+  check_python_command || ok=1
+  if [ "$ok" -eq 0 ]; then
+    check_python_version || ok=1
+    check_python_venv || ok=1
+    check_python_pip_bootstrap || ok=1
   fi
+  check_source_tree || ok=1
 
   exit "$ok"
 }
 
-NO_ENV_SETUP=0
-ENV_ONLY=0
-for arg in "$@"; do
-  case "$arg" in
-    --help|-h) show_help; exit 0 ;;
-    --version|-V) show_version; exit 0 ;;
-    --check) check_prereqs; exit 0 ;;
-    --no-env-setup) NO_ENV_SETUP=1 ;;
-    --env-only) ENV_ONLY=1 ;;
-  esac
-done
+setup_dotenv() {
+  local env_file="$BUNDLE_ROOT/.env"
+  local example_file="$BUNDLE_ROOT/.env.example"
 
-# --env-only skips the install and jumps straight to env setup
-if [ "$ENV_ONLY" -eq 1 ]; then
-  _setup_dotenv
-  exit 0
-fi
+  if [ -f "$env_file" ]; then
+    echo ".env already exists at $env_file"
+    return 0
+  fi
 
-# ------------------------------------------------------------------
-# Issue 1: Python presence and minimum version guard
-# ------------------------------------------------------------------
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Error: $PYTHON_BIN is required but was not found on PATH." >&2
-  exit 1
-fi
+  if [ ! -f "$example_file" ]; then
+    echo "No .env.example found; skipping env setup."
+    return 0
+  fi
 
-PYVER=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-if ! "$PYTHON_BIN" -c "import sys; exit(0 if sys.version_info >= (3,10) else 1)"; then
-  echo "Error: Python >= 3.10 required (found $PYVER)." >&2
-  exit 1
-fi
-echo "Python $PYVER (>= 3.10 OK)"
+  echo ""
+  echo "smallctl - First-Time Setup"
+  echo ""
+  echo "No .env file found. Configure a few essentials."
+  echo "Press Enter to accept the default shown in brackets."
+  echo ""
 
-# ------------------------------------------------------------------
-# Source tree integrity (carried over from original)
-# ------------------------------------------------------------------
-if [ ! -f "$BUNDLE_ROOT/pyproject.toml" ]; then
-  echo "Error: Expected pyproject.toml next to install.sh in $BUNDLE_ROOT." >&2
-  exit 1
-fi
+  local default_endpoint
+  local default_model
+  local default_profile
+  local default_context
+  local default_reasoning
+  default_endpoint="$(grep '^SMALLCTL_ENDPOINT=' "$example_file" | cut -d= -f2-)"
+  default_model="$(grep '^SMALLCTL_MODEL=' "$example_file" | cut -d= -f2-)"
+  default_profile="$(grep '^SMALLCTL_PROVIDER_PROFILE=' "$example_file" | cut -d= -f2-)"
+  default_context="$(grep '^SMALLCTL_CONTEXT_LIMIT=' "$example_file" | cut -d= -f2-)"
+  default_reasoning="$(grep '^SMALLCTL_REASONING_MODE=' "$example_file" | cut -d= -f2-)"
 
-if [ ! -d "$BUNDLE_ROOT/src/smallctl" ]; then
-  echo "Error: Expected source tree at $BUNDLE_ROOT/src/smallctl." >&2
-  exit 1
-fi
+  echo "API Connection"
+  read -r -p "LLM API endpoint [$default_endpoint]: " input_endpoint
+  local endpoint="${input_endpoint:-$default_endpoint}"
 
-# ------------------------------------------------------------------
-# Issue 2: Virtual environment with stale-Python detection
-# ------------------------------------------------------------------
-if [ -d "$VENV_DIR" ]; then
-  VENV_PYTHON="$VENV_DIR/bin/python"
-  if [ -f "$VENV_PYTHON" ]; then
-    VENV_VER=$("$VENV_PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if [ "$VENV_VER" != "$PYVER" ]; then
-      echo "Python version mismatch: venv uses $VENV_VER but $PYTHON_BIN is $PYVER. Recreating venv..."
+  read -r -p "Model name [$default_model]: " input_model
+  local model="${input_model:-$default_model}"
+
+  read -r -s -p "API key (leave blank if not needed): " input_key
+  echo ""
+  local api_key="${input_key:-}"
+
+  echo ""
+  echo "Provider"
+  echo "Supported: generic, openai, ollama, vllm, lmstudio, openrouter"
+  read -r -p "Provider profile [$default_profile]: " input_profile
+  local profile="${input_profile:-$default_profile}"
+
+  echo ""
+  echo "Performance"
+  read -r -p "Context limit (tokens) [$default_context]: " input_context
+  local context="${input_context:-$default_context}"
+
+  read -r -p "Reasoning mode (auto/off/on) [$default_reasoning]: " input_reasoning
+  local reasoning="${input_reasoning:-$default_reasoning}"
+
+  cat > "$env_file" <<ENV_FILE
+# smallctl configuration - generated by install.sh
+SMALLCTL_ENDPOINT=$endpoint
+SMALLCTL_MODEL=$model
+SMALLCTL_PROVIDER_PROFILE=$profile
+SMALLCTL_CONTEXT_LIMIT=$context
+SMALLCTL_REASONING_MODE=$reasoning
+ENV_FILE
+
+  if [ -n "$api_key" ]; then
+    echo "SMALLCTL_API_KEY=$api_key" >> "$env_file"
+  fi
+
+  echo ""
+  echo "Created $env_file"
+  echo "Edit it anytime to adjust settings."
+}
+
+require_prereqs() {
+  check_python_command
+  check_python_version
+  check_python_venv
+  check_source_tree
+}
+
+ensure_venv() {
+  if [ -d "$VENV_DIR" ]; then
+    local venv_python="$VENV_DIR/bin/python"
+    if [ -f "$venv_python" ]; then
+      local pyver
+      local venv_ver
+      pyver="$(python_version)"
+      venv_ver="$("$venv_python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+      if [ "$venv_ver" != "$pyver" ]; then
+        echo "Python version mismatch: venv uses $venv_ver but $PYTHON_BIN is $pyver. Recreating venv..."
+        rm -rf "$VENV_DIR"
+      fi
+    else
+      echo "Incomplete venv detected. Recreating..."
       rm -rf "$VENV_DIR"
     fi
-  else
-    echo "Incomplete venv detected. Recreating..."
-    rm -rf "$VENV_DIR"
   fi
-fi
 
-if [ ! -d "$VENV_DIR" ]; then
-  "$PYTHON_BIN" -m venv "$VENV_DIR"
-  echo "Created virtual environment at $VENV_DIR"
-fi
+  if [ ! -d "$VENV_DIR" ]; then
+    if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+      echo "Error: failed to create virtual environment with $PYTHON_BIN." >&2
+      show_prereq_hint
+      exit 1
+    fi
+    echo "Created virtual environment at $VENV_DIR"
+  fi
+}
 
-# ------------------------------------------------------------------
-# Upgrade core packaging tools
-# ------------------------------------------------------------------
-"$VENV_DIR/bin/python" -m pip install --upgrade pip wheel setuptools
+ensure_venv_pip() {
+  if "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
 
-# ------------------------------------------------------------------
-# Issue 4: Install smallctl (non-editable for users, editable for devs)
-# ------------------------------------------------------------------
-if [ -n "$SMALLCTL_DEV_MODE" ]; then
-  "$VENV_DIR/bin/python" -m pip install -e "$BUNDLE_ROOT"
-  echo "smallctl installed in editable mode (SMALLCTL_DEV_MODE)."
-else
-  "$VENV_DIR/bin/python" -m pip install "$BUNDLE_ROOT"
-  echo "smallctl installed."
-fi
+  echo "pip is missing inside $VENV_DIR. Trying ensurepip..."
+  "$VENV_DIR/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
 
-# ------------------------------------------------------------------
-# Issue 3: Resolve python-debian (required for apt/deb822 validation)
-# ------------------------------------------------------------------
-_resolve_python_debian() {
+  if "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Error: pip is required inside the virtual environment but is not available." >&2
+  show_prereq_hint
+  exit 1
+}
+
+install_smallctl() {
+  "$VENV_DIR/bin/python" -m pip install --upgrade pip wheel setuptools
+
+  if [ -n "$SMALLCTL_DEV_MODE" ]; then
+    "$VENV_DIR/bin/python" -m pip install -e "$BUNDLE_ROOT"
+    echo "smallctl installed in editable mode (SMALLCTL_DEV_MODE)."
+  else
+    "$VENV_DIR/bin/python" -m pip install "$BUNDLE_ROOT"
+    echo "smallctl installed."
+  fi
+}
+
+resolve_python_debian() {
   if "$VENV_DIR/bin/python" -c "import debian.deb822" 2>/dev/null; then
     return 0
   fi
 
   echo "Installing python-debian (required for apt sources validation)..."
 
-  # Try pip first — works on most platforms with build dependencies
   if "$VENV_DIR/bin/python" -m pip install python-debian 2>/dev/null; then
     echo "  -> installed via pip"
     return 0
   fi
 
-  # Debian/Ubuntu — use the pre-compiled system package
   if command -v apt-get >/dev/null 2>&1; then
     if [ "$(id -u)" -eq 0 ]; then
       apt-get install -y python3-debian && echo "  -> installed via apt" && return 0
@@ -183,7 +305,6 @@ _resolve_python_debian() {
     fi
   fi
 
-  # Fedora/RHEL
   if command -v dnf >/dev/null 2>&1; then
     if [ "$(id -u)" -eq 0 ]; then
       dnf install -y python3-debian && echo "  -> installed via dnf" && return 0
@@ -196,102 +317,44 @@ _resolve_python_debian() {
 Error: Could not install python-debian. Please install it manually:
   Debian/Ubuntu:  sudo apt-get install python3-debian
   Fedora/RHEL:    sudo dnf install python3-debian
-  pip (requires build tools: gcc, python3-dev, libbz2-dev):
-                  pip install python-debian
+  pip:            "$VENV_DIR/bin/python" -m pip install python-debian
 MSG
   return 1
 }
 
-_resolve_python_debian
+NO_ENV_SETUP=0
+ENV_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h) show_help; exit 0 ;;
+    --version|-V) show_version; exit 0 ;;
+    --check) check_prereqs ;;
+    --no-env-setup) NO_ENV_SETUP=1 ;;
+    --env-only) ENV_ONLY=1 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      show_help >&2
+      exit 2
+      ;;
+  esac
+done
 
-# ------------------------------------------------------------------
-# .env setup wizard (runs if .env is missing and not suppressed)
-# ------------------------------------------------------------------
-_setup_dotenv() {
-  local env_file="$BUNDLE_ROOT/.env"
-  local example_file="$BUNDLE_ROOT/.env.example"
-
-  if [ -f "$env_file" ]; then
-    echo ".env already exists at $env_file"
-    return 0
-  fi
-
-  if [ ! -f "$example_file" ]; then
-    echo "No .env.example found — skipping env setup."
-    return 0
-  fi
-
-  echo ""
-  echo "╔══════════════════════════════════════════════════════════╗"
-  echo "║            smallctl — First-Time Setup                  ║"
-  echo "╚══════════════════════════════════════════════════════════╝"
-  echo ""
-  echo "No .env file found. Let's configure a few essentials."
-  echo "Press Enter to accept the default shown in [brackets]."
-  echo ""
-
-  local default_endpoint
-  local default_model
-  local default_profile
-  local default_context
-  local default_reasoning
-  default_endpoint=$(grep '^SMALLCTL_ENDPOINT=' "$example_file" | cut -d= -f2-)
-  default_model=$(grep '^SMALLCTL_MODEL=' "$example_file" | cut -d= -f2-)
-  default_profile=$(grep '^SMALLCTL_PROVIDER_PROFILE=' "$example_file" | cut -d= -f2-)
-  default_context=$(grep '^SMALLCTL_CONTEXT_LIMIT=' "$example_file" | cut -d= -f2-)
-  default_reasoning=$(grep '^SMALLCTL_REASONING_MODE=' "$example_file" | cut -d= -f2-)
-
-  echo "── API Connection ────────────────────────────────────────"
-  read -r -p "LLM API endpoint [$default_endpoint]: " input_endpoint
-  local endpoint="${input_endpoint:-$default_endpoint}"
-
-  read -r -p "Model name [$default_model]: " input_model
-  local model="${input_model:-$default_model}"
-
-  read -r -s -p "API key (leave blank if not needed): " input_key
-  echo ""
-  local api_key="${input_key:-}"
-
-  echo ""
-  echo "── Provider ──────────────────────────────────────────────"
-  echo "Supported: generic, openai, ollama, vllm, lmstudio, openrouter"
-  read -r -p "Provider profile [$default_profile]: " input_profile
-  local profile="${input_profile:-$default_profile}"
-
-  echo ""
-  echo "── Performance ──────────────────────────────────────────"
-  read -r -p "Context limit (tokens) [$default_context]: " input_context
-  local context="${input_context:-$default_context}"
-
-  read -r -p "Reasoning mode (auto/off/on) [$default_reasoning]: " input_reasoning
-  local reasoning="${input_reasoning:-$default_reasoning}"
-
-  cat > "$env_file" <<ENV
-# smallctl configuration — generated by install.sh
-SMALLCTL_ENDPOINT=$endpoint
-SMALLCTL_MODEL=$model
-SMALLCTL_PROVIDER_PROFILE=$profile
-SMALLCTL_CONTEXT_LIMIT=$context
-SMALLCTL_REASONING_MODE=$reasoning
-ENV
-
-  if [ -n "$api_key" ]; then
-    echo "SMALLCTL_API_KEY=$api_key" >> "$env_file"
-  fi
-
-  echo ""
-  echo "Created $env_file"
-  echo "Edit it anytime to adjust settings."
-}
-
-if [ "$NO_ENV_SETUP" -eq 0 ] && [ "${SKIP_ENV_SETUP:-0}" != "1" ]; then
-  _setup_dotenv
+if [ "$ENV_ONLY" -eq 1 ]; then
+  setup_dotenv
+  exit 0
 fi
 
-# ------------------------------------------------------------------
-# Completion message
-# ------------------------------------------------------------------
-cat <<EOF
+require_prereqs
+ensure_venv
+ensure_venv_pip
+install_smallctl
+resolve_python_debian
+
+if [ "$NO_ENV_SETUP" -eq 0 ] && [ "${SKIP_ENV_SETUP:-0}" != "1" ]; then
+  setup_dotenv
+fi
+
+cat <<EOF_DONE
 
 smallctl is installed in: $VENV_DIR
 
@@ -300,11 +363,4 @@ Activate it with:
 
 Then run:
   smallctl --help
-EOF
-
-if [ -f "$BUNDLE_ROOT/.env.example" ]; then
-  cat <<EOF
-
-Copy "$BUNDLE_ROOT/.env.example" to "$BUNDLE_ROOT/.env" to configure local defaults.
-EOF
-fi
+EOF_DONE

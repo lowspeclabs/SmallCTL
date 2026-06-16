@@ -82,6 +82,8 @@ class TestSystemPromptSnapshots:
         prompt = build_system_prompt(state, "execute")
         assert "STRICT: NEVER use text-based tool tags" in prompt
         assert "CONCISENESS: Do not paste long tool output" in prompt
+        assert "ANTI-LOOP RULE" in prompt
+        assert "Do not restart from the beginning" in prompt
 
     def test_small_model_includes_redundancy_rules(self) -> None:
         state = _make_state("qwen3.5:4b")

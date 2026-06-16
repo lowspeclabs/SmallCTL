@@ -85,6 +85,14 @@ _SMALL_GEMMA_STRICT_FORMAT = (
     "describe intent only; do not copy that literal syntax into the response. "
 )
 
+_LARGE_GEMMA_26B_ANTI_LOOP_RULE = (
+    "ANTI-LOOP RULE: Do not restart from the beginning of a task once concrete steps have already succeeded. "
+    "If a directory was already created, a file was already written, or a container was already started, "
+    "do not re-run the same creation/write/start command. Instead, verify the current state with a read or status command, "
+    "then continue from the next missing step. Always trust the most recent tool result over older failure notes. "
+    "If the current state is unclear, inspect it; do not blindly repeat setup steps. "
+)
+
 _LARGE_MODEL_STRUCTURED_REASONING = (
     "\n### STRUCTURED REASONING\n"
     "Use this framework for complex tasks:\n"

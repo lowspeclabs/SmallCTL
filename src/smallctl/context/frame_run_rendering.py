@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from ..remote_scope import has_any_session_ssh_target, remote_scope_is_active
 from ..state import LoopState, clip_text_value, normalize_intent_label
-from .artifact_visibility import artifact_path_candidates, is_prompt_visible_artifact, is_superseded_artifact
+from .artifact_visibility import (
+    artifact_path_candidates,
+    is_prompt_visible_artifact,
+    is_superseded_artifact,
+)
 from .frame_state_helpers import dedupe_nonempty
 
 _LOCAL_SCOPE_MARKERS = (
@@ -39,6 +43,7 @@ def _task_has_local_scope_markers(task: str) -> bool:
         return True
     return any(marker in text for marker in _LOCAL_SSH_FILE_MARKERS)
 
+
 MUTATION_TOOL_NAMES = {
     "ssh_file_write",
     "ssh_file_patch",
@@ -55,9 +60,13 @@ def _suspicious_remote_target_reason(*, host: str, user: str = "") -> str:
     normalized_user = str(user or "").strip().lower()
     if not normalized_host:
         return "missing_host"
-    if any(char.isspace() for char in normalized_host) or any(char in normalized_host for char in '"\''):
+    if any(char.isspace() for char in normalized_host) or any(
+        char in normalized_host for char in "\"'"
+    ):
         return "invalid_host_format"
-    if any(char.isspace() for char in normalized_user) or any(char in normalized_user for char in '"\''):
+    if any(char.isspace() for char in normalized_user) or any(
+        char in normalized_user for char in "\"'"
+    ):
         return "invalid_user_format"
     if normalized_host in {"pass", "password", "passwd", "secret"}:
         return "password_like_host"
@@ -67,11 +76,16 @@ def _suspicious_remote_target_reason(*, host: str, user: str = "") -> str:
 def coding_anchor_lines(state: LoopState) -> list[str]:
     anchors: list[str] = []
     task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
-    is_coding_mode = bool(state.write_session) or bool(state.files_changed_this_cycle) or task_mode in {
-        "analysis",
-        "local_execute",
-        "debug_inspect",
-    }
+    is_coding_mode = (
+        bool(state.write_session)
+        or bool(state.files_changed_this_cycle)
+        or task_mode
+        in {
+            "analysis",
+            "local_execute",
+            "debug_inspect",
+        }
+    )
     if not is_coding_mode:
         return anchors
 
@@ -81,11 +95,17 @@ def coding_anchor_lines(state: LoopState) -> list[str]:
             anchors.append(f"target_file={session.write_target_path}")
         anchors.append(f"write_mode={session.write_session_mode}")
         if session.write_sections_completed:
-            anchors.append("completed_sections=" + ", ".join(session.write_sections_completed[:5]))
+            anchors.append(
+                "completed_sections=" + ", ".join(session.write_sections_completed[:5])
+            )
         if session.write_failed_local_patches:
-            anchors.append(f"failed_sections={session.write_failed_local_patches} local patch failures")
+            anchors.append(
+                f"failed_sections={session.write_failed_local_patches} local patch failures"
+            )
     if state.files_changed_this_cycle:
-        anchors.append("files_changed=" + ", ".join(state.files_changed_this_cycle[-5:]))
+        anchors.append(
+            "files_changed=" + ", ".join(state.files_changed_this_cycle[-5:])
+        )
     verdict = state.current_verifier_verdict()
     if isinstance(verdict, dict):
         anchors.append("verifier_status=" + str(verdict.get("verdict") or "unknown"))
@@ -120,8 +140,12 @@ def artifact_evidence_rows(state: LoopState, *, limit: int = 8) -> list[str]:
             metadata = {}
         source_candidates = artifact_path_candidates(art, metadata)
         source = " / ".join(dedupe_nonempty(source_candidates)[:2]) or "observed"
-        summary = (getattr(art, "summary", "") or getattr(art, "tool_name", "") or "").strip()
-        rows.append(f"  {aid} | {source.replace('|', '/')} | {summary.replace('|', '/')[:110]}")
+        summary = (
+            getattr(art, "summary", "") or getattr(art, "tool_name", "") or ""
+        ).strip()
+        rows.append(
+            f"  {aid} | {source.replace('|', '/')} | {summary.replace('|', '/')[:110]}"
+        )
         if len(rows) >= limit:
             break
     return rows
@@ -147,7 +171,9 @@ def render_run_brief(state: LoopState) -> str:
     if brief.original_task:
         parts.append(f"  Goal: {brief.original_task}")
         if _task_has_local_scope_markers(brief.original_task):
-            parts.append("  Scope: local user task; prefer local file tools and shell_exec over ssh_exec")
+            parts.append(
+                "  Scope: local user task; prefer local file tools and shell_exec over ssh_exec"
+            )
 
     if brief.task_contract:
         parts.append(f"  Contract: {brief.task_contract}")
@@ -191,13 +217,17 @@ def render_run_brief(state: LoopState) -> str:
 
 
 def run_boundary_lines(state: LoopState) -> list[str]:
-    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    scratchpad = (
+        state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    )
     transaction = scratchpad.get("_task_transaction")
     handoff = scratchpad.get("_last_task_handoff")
     source: dict[str, object] = {}
     if isinstance(transaction, dict) and transaction:
         source = transaction
-    elif isinstance(handoff, dict) and str(handoff.get("status") or "").strip().lower() in {
+    elif isinstance(handoff, dict) and str(
+        handoff.get("status") or ""
+    ).strip().lower() in {
         "closed",
         "failed",
         "aborted",
@@ -214,7 +244,12 @@ def run_boundary_lines(state: LoopState) -> list[str]:
     turn_type = str(source.get("turn_type") or "").strip()
     if turn_type:
         lines.append(f"  Current turn type: {turn_type}.")
-    goal = str(source.get("user_goal") or source.get("current_goal") or source.get("effective_task") or "").strip()
+    goal = str(
+        source.get("user_goal")
+        or source.get("current_goal")
+        or source.get("effective_task")
+        or ""
+    ).strip()
     if goal:
         clipped_goal, _ = clip_text_value(goal, limit=220)
         lines.append(f"  Current goal: {clipped_goal}")
@@ -230,7 +265,9 @@ def run_boundary_lines(state: LoopState) -> list[str]:
     if not isinstance(artifacts, list) or not artifacts:
         artifacts = source.get("last_good_artifact_ids")
     if isinstance(artifacts, list):
-        relevant.extend(str(artifact).strip() for artifact in artifacts if str(artifact).strip())
+        relevant.extend(
+            str(artifact).strip() for artifact in artifacts if str(artifact).strip()
+        )
     relevant = dedupe_nonempty(relevant)
     if relevant:
         lines.append("  Relevant prior context: " + "; ".join(relevant[:4]) + ".")
@@ -249,6 +286,31 @@ def run_boundary_lines(state: LoopState) -> list[str]:
 def active_ssh_session_labels(state: LoopState) -> list[str]:
     labels: list[str] = []
     seen: set[str] = set()
+
+    # Prefer live session registry because it carries session_id + status.
+    live_sessions = state.scratchpad.get("_active_ssh_interactive_sessions")
+    if isinstance(live_sessions, dict):
+        for session_id, info in live_sessions.items():
+            if not isinstance(info, dict):
+                continue
+            host = str(info.get("host") or "").strip().lower()
+            if not host:
+                continue
+            user = str(info.get("user") or "").strip()
+            status = str(info.get("status") or "").strip() or "running"
+            command = str(info.get("command") or "").strip()
+            if _suspicious_remote_target_reason(host=host, user=user):
+                continue
+            target = f"{user}@{host}" if user else host
+            label = f"{session_id} ({target}, {status})"
+            if command:
+                label += f" cmd: {command[:40]}"
+            if label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+        if labels:
+            return labels
 
     resolved_remote = state.scratchpad.get("_resolved_remote_followup")
     if isinstance(resolved_remote, dict):
@@ -325,10 +387,16 @@ def continuation_anchor_lines(state: LoopState) -> list[str]:
                 if isinstance(target_entry, dict):
                     validated_tools = target_entry.get("validated_tools")
                     if isinstance(validated_tools, list):
-                        cleaned_tools = [str(item).strip() for item in validated_tools if str(item).strip()]
+                        cleaned_tools = [
+                            str(item).strip()
+                            for item in validated_tools
+                            if str(item).strip()
+                        ]
                     else:
                         cleaned_tools = []
-                    last_path = str(target_entry.get("last_validated_path") or "").strip()
+                    last_path = str(
+                        target_entry.get("last_validated_path") or ""
+                    ).strip()
                     if cleaned_tools:
                         tool_line = f"validated_remote={user + '@' if user else ''}{host} via {', '.join(cleaned_tools[:2])}"
                         if last_path:
@@ -342,9 +410,13 @@ def continuation_anchor_lines(state: LoopState) -> list[str]:
             lines.append("recent_artifacts=" + ", ".join(cleaned_ids[:3]))
     research_artifact_ids = handoff.get("recent_research_artifact_ids")
     if isinstance(research_artifact_ids, list):
-        cleaned_research_ids = [str(item).strip() for item in research_artifact_ids if str(item).strip()]
+        cleaned_research_ids = [
+            str(item).strip() for item in research_artifact_ids if str(item).strip()
+        ]
         if cleaned_research_ids:
-            lines.append("recent_research_artifacts=" + ", ".join(cleaned_research_ids[:2]))
+            lines.append(
+                "recent_research_artifacts=" + ", ".join(cleaned_research_ids[:2])
+            )
     return dedupe_nonempty(lines)
 
 
@@ -370,7 +442,11 @@ def render_task_ground_truth(state: LoopState) -> str:
 
     mutation_tools = [tool for tool in successful_tools if tool in MUTATION_TOOL_NAMES]
     if mutation_tools:
-        changed = ", ".join(state.files_changed_this_cycle[-5:]) if state.files_changed_this_cycle else "none"
+        changed = (
+            ", ".join(state.files_changed_this_cycle[-5:])
+            if state.files_changed_this_cycle
+            else "none"
+        )
         return (
             "Task ground truth: Mutating operations performed this task: "
             + ", ".join(mutation_tools)

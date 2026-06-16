@@ -89,7 +89,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         )
 
     self.reasoning_mode = config.reasoning_mode
-    if _model_uses_gemma_rules(config.model) and self.reasoning_mode in {"off", "field"}:
+    if _model_uses_gemma_rules(config.model):
         self.reasoning_mode = "tags"
     self.thinking_visibility = config.thinking_visibility
     self.thinking_start_tag = config.thinking_start_tag

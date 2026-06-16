@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..client.chunk_parser import extract_response_from_wrapper_tags
+from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
 from ..state import WriteSession, json_safe_value
 from ..task_targets import extract_task_target_paths, primary_task_target_path
 from ..write_session_fsm import new_write_session, record_write_session_event
@@ -369,6 +369,17 @@ def parse_tool_calls(
             model_name=active_model_name,
             allowed_tool_names=allowed_raw_function_names,
         )
+
+    # Defense-in-depth: strip thinking tags from final assistant text before it is
+    # recorded in conversation history. This prevents leaked <think> blocks even
+    # when reasoning_mode is misconfigured or a provider wraps reasoning in content.
+    if final_assistant_text.strip():
+        stripped, _ = extract_thinking_from_tags(
+            final_assistant_text,
+            thinking_start_tag=harness.thinking_start_tag or "<think>",
+            thinking_end_tag=harness.thinking_end_tag or "</think>",
+        )
+        final_assistant_text = stripped.strip()
 
     if reasoning_fallback_used and isinstance(scratchpad, dict):
         scratchpad["_assistant_text_from_reasoning_fallback"] = True

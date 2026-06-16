@@ -69,6 +69,42 @@ class _Registry:
         return {"task_complete"}
 
 
+def test_parse_tool_calls_strips_thinking_tags_from_gemma_assistant_text() -> None:
+    raw_assistant_text = (
+        "<think>\n"
+        'The user said "hi". This is a greeting. I should respond politely and ask how I can help.\n'
+        "</think>Hello! How can I help you today?\n"
+        '{"name": "task_complete", "arguments": {"message": "Greeted the user."}}'
+    )
+    stream = SimpleNamespace(
+        assistant_text=raw_assistant_text,
+        thinking_text="",
+        tool_calls=[],
+    )
+    harness = SimpleNamespace(
+        registry=_Registry(),
+        state=LoopState(cwd="."),
+        client=SimpleNamespace(model="google/gemma-4-31b-it"),
+        _runlog=lambda *args, **kwargs: None,
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+    )
+
+    parse_result = parse_tool_calls(
+        stream,
+        timeline=[],
+        graph_state=SimpleNamespace(run_mode="chat"),
+        deps=SimpleNamespace(harness=harness),
+        model_name="google/gemma-4-31b-it",
+    )
+
+    assert "<think>" not in parse_result.final_assistant_text
+    assert "</think>" not in parse_result.final_assistant_text
+    assert parse_result.final_assistant_text.startswith("Hello!")
+    assert len(parse_result.pending_tool_calls) == 1
+    assert parse_result.pending_tool_calls[0].tool_name == "task_complete"
+
+
 def test_ssh_semantic_failure_detects_pipelined_dnf_error_exit_zero() -> None:
     output = {
         "stdout": "dnf search: error: unrecognized arguments: --allrepo\n",

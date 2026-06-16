@@ -38,7 +38,13 @@ Install the startup prerequisites first.
 
 Debian/Ubuntu:
   sudo apt-get update
-  sudo apt-get install -y python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-venv python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-dev python3-pip
+  sudo apt-get install -y python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-venv python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-dev python3-pip sshpass
+
+Fedora/RHEL:
+  sudo dnf install -y python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}-devel python3-pip sshpass
+
+macOS (with Homebrew):
+  brew install python sshpass
 
 If Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} is installed somewhere else:
   PYTHON_BIN=/path/to/python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} ./install.sh
@@ -132,6 +138,50 @@ check_source_tree() {
   return "$ok"
 }
 
+check_sshpass() {
+  if command -v sshpass >/dev/null 2>&1; then
+    echo "PASS: sshpass available"
+    return 0
+  fi
+
+  echo "WARN: sshpass not found. Password-based SSH tools will fail until it is installed." >&2
+  return 1
+}
+
+install_sshpass() {
+  if command -v sshpass >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "sshpass is required for password-based SSH. Attempting to install..."
+
+  if command -v apt-get >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then
+      apt-get update && apt-get install -y sshpass && echo "  -> installed sshpass via apt" && return 0
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo apt-get update && sudo apt-get install -y sshpass && echo "  -> installed sshpass via apt" && return 0
+    fi
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then
+      dnf install -y sshpass && echo "  -> installed sshpass via dnf" && return 0
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo dnf install -y sshpass && echo "  -> installed sshpass via dnf" && return 0
+    fi
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    brew install hudochenkov/sshpass/sshpass && echo "  -> installed sshpass via brew" && return 0
+  fi
+
+  echo "Error: Could not install sshpass automatically. Please install it manually:" >&2
+  echo "  Debian/Ubuntu:  sudo apt-get install sshpass" >&2
+  echo "  Fedora/RHEL:    sudo dnf install sshpass" >&2
+  echo "  macOS:          brew install hudochenkov/sshpass/sshpass" >&2
+  return 1
+}
+
 check_prereqs() {
   local ok=0
 
@@ -142,6 +192,7 @@ check_prereqs() {
     check_python_pip_bootstrap || ok=1
   fi
   check_source_tree || ok=1
+  check_sshpass || ok=1
 
   exit "$ok"
 }
@@ -226,6 +277,10 @@ require_prereqs() {
   check_python_version
   check_python_venv
   check_source_tree
+}
+
+ensure_host_deps() {
+  install_sshpass
 }
 
 ensure_venv() {
@@ -345,6 +400,7 @@ if [ "$ENV_ONLY" -eq 1 ]; then
 fi
 
 require_prereqs
+ensure_host_deps
 ensure_venv
 ensure_venv_pip
 install_smallctl

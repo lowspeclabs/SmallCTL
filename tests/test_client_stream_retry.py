@@ -393,6 +393,61 @@ def test_openrouter_context_probe_remembers_model_capabilities(monkeypatch) -> N
     assert client._request_max_completion_tokens([]) == 8192
 
 
+def test_openrouter_metadata_completion_tokens_equal_context_length_is_capped(monkeypatch) -> None:
+    client = OpenAICompatClient(
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3.5-9b",
+        provider_profile="openrouter",
+        api_key="test-key",
+    )
+
+    class _Response:
+        def __init__(self, status_code: int, payload: dict[str, object]) -> None:
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class _FakeAsyncClient:
+        async def get(self, url, headers, timeout=None):
+            del headers, timeout
+            if url.endswith("/props") or url.endswith("/slots"):
+                return _Response(404, {})
+            if url.endswith("/models/qwen%2Fqwen3.5-9b"):
+                return _Response(404, {})
+            if url.endswith("/models"):
+                return _Response(
+                    200,
+                    {
+                        "data": [
+                            {
+                                "id": "qwen/qwen3.5-9b",
+                                "context_length": 262144,
+                                "supported_parameters": ["temperature", "max_tokens"],
+                                "top_provider": {"max_completion_tokens": 262144},
+                            }
+                        ]
+                    },
+                )
+            raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+
+    limit = asyncio.run(client.fetch_model_context_limit())
+
+    assert limit == 262144
+    assert client.model_max_completion_tokens == 262144
+    # Without messages the metadata value is ignored (OpenRouter fallback is 2048).
+    assert client._request_max_completion_tokens([]) == 2048
+    # With messages the cap is also prompt-aware and stays under the context window.
+    requested_max_tokens = client._request_max_completion_tokens(
+        [], messages=[{"role": "system", "content": "hi"}, {"role": "user", "content": "hi"}]
+    )
+    assert requested_max_tokens < 262144
+    assert requested_max_tokens > 0
+
+
 def test_stream_chat_openrouter_omits_unsupported_max_tokens_from_metadata(monkeypatch) -> None:
     client = OpenAICompatClient(
         base_url="https://openrouter.ai/api/v1",

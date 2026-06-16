@@ -18,7 +18,11 @@ from .stream_collectors import StreamResult, TimelineEntry, collect_stream, coll
 from .usage import extract_context_limit, extract_runtime_context_limit
 from .client_transport import _DEFAULT_MAX_COMPLETION_TOKENS
 from .client_transport import fetch_model_context_limit, stream_chat
-from .request_budget import client_context_limit as _request_budget_client_context_limit
+from .request_budget import (
+    build_request_budget,
+    client_context_limit as _request_budget_client_context_limit,
+)
+from .request_budget import approx_token_count as _request_budget_approx_token_count
 
 
 class OpenAICompatClient:
@@ -236,16 +240,39 @@ class OpenAICompatClient:
             value = int(getattr(self, "model_max_completion_tokens", None) or 0)
         except (TypeError, ValueError):
             return None
-        if value > 0:
-            return value
-        return None
+        if value <= 0:
+            return None
+        limit = _request_budget_client_context_limit(self)
+        if limit and value >= limit:
+            # Provider metadata sometimes reports context_length as max_completion_tokens.
+            # Trusting that would request an output window that leaves no room for the prompt,
+            # so fall back to the normal base heuristic instead.
+            return None
+        return value
 
-    def _request_max_completion_tokens(self, tools: list[dict[str, Any]]) -> int | None:
+    def _request_max_completion_tokens(
+        self,
+        tools: list[dict[str, Any]],
+        messages: list[dict[str, Any]] | None = None,
+    ) -> int | None:
         if not self._request_supports_parameter("max_tokens"):
             return None
         limit = _request_budget_client_context_limit(self)
         metadata_limit = self._metadata_max_completion_tokens()
         base = metadata_limit or self._resolve_base_max_completion_tokens()
+
+        # Cap completion tokens so prompt + completion (+ margins) stays within the
+        # model's context window. Some providers report max_completion_tokens equal
+        # (or nearly equal) to context_length, which leaves no room for the prompt.
+        if limit and messages is not None:
+            estimated_prompt_tokens = _request_budget_approx_token_count(messages)
+            budget = build_request_budget(limit)
+            safe_max = max(
+                1,
+                budget.effective_prompt_budget - estimated_prompt_tokens,
+            )
+            base = min(base, safe_max)
+
         if not tools:
             return base
 

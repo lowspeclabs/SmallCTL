@@ -313,7 +313,7 @@ def _build_openrouter_recovery_payload(
         "messages": messages,
         "stream": True,
     }
-    request_max_tokens = client._request_max_completion_tokens(tools)
+    request_max_tokens = client._request_max_completion_tokens(tools, messages=messages)
     if request_max_tokens is not None:
         payload["max_tokens"] = int(request_max_tokens)
     if getattr(client, "temperature", None) is not None:

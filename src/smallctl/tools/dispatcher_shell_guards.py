@@ -42,7 +42,8 @@ _HARNESS_TOOL_AS_SHELL_RE = re.compile(
     r"^\s*(?P<tool>[A-Za-z_][A-Za-z0-9_]*)\s+(?:[A-Za-z_][A-Za-z0-9_]*=|[{'\"])",
     re.DOTALL,
 )
-_RAW_SSH_SHELL_RE = re.compile(r"^\s*(?:ssh\b|scp\b|sftp\b|sshpass\b)", re.IGNORECASE)
+_RAW_SSH_SHELL_RE = re.compile(r"^\s*(?:ssh(?!-)\b|scp\b|sftp\b|sshpass\b)", re.IGNORECASE)
+_SSH_KEYGEN_SHELL_RE = re.compile(r"^\s*ssh-keygen\b", re.IGNORECASE)
 
 
 def guard_harness_tool_as_ssh_shell_command(command: str) -> ToolEnvelope | None:
@@ -70,6 +71,10 @@ def looks_like_raw_ssh_shell_command(command: str) -> bool:
     return bool(_RAW_SSH_SHELL_RE.match(str(command or "").strip()))
 
 
+def looks_like_ssh_keygen_shell_command(command: str) -> bool:
+    return bool(_SSH_KEYGEN_SHELL_RE.match(str(command or "").strip()))
+
+
 def guard_nested_raw_ssh_in_ssh_exec(command: str) -> ToolEnvelope | None:
     if not looks_like_raw_ssh_shell_command(command):
         return None
@@ -91,6 +96,29 @@ def guard_nested_raw_ssh_in_ssh_exec(command: str) -> ToolEnvelope | None:
 
 
 def raw_ssh_shell_block_envelope(command: str, *, ssh_available: bool) -> ToolEnvelope:
+    if looks_like_ssh_keygen_shell_command(command):
+        return ToolEnvelope(
+            success=False,
+            error=(
+                "Only local known_hosts removals are allowed through `ssh-keygen` here. "
+                "Use `ssh-keygen -R <host> -f ~/.ssh/known_hosts` and wait for approval; "
+                "do not generate keys, rewrite trust stores, or use SSH file tools for local known_hosts."
+            ),
+            metadata={
+                "tool_name": "shell_exec",
+                "reason": "raw_ssh_shell_blocked",
+                "command": command,
+                "suggested_command": "ssh-keygen -R <host> -f ~/.ssh/known_hosts",
+                "next_required_tool": {
+                    "tool_name": "shell_exec",
+                    "required_arguments": {"command": "ssh-keygen -R <host> -f ~/.ssh/known_hosts"},
+                    "notes": [
+                        "This modifies the local harness machine's SSH trust store and requires approval.",
+                        "Do not use ssh_file_read/ssh_file_write for ~/.ssh/known_hosts.",
+                    ],
+                },
+            },
+        )
     if ssh_available:
         error = (
             "Raw `ssh`/`scp`/`sftp` shell commands are not allowed here. "

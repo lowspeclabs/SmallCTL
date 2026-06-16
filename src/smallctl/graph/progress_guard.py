@@ -685,6 +685,14 @@ def _check_completion_confabulation(harness: Any, graph_state: Any) -> str | Non
     if state is None:
         return None
 
+    # Read-only / research / analysis tasks do not require mutations. Treating
+    # a completed answer as a confabulation pushes the model into a useless
+    # loop, so skip the nudge entirely for those intents.
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if active_intent == "readonly_lookup" or task_mode in {"analysis", "debug_inspect", "chat"}:
+        return None
+
     # If mutations have actually occurred, there is nothing to confabulate.
     if state.files_changed_this_cycle:
         return None

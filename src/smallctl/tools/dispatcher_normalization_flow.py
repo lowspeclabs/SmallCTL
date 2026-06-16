@@ -17,9 +17,11 @@ from .dispatcher_request_normalization import (
 from .dispatcher_shell_guards import (
     guard_harness_tool_as_ssh_shell_command as _guard_harness_tool_as_ssh_shell_command,
     guard_nested_raw_ssh_in_ssh_exec as _guard_nested_raw_ssh_in_ssh_exec,
+    looks_like_ssh_keygen_shell_command as _looks_like_ssh_keygen_shell_command,
     looks_like_raw_ssh_shell_command as _looks_like_raw_ssh_shell_command,
     raw_ssh_shell_block_envelope as _raw_ssh_shell_block_envelope,
 )
+from ..shell_utils import looks_like_ssh_keygen_known_hosts_removal as _looks_like_ssh_keygen_known_hosts_removal
 from .dispatcher_tool_guards import (
     _guard_remote_file_tool_request,
     _guard_remote_shell_tool_request,
@@ -251,7 +253,10 @@ def normalize_tool_request(
                 ),
                 normalization_metadata,
             )
-    raw_ssh_shell_attempt = _looks_like_raw_ssh_shell_command(command)
+    raw_ssh_shell_attempt = (
+        _looks_like_raw_ssh_shell_command(command)
+        or _looks_like_ssh_keygen_shell_command(command)
+    ) and not _looks_like_ssh_keygen_known_hosts_removal(command)
     if rewritten_args is None:
         if raw_ssh_shell_attempt:
             return (

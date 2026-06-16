@@ -32,6 +32,7 @@ _CRITICAL_EVENTS = {
     "reflexion_created",
     "recovery_human_resteer_recorded",
     "same_scope_iteration_recorded",
+    "ssh_host_key_recovery_required",
     "subtask_transition",
     "task_interrupted",
     "terminal_control_failed",
@@ -69,6 +70,20 @@ _DUPLICATE_STOPWORDS = {
     "to",
     "with",
 }
+
+_COMMAND_OUTPUT_ERROR_TOOLS = {"shell_exec", "ssh_exec"}
+
+
+def _sanitize_recent_error_for_ui(err_text: str) -> str:
+    """Keep diagnostics useful without surfacing command output as system text."""
+    text = str(err_text or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    for tool_name in _COMMAND_OUTPUT_ERROR_TOOLS:
+        if re.search(rf"(?:^|[\s\['\"]){re.escape(tool_name)}\s*:", lower):
+            return f"{tool_name} failed; see tool output"
+    return text
 
 
 def format_restore_status(status: dict[str, Any]) -> str:
@@ -137,6 +152,8 @@ def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool
             return True
         if "interrupt" in event.data:
             return True
+        return False
+    if event.event_type == UIEventType.SHELL_STREAM and not show_tool_calls:
         return False
     if event.event_type in {UIEventType.TOOL_CALL, UIEventType.TOOL_RESULT} and not show_tool_calls:
         return False
@@ -212,6 +229,12 @@ def format_run_log_row(row: dict[str, Any]) -> str:
     if event == "generic_tool_loop_nudge":
         tool_name = str(data.get("tool_name") or "")
         return f"[harness] ⚠️ Loop guard nudge: {tool_name}"
+    if event == "ssh_host_key_recovery_required":
+        host = str(data.get("host") or "").strip()
+        command = str(data.get("suggested_command") or "").strip()
+        host_text = f" for {host}" if host else ""
+        command_text = f" `{command}`" if command else ""
+        return f"[harness] ⚠️ SSH host key changed{host_text}. Approve{command_text} or fix known_hosts manually."
     if event == "recent_message_limit_tuned":
         adjusted = data.get("adjusted_limit")
         reasons = data.get("reasons", [])
@@ -262,6 +285,10 @@ def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
     if event == "recent_message_limit_tuned":
         adjusted = data.get("adjusted_limit")
         return f"Recovery: message window reduced to {adjusted}"
+    if event == "ssh_host_key_recovery_required":
+        host = str(data.get("host") or "remote host").strip()
+        command = str(data.get("suggested_command") or "ssh-keygen -R <host> -f ~/.ssh/known_hosts").strip()
+        return f"Blocked: SSH host key changed for {host}. Approve `{command}` or fix known_hosts manually."
     interrupt = data.get("interrupt") if isinstance(data, dict) else None
     if isinstance(interrupt, dict) and str(interrupt.get("kind") or "").strip() == "apt_deb822_validator_approval":
         host = str(interrupt.get("host") or "").strip()
@@ -563,6 +590,11 @@ def _build_backend_rca_strip(harness: Any) -> str:
     if isinstance(last_verifier, dict):
         verdict = str(last_verifier.get("verdict") or "").strip().lower()
         cmd = str(last_verifier.get("command") or "").strip()
+        latest_blocker = last_verifier.get("latest_blocker")
+        if isinstance(latest_blocker, dict):
+            salient = str(latest_blocker.get("salient_error") or "").strip()
+            if salient:
+                parts.append(f"Primary blocker: {salient[:160]}")
         if verdict == "fail" and cmd:
             parts.append(f"Last failing verifier: `{cmd}`")
         elif verdict == "pass" and cmd:
@@ -575,7 +607,7 @@ def _build_backend_rca_strip(harness: Any) -> str:
     recent_errors = getattr(state, "recent_errors", None)
     if isinstance(recent_errors, list):
         for err in recent_errors[-3:]:
-            err_text = str(err or "").strip()
+            err_text = _sanitize_recent_error_for_ui(str(err or ""))
             if err_text and len(err_text) <= 120:
                 critical_failures.append(err_text)
             elif err_text:

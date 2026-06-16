@@ -7,6 +7,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
+from ..shell_utils import looks_like_ssh_keygen_known_hosts_removal as _looks_like_ssh_keygen_known_hosts_removal
+
 
 @dataclass(frozen=True)
 class ShellApprovalDecision:
@@ -157,12 +159,21 @@ class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
             "",
             "Command:",
             self.command,
+        ]
+        parsed = _looks_like_ssh_keygen_known_hosts_removal(self.command)
+        if parsed:
+            parts.extend([
+                "",
+                f"Known-hosts file: {parsed.get('known_hosts_file', '~/.ssh/known_hosts')}",
+                f"Host entry to remove: {parsed.get('host', '')}",
+            ])
+        parts.extend([
             "",
             *proof_lines,
             "",
             "Use left/right to choose, then Enter.",
             "Y approves once, S selects Yes for Session, N denies.",
-        ]
+        ])
         return "\n".join(parts)
 
 

@@ -4,7 +4,10 @@ import asyncio
 
 from smallctl.state import LoopState
 from smallctl.tools import network, shell
-from smallctl.tools.shell_support import _looks_like_remote_installer_mutation
+from smallctl.tools.shell_support import (
+    _looks_like_remote_installer_mutation,
+    _remote_installer_cwd_and_script,
+)
 
 
 def _state() -> LoopState:
@@ -54,6 +57,23 @@ class _DoneProcess:
         self.stderr = _ChunkStream([b""])
         self.stdin = None
         self.returncode = 0
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+
+class _FailedProcess:
+    def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 1) -> None:
+        self.stdout = _ChunkStream([stdout.encode("utf-8"), b""])
+        self.stderr = _ChunkStream([stderr.encode("utf-8"), b""])
+        self.stdin = None
+        self.returncode = returncode
 
     async def wait(self) -> int:
         return self.returncode
@@ -139,6 +159,26 @@ def test_remote_installer_mutation_detector_detects_actual_installfog_execution(
     assert _looks_like_remote_installer_mutation("/root/fogproject/bin/installfog.sh")
     assert _looks_like_remote_installer_mutation("cd /root/fogproject/bin && ./installfog.sh -Y")
     assert _looks_like_remote_installer_mutation("bash /root/fogproject/bin/installfog.sh")
+
+
+def test_remote_installer_parser_handles_wrapped_shell_invocations() -> None:
+    assert _looks_like_remote_installer_mutation("env PIHOLE_SKIP_OS_CHECK=true bash /tmp/pihole_install.sh --help")
+    assert _looks_like_remote_installer_mutation("bash -x /tmp/pihole_install.sh --unattended")
+    assert _looks_like_remote_installer_mutation("sudo bash /tmp/bootstrap.sh")
+    assert _looks_like_remote_installer_mutation("bash -c 'cd /tmp && bash pihole_install.sh'")
+
+    assert _remote_installer_cwd_and_script("env PIHOLE_SKIP_OS_CHECK=true bash /tmp/pihole_install.sh --help") == (
+        "",
+        "/tmp/pihole_install.sh",
+    )
+    assert _remote_installer_cwd_and_script("cd /tmp && bash pihole_install.sh") == (
+        "/tmp",
+        "/tmp/pihole_install.sh",
+    )
+    assert _remote_installer_cwd_and_script("bash -c 'cd /tmp && bash pihole_install.sh'") == (
+        "",
+        "/tmp/pihole_install.sh",
+    )
 
 
 def test_ssh_exec_blocks_yes_pipe_to_interactive_installer_before_launch() -> None:
@@ -233,6 +273,48 @@ def test_ssh_exec_requires_remote_installer_preflight_before_installfog(monkeypa
     assert result["metadata"]["preflight_probes"]["script_exists"] is True
     assert result["metadata"]["preflight_probes"]["script_executable"] is True
     assert "--autoaccept" in result["error"]
+
+
+def test_ssh_exec_remote_preflight_reports_wrapped_pihole_script_exists(monkeypatch) -> None:
+    state = _state()
+
+    probe_stdout = (
+        "__PREFLIGHT_PWD__\n"
+        "/root\n"
+        "__PREFLIGHT_GIT_TOPLEVEL__\n"
+        "NO_GIT\n"
+        "__PREFLIGHT_GIT_STATUS__\n"
+        "NO_GIT\n"
+        "__PREFLIGHT_SCRIPT__\n"
+        "EXISTS\n"
+        "__PREFLIGHT_HELP__\n"
+        "Usage: pihole_install.sh\n"
+        "__PREFLIGHT_DONE__\n"
+    )
+
+    async def _fake_create_process(**_kwargs):
+        return _ProbeProcess(probe_stdout)
+
+    monkeypatch.setattr(network, "create_process", _fake_create_process)
+    monkeypatch.setattr(shell, "create_process", _fake_create_process)
+
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="env PIHOLE_SKIP_OS_CHECK=true bash -x /tmp/pihole_install.sh --help",
+            timeout_sec=600,
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "remote_installer_preflight_required"
+    probes = result["metadata"]["preflight_probes"]
+    assert probes["script_path"] == "/tmp/pihole_install.sh"
+    assert probes["script_exists"] is True
+    assert "Script: /tmp/pihole_install.sh (exists but NOT executable)" in result["error"]
+    assert "Script: /tmp/pihole_install.sh (NOT FOUND)" not in result["error"]
 
 
 def test_ssh_exec_allows_clean_remote_installer_preflight(monkeypatch) -> None:
@@ -369,6 +451,33 @@ def test_ssh_exec_timeout_with_prompt_suggests_interactive_session(monkeypatch) 
     assert result["metadata"]["failure_kind"] == "interactive_prompt_wait"
     assert result["metadata"]["detected_prompt"]["type"] == "yes_no"
     assert "ssh_session_start" in result["metadata"]["suggested_tools"]
+
+
+def test_ssh_exec_terminal_unknown_exposes_interactive_session_tools(monkeypatch) -> None:
+    state = _state()
+    stderr = "Error opening terminal: unknown.\nInstaller exited while opening dialog."
+
+    async def _fake_create_process(**_kwargs):
+        return _FailedProcess(stdout="[i] Root user check\n", stderr=stderr, returncode=1)
+
+    monkeypatch.setattr(network, "create_process", _fake_create_process)
+
+    result = asyncio.run(
+        network.run_ssh_command(
+            host="192.0.2.10",
+            user="root",
+            command="DEBIAN_FRONTEND=noninteractive bash -c 'curl -sSL https://install.pi-hole.net | bash'",
+            timeout_sec=300,
+            state=state,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["ssh_error_class"] == "interactive_installer_blocked"
+    assert state.scratchpad.get("_expose_interactive_session_tools") is True
+    assert "ssh_session_start" in result["metadata"]["suggested_tools"]
+    assert "Do not retry the same ssh_exec command" in result["metadata"]["next_required_action"]
+    assert "Do not put `-t` inside the remote command string" in "\n".join(result["metadata"]["hints"])
 
 
 def test_ssh_session_start_returns_prompt_state_and_accepts_input(monkeypatch) -> None:

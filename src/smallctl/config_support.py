@@ -438,6 +438,7 @@ def _env_raw_config(env_or_dotenv: Any) -> dict[str, Any]:
         "subtask_max_active": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_ACTIVE"),
         "subtask_max_history": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_HISTORY"),
         "subtask_inject_completed_limit": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_INJECT_COMPLETED_LIMIT"),
+        "sudo_password": env_or_dotenv(f"{ENV_PREFIX}SUDO_PASSWORD"),
         "verbose": env_or_dotenv(f"{ENV_PREFIX}VERBOSE"),
     }
 

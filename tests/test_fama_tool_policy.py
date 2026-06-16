@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from smallctl.fama.fingerprints import install_verifier_passes_objective
 from smallctl.fama.runtime import observe_tool_result
 from smallctl.fama.signals import ActiveMitigation
 from smallctl.fama.state import activate_mitigations, active_mitigation_names
@@ -12,6 +13,39 @@ from smallctl.state import LoopState
 from smallctl.tools.base import ToolSpec
 from smallctl.tools.dispatcher import ToolDispatcher
 from smallctl.tools.registry import ToolRegistry
+
+
+def test_install_verifier_passes_objective_clears_done_gate_match() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "ssh_exec to 192.168.1.161 and install webmin"
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "command": "dnf list installed webmin",
+    }
+
+    assert install_verifier_passes_objective(state) is True
+
+
+def test_install_verifier_passes_objective_rejects_non_install_task() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Read the webmin config file"
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "command": "dnf list installed webmin",
+    }
+
+    assert install_verifier_passes_objective(state) is False
+
+
+def test_install_verifier_passes_objective_rejects_weak_file_verifier() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "ssh_exec to 192.168.1.161 and install webmin"
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "command": "cat /tmp/webmin-install.log",
+    }
+
+    assert install_verifier_passes_objective(state) is False
 
 
 class _Config:
@@ -305,3 +339,132 @@ def test_remote_transport_verifier_failure_does_not_hide_completion_tools() -> N
     names = [entry["function"]["name"] for entry in schemas]
     assert "task_complete" in names
     assert "task_fail" in names
+
+
+def test_interactive_terminal_verifier_failure_exposes_ssh_session_tools() -> None:
+    state = LoopState()
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "tool": "ssh_exec",
+        "failure_mode": "interactive_installer_blocked",
+        "key_stderr": "Error opening terminal: unknown.",
+        "command": "DEBIAN_FRONTEND=noninteractive bash -c 'curl -sSL https://install.pi-hole.net | bash'",
+    }
+
+    schemas = apply_fama_tool_exposure(
+        [
+            _schema("ssh_exec"),
+            _schema("ssh_session_start"),
+            _schema("ssh_session_read"),
+            _schema("ssh_session_send"),
+            _schema("ssh_session_close"),
+        ],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "ssh_exec" in names
+    assert "ssh_session_start" in names
+    assert "ssh_session_read" in names
+    assert "ssh_session_send" in names
+    assert "ssh_session_close" in names
+
+
+def test_ssh_host_key_failure_activates_recovery_capsule_and_runlog() -> None:
+    state = LoopState()
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "root@192.168.1.161": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "last_error_class": "host_key_verification",
+            "consecutive_count": 2,
+            "last_command": "hostname",
+            "last_error": "Host key verification failed.",
+        }
+    }
+
+    runlog: list[tuple[str, str, dict[str, object]]] = []
+
+    def _runlog(event: str, message: str, **data: object) -> None:
+        runlog.append((event, message, data))
+
+    harness = SimpleNamespace(
+        state=state,
+        config=_Config(),
+        _runlog=_runlog,
+    )
+    result = ToolEnvelope(
+        success=False,
+        error="Host key verification failed.",
+        metadata={
+            "tool_name": "ssh_exec",
+            "failure_mode": "host_key_verification",
+            "output": {
+                "stdout": "",
+                "stderr": "Host key verification failed.",
+                "exit_code": 255,
+            },
+        },
+    )
+
+    asyncio.run(
+        observe_tool_result(
+            SimpleNamespace(harness=harness),
+            tool_name="ssh_exec",
+            result=result,
+            operation_id="op-host-key-1",
+        )
+    )
+
+    assert "ssh_host_key_recovery_capsule" in active_mitigation_names(state)
+    assert any(event == "ssh_host_key_recovery_required" for event, _msg, _data in runlog)
+    runlog_entry = next((entry for entry in runlog if entry[0] == "ssh_host_key_recovery_required"), None)
+    assert runlog_entry is not None
+    assert runlog_entry[2].get("host") == "192.168.1.161"
+    assert "ssh-keygen -R 192.168.1.161" in str(runlog_entry[2].get("suggested_command", ""))
+
+
+def test_permission_denied_failure_does_not_activate_host_key_capsule() -> None:
+    state = LoopState()
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "root@192.168.1.161": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "last_error_class": "auth_permission_denied",
+            "consecutive_count": 2,
+            "last_command": "hostname",
+            "last_error": "Permission denied (publickey,password).",
+        }
+    }
+
+    harness = SimpleNamespace(
+        state=state,
+        config=_Config(),
+        _runlog=lambda *args, **kwargs: None,
+    )
+    result = ToolEnvelope(
+        success=False,
+        error="Permission denied (publickey,password).",
+        metadata={
+            "tool_name": "ssh_exec",
+            "failure_mode": "auth_permission_denied",
+            "output": {
+                "stdout": "",
+                "stderr": "Permission denied (publickey,password).",
+                "exit_code": 255,
+            },
+        },
+    )
+
+    asyncio.run(
+        observe_tool_result(
+            SimpleNamespace(harness=harness),
+            tool_name="ssh_exec",
+            result=result,
+            operation_id="op-auth-fail-1",
+        )
+    )
+
+    assert "ssh_host_key_recovery_capsule" not in active_mitigation_names(state)

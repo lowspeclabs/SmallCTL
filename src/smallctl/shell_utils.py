@@ -60,6 +60,20 @@ _READ_ONLY_ROOT_COMMANDS = {
     "file",
 }
 
+_SSH_KEYGEN_SHELL_METACHAR_TOKENS = {
+    "&&",
+    "||",
+    ";",
+    "|",
+    "&",
+    "$(",
+    "`",
+    ">",
+    ">>",
+    "<",
+    "<<",
+}
+
 
 def file_read_cache_key(cwd: str, payload: dict[str, Any] | None) -> str | None:
     if not isinstance(payload, dict):
@@ -339,6 +353,75 @@ def is_read_only_shell_evidence_action(action: str) -> bool:
         return False
     segments = split_shell_segments(str(action or "").strip())
     return bool(segments) and all(is_read_only_shell_segment(segment) for segment in segments)
+
+
+def looks_like_ssh_keygen_known_hosts_removal(command: str) -> dict[str, str] | None:
+    """Return parsed host/file if command is a safe local ssh-keygen -R removal."""
+    text = str(command or "").strip()
+    if not text:
+        return None
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if tokens[0] != "ssh-keygen":
+        return None
+
+    for token in tokens[1:]:
+        if token in _SSH_KEYGEN_SHELL_METACHAR_TOKENS:
+            return None
+        if "`" in token or "$(" in token:
+            return None
+        if re.match(r"^\d*[<>]", token):
+            return None
+
+    host: str | None = None
+    known_hosts_file: str | None = None
+    seen_options: set[str] = set()
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-R" or token.startswith("-R"):
+            if "R" in seen_options:
+                return None
+            seen_options.add("R")
+            if token == "-R":
+                index += 1
+                if index >= len(tokens):
+                    return None
+                host = tokens[index]
+            else:
+                host = token[2:]
+            if not host or host.startswith("-"):
+                return None
+            index += 1
+            continue
+        if token == "-f" or token.startswith("-f"):
+            if "f" in seen_options:
+                return None
+            seen_options.add("f")
+            if token == "-f":
+                index += 1
+                if index >= len(tokens):
+                    return None
+                known_hosts_file = tokens[index]
+            else:
+                known_hosts_file = token[2:]
+            if not known_hosts_file or known_hosts_file.startswith("-"):
+                return None
+            index += 1
+            continue
+        if token.startswith("-"):
+            return None
+        return None
+
+    if host is None:
+        return None
+    if known_hosts_file is None:
+        known_hosts_file = "~/.ssh/known_hosts"
+    return {"host": host, "known_hosts_file": known_hosts_file}
 
 
 def _extract_command_from_result(result: ToolEnvelope, *, tool_name: str) -> str:

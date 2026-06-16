@@ -835,6 +835,42 @@ def test_recovery_guidance_renders_read_loop_payload() -> None:
     assert "Recent artifact_read calls already targeted A1" in joined
 
 
+def test_recovery_guidance_renders_latest_execution_blocker() -> None:
+    state = LoopState(cwd="/tmp", step_count=4)
+    state.scratchpad["_latest_execution_blocker"] = {
+        "command": "dnf install -y vikunja-server",
+        "salient_error": "Errors during downloading metadata for repository 'vikunja': repomd.xml 404",
+    }
+
+    lines = PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).frame_compiler.render_recovery_guidance(state)
+
+    joined = "\n".join(lines)
+    assert "Current execution blocker" in joined
+    assert "repomd.xml 404" in joined
+    assert "dnf install -y vikunja-server" in joined
+
+
+def test_recovery_guidance_renders_remote_repair_state() -> None:
+    state = LoopState(cwd="/tmp", step_count=9)
+    state.task_mode = "remote_execute"
+    state.current_phase = "repair"
+    state.scratchpad["_session_ssh_targets"] = [{"host": "192.168.1.161", "user": "root"}]
+    state.scratchpad["_latest_execution_blocker"] = {
+        "command": "ls -la /opt/pihole/",
+        "salient_error": "ls: cannot access '/opt/pihole/': No such file or directory",
+    }
+    state.scratchpad["_continued_after_guard_trip"] = True
+
+    lines = PromptAssembler(ContextPolicy(max_prompt_tokens=2048)).frame_compiler.render_recovery_guidance(state)
+
+    joined = "\n".join(lines)
+    assert "Remote repair state" in joined
+    assert "root@192.168.1.161" in joined
+    assert "ls -la /opt/pihole/" in joined
+    assert "No such file or directory" in joined
+    assert "explicit continuation after a guard trip" in joined
+
+
 def test_remote_repair_phase_does_not_reduce_recent_window_without_prompt_pressure() -> None:
     calls: dict[str, int] = {}
 

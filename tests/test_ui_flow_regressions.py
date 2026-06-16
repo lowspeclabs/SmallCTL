@@ -21,6 +21,7 @@ from smallctl.harness import HarnessConfig
 from smallctl.ui.app import SmallctlApp
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
 from smallctl.ui.display import compute_activity_for_event, format_test_time_scaling_event
+from smallctl.ui.console import ConsolePane
 from smallctl.ui.input import InputPane
 from smallctl.ui.model_selector import ModelSelectButton
 from smallctl.ui.statusbar import StatusBar
@@ -151,6 +152,80 @@ def test_on_harness_event_queues_same_thread_work_before_rendering() -> None:
     asyncio.run(_run())
 
     assert seen == ["queued"]
+
+
+def test_ui_transcript_does_not_persist_live_shell_stream() -> None:
+    persist_calls = []
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._ui_transcript = []
+
+        def _persist_ui_transcript(self) -> None:
+            persist_calls.append(list(self._ui_transcript))
+
+    flow = _Flow()
+
+    flow._record_ui_transcript_event(UIEvent(UIEventType.SHELL_STREAM, "live output"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.SYSTEM, "system note"))
+
+    assert len(flow._ui_transcript) == 1
+    assert flow._ui_transcript[0]["event_type"] == "system"
+    assert flow._ui_transcript[0]["content"] == "system note"
+    assert len(persist_calls) == 1
+
+
+def test_render_restored_chat_hides_tool_output_when_tool_calls_hidden() -> None:
+    events: list[UIEvent] = []
+
+    class _Console:
+        async def clear_bubbles(self) -> None:
+            return None
+
+        async def append_event(self, event: UIEvent) -> None:
+            events.append(event)
+
+    class _Flow(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self.harness = None
+            self._show_tool_calls = False
+            self._show_system_messages = False
+            self._verbose = False
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+    messages = [
+        {"role": "user", "content": "run it"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "ssh_exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "ssh_exec",
+            "tool_call_id": "call-1",
+            "content": "--- [FAILURE SUMMARY] ---\nRemote SSH command exited with code 127",
+        },
+        {"event_type": "tool_result", "content": "live tool output", "data": {"tool_name": "shell_exec"}},
+        {"event_type": "shell_stream", "content": "live shell stream", "data": {"tool_name": "shell_exec"}},
+        {"event_type": "system", "content": "normal hidden system note", "data": {}},
+    ]
+
+    asyncio.run(flow._render_restored_chat(messages=messages))
+
+    assert [(event.event_type, event.content) for event in events] == [
+        (UIEventType.USER, "run it"),
+    ]
 
 
 def test_handle_slash_command_routes_planning_mode_through_bridge() -> None:
@@ -641,6 +716,70 @@ def test_smallctl_app_model_bar_toggle_binding_switches_layout(monkeypatch) -> N
     assert asyncio.run(_run()) == (False, True, True, False, True)
 
 
+
+def test_right_model_bar_clips_streamed_tool_output(monkeypatch) -> None:
+    async def _fake_create_harness(self: SmallctlApp) -> None:
+        async def _teardown() -> None:
+            return None
+
+        self.harness = SimpleNamespace(
+            state=SimpleNamespace(
+                current_phase="explore",
+                step_count=0,
+                planning_mode_enabled=False,
+                active_plan=None,
+                draft_plan=None,
+                scratchpad={},
+                token_usage=0,
+                contract_phase=lambda: "",
+                acceptance_checklist=lambda: [],
+                current_verifier_verdict=lambda: None,
+            ),
+            context_policy=SimpleNamespace(max_prompt_tokens=4096),
+            server_context_limit=None,
+            guards=SimpleNamespace(max_tokens=4096),
+            set_interactive_shell_approval=lambda enabled: None,
+            set_shell_approval_session_default=lambda enabled: None,
+            teardown=_teardown,
+        )
+
+    monkeypatch.setattr(SmallctlApp, "_create_harness", _fake_create_harness)
+
+    async def _run() -> None:
+        app = SmallctlApp({"endpoint": "http://example.test/v1", "model": "alpha-model"})
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.pause(0.2)
+            app.action_toggle_model_bar_layout()
+            await pilot.pause(0.2)
+
+            console = app.query_one(ConsolePane)
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "ssh_exec",
+                    data={
+                        "display_text": "ssh_exec(command=\"" + ("x" * 500) + "\")",
+                        "tool_call_id": "tool-1",
+                    },
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.SHELL_STREAM,
+                    "remote output " + ("y" * 800),
+                    data={"tool_name": "ssh_exec", "tool_call_id": "tool-1"},
+                )
+            )
+            await pilot.pause(0.2)
+
+            console_wrap = app.query_one("#console-wrap")
+            sidebar = app.query_one("#model-sidebar")
+            assert not sidebar.has_class("hidden")
+            assert console_wrap.region.right <= sidebar.region.x
+            assert console.region.right <= sidebar.region.x
+
+    asyncio.run(_run())
+
 def test_subtask_checklist_moves_to_sidebar_in_right_layout() -> None:
     appended: list[UIEvent] = []
 
@@ -706,6 +845,7 @@ def test_subtask_checklist_still_renders_in_bottom_layout() -> None:
             self._status_activity = ""
             self._show_system_messages = False
             self._show_tool_calls = True
+            self._verbose = False
             self.active_task = None
             self.objective = _Objective()
             self.console = _Console()

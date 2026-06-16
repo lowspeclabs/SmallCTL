@@ -519,6 +519,8 @@ def _apply_finalization_updates(
     if result.success:
         service.harness.state.recent_errors = []
     else:
+        if result.metadata.get("reason") == "web_fetch_duplicate_result_id":
+            return evidence
         error_text = str(result.error or result.metadata.get("error") or "tool failed").strip()
         error_kind = str(result.metadata.get("error_kind") or "").strip()
         if error_kind:

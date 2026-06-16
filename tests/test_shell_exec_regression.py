@@ -230,3 +230,178 @@ def test_dispatch_cancellation_records_synthetic_tool_result() -> None:
     assert result.metadata["cancellation_source"] == "ui_stop_button"
     assert "thread-1:3:call-1:ssh_exec" in state.tool_execution_records
     assert any(entry[0][0] == "tool_dispatch_cancelled" for entry in runlog)
+
+
+def test_shell_exec_feeds_configured_sudo_password_inline() -> None:
+    class _CapturingStdin:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.writes.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _PromptStream:
+        def __init__(self, prompt: bytes = b"[sudo] password for user: ") -> None:
+            self._prompt = prompt
+            self._sent = False
+
+        async def read(self, _size: int) -> bytes:
+            if not self._sent:
+                self._sent = True
+                return self._prompt
+            return b""
+
+    class _FakeProcessWithStdin:
+        def __init__(self) -> None:
+            self.stdout = _PromptStream()
+            self.stderr = _PromptStream(b"")
+            self.stdin = _CapturingStdin()
+            self.returncode: int | None = 0
+            self._waited = False
+
+        async def wait(self) -> int:
+            self._waited = True
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = 0
+
+    async def _create_process(**kwargs):
+        nonlocal _proc
+        _proc = _FakeProcessWithStdin()
+        return _proc
+
+    harness = SimpleNamespace(
+        event_handler=None,
+        _active_processes=set(),
+        get_sudo_password=lambda command: "secret-sudo-password",
+    )
+    state = LoopState(cwd="/tmp")
+    _proc: _FakeProcessWithStdin | None = None
+
+    async def _run() -> dict[str, Any]:
+        return await shell_foreground.shell_exec_foreground(
+            "sudo systemctl restart nginx",
+            state=state,
+            timeout_sec=30,
+            harness=harness,
+            create_process=_create_process,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["success"] is True
+    assert _proc is not None
+    assert b"secret-sudo-password\n" in _proc.stdin.writes
+    assert _proc.stdin.closed is True
+    assert harness._active_processes == set()
+
+
+def test_shell_exec_returns_needs_human_when_no_sudo_password_configured(monkeypatch) -> None:
+    class _PromptStream:
+        def __init__(self, prompt: bytes = b"[sudo] password for user: ") -> None:
+            self._prompt = prompt
+            self._sent = False
+
+        async def read(self, _size: int) -> bytes:
+            if not self._sent:
+                self._sent = True
+                return self._prompt
+            return b""
+
+    class _FakeProcessWithStdin:
+        def __init__(self) -> None:
+            self.stdout = _PromptStream()
+            self.stderr = _PromptStream(b"")
+            self.stdin = None
+            self.returncode: int | None = 1
+            self._waited = False
+
+        async def wait(self) -> int:
+            self._waited = True
+            return 1
+
+        def kill(self) -> None:
+            self.returncode = 1
+
+    async def _create_process(**kwargs):
+        return _FakeProcessWithStdin()
+
+    async def _no_sudo_guard(**kwargs):
+        return None
+
+    monkeypatch.setattr(shell_foreground, "ensure_sudo_credentials", _no_sudo_guard)
+
+    harness = SimpleNamespace(
+        event_handler=None,
+        _active_processes=set(),
+        get_sudo_password=lambda command: None,
+    )
+    state = LoopState(cwd="/tmp")
+
+    async def _run() -> dict[str, Any]:
+        return await shell_foreground.shell_exec_foreground(
+            "sudo systemctl restart nginx",
+            state=state,
+            timeout_sec=30,
+            harness=harness,
+            create_process=_create_process,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result["success"] is False
+    assert result.get("status") == "needs_human"
+    assert "sudo_password_required" in str(result["metadata"].get("reason", ""))
+
+
+def test_ssh_keygen_known_hosts_removal_reaches_approval_in_diagnosis_remediation() -> None:
+    from smallctl.risk_policy import evaluate_risk_policy
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_task_classification"] = "diagnosis_remediation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="shell_exec",
+        tool_risk="high",
+        phase="execute",
+        action="ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts",
+        expected_effect="Remove stale known_hosts entry.",
+        rollback="Re-add the key if needed.",
+        verification="Retry SSH connection.",
+        approval_available=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_approval is True
+    assert decision.approval_kind == "shell"
+
+
+def test_non_ssh_keygen_mutating_shell_still_blocked_without_claim() -> None:
+    from smallctl.risk_policy import evaluate_risk_policy
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_task_classification"] = "diagnosis_remediation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="shell_exec",
+        tool_risk="high",
+        phase="execute",
+        action="rm -f /tmp/example",
+        expected_effect="Remove file.",
+        rollback="Restore from backup.",
+        verification="Check file is gone.",
+        approval_available=True,
+    )
+
+    assert decision.allowed is False
+    assert "supported claim" in decision.reason.lower()

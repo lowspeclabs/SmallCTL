@@ -23,6 +23,8 @@ def is_retrieval_visible_artifact(artifact: Any) -> bool:
     metadata = getattr(artifact, "metadata", None)
     if not isinstance(metadata, dict):
         return True
+    if metadata.get("hidden") is True:
+        return bool(metadata.get("force_retrieval_visible"))
     if metadata.get("model_visible", True) is not False:
         return True
     return bool(str(metadata.get("verifier_verdict") or "").strip())

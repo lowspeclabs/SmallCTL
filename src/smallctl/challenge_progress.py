@@ -108,8 +108,6 @@ def record_verifier_result(
     _initialize_from_state_task(state)
     if not progress.task_category and _command_mentions_required_output(progress, command):
         progress.task_category = "coding"
-    if progress.task_category != "coding":
-        return
     step = int(getattr(state, "step_count", 0) or 0)
     progress.last_verifier_step = step
     progress.last_verifier_command = str(command or "").strip()
@@ -121,7 +119,10 @@ def record_verifier_result(
         progress.last_verifier_exit_code = None
     if progress.last_verifier_verdict == "pass":
         if _verifier_matches_user_objective(state, command):
-            progress.verified_after_last_change = step >= progress.last_code_change_step
+            if progress.task_category == "coding":
+                progress.verified_after_last_change = step >= progress.last_code_change_step
+            else:
+                progress.verified_after_last_change = True
         else:
             progress.verified_after_last_change = False
         progress.post_pass_nonterminal_steps = 0
@@ -238,7 +239,11 @@ def challenge_progress_report(state: Any) -> dict[str, Any]:
     progress = getattr(state, "challenge_progress", None)
     if progress is None:
         return {}
-    if progress.task_category != "coding" and progress.code_change_count <= 0 and not progress.last_verifier_command:
+    if (
+        progress.task_category not in {"coding", "sysadmin"}
+        and progress.code_change_count <= 0
+        and not progress.last_verifier_command
+    ):
         return {}
     return {
         "task_category": progress.task_category,

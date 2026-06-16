@@ -322,6 +322,12 @@ class SmallctlAppActionsMixin:
             is_ui_transcript_event = "event_type" in message
             role = str(message.get("role") or message.get("event_type") or "").strip().lower()
             content = str(message.get("content") or "")
+            show_tool_calls = bool(getattr(self, "_show_tool_calls", True))
+            show_system_messages = bool(
+                getattr(self, "_show_system_messages", True) or getattr(self, "_verbose", False)
+            )
+            if not show_tool_calls and role in {"tool", "tool_call", "tool_result", "shell_stream"}:
+                continue
             metadata = message.get("metadata")
             if not isinstance(metadata, dict):
                 data = message.get("data")
@@ -336,7 +342,7 @@ class SmallctlAppActionsMixin:
                     await console.append_event(
                         UIEvent(UIEventType.ASSISTANT, content, data=speaker_data)
                     )
-                elif tool_calls:
+                elif tool_calls and show_tool_calls:
                     await console.append_event(
                         UIEvent(
                             UIEventType.ASSISTANT,
@@ -344,14 +350,15 @@ class SmallctlAppActionsMixin:
                             data={**speaker_data, "synthetic_tool_call_summary": True},
                         )
                     )
-                for tool_call in tool_calls:
-                    await console.append_event(
-                        UIEvent(
-                            UIEventType.TOOL_CALL,
-                            tool_call["name"],
-                            data={**speaker_data, **tool_call["data"]},
+                if show_tool_calls:
+                    for tool_call in tool_calls:
+                        await console.append_event(
+                            UIEvent(
+                                UIEventType.TOOL_CALL,
+                                tool_call["name"],
+                                data={**speaker_data, **tool_call["data"]},
+                            )
                         )
-                    )
             elif role in {"thinking", "reasoning"}:
                 if content.strip():
                     await console.append_event(
@@ -389,6 +396,8 @@ class SmallctlAppActionsMixin:
                     or metadata.get("ui_kind")
                     or metadata.get("event")
                 )
+                if not show_system_messages and not is_recovery_system:
+                    continue
                 if content.strip() and (is_ui_transcript_event or is_recovery_system):
                     await console.append_event(
                         UIEvent(

@@ -380,6 +380,24 @@ class TaskBoundaryLifecycleMixin:
         preserved_context_briefs = list(self.harness.state.context_briefs)
         preserved_tool_history = list(self.harness.state.tool_history)
         preserved_failure_events = list(getattr(self.harness.state, "failure_events", []) or [])
+        if preserve_memory:
+            # On same-scope iterations, keep boundary events and at most one
+            # recent non-boundary event that is directly relevant to the new
+            # intent. Drop stale detailed verifier/repair failures so they don't
+            # bias the new intent.
+            last_relevant_non_boundary = None
+            for e in reversed(preserved_failure_events):
+                if getattr(e, "source", "") == "task_boundary":
+                    continue
+                if getattr(e, "failure_class", "") == "repeated_action":
+                    last_relevant_non_boundary = e
+                    break
+            preserved_failure_events = [
+                e for e in preserved_failure_events
+                if getattr(e, "failure_class", "") in {"human_resteer", "same_scope_iteration"}
+                or getattr(e, "source", "") == "task_boundary"
+                or e is last_relevant_non_boundary
+            ]
         preserved_reflexion_memory = list(getattr(self.harness.state, "reflexion_memory", []) or [])
         preserved_subtask_ledger = getattr(self.harness.state, "subtask_ledger", None)
         recovery_config = preserved_scratchpad.get("_recovery_config")

@@ -1040,6 +1040,127 @@ def detect_repeated_remote_installer_failure(
     )
 
 
+def detect_ssh_host_key_verification_failure(
+    state: Any,
+    *,
+    threshold: int = 2,
+) -> FamaSignal | None:
+    """Detect repeated SSH host-key verification failures and recommend local recovery."""
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    recovery_state = scratchpad.get("_ssh_auth_recovery_state")
+    if not isinstance(recovery_state, dict):
+        return None
+    threshold = max(1, int(threshold or 2))
+    for key, record in recovery_state.items():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("last_error_class") or "").strip() != "host_key_verification":
+            continue
+        consecutive_count = int(record.get("consecutive_count") or 0)
+        if consecutive_count < threshold:
+            continue
+        host = str(record.get("host") or key or "").strip()
+        if not host:
+            continue
+        return FamaSignal(
+            kind=FamaFailureKind.SSH_HOST_KEY_VERIFICATION,
+            severity=2,
+            source="tool_result",
+            evidence=f"ssh host-key verification failed {consecutive_count} times for {host}",
+            step=current_step(state),
+            tool_name="ssh_exec",
+            failure_class="ssh_host_key_verification",
+            next_safe_action=(
+                f"SSH host key changed for {host}. Do not patch known_hosts line by line. "
+                f"Use approved local `ssh-keygen -R {host} -f ~/.ssh/known_hosts`, then retry SSH only after approval."
+            ),
+            suggested_mitigations=["ssh_host_key_recovery_capsule"],
+        )
+    return None
+
+
+_SSH_HOST_KEY_CHANGED_RE = re.compile(
+    r"REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|Offending .* key in .*known_hosts",
+    re.IGNORECASE | re.DOTALL,
+)
+_SSH_KEYGEN_REMOVE_RE = re.compile(r"ssh-keygen\s+[^\n]*\s-R\s+['\"]?(?P<host>[A-Za-z0-9._:-]+)", re.IGNORECASE)
+_OFFENDING_KNOWN_HOST_RE = re.compile(
+    r"Offending .* key in (?P<path>[^:\r\n]+known_hosts):(?P<line>\d+)",
+    re.IGNORECASE,
+)
+
+
+def detect_ssh_host_key_verification_failure_from_result(
+    state: Any,
+    *,
+    tool_name: str,
+    result: Any,
+    arguments: dict[str, Any] | None = None,
+    operation_id: str | None = None,
+) -> FamaSignal | None:
+    """Detect an SSH known_hosts trust failure directly from the current tool result."""
+    if str(tool_name or "").strip() not in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
+        return None
+    if bool(getattr(result, "success", False)):
+        return None
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    combined = _result_text(result, metadata=metadata)
+    if not _SSH_HOST_KEY_CHANGED_RE.search(combined):
+        return None
+    args = arguments if isinstance(arguments, dict) else {}
+    host = str(args.get("host") or metadata.get("host") or "").strip()
+    if not host:
+        remove_match = _SSH_KEYGEN_REMOVE_RE.search(combined)
+        if remove_match:
+            host = str(remove_match.group("host") or "").strip()
+    if not host:
+        host = _host_key_failure_host_from_scratchpad(state)
+    host_label = host or "the host"
+    offending = _OFFENDING_KNOWN_HOST_RE.search(combined)
+    known_hosts_hint = ""
+    if offending:
+        known_hosts_hint = f"; offending local file {offending.group('path')} line {offending.group('line')}"
+    return FamaSignal(
+        kind=FamaFailureKind.SSH_HOST_KEY_VERIFICATION,
+        severity=2,
+        source="tool_result",
+        evidence=f"ssh host-key verification failed for {host_label}{known_hosts_hint}",
+        step=current_step(state),
+        tool_name=str(tool_name or "").strip(),
+        operation_id=operation_id,
+        failure_class="ssh_host_key_verification",
+        next_safe_action=(
+            f"SSH host key changed for {host_label}. Treat `~/.ssh/known_hosts` as a local harness file, "
+            "not a remote file. Ask approval, run local `ssh-keygen -R <host> -f ~/.ssh/known_hosts`, "
+            "then retry SSH only after trust is fixed."
+        ),
+        suggested_mitigations=["ssh_host_key_recovery_capsule"],
+    )
+
+
+def _host_key_failure_host_from_scratchpad(state: Any) -> str:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return ""
+    recovery_state = scratchpad.get("_ssh_auth_recovery_state")
+    if not isinstance(recovery_state, dict):
+        return ""
+    for key, record in recovery_state.items():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("last_error_class") or "").strip() != "host_key_verification":
+            continue
+        host = str(record.get("host") or key or "").strip()
+        if "@" in host:
+            host = host.rsplit("@", 1)[-1].strip()
+        if host:
+            return host
+    return ""
+
+
 def detect_upstream_install_source_invalid(state: Any) -> FamaSignal | None:
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):

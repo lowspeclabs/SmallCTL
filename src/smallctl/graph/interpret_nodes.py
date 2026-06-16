@@ -12,6 +12,8 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
 from ..phases import filter_phase_blocked_tools, is_phase_contract_active, phase_contract
+from ..state import normalize_intent_label
+from ..harness.task_classifier import classify_runtime_intent, runtime_policy_for_intent, looks_like_readonly_chat_request
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..runtime_error_repair import current_reported_runtime_error
 from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
@@ -62,6 +64,36 @@ from .hidden_tool_helpers import (
     _strip_hidden_chat_terminal_completion_calls,
     _validation_handoff_hint_for_blocked_tool,
 )
+
+
+def _is_readonly_lookup_intent(harness: Any) -> bool:
+    """Return True when the current task is best treated as answer-only research."""
+    task = str(harness.state.run_brief.original_task or "").strip()
+    active_intent = normalize_intent_label(getattr(harness.state, "active_intent", "") or "")
+    if active_intent == "readonly_lookup":
+        return True
+    if active_intent and active_intent != "general_task":
+        return False
+    return looks_like_readonly_chat_request(task)
+
+
+def _readonly_answer_looks_complete(text: str) -> bool:
+    """Heuristic: does the assistant text look like a finished research answer?"""
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if len(lowered) < 80:
+        return False
+    # Forward-looking phrasing means the model is not done yet.
+    if any(marker in lowered for marker in ("let me ", "i'll ", "i will ", "i need to ", "next i ", "can inspect", "going to ", "gonna ")):
+        return False
+    # Structural answer signals: markdown list, numbered steps, fenced code.
+    if re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s+\S", text):
+        return True
+    if "```" in text:
+        return True
+    # Conclusive language.
+    if any(marker in lowered for marker in ("to install", "steps:", "summary", "conclusion", "in summary", "recommended")):
+        return True
+    return False
 
 
 async def interpret_model_output(
@@ -681,20 +713,31 @@ async def interpret_model_output(
                 "next i",
             )
         )
+        # For read-only / research tasks (e.g. "do a websearch and respond"),
+        # a substantive prose answer after tool evidence is the deliverable.
+        # Auto-promote it to task_complete so the loop doesn't stall with
+        # action_stall / completion_confabulation / consecutive_idle nudges.
+        readonly_lookup = _is_readonly_lookup_intent(harness)
         if (
             nudges == 0
-            and has_facts
             and has_tool_evidence
             and len(assistant_text) > 120
-            and chat_only_auto_finalize
-            and harness.state.current_phase != "repair"
             and not has_recent_errors
             and not looks_like_future_action
+            and (
+                chat_only_auto_finalize
+                or (
+                    readonly_lookup
+                    and _readonly_answer_looks_complete(assistant_text)
+                )
+            )
+            and harness.state.current_phase != "repair"
         ):
             harness._runlog(
                 "auto_finalize",
                 "prose answer with tool evidence; skipping nudge",
                 text_len=len(assistant_text),
+                readonly_lookup=readonly_lookup,
             )
             graph_state.final_result = {
                 "status": "completed",
@@ -739,31 +782,41 @@ async def interpret_model_output(
             if plan is not None:
                 await pause_for_plan_approval(graph_state, deps)
                 return LoopRoute.FINALIZE
-        stalls = int(harness.state.scratchpad.get("_action_stalls", 0))
-        if stalls < 1:
-            harness.state.scratchpad["_action_stalls"] = stalls + 1
-            msg = "### SYSTEM ALERT: You identified or described a tool action, but you did not emit the JSON tool call."
-            if text_has_tool_tags or text_has_func_calls:
-                msg = "### FORMAT ERROR: You used text-based tool tags or functional syntax (e.g. <tool_call> or shell_exec()). This is FORBIDDEN. You MUST use the JSON block format."
-
-            harness.state.append_message(ConversationMessage(
-                role="user",
-                content=f"{msg}\n\nDO NOT repeat your earlier findings or analysis. Just generate the JSON block immediately after your reasoning. Do not describe what you are going to do; just DO it.",
-                metadata={
-                    "is_recovery_nudge": True,
-                    "recovery_kind": "action_stall",
-                    "retry_count": stalls + 1,
-                    "format_error": bool(text_has_tool_tags or text_has_func_calls),
-                },
-            ))
-            harness._record_experience(
-                tool_name="reasoning",
-                result=ToolEnvelope(success=False, error=msg),
-                source="guarded_stall",
-                notes=f"Model described action but missed JSON format. Failure mode: {TOOL_NOT_CALLED}",
+        # Read-only research tasks can mention verbs like "install" in the
+        # user's question and end up here. If the assistant has already
+        # produced a substantive answer after gathering evidence, don't treat
+        # it as a stalled action.
+        if _is_readonly_lookup_intent(harness) and _readonly_answer_looks_complete(assistant_text):
+            harness._runlog(
+                "readonly_lookup_skip_action_stall",
+                "substantive answer for read-only task; skipping action_stall",
             )
-            harness._runlog("action_stall", "improper tool format or description", stalls=stalls+1, has_tags=text_has_tool_tags)
-            return LoopRoute.NEXT_STEP
+        else:
+            stalls = int(harness.state.scratchpad.get("_action_stalls", 0))
+            if stalls < 1:
+                harness.state.scratchpad["_action_stalls"] = stalls + 1
+                msg = "### SYSTEM ALERT: You identified or described a tool action, but you did not emit the JSON tool call."
+                if text_has_tool_tags or text_has_func_calls:
+                    msg = "### FORMAT ERROR: You used text-based tool tags or functional syntax (e.g. <tool_call> or shell_exec()). This is FORBIDDEN. You MUST use the JSON block format."
+
+                harness.state.append_message(ConversationMessage(
+                    role="user",
+                    content=f"{msg}\n\nDO NOT repeat your earlier findings or analysis. Just generate the JSON block immediately after your reasoning. Do not describe what you are going to do; just DO it.",
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "action_stall",
+                        "retry_count": stalls + 1,
+                        "format_error": bool(text_has_tool_tags or text_has_func_calls),
+                    },
+                ))
+                harness._record_experience(
+                    tool_name="reasoning",
+                    result=ToolEnvelope(success=False, error=msg),
+                    source="guarded_stall",
+                    notes=f"Model described action but missed JSON format. Failure mode: {TOOL_NOT_CALLED}",
+                )
+                harness._runlog("action_stall", "improper tool format or description", stalls=stalls+1, has_tags=text_has_tool_tags)
+                return LoopRoute.NEXT_STEP
 
     if not graph_state.pending_tool_calls and "hello" in low_text and ("task" in low_text or "complete" in low_text):
         if any(v in harness.state.run_brief.original_task.lower() for v in ["ping", "list", "read", "run"]):

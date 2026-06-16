@@ -582,6 +582,11 @@ class LoopStateFlowMixin:
         detail_payload = dict(details or {})
         if reason_label == "verifier_failed" and not path_hints:
             path_hints = self._normalize_paths(self._verifier_failure_paths(detail_payload))
+        # Install commands that time out locally often still complete remotely.
+        # Do not let that local timeout invalidate observations wholesale.
+        failure_mode = str(detail_payload.get("failure_mode") or "").strip().lower()
+        if reason_label == "verifier_failed" and failure_mode == "command_timeout_installer_in_flight":
+            return {"reason": reason_label, "skipped": True, "note": "installer timeout does not invalidate context"}
         invalidated_facts: list[str] = []
         invalidated_memory_ids: list[str] = []
 

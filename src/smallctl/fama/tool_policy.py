@@ -161,10 +161,19 @@ def enforce_fama_tool_call(
 def _interactive_ssh_tools_exposed(state: Any) -> bool:
     scratchpad = getattr(state, "scratchpad", None)
     if isinstance(scratchpad, dict):
-        return bool(
+        if bool(
             scratchpad.get("_expose_interactive_session_tools")
             or scratchpad.get("_expose_interactive_ssh_tools")
-        )
+        ):
+            return True
+    verifier = _latest_verifier(state)
+    if isinstance(verifier, dict):
+        failure_text = " ".join(
+            str(verifier.get(key) or "")
+            for key in ("failure_mode", "ssh_error_class", "key_stderr", "key_stdout", "reason", "message")
+        ).lower()
+        if "interactive_installer_blocked" in failure_text or "error opening terminal: unknown" in failure_text:
+            return True
     return False
 
 

@@ -10,6 +10,7 @@ from .common import fail
 from .shell_parsing import (
     _simple_shell_command_segments,
     _split_shell_words,
+    _strip_environment_and_wrappers,
 )
 from .shell_support_constants import (
     _REMOTE_INSTALLER_PREFLIGHT_KEY,
@@ -111,7 +112,14 @@ def _installer_command_suggested_timeout(command: str, timeout_sec: int) -> int:
     except (TypeError, ValueError):
         current_timeout = 60
     words = _split_shell_words(raw.lower())
-    if any(_looks_like_interactive_installer_word(word) for word in words) and current_timeout <= 60:
+    is_installer = any(_looks_like_interactive_installer_word(word) for word in words)
+    is_package_install = any(
+        word in {"apt", "apt-get", "dnf", "yum", "apk", "pacman", "zyppper"}
+        and len(words) > idx + 1
+        and words[idx + 1] in {"install", "reinstall", "groupinstall"}
+        for idx, word in enumerate(words)
+    )
+    if (is_installer or is_package_install) and current_timeout <= 60:
         return 600
     return max(1, current_timeout)
 
@@ -197,15 +205,15 @@ def _looks_like_remote_installer_mutation(command: str) -> bool:
             words = []
         if not words:
             continue
+        words = _strip_environment_and_wrappers(words)
+        if not words:
+            continue
         executable = Path(words[0]).name.lower()
         if executable == "make" and len(words) > 1 and words[1].lower() == "install":
             return True
-        if executable in {"bash", "sh", "dash", "zsh", "ksh"} and len(words) > 1:
-            script_name = Path(words[1]).name.lower()
-            if script_name == "installfog.sh" or (
-                script_name.endswith(".sh")
-                and ("install" in script_name or "bootstrap" in script_name)
-            ):
+        if executable in {"bash", "sh", "dash", "zsh", "ksh"}:
+            script = _installer_script_from_shell_words(words)
+            if script and _looks_like_installer_script_name(script):
                 return True
             continue
         if executable == "installfog.sh":
@@ -230,11 +238,13 @@ def _remote_installer_cwd_and_script(command: str) -> tuple[str, str]:
             words = []
         if not words:
             continue
+        words = _strip_environment_and_wrappers(words)
+        if not words:
+            continue
         executable = Path(words[0]).name.lower()
-        if executable in {"bash", "sh", "dash", "zsh", "ksh"} and len(words) > 1:
-            candidate = words[1]
-            candidate_name = Path(candidate).name.lower()
-            if candidate_name.endswith(".sh") and ("install" in candidate_name or "bootstrap" in candidate_name):
+        if executable in {"bash", "sh", "dash", "zsh", "ksh"}:
+            candidate = _installer_script_from_shell_words(words)
+            if candidate and _looks_like_installer_script_name(candidate):
                 script = candidate
                 break
         elif executable.endswith(".sh") and ("install" in executable or "bootstrap" in executable):
@@ -252,6 +262,34 @@ def _remote_installer_cwd_and_script(command: str) -> tuple[str, str]:
         elif not script.startswith("/") and cwd:
             script = cwd.rstrip("/") + "/" + script
     return cwd, script
+
+
+def _installer_script_from_shell_words(words: list[str]) -> str:
+    idx = 1
+    while idx < len(words):
+        word = words[idx]
+        if word == "-c":
+            if idx + 1 < len(words):
+                return _remote_installer_cwd_and_script(" ".join(words[idx + 1:]))[1]
+            return ""
+        if word == "--":
+            idx += 1
+            break
+        if word.startswith("-"):
+            idx += 1
+            continue
+        break
+    if idx >= len(words):
+        return ""
+    return words[idx]
+
+
+def _looks_like_installer_script_name(candidate: str) -> bool:
+    candidate_name = Path(candidate).name.lower()
+    return candidate_name == "installfog.sh" or (
+        candidate_name.endswith(".sh")
+        and ("install" in candidate_name or "bootstrap" in candidate_name)
+    )
 
 
 def _remote_installer_preflight_checks(*, cwd: str, script_path: str) -> list[str]:

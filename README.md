@@ -20,7 +20,7 @@ SmallCTL is not a claim that a 4B-9B model is a fully autonomous senior engineer
 Requires Python 3.10+.
 
 ```bash
-git clone https://github.com/cheeseonamonkey/SmallCTL
+git clone https://github.com/lowspeclabs/SmallCTL
 cd SmallCTL
 pip install -e .
 smallctl --help

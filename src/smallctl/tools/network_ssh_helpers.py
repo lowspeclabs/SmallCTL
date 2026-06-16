@@ -26,6 +26,55 @@ _SSH_TRANSPORT_FAILURE_MARKERS = (
     "operation timed out",
     "network is unreachable",
 )
+_SSH_COMPOSITE_ERROR_MARKERS = (
+    "command line error:",
+    "error opening terminal:",
+    "error: problems in request:",
+    "error: unable to find a match:",
+    "dnf search: error:",
+    "unit ",
+    "could not be found",
+    "cannot access",
+    "no such file or directory",
+)
+_SSH_COMPOSITE_SHELL_TOKENS = ("&&", "||", ";", "|", "tee ", "head ", "tail ")
+_SSH_PACKAGE_OR_INSTALL_TOKENS = (
+    " apt ",
+    " apt-get ",
+    " dnf ",
+    " yum ",
+    " apk ",
+    " pacman ",
+    " zypper ",
+    " install ",
+    " installer",
+    " bash ",
+    " systemctl ",
+    " service ",
+)
+
+
+def ssh_command_is_package_manager_install(command: str) -> bool:
+    """Return True when the command runs a package manager install/reinstall."""
+    normalized = f" {str(command or '').lower()} "
+    manager_tokens = {" apt ", " apt-get ", " dnf ", " yum ", " apk ", " pacman ", " zypper "}
+    has_manager = any(token in normalized for token in manager_tokens)
+    if not has_manager:
+        return False
+    return any(token in normalized for token in (" install ", " reinstall ", " groupinstall "))
+
+
+def ssh_timeout_suggests_verify(command: str) -> str:
+    """Return a short hint telling the model to verify before retrying a timed-out install."""
+    if ssh_command_is_package_manager_install(command):
+        return (
+            "The package-manager install timed out locally, but the remote process may still be running. "
+            "Before retrying, verify the current state with package-presence and service checks "
+            "(e.g., `dnf list installed <pkg>`, `systemctl status <svc>`)."
+        )
+    return ""
+
+
 _INTERACTIVE_PROMPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("choice", re.compile(r"Choice:\s*\[(?P<choices>[^\]]+)\]", re.IGNORECASE)),
     ("yes_no", re.compile(r"(?P<question>[^\n\r]{0,120}\?)\s*\(?(?P<default>[yYnN])/?[yYnN]\)?", re.IGNORECASE)),
@@ -151,6 +200,41 @@ def ssh_diagnostic_not_found(command: str, output: dict[str, Any]) -> bool:
     stdout = str(output.get("stdout") or "").lower()
     combined = stdout + " " + stderr
     return any(marker in combined for marker in _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS)
+
+
+def ssh_semantic_failure(command: str, output: dict[str, Any]) -> str:
+    """Return a high-confidence remote failure reason hidden behind exit 0.
+
+    Many model-generated SSH commands use pipelines or `|| echo`, causing the
+    outer shell to return 0 even when the meaningful command failed. Keep this
+    intentionally narrow so ordinary diagnostic probes remain informational.
+    """
+    try:
+        exit_code = int(output.get("exit_code") or 0)
+    except (TypeError, ValueError):
+        exit_code = 0
+    if exit_code != 0:
+        return ""
+    command_text = str(command or "")
+    normalized_command = f" {command_text.lower()} "
+    if not any(token in normalized_command for token in _SSH_COMPOSITE_SHELL_TOKENS):
+        return ""
+    if not any(token in normalized_command for token in _SSH_PACKAGE_OR_INSTALL_TOKENS):
+        return ""
+    stdout = str(output.get("stdout") or "")
+    stderr = str(output.get("stderr") or "")
+    combined = f"{stdout}\n{stderr}".strip()
+    lowered = combined.lower()
+    if not lowered:
+        return ""
+    for marker in _SSH_COMPOSITE_ERROR_MARKERS:
+        if marker not in lowered:
+            continue
+        if marker == "unit " and "could not be found" not in lowered:
+            continue
+        first_line = next((line.strip() for line in combined.splitlines() if marker in line.lower()), "")
+        return first_line or marker.strip(":")
+    return ""
 
 
 def ssh_execution_debug_metadata(

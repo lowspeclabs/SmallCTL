@@ -1147,6 +1147,7 @@ def test_dispatcher_shell_guard_blocks_harness_tool_inside_ssh_exec() -> None:
 
 def test_dispatcher_shell_guard_blocks_nested_raw_ssh() -> None:
     assert looks_like_raw_ssh_shell_command("ssh root@example.test whoami") is True
+    assert looks_like_raw_ssh_shell_command("ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts") is False
     result = guard_nested_raw_ssh_in_ssh_exec("ssh root@example.test whoami")
 
     assert result is not None

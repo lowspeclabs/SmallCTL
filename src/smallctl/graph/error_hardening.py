@@ -8,6 +8,7 @@ from typing import Any
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..state import json_safe_value
+from ..tools.ansi_utils import strip_ansi
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 
 logger = logging.getLogger("smallctl.graph.error_hardening")
@@ -39,6 +40,14 @@ _LOCAL_REMOTE_BLOCKER_RE = re.compile(
     r"|\bAre you sure you wish to continue\b",
     re.IGNORECASE | re.DOTALL,
 )
+_HARNESS_POLICY_BLOCK_RE = re.compile(
+    r"\b(?:raw_ssh_shell_blocked|nested_raw_ssh_in_ssh_exec|missing_supported_claim|"
+    r"patch_over_rewrite_guard|ssh_host_key_recovery_required)\b"
+    r"|Raw `ssh`/`scp`/`sftp` shell commands are (?:not allowed|blocked)",
+    re.IGNORECASE | re.DOTALL,
+)
+_TERMINAL_UNKNOWN_RE = re.compile(r"\berror\s+opening\s+terminal:\s*unknown\b", re.IGNORECASE)
+_ANSI_ART_NOISE_RE = re.compile(r"^[\s.,;:'`\-_/\\|()\[\]{}<>~=+*!?A-Za-z0-9]*$")
 
 
 def _record_output_text(record: ToolExecutionRecord) -> str:
@@ -62,6 +71,22 @@ def _record_has_failure_evidence(record: ToolExecutionRecord) -> bool:
         return True
     text = _record_output_text(record)
     return bool(_NGINX_CONFIG_TEST_RE.search(text) or _NGINX_UNEXPECTED_EOF_RE.search(text))
+
+
+def _clean_error_for_recovery_query(error: str) -> str:
+    text = strip_ansi(str(error or ""))
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            continue
+        if _TERMINAL_UNKNOWN_RE.search(line):
+            cleaned_lines.append("Error opening terminal: unknown")
+            continue
+        if _ANSI_ART_NOISE_RE.fullmatch(line) and not re.search(r"[a-zA-Z]{3,}", line):
+            continue
+        cleaned_lines.append(line)
+    return " ".join(cleaned_lines)
 
 
 def _maybe_emit_nginx_sites_enabled_nudge(
@@ -373,6 +398,9 @@ def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRec
             return _install_source_invalid_query(harness)
     if record is not None:
         command = _record_command(record).lower()
+        if _TERMINAL_UNKNOWN_RE.search(error):
+            installer_context = " installer" if _INSTALL_MARKER_RE.search(command) else ""
+            return f"Error opening terminal unknown ssh_exec{installer_context} TERM noninteractive"
         if _INSTALL_MARKER_RE.search(command) and (
             _HTML_FETCH_RE.search(error) or _HTML_SHELL_ERROR_RE.search(error) or _FETCH_404_RE.search(error) or _RESOLVE_FAIL_RE.search(error)
         ):
@@ -380,7 +408,8 @@ def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRec
             if host:
                 return f"{host} official install instructions"
     prefix = "nginx error" if _NGINX_CONFIG_TEST_RE.search(error) else "error"
-    return f"{prefix}: {error[:150]}"
+    cleaned_error = _clean_error_for_recovery_query(error)
+    return f"{prefix}: {cleaned_error[:150] or str(error or '')[:150]}"
 
 
 def _maybe_schedule_web_search_for_repeated_error(
@@ -398,6 +427,8 @@ def _maybe_schedule_web_search_for_repeated_error(
     if not error or len(error) < 20:
         return False
     if record.tool_name in {"ssh_exec", "shell_exec"} and _LOCAL_REMOTE_BLOCKER_RE.search(error):
+        return False
+    if _HARNESS_POLICY_BLOCK_RE.search(error):
         return False
     if record.tool_name in {"ssh_exec", "shell_exec"} and _LOCAL_SOURCE_TRACEBACK_RE.search(error):
         return False

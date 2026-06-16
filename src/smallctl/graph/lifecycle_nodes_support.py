@@ -22,6 +22,17 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
             archived_session.get("write_session_id") if archived_session else ""
         ),
     )
+    recent_errors = [str(item or "").strip() for item in (getattr(harness.state, "recent_errors", []) or []) if str(item or "").strip()]
+    guard_errors = [item for item in recent_errors if "Guard tripped:" in item]
+    if guard_errors:
+        capsule = harness.state.scratchpad.setdefault("_guard_trip_recovery_capsule", {})
+        if isinstance(capsule, dict):
+            capsule.setdefault("created_at_step", int(getattr(harness.state, "step_count", 0) or 0))
+            capsule.setdefault("reason", guard_errors[-1])
+            capsule.setdefault("goal", resolved_task or task)
+            capsule["continued_after_guard"] = True
+        harness.state.scratchpad["_continued_after_guard_trip"] = True
+    harness.state.recent_errors = [item for item in recent_errors if "Guard tripped:" not in item]
     harness.state.step_count = 0
     harness.state.inactive_steps = 0
     harness.state.stagnation_counters.pop("no_actionable_progress", None)

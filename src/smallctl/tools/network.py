@@ -58,11 +58,15 @@ from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
     ssh_accept_new_is_incompatible as _ssh_accept_new_is_incompatible,
+    ssh_command_is_package_manager_install as _ssh_command_is_package_manager_install,
     ssh_diagnostic_not_found as _ssh_diagnostic_not_found,
     ssh_error_class as _ssh_error_class,
     ssh_execution_debug_metadata as _ssh_execution_debug_metadata,
     ssh_failure_kind as _ssh_failure_kind,
+    ssh_semantic_failure as _ssh_semantic_failure,
+    ssh_timeout_suggests_verify as _ssh_timeout_suggests_verify,
 )
+from .dispatcher_ssh_auth import ssh_auth_recovery_entry_key as _ssh_auth_recovery_entry_key
 from .ui_streaming import BufferedUIEventEmitter
 from .network_interactive_sessions import (
     _SSH_INTERACTIVE_SESSIONS,
@@ -81,6 +85,55 @@ if TYPE_CHECKING:
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+
+
+def _get_ssh_recovery_state(state: Any) -> dict[str, Any]:
+    """Return the mutable ssh auth recovery state for this session."""
+    if state is None:
+        return {}
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return {}
+    recovery_state = scratchpad.setdefault("_ssh_auth_recovery_state", {})
+    if not isinstance(recovery_state, dict):
+        recovery_state = {}
+        scratchpad["_ssh_auth_recovery_state"] = recovery_state
+    return recovery_state
+
+
+def _get_ssh_recovery_record(state: Any, host: str, user: str | None) -> dict[str, Any]:
+    """Return the mutable recovery record for a specific SSH target."""
+    recovery_state = _get_ssh_recovery_state(state)
+    key = _ssh_auth_recovery_entry_key(host, user or "")
+    record = recovery_state.setdefault(key, {})
+    if not isinstance(record, dict):
+        record = {}
+        recovery_state[key] = record
+    return record
+
+
+def _record_ssh_failure(state: Any, host: str, user: str | None, command: str, error_class: str, error_text: str) -> None:
+    """Track an SSH failure so the dispatcher can apply a circuit breaker."""
+    record = _get_ssh_recovery_record(state, host, user)
+    record["host"] = host
+    record["user"] = user or ""
+    record["last_command"] = command
+    record["last_error"] = error_text
+    previous_error_class = record.get("last_error_class")
+    record["last_error_class"] = error_class
+    if previous_error_class == error_class:
+        record["consecutive_count"] = int(record.get("consecutive_count") or 0) + 1
+    else:
+        record["consecutive_count"] = 1
+    record["last_error_at_step"] = int(getattr(state, "step_count", 0) or 0)
+
+
+def _record_ssh_success(state: Any, host: str, user: str | None) -> None:
+    """Clear the failure circuit breaker after a successful SSH connection."""
+    record = _get_ssh_recovery_record(state, host, user or "")
+    record["consecutive_count"] = 0
+    record["last_error_class"] = ""
+    record["last_error"] = ""
 
 
 async def _preflight_curl_url_in_command(command: str) -> tuple[bool, str]:
@@ -614,6 +667,43 @@ async def run_ssh_command(
                 "ssh_option_retry_reason": "accept_new_incompatible",
             }
 
+        # Auto-recover from stale host keys by retrying with strict checking
+        # disabled once per target.  This matches the common case where a
+        # remote host was reinstalled and its host key changed.
+        if (
+            int(output.get("exit_code") or 0) != 0
+            and retry_metadata.get("ssh_option_retry_reason") != "host_key_verification"
+            and _ssh_error_class(
+                exit_code=int(output.get("exit_code") or 0),
+                stderr=str(output.get("stderr") or ""),
+            ) == "host_key_verification"
+        ):
+            record = _get_ssh_recovery_record(state, host, user)
+            if not record.get("host_key_retry_done"):
+                record["host_key_retry_done"] = True
+                strict_host_key_mode = "no"
+                full_cmd, env_overrides = _build_ssh_command(
+                    host=host,
+                    command=command,
+                    user=user,
+                    port=port,
+                    identity_file=identity_file,
+                    password=password,
+                    strict_host_key_checking=strict_host_key_mode,
+                )
+                execution_debug_metadata = _ssh_execution_debug_metadata(
+                    password=password,
+                    identity_file=identity_file,
+                    strict_host_key_checking=strict_host_key_mode,
+                )
+                if stripped_root_sudo:
+                    execution_debug_metadata["stripped_redundant_root_sudo"] = True
+                output, proc = await _run_ssh_process(full_cmd, stdin_data)
+                retry_metadata = {
+                    "ssh_option_retry": "strict_host_key_checking_no",
+                    "ssh_option_retry_reason": "host_key_verification",
+                }
+
         if auth_retry_count > 0:
             retry_metadata["ssh_auth_retries"] = auth_retry_count
 
@@ -659,6 +749,7 @@ async def run_ssh_command(
             ):
                 if _looks_like_deb822_validator(command):
                     _mark_deb822_preflight_clean(state, host=host, user=user)
+                _record_ssh_success(state, host, user)
                 return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
             failure_kind = _ssh_failure_kind(
                 exit_code=int(proc.returncode),
@@ -668,6 +759,7 @@ async def run_ssh_command(
                 exit_code=int(proc.returncode),
                 stderr=err_output,
             )
+            _record_ssh_failure(state, host, user, command, ssh_error_class, err_output)
             hints = []
             if failure_kind == "transport":
                 error_msg = err_output.strip() or f"SSH transport failed with exit code {proc.returncode}"
@@ -683,6 +775,11 @@ async def run_ssh_command(
                     hints.append("Check if SSH keys are correctly configured on the remote host.")
             if "Connection timed out" in error_msg:
                 hints.append("Verify the host is reachable and the port is open.")
+            if ssh_error_class == "interactive_installer_blocked":
+                _expose_interactive_session_tools(state)
+                hints.append(
+                    "The remote installer needs terminal semantics. Do not blindly rerun the same ssh_exec command. Do not put `-t` inside the remote command string; that is an SSH transport option, not a shell command. Use documented unattended flags/config when available, or switch to `ssh_session_start` for one managed PTY session, then read/send with `ssh_session_read` and `ssh_session_send`."
+                )
 
             return fail(
                 error_msg,
@@ -697,6 +794,20 @@ async def run_ssh_command(
                     "failure_mode": ssh_error_class,
                     "ssh_error_class": ssh_error_class,
                     "ssh_transport_succeeded": failure_kind == "remote_command",
+                    **(
+                        {
+                            "next_required_action": "Switch to interactive SSH session tooling (`ssh_session_start`, then `ssh_session_read`/`ssh_session_send`) or use a documented unattended installer mode. Do not retry the same ssh_exec command or prefix the remote command with `-t`.",
+                            "suggested_tools": [
+                                "ssh_session_start",
+                                "ssh_session_read",
+                                "ssh_session_send",
+                                "ssh_session_close",
+                            ],
+                            "expose_interactive_session_tools": True,
+                        }
+                        if ssh_error_class == "interactive_installer_blocked"
+                        else {}
+                    ),
                     **execution_debug_metadata,
                     **retry_metadata,
                 },
@@ -704,6 +815,29 @@ async def run_ssh_command(
 
         if _looks_like_deb822_validator(command):
             _mark_deb822_preflight_clean(state, host=host, user=user)
+        semantic_failure = _ssh_semantic_failure(command, output)
+        if semantic_failure:
+            _record_ssh_failure(state, host, user, command, "remote_semantic_failure", semantic_failure)
+            return fail(
+                semantic_failure,
+                metadata={
+                    "output": output,
+                    "output_received": bool(
+                        str(output.get("stdout") or "").strip()
+                        or str(output.get("stderr") or "").strip()
+                    ),
+                    "hints": [
+                        "The remote shell returned exit 0, but command output contains a high-confidence failure marker. Inspect stdout/stderr and retry with stricter command chaining if needed."
+                    ],
+                    "failure_kind": "remote_command",
+                    "failure_mode": "remote_semantic_failure",
+                    "ssh_error_class": "remote_semantic_failure",
+                    "ssh_transport_succeeded": True,
+                    **execution_debug_metadata,
+                    **retry_metadata,
+                },
+            )
+        _record_ssh_success(state, host, user)
         return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
 
     except asyncio.TimeoutError:
@@ -735,11 +869,19 @@ async def run_ssh_command(
                     or str(output.get("stderr") or "").strip()
                 ),
                 "failure_kind": "timeout",
-                "ssh_error_class": "command_timeout",
+                "ssh_error_class": (
+                    "command_timeout_installer_in_flight"
+                    if _ssh_command_is_package_manager_install(command)
+                    else "command_timeout"
+                ),
                 "ssh_transport_succeeded": bool(
                     str(output.get("stdout") or "").strip()
                     or str(output.get("stderr") or "").strip()
                 ),
+                "hints": [
+                    _ssh_timeout_suggests_verify(command),
+                    "If the remote command is still running, poll with a bounded status probe before retrying.",
+                ],
                 **execution_debug_metadata,
             },
         )

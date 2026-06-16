@@ -17,6 +17,30 @@ def _cleanup_state() -> LoopState:
     return state
 
 
+def test_passing_verifier_clears_latest_execution_blocker() -> None:
+    state = _cleanup_state()
+    state.scratchpad["_latest_execution_blocker"] = {
+        "tool": "ssh_exec",
+        "command": "cat /tmp/webmin-install.log",
+        "salient_error": "No such file or directory",
+    }
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "webmin-2.641-1.noarch", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.161", "command": "dnf list installed webmin"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert "_latest_execution_blocker" not in state.scratchpad
+
+
 def test_removal_grep_no_matches_is_verifier_pass() -> None:
     state = _cleanup_state()
     result = ToolEnvelope(

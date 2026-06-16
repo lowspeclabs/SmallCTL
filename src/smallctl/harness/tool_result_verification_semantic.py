@@ -143,6 +143,8 @@ def _install_task_requires_strong_verifier(state: Any, *, command: str) -> tuple
         return False, ""
 
     normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    if re.fullmatch(r"(?:sudo\s+)?cat\s+/etc/(?:os-release|redhat-release|centos-release)", normalized):
+        return False, ""
     kind = verifier_kind_for_command(command)
     if verifier_strength(kind) >= verifier_strength("install_service_status"):
         # Strong install verifier (service status, package, port, version)

@@ -12,6 +12,42 @@ from smallctl.challenge_progress import (
 from smallctl.state import LoopState
 
 
+def test_sysadmin_install_verifier_sets_verified_after_last_change() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "ssh_exec to 192.168.1.161 and install webmin"
+    state.challenge_progress.task_category = "sysadmin"
+
+    record_verifier_result(
+        state,
+        tool_name="ssh_exec",
+        command="dnf list installed webmin",
+        verifier_kind="package_presence",
+        verdict="pass",
+        exit_code=0,
+    )
+
+    assert state.challenge_progress.verified_after_last_change is True
+    report = challenge_progress_report(state)
+    assert report["verified_after_last_change"] is True
+
+
+def test_install_weak_file_verifier_does_not_count() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "ssh_exec to 192.168.1.161 and install webmin"
+    state.challenge_progress.task_category = "sysadmin"
+
+    record_verifier_result(
+        state,
+        tool_name="ssh_exec",
+        command="cat /tmp/webmin-install.log",
+        verifier_kind="file_content",
+        verdict="pass",
+        exit_code=0,
+    )
+
+    assert state.challenge_progress.verified_after_last_change is False
+
+
 def test_coding_verifier_pass_blocks_identical_reverify() -> None:
     state = LoopState()
     state.run_brief.original_task = (

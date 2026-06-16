@@ -32,6 +32,7 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
     FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE: ["repeated_remote_installer_failure_capsule", "preflight_contradiction_capsule", "evidence_reuse_capsule", "micro_plan_capsule"],
     FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID: ["source_invalid_install_capsule", "evidence_reuse_capsule", "tool_exposure_narrowing", "micro_plan_capsule"],
     FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: ["preexisting_state_as_success_capsule", "acceptance_checklist_capsule", "evidence_reuse_capsule"],
+    FamaFailureKind.SSH_HOST_KEY_VERIFICATION: ["ssh_host_key_recovery_capsule"],
 }
 
 
@@ -75,10 +76,13 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
     step = current_step(state)
     expires_after_step = step + default_ttl_steps(config)
     source_signal = f"{signal.kind.value}:{signal.step}:{signal.tool_name or ''}"
+    reason = signal.evidence
+    if signal.kind == FamaFailureKind.SSH_HOST_KEY_VERIFICATION and signal.next_safe_action:
+        reason = signal.next_safe_action
     return [
         ActiveMitigation(
             name=name,
-            reason=signal.evidence,
+            reason=reason,
             source_signal=source_signal,
             activated_step=step,
             expires_after_step=expires_after_step,

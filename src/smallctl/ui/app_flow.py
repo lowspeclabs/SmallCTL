@@ -706,6 +706,8 @@ class SmallctlAppFlowMixin:
     def _record_ui_transcript_event(self, event: UIEvent) -> None:
         if event.event_type == UIEventType.STATUS:
             return
+        if event.event_type == UIEventType.SHELL_STREAM:
+            return
         transcript = getattr(self, "_ui_transcript", None)
         if not isinstance(transcript, list):
             transcript = []
@@ -806,7 +808,7 @@ class SmallctlAppFlowMixin:
     def _should_render_event(self, event: UIEvent) -> bool:
         return should_render_event(
             event,
-            show_system_messages=self._show_system_messages,
+            show_system_messages=self._show_system_messages or self._verbose,
             show_tool_calls=self._show_tool_calls,
         )
 

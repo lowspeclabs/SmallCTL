@@ -6,6 +6,19 @@ from .prompt_fragments import _REMOTE_CLEANUP_TASK_KEYWORDS
 from .state import LoopState, normalize_intent_label
 
 
+def _readonly_lookup_hint(state: LoopState) -> str | None:
+    """Return a prompt hint for answer-only / research tasks."""
+    active_intent = normalize_intent_label(getattr(state, "active_intent", "") or "")
+    if active_intent != "readonly_lookup":
+        return None
+    return (
+        "ANSWER-ONLY TASK: Your goal is to gather evidence and return a clear, "
+        "self-contained answer. When you have enough information, call "
+        "`task_complete(message='...')` with the final answer in the message "
+        "field. Do not end with plain chat text; wrap the answer in task_complete."
+    )
+
+
 def _graph_step_budget_prompt(scratchpad: Any) -> str | None:
     if not isinstance(scratchpad, dict):
         return None

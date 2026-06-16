@@ -73,6 +73,7 @@ class HarnessConfig:
     policy: Any = None
     allow_interactive_shell_approval: bool = False
     shell_approval_session_default: bool = False
+    sudo_password: str | None = None
     loop_guard_enabled: bool = True
     loop_guard_stagnation_threshold: int = 3
     loop_guard_level2_threshold: int = 5

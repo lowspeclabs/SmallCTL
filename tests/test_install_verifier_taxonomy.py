@@ -36,6 +36,59 @@ def test_install_verifier_taxonomy_recognizes_strong_verifiers() -> None:
     assert strong is False
 
 
+def test_install_os_release_diagnostic_is_not_rejected_as_weak_verifier() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Install Vikunja on the remote host"
+    result = ToolEnvelope(
+        success=True,
+        status="success",
+        output={
+            "exit_code": 0,
+            "stdout": 'NAME="CentOS Stream"\nVERSION="9"\nID="centos"\n',
+            "stderr": "",
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.161", "command": "cat /etc/os-release"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert not verdict.get("insufficient_verifier")
+
+
+def test_failed_ssh_exec_stores_generic_latest_blocker() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Install Vikunja on the remote host"
+    result = ToolEnvelope(
+        success=False,
+        status="failed",
+        output={
+            "exit_code": 1,
+            "stdout": "Vikunja 18 kB/s | 27 kB\n",
+            "stderr": "Errors during downloading metadata for repository 'vikunja': repomd.xml 404\n",
+        },
+        error="Errors during downloading metadata for repository 'vikunja': repomd.xml 404",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.161", "command": "dnf install -y vikunja-server"},
+    )
+
+    assert verdict is not None
+    blocker = verdict.get("latest_blocker")
+    assert isinstance(blocker, dict)
+    assert "repomd.xml 404" in blocker["salient_error"]
+    assert state.scratchpad["_latest_execution_blocker"]["salient_error"] == blocker["salient_error"]
+
+
 def test_evidence_anchored_diagnosis_rule_in_install_prompt() -> None:
     state = LoopState()
     state.run_brief.original_task = "Install FOG on Debian"

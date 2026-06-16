@@ -235,9 +235,16 @@ async def model_call(
             ),
         )
 
+    assistant_text = str(parse_result.final_assistant_text or "").strip()
     if not graph_state.pending_tool_calls:
         harness.state.inactive_steps += 1
-        harness.state.scratchpad["_consecutive_idle"] = int(harness.state.scratchpad.get("_consecutive_idle", 0)) + 1
+        # A substantive answer turn (e.g. a completed research summary) is not
+        # "idle" even though it emitted no tool call. Reset the counter so the
+        # loop doesn't accuse the model of stalling.
+        if assistant_text and len(assistant_text) >= 80:
+            harness.state.scratchpad["_consecutive_idle"] = 0
+        else:
+            harness.state.scratchpad["_consecutive_idle"] = int(harness.state.scratchpad.get("_consecutive_idle", 0)) + 1
     else:
         harness.state.scratchpad["_consecutive_idle"] = 0
 

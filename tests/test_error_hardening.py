@@ -44,6 +44,7 @@ def _make_record(
     success: bool,
     error: str = "",
     command: str = "",
+    output: dict | None = None,
 ) -> ToolExecutionRecord:
     return ToolExecutionRecord(
         operation_id="op-1",
@@ -53,6 +54,7 @@ def _make_record(
         result=ToolEnvelope(
             success=success,
             error=error,
+            output=output,
             metadata={"command": command} if command else {},
         ),
     )
@@ -404,6 +406,21 @@ class TestWebSearchOnRepeatedError:
         assert gs.pending_tool_calls == []
         harness.state.append_message.assert_not_called()
 
+    def test_skips_web_search_for_harness_policy_block(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = (
+            "Raw `ssh`/`scp`/`sftp` shell commands are not allowed here. "
+            "Use canonical `ssh_exec` for remote commands. reason=raw_ssh_shell_blocked"
+        )
+        record = _make_record("shell_exec", success=False, error=error)
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert gs.pending_tool_calls == []
+        harness.state.append_message.assert_not_called()
+
     def test_nudges_when_web_search_unavailable(self):
         gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
         harness = _make_harness()
@@ -436,3 +453,27 @@ class TestWebSearchOnRepeatedError:
         assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
         assert gs.pending_tool_calls == []
         harness.state.append_message.assert_not_called()
+
+    def test_terminal_unknown_repeated_error_query_omits_installer_output(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        record = _make_record(
+            "ssh_exec",
+            success=False,
+            error="Error opening terminal: unknown.",
+            command="DEBIAN_FRONTEND=noninteractive bash -c 'curl -sSL https://install.pi-hole.net | bash'",
+            output={
+                "stdout": "\x1b[1;32m.;;,.\x1b[0m\n.ccccc:,.\n[i] Root user check\nDependencies resolved.",
+                "stderr": "",
+                "exit_code": 1,
+            },
+        )
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+
+        query = gs.pending_tool_calls[0].args["query"]
+        assert query == "Error opening terminal unknown ssh_exec installer TERM noninteractive"
+        assert "Root user check" not in query
+        assert ".ccc" not in query

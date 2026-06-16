@@ -18,8 +18,40 @@ from smallctl.ui.console import ConsolePane
 
 
 class _ConsoleApp(App[None]):
+    def __init__(self, verbose: bool = False) -> None:
+        self._verbose = verbose
+        super().__init__()
+
     def compose(self) -> ComposeResult:
-        yield ConsolePane()
+        yield ConsolePane(verbose=self._verbose)
+
+
+def test_console_hides_scrollbar_but_remains_scrollable() -> None:
+    class _ScrollableConsoleApp(App[None]):
+        CSS = "#console { height: 6; } #bubble-stack { height: auto; }"
+
+        def compose(self) -> ComposeResult:
+            yield ConsolePane(id="console")
+
+    async def _run() -> None:
+        app = _ScrollableConsoleApp()
+        async with app.run_test(size=(80, 12)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            for index in range(40):
+                await console.append_line(f"line {index}")
+            await pilot.pause()
+
+            assert console.styles.scrollbar_size_vertical == 0
+            assert console.styles.scrollbar_size_horizontal == 0
+            assert console.max_scroll_y > 0
+
+            console.scroll_relative(y=3, animate=False)
+            await pilot.pause()
+
+            assert console.scroll_y > 0
+
+    asyncio.run(_run())
 
 
 def test_thinking_after_visible_assistant_stays_in_one_turn() -> None:
@@ -241,7 +273,7 @@ def test_user_event_breaks_active_assistant_turn() -> None:
 
 def test_system_event_breaks_active_assistant_turn() -> None:
     async def _run() -> None:
-        app = _ConsoleApp()
+        app = _ConsoleApp(verbose=True)
         async with app.run_test(size=(120, 40)) as pilot:
             console = app.query_one(ConsolePane)
 
@@ -259,6 +291,29 @@ def test_system_event_breaks_active_assistant_turn() -> None:
             ]
             assert children[0].get_assistant_text() == "Before system."
             assert children[2].get_assistant_text() == "After system."
+
+    asyncio.run(_run())
+
+
+def test_system_event_suppressed_without_verbose_but_breaks_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp(verbose=False)
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before system."))
+            await console.append_event(UIEvent(UIEventType.SYSTEM, "System notice."))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "After system."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert [type(child) for child in children] == [
+                type(console._active_assistant_turn),
+                type(console._active_assistant_turn),
+            ]
+            assert children[0].get_assistant_text() == "Before system."
+            assert children[1].get_assistant_text() == "After system."
 
     asyncio.run(_run())
 
@@ -358,7 +413,7 @@ def test_unmatched_tool_result_breaks_active_assistant_turn() -> None:
                 UIEvent(
                     UIEventType.TOOL_RESULT,
                     "orphan output",
-                    data={"tool_name": "shell_exec", "tool_call_id": "missing"},
+                    data={"tool_name": "web_fetch", "tool_call_id": "missing"},
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
@@ -374,5 +429,30 @@ def test_unmatched_tool_result_breaks_active_assistant_turn() -> None:
             assert children[0].get_assistant_text() == "Before result."
             assert children[1].kind == "system"
             assert children[2].get_assistant_text() == "After result."
+
+    asyncio.run(_run())
+
+
+def test_unmatched_shell_tool_result_is_not_rendered_as_system() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before result."))
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "SSH reached the remote host; remote command exited non-zero.",
+                    data={"tool_name": "ssh_exec", "tool_call_id": "missing"},
+                )
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert len(children) == 1
+            assert children[0].get_assistant_text() == "Before result.After result."
 
     asyncio.run(_run())

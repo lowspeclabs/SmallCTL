@@ -11,6 +11,7 @@ from smallctl.models.tool_result import ToolEnvelope
 from smallctl.search_server.app import SearchServerError
 from smallctl.retrieval_safety import build_retrieval_safe_text
 from smallctl.search_server.citations import now_iso
+from smallctl.search_server.extract import extract_page
 from smallctl.search_server.models import CitationSource, WebFetchResponse, WebSearchResponse, WebSearchResult
 from smallctl.state import LoopState
 from smallctl.tools import ToolDispatcher, build_registry
@@ -320,6 +321,70 @@ def test_normalize_web_fetch_accepts_fetch_id_field_alias() -> None:
     assert args == {"result_id": "r1"}
     assert metadata["field_alias_repair"] == "web_fetch_fetch_id_to_result_id"
     assert metadata["original_fetch_id"] == "r1"
+
+
+def test_duplicate_web_fetch_does_not_increment_recent_errors(monkeypatch, tmp_path) -> None:
+    harness = _make_harness(tmp_path)
+    runtime = FakeRuntime()
+    monkeypatch.setattr("smallctl.tools.web.get_search_runtime", lambda harness, config=None: runtime)
+
+    search_result = asyncio.run(web_search(harness=harness, state=harness.state, query="example", limit=5))
+    assert search_result["success"] is True
+    service = ToolResultService(harness)
+    asyncio.run(
+        service.record_result(
+            tool_name="web_search",
+            tool_call_id="call-search-dup",
+            result=ToolEnvelope(
+                success=True,
+                status=search_result.get("status"),
+                output=search_result["output"],
+                error=search_result.get("error"),
+                metadata=search_result["metadata"],
+            ),
+            arguments={"query": "example", "limit": 5},
+            operation_id="op-search-dup",
+        )
+    )
+
+    fetch_result = asyncio.run(web_fetch(harness=harness, state=harness.state, result_id="r1"))
+    assert fetch_result["success"] is True
+    asyncio.run(
+        service.record_result(
+            tool_name="web_fetch",
+            tool_call_id="call-fetch-dup-1",
+            result=ToolEnvelope(
+                success=True,
+                status=fetch_result.get("status"),
+                output=fetch_result["output"],
+                error=fetch_result.get("error"),
+                metadata=fetch_result["metadata"],
+            ),
+            arguments={"result_id": "r1"},
+            operation_id="op-fetch-dup-1",
+        )
+    )
+
+    duplicate = asyncio.run(web_fetch(harness=harness, state=harness.state, result_id="r1"))
+    assert duplicate["success"] is False
+    assert duplicate["metadata"]["reason"] == "web_fetch_duplicate_result_id"
+    asyncio.run(
+        service.record_result(
+            tool_name="web_fetch",
+            tool_call_id="call-fetch-dup-2",
+            result=ToolEnvelope(
+                success=False,
+                status=duplicate.get("status"),
+                output=duplicate.get("output"),
+                error=duplicate.get("error"),
+                metadata=duplicate["metadata"],
+            ),
+            arguments={"result_id": "r1"},
+            operation_id="op-fetch-dup-2",
+        )
+    )
+
+    assert harness.state.recent_errors == []
 
 
 def test_dispatch_web_fetch_repairs_transcript_style_artifact_rank_alias(monkeypatch, tmp_path) -> None:
@@ -867,3 +932,28 @@ def test_web_fetch_duplicate_result_id_is_blocked_with_artifact_pointer(monkeypa
         )
         assert canonical_duplicate["success"] is False
         assert canonical_duplicate["metadata"]["reason"] == "web_fetch_duplicate_result_id"
+
+
+def test_extract_page_strips_leading_documentation_search_chrome() -> None:
+    html = """
+    <html><head><title>Installing</title></head><body>
+    <div>ESC</div>
+    <div>Loading search index...</div>
+    <div>Start typing to search documentation</div>
+    <div>No results found</div>
+    <div>Search</div>
+    <div>Toggle Menu</div>
+    <main>
+      <p>Architecturally, Vikunja is made up of two parts: API and frontend.</p>
+      <p>Vikunja can be installed in various ways.</p>
+    </main>
+    </body></html>
+    """
+
+    extracted = extract_page(html, max_chars=2000, mode="article")
+
+    assert not extracted.full_text.startswith("ESC")
+    assert "Loading search index" not in extracted.full_text
+    assert extracted.full_text.startswith("Architecturally, Vikunja")
+    assert "Vikunja can be installed" in extracted.full_text
+    assert extracted.warnings == ["Removed documentation search/navigation boilerplate from fetched text."]

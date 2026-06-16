@@ -78,6 +78,15 @@ from .ast_patch import handle_ast_patch
 from .fs_patch_flow import handle_file_patch
 from .common import fail, ok
 
+
+def _looks_like_sensitive_known_hosts_path(path: str, cwd: str | None = None) -> bool:
+    try:
+        resolved = _resolve(path, cwd)
+    except Exception:
+        resolved = Path(str(path or "")).expanduser()
+    normalized = resolved.as_posix().lower()
+    return normalized.endswith("/.ssh/known_hosts") or normalized.endswith("/.ssh/known_hosts2")
+
 FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 
 
@@ -322,6 +331,26 @@ async def file_write(
             },
         )
         write_session_id = None
+
+    if _looks_like_sensitive_known_hosts_path(path, cwd) and _normalize_replace_strategy(replace_strategy) == "overwrite":
+        return fail(
+            f"Refusing to overwrite sensitive SSH trust-store file `{path}`. "
+            "Use approved `shell_exec(command='ssh-keygen -R <host> -f ~/.ssh/known_hosts')` "
+            "or a narrow, explicit file_patch after human approval.",
+            metadata={
+                "path": str(target),
+                "error_kind": "sensitive_known_hosts_overwrite_blocked",
+                "requires_approval": True,
+                "next_required_tool": {
+                    "tool_name": "shell_exec",
+                    "required_arguments": {"command": "ssh-keygen -R <host> -f ~/.ssh/known_hosts"},
+                    "notes": [
+                        "Do not synthesize full-file overwrites for SSH trust stores.",
+                        "Ask the user before changing host-key trust entries.",
+                    ],
+                },
+            },
+        )
 
     # Implicit session creation for path-based chunked authoring.
     implicit_session = maybe_create_implicit_write_session(

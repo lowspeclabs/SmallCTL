@@ -49,6 +49,45 @@ def _guard_ssh_auth_recovery(
         "ssh_auth_recovery_required": True,
         "ssh_auth_recovery_failure_count": int(record.get("failure_count") or 0),
     }
+
+    # Circuit breaker for repeated identical SSH errors (e.g. stale host keys).
+    last_error_class = str(record.get("last_error_class") or "").strip()
+    consecutive_count = int(record.get("consecutive_count") or 0)
+    if last_error_class == "host_key_verification" and consecutive_count >= 2:
+        metadata["ssh_host_key_recovery_required"] = True
+        metadata["ssh_host_key_recovery_failure_count"] = consecutive_count
+        suggested_command = f"ssh-keygen -R {host} -f ~/.ssh/known_hosts"
+        required_arguments = {
+            "host": host,
+            "command": str(arguments.get("command") or "").strip(),
+        }
+        if user:
+            required_arguments["user"] = user
+        return ToolEnvelope(
+            success=False,
+            error=(
+                f"SSH host-key verification failed {consecutive_count} times for {host}. "
+                "Do not patch known_hosts line by line. "
+                f"Run local `shell_exec(command='{suggested_command}')` and wait for approval, "
+                "or call `ask_human` / `task_fail`."
+            ),
+            metadata={
+                "tool_name": "ssh_exec",
+                "reason": "ssh_host_key_recovery_required",
+                "last_error": str(record.get("last_error") or "").strip(),
+                "last_command": str(record.get("last_command") or "").strip(),
+                "suggested_command": suggested_command,
+                "next_required_action": {
+                    "tool_names": ["shell_exec", "ask_human", "task_fail"],
+                    "required_arguments": required_arguments,
+                    "notes": [
+                        "Use the local ssh-keygen command to remove the stale known_hosts entry.",
+                        "Do not retry the same SSH command until the stale key is removed and approved.",
+                    ],
+                },
+            },
+        ), metadata
+
     if password_retry_allowed:
         metadata["ssh_auth_recovery_branch"] = "retry_with_password"
         return None, metadata

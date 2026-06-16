@@ -19,6 +19,9 @@ class ConsolePane(VerticalScroll):
         self._verbose = bool(verbose)
 
     async def on_mount(self) -> None:
+        self.styles.scrollbar_size_vertical = 0
+        self.styles.scrollbar_size_horizontal = 0
+        self.styles.scrollbar_gutter = "auto"
         await self.mount(Vertical(id="bubble-stack"))
 
     async def append_line(self, line: str, kind: str = "system") -> None:
@@ -87,17 +90,20 @@ class ConsolePane(VerticalScroll):
             )
             return
         if event.event_type == UIEventType.TOOL_RESULT:
+            tool_name = _coerce_str(event.data.get("tool_name"))
             if self._active_assistant_turn is not None:
                 if speaker:
                     self._active_assistant_turn.set_speaker(speaker)
                 nested = await self._append_tool_result(
                     str(event.data.get("display_text") or event.content),
-                    tool_name=_coerce_str(event.data.get("tool_name")),
+                    tool_name=tool_name,
                     tool_call_id=_coerce_str(event.data.get("tool_call_id")),
                     data=event.data,
                 )
                 if nested:
                     return
+            if tool_name in {"shell_exec", "ssh_exec"}:
+                return
             self._active_assistant_turn = None
             await self._add_bubble("system", str(event.data.get("display_text") or event.content))
             return
@@ -118,9 +124,16 @@ class ConsolePane(VerticalScroll):
             return
 
         # P2.2: critical backend events render as compact inline interruptions
-        # only when verbose mode is enabled (default off).
-        if self._verbose and event.event_type == UIEventType.SYSTEM and event.data.get("ui_kind") in _CRITICAL_EVENTS:
-            await self._append_critical_interrupt(event)
+        # only when verbose mode is enabled (default off). Suppressed events must
+        # not split the active assistant turn.
+        is_critical = (
+            event.event_type == UIEventType.SYSTEM
+            and event.data.get("ui_kind") in _CRITICAL_EVENTS
+        )
+        if is_critical:
+            self._last_system_message = str(event.data.get("display_text") or event.content)
+            if self._verbose:
+                await self._append_critical_interrupt(event)
             return
 
         kind_map = {
@@ -129,7 +142,27 @@ class ConsolePane(VerticalScroll):
             UIEventType.SYSTEM: "system",
             UIEventType.ALERT: "system",
         }
-        kind = kind_map.get(event.event_type, "system")
+        kind = kind_map.get(event.event_type)
+        if kind is None:
+            return
+        text = str(event.data.get("display_text") or event.content)
+        is_interactive_alert = (
+            event.event_type == UIEventType.ALERT
+            and (
+                event.data.get("ui_kind") in {"approve_prompt", "sudo_password_prompt"}
+                or "interrupt" in event.data
+            )
+        )
+        if kind == "system" and not self._verbose and not is_interactive_alert:
+            # Suppressed system events should not create a visible bubble, but
+            # non-info system events still break the active assistant turn so that
+            # subsequent assistant messages render as a new turn rather than
+            # appending to the previous one. Purely informational suppressed
+            # events preserve the active turn to avoid interrupting the flow.
+            if event.data.get("ui_kind") not in {"info", "status"}:
+                self._active_assistant_turn = None
+            self._last_system_message = text
+            return
         if event.event_type in {
             UIEventType.USER,
             UIEventType.ERROR,
@@ -138,10 +171,9 @@ class ConsolePane(VerticalScroll):
             UIEventType.ALERT,
         }:
             self._active_assistant_turn = None
-        text = str(event.data.get("display_text") or event.content)
         await self._add_bubble(kind, text)
         if kind == "system":
-            self._last_system_message = event.content
+            self._last_system_message = text
 
     async def _append_assistant(self, text: str) -> None:
         if not text:

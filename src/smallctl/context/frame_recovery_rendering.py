@@ -101,12 +101,26 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
         and state.write_session is None
         and not isinstance(state.scratchpad.get("_last_schema_validation_hint"), dict)
         and not isinstance(state.scratchpad.get("_read_loop_recovery_payload"), dict)
+        and not isinstance(state.scratchpad.get("_latest_execution_blocker"), dict)
+        and not remote_repair_state_lines(state)
     ):
         return []
 
     lines: list[str] = []
+    lines.extend(remote_repair_state_lines(state))
     lines.extend(fresh_schema_validation_hint_lines(state))
     lines.extend(fresh_read_loop_recovery_lines(state))
+    latest_execution_blocker = state.scratchpad.get("_latest_execution_blocker")
+    if isinstance(latest_execution_blocker, dict):
+        salient = str(latest_execution_blocker.get("salient_error") or "").strip()
+        command = str(latest_execution_blocker.get("command") or "").strip()
+        if salient:
+            salient_snip = salient[:237] + "..." if len(salient) > 240 else salient
+            line = "Current execution blocker: " + salient_snip
+            if command:
+                command_snip = command[:157] + "..." if len(command) > 160 else command
+                line += " | command: " + command_snip
+            lines.append(line)
     if active_subtask is not None:
         line = f"Active subtask {active_subtask.subtask_id} [{active_subtask.status}]: {active_subtask.title}"
         if active_subtask.attempts:
@@ -175,6 +189,34 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
         clipped.append(text)
         used += len(text)
     return clipped
+
+
+def remote_repair_state_lines(state: LoopState) -> list[str]:
+    if str(getattr(state, "task_mode", "") or "").strip() != "remote_execute":
+        return []
+    if str(getattr(state, "current_phase", "") or "").strip() != "repair":
+        return []
+    scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
+    lines = ["Remote repair state: continue from verified remote facts; do not repeat the same failing command unchanged."]
+    targets = scratchpad.get("_session_ssh_targets")
+    if isinstance(targets, list) and targets:
+        target = targets[-1]
+        if isinstance(target, dict):
+            host = str(target.get("host") or "").strip()
+            user = str(target.get("user") or "").strip()
+            if host:
+                lines.append("Active remote target: " + (f"{user}@{host}" if user else host))
+    blocker = scratchpad.get("_latest_execution_blocker")
+    if isinstance(blocker, dict):
+        command = str(blocker.get("command") or "").strip()
+        salient = str(blocker.get("salient_error") or "").strip()
+        if command:
+            lines.append("Last failing remote command: " + (command[:197] + "..." if len(command) > 200 else command))
+        if salient:
+            lines.append("Last remote error: " + (salient[:197] + "..." if len(salient) > 200 else salient))
+    if scratchpad.get("_continued_after_guard_trip"):
+        lines.append("This is an explicit continuation after a guard trip; choose a different concrete next action.")
+    return lines
 
 
 def fresh_schema_validation_hint_lines(state: LoopState) -> list[str]:

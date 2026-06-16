@@ -71,6 +71,11 @@ def test_tool_call_suppressed_when_tool_calls_hidden() -> None:
     assert should_render_event(event, show_system_messages=True, show_tool_calls=False) is False
 
 
+def test_shell_stream_suppressed_when_tool_calls_hidden() -> None:
+    event = UIEvent(event_type=UIEventType.SHELL_STREAM, content="live output")
+    assert should_render_event(event, show_system_messages=True, show_tool_calls=False) is False
+
+
 def test_tool_result_visible_when_tool_calls_shown() -> None:
     event = UIEvent(event_type=UIEventType.TOOL_RESULT, content="ok")
     assert should_render_event(event, show_system_messages=True, show_tool_calls=True) is True

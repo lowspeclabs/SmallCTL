@@ -143,7 +143,11 @@ async def fetch_document(
         text_excerpt=excerpt,
         char_start=1,
         char_end=len(excerpt),
-        warnings=warnings + ([f"Excerpt truncated to {len(excerpt)} chars."] if truncated else []),
+        warnings=(
+            warnings
+            + list(getattr(extracted, "warnings", []) or [])
+            + ([f"Excerpt truncated to {len(excerpt)} chars."] if truncated else [])
+        ),
         untrusted_text=excerpt,
     )
     citation = CitationSource(

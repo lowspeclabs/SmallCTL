@@ -103,6 +103,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.event_handler = None
     self.allow_interactive_shell_approval = bool(config.allow_interactive_shell_approval)
     self.shell_approval_session_default = bool(config.shell_approval_session_default)
+    self.sudo_password = config.sudo_password
     self._configured_tool_profiles = list(config.tool_profiles) if config.tool_profiles else None
     self._strategy_prompt = config.strategy_prompt
     self._indexer = config.indexer

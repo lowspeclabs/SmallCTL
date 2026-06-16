@@ -253,6 +253,19 @@ def _store_verifier_verdict(
     )
     if blocker:
         normalized["latest_blocker"] = blocker
+    elif verdict != "pass" and tool_name in {"shell_exec", "ssh_exec"}:
+        salient_error = snip_text(raw_stderr or str(result.error or "") or raw_stdout, limit=280)
+        if salient_error:
+            blocker = {
+                "tool": tool_name,
+                "command": command,
+                "target": target,
+                "exit_code": exit_code,
+                "blocker_class": "execution_failure",
+                "failure_class": failure_class,
+                "salient_error": salient_error,
+            }
+            normalized["latest_blocker"] = blocker
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
     record_verifier_result(
@@ -265,6 +278,8 @@ def _store_verifier_verdict(
     )
     if blocker:
         _store_latest_execution_blocker(state, blocker)
+    elif verdict == "pass":
+        state.scratchpad.pop("_latest_execution_blocker", None)
     state.scratchpad.pop("_last_verifier_stale_after_mutation", None)
     state.last_failure_class = failure_class
     state.scratchpad["_last_failure_class"] = failure_class

@@ -11,7 +11,11 @@ from .config import (
     signal_window,
 )
 from .detectors import detect_early_stop_from_result, latest_verifier_passed
-from .fingerprints import active_done_gate_fingerprints, passing_verifier_fingerprint
+from .fingerprints import (
+    active_done_gate_fingerprints,
+    install_verifier_passes_objective,
+    passing_verifier_fingerprint,
+)
 from .detectors import (
     detect_apt_deb822_preflight_blocked,
     detect_backend_stream_halt,
@@ -29,6 +33,8 @@ from .detectors import (
     detect_repeated_tool_loop,
     detect_remote_local_confusion,
     detect_remote_verification_pending,
+    detect_ssh_host_key_verification_failure,
+    detect_ssh_host_key_verification_failure_from_result,
     detect_tool_plan_hard_route,
     detect_upstream_install_source_invalid,
     detect_verifier_failure_from_result,
@@ -78,6 +84,24 @@ async def observe_tool_result(
                     "FAMA mitigation cleared",
                     mitigation=mitigation.name,
                     reason="verifier_passed",
+                    step=current_step(state),
+                )
+
+        if latest_verifier_passed(state, result=result) and install_verifier_passes_objective(
+            state, result=result
+        ):
+            cleared = clear_mitigations(
+                state,
+                {"done_gate", "acceptance_checklist_capsule"},
+                reason="install_verifier_passed",
+            )
+            for mitigation in cleared:
+                _runlog(
+                    harness,
+                    "fama_mitigation_expired",
+                    "FAMA mitigation cleared",
+                    mitigation=mitigation.name,
+                    reason="install_verifier_passed",
                     step=current_step(state),
                 )
 
@@ -273,6 +297,20 @@ async def observe_tool_result(
         )
         if stale_success is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=stale_success, dedupe=True)
+
+        host_key_failure_from_result = detect_ssh_host_key_verification_failure_from_result(
+            state,
+            tool_name=tool_name,
+            result=result,
+            arguments=arguments,
+            operation_id=operation_id,
+        )
+        if host_key_failure_from_result is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=host_key_failure_from_result, dedupe=True)
+
+        host_key_failure = detect_ssh_host_key_verification_failure(state, threshold=2)
+        if host_key_failure is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=host_key_failure, dedupe=True)
     except Exception as exc:
         logger.warning("FAMA observe failed: %s", exc)
         _runlog(
@@ -531,6 +569,16 @@ def _handle_signal(
     increment_metric_bucket(state, "fama_signals_by_kind", signal.kind.value)
     if signal.failure_class == "repeated_action" or signal.kind.value == "looping":
         increment_metric(state, "repeated_action_count")
+    if signal.kind.value == "ssh_host_key_verification":
+        host = _extract_ssh_host_key_failure_host(signal)
+        if host:
+            _runlog(
+                harness,
+                "ssh_host_key_recovery_required",
+                f"SSH host key changed for {host}",
+                host=host,
+                suggested_command=f"ssh-keygen -R {host} -f ~/.ssh/known_hosts",
+            )
     try:
         record_fama_failure_event(harness, state=state, signal=signal)
     except Exception as exc:
@@ -762,6 +810,15 @@ def _is_ssh_transport_impossibility(result: Any, *, tool_name: str = "") -> bool
 def _is_ssh_auth_impossibility(result: Any) -> bool:
     """Compatibility wrapper for tests/imports using the old helper name."""
     return _is_ssh_transport_impossibility(result)
+
+
+def _extract_ssh_host_key_failure_host(signal: FamaSignal) -> str:
+    """Extract the target host from a host-key verification FAMA signal."""
+    evidence = str(signal.evidence or "")
+    marker = " for "
+    if marker in evidence:
+        return evidence.rsplit(marker, 1)[-1].split(";", 1)[0].strip()
+    return ""
 
 
 def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:

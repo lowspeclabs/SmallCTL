@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from smallctl.graph.lifecycle_nodes_support import _apply_continue_task_state_reset
 from smallctl.graph.tool_loop_guard_progress import _dir_list_same_path_repeat_is_loop
 from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop
 from smallctl.state import LoopState
@@ -86,3 +87,27 @@ def test_tool_attempt_history_reset_on_task_boundary() -> None:
     )
 
     assert "_tool_attempt_history" not in state.scratchpad
+
+
+def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 8
+    state.inactive_steps = 3
+    state.recent_errors = [
+        "transient network warning",
+        "Guard tripped: max_consecutive_errors (5)",
+    ]
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+    _apply_continue_task_state_reset(harness, task="continue", resolved_task="continue install")
+
+    assert state.step_count == 0
+    assert state.inactive_steps == 0
+    assert state.recent_errors == ["transient network warning"]
+    assert state.scratchpad["_continued_after_guard_trip"] is True
+    capsule = state.scratchpad["_guard_trip_recovery_capsule"]
+    assert capsule["reason"] == "Guard tripped: max_consecutive_errors (5)"
+    assert capsule["continued_after_guard"] is True

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import shell_utils as _shell_attempts
+from .shell_utils import looks_like_ssh_keygen_known_hosts_removal as _is_ssh_keygen_known_hosts_removal
 from .reasoning_policy import (
     build_claim_proof_bundle,
     classify_task as _classify_task,
@@ -108,6 +109,21 @@ def evaluate_risk_policy(
             tool_risk=tool_risk,
             task_classification=task_classification,
             approval_kind="shell" if tool_name in _SHELL_TOOLS else "",
+        )
+
+    if (
+        task_classification == "diagnosis_remediation"
+        and tool_name == "shell_exec"
+        and _is_ssh_keygen_known_hosts_removal(action)
+    ):
+        requires_approval = approval_available and tool_risk in {"medium", "high"}
+        return RiskPolicyDecision(
+            allowed=True,
+            requires_approval=requires_approval,
+            proof_bundle=proof_bundle,
+            tool_risk=tool_risk,
+            task_classification=task_classification,
+            approval_kind="shell",
         )
 
     if (

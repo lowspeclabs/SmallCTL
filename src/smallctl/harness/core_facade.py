@@ -51,6 +51,35 @@ def _write_json_file(path: Path, payload: dict[str, Any], *, trailing_newline: b
     path.write_text(text, encoding="utf-8")
 
 
+def _ssh_host_key_failure_causal_chain(state: Any, result: dict[str, Any]) -> str:
+    texts: list[str] = []
+    texts.extend(str(item or "") for item in (getattr(state, "recent_errors", []) or []))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        latest_blocker = scratchpad.get("_latest_execution_blocker")
+        if isinstance(latest_blocker, dict):
+            texts.extend(str(latest_blocker.get(key) or "") for key in ("command", "salient_error", "reason"))
+        recovery_state = scratchpad.get("_ssh_auth_recovery_state")
+        if isinstance(recovery_state, dict):
+            for record in recovery_state.values():
+                if isinstance(record, dict):
+                    texts.extend(str(record.get(key) or "") for key in ("last_error", "last_error_class", "last_command"))
+    texts.extend(str(result.get(key) or "") for key in ("reason", "message", "last_recent_error"))
+    combined = "\n".join(texts).lower()
+    if not any(marker in combined for marker in ("host key verification", "remote host identification has changed", "known_hosts")):
+        return ""
+    blocked_recovery = any(marker in combined for marker in ("raw_ssh_shell_blocked", "ssh-keygen", "raw `ssh`"))
+    if blocked_recovery:
+        return (
+            "ssh_exec failed due to host-key mismatch -> correct local ssh-keygen known_hosts recovery was blocked or required approval -> "
+            "subsequent recovery risked wrong tool families -> guard trip/failure"
+        )
+    return (
+        "ssh_exec failed due to host-key mismatch -> local known_hosts trust must be fixed with approved ssh-keygen recovery -> "
+        "retry SSH only after trust is fixed"
+    )
+
+
 def _write_checkpoint_file(path: Path, result: dict[str, Any], state: Any) -> None:
     payload = {
         "checkpoint_schema_version": 1,
@@ -130,6 +159,7 @@ def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status:
     no_op = task_text in {"hi", "hello", "hey", "thanks", "thank you"} and int(getattr(state, "step_count", 0) or 0) <= 1
     code_changes = int(challenge_progress.get("code_change_count", 0) or 0) if challenge_progress else 0
     deliverable_verified = bool(challenge_progress.get("verified_after_last_change")) if challenge_progress else False
+    task_category = str(challenge_progress.get("task_category") or "").strip().lower()
     # If the run was cancelled, do not claim deliverable_verified=true unless the objective verifier
     # passed after the last failure.
     if status == "cancelled" and deliverable_verified:
@@ -140,6 +170,8 @@ def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status:
         if not last_verifier_pass:
             deliverable_verified = False
     diagnostic_only = code_changes <= 0 and not deliverable_verified and not no_op
+    if task_category in {"sysadmin", "install", "setup", "deploy", "configure"} and deliverable_verified:
+        diagnostic_only = False
     return {
         "no_op": no_op,
         "deliverable_verified": deliverable_verified,
@@ -149,6 +181,12 @@ def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status:
 
 def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     status = str((result or {}).get("status") or "").strip().lower()
+    if status in {"completed", "success", "succeeded"}:
+        scratchpad = getattr(self, "state", None)
+        if scratchpad is not None:
+            scratchpad = getattr(scratchpad, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            scratchpad.pop("_latest_execution_blocker", None)
     task_summary = None
     if status not in {"needs_human", "plan_ready", "plan_approved"}:
         terminal_event = "task_interrupted" if status == "cancelled" else ""
@@ -227,6 +265,15 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
             error_type = result.get("error_type", "")
             if error_type == "backend_stream_failure":
                 stall_classification = "backend_failed"
+            primary_blocker = ""
+            latest_blocker = scratchpad.get("_latest_execution_blocker")
+            if isinstance(latest_blocker, dict):
+                salient = str(latest_blocker.get("salient_error") or "").strip()
+                command = str(latest_blocker.get("command") or "").strip()
+                if salient:
+                    primary_blocker = salient
+                    if command:
+                        primary_blocker = f"{primary_blocker} [command: {command}]"
             summary_payload = {
                 "final_task_status": status,
                 "total_tool_calls": self.state.step_count,
@@ -235,6 +282,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                     if any(marker in str(e) for marker in ("Guard tripped", "file_read_hard_block", "human_resteer"))
                 ),
                 "postmortem_summary": postmortem_summary,
+                "primary_blocker": primary_blocker,
                 "unverified_change_warning": unverified_change_warning,
                 "latest_task_id": task_id,
                 "latest_task_summary_path": task_summary_path,
@@ -242,6 +290,11 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "error_type": error_type,
                 **_run_metric_flags(self.state, challenge_progress, status=status),
             }
+            causal_chain = _ssh_host_key_failure_causal_chain(self.state, result)
+            if causal_chain:
+                summary_payload["causal_chain"] = causal_chain
+                if not postmortem_summary or "Guard tripped" in postmortem_summary:
+                    summary_payload["postmortem_summary"] = causal_chain
             if challenge_progress:
                 summary_payload["challenge_progress"] = challenge_progress
             summary_path = self.run_logger.run_dir / "task_summary.json"
@@ -265,6 +318,40 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                     continue
                 if isinstance(payload, dict):
                     task_summaries.append(payload)
+            if isinstance(task_summary, dict) and task_summary:
+                current_summary = dict(task_summary)
+                current_summary.setdefault("step_count", summary_payload.get("total_tool_calls", 0))
+                current_task_id = str(current_summary.get("task_id") or "").strip()
+                current_summary_path = str(current_summary.get("summary_path") or "").strip()
+                matched_current_summary = False
+                for index, item in enumerate(task_summaries):
+                    item_task_id = str(item.get("task_id") or "").strip()
+                    item_summary_path = str(item.get("summary_path") or "").strip()
+                    if (current_task_id and item_task_id == current_task_id) or (
+                        current_summary_path and item_summary_path == current_summary_path
+                    ):
+                        task_summaries[index] = {**item, **current_summary}
+                        matched_current_summary = True
+                        break
+                if not matched_current_summary:
+                    task_summaries.append(current_summary)
+                current_summary_path = str(task_summary.get("summary_path") or "").strip()
+                if current_summary_path and current_summary_path not in task_summary_paths:
+                    task_summary_paths.append(current_summary_path)
+            session_total_tool_calls = 0
+            for item in task_summaries:
+                try:
+                    session_total_tool_calls += max(0, int(item.get("step_count") or item.get("total_tool_calls") or 0))
+                except (TypeError, ValueError):
+                    continue
+            session_guard_trips = 0
+            for item in task_summaries:
+                text = " ".join(
+                    str(item.get(key) or "")
+                    for key in ("reason", "message", "last_recent_error")
+                )
+                if "Guard tripped" in text:
+                    session_guard_trips += 1
             prior_task_completed = any(
                 str(item.get("status") or item.get("result_status") or "").strip().lower()
                 in {"completed", "success", "succeeded"}
@@ -276,6 +363,8 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
             )
             session_summary_payload = {
                 **summary_payload,
+                "total_tool_calls": session_total_tool_calls or summary_payload.get("total_tool_calls", 0),
+                "guard_trips": session_guard_trips or summary_payload.get("guard_trips", 0),
                 "task_count": len(task_summary_paths),
                 "task_summary_paths": task_summary_paths,
                 "prior_task_completed": prior_task_completed,

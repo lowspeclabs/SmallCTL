@@ -19,6 +19,7 @@ class ExtractedPage:
     headings: list[str] = field(default_factory=list)
     full_text: str = ""
     extractor: str = "trafilatura" if trafilatura is not None else "html_parser"
+    warnings: list[str] = field(default_factory=list)
 
 
 class _BasicTextExtractor(HTMLParser):
@@ -109,7 +110,7 @@ def extract_page(
             byline = str(getattr(metadata, "author", "") or "").strip() or None
             published = str(getattr(metadata, "date", "") or "").strip() or None
             if extracted:
-                full_text = _normalize_text(str(extracted), max_chars=max_chars)
+                full_text, warnings = _normalize_extracted_html_text(str(extracted), max_chars=max_chars)
                 headings = _find_headings(html_text)
                 if not title:
                     title = headings[0] if headings else ""
@@ -120,6 +121,7 @@ def extract_page(
                     headings=headings,
                     full_text=full_text,
                     extractor="trafilatura",
+                    warnings=warnings,
                 )
         except Exception:
             pass
@@ -130,7 +132,7 @@ def extract_page(
 def _extract_article_fallback(html_text: str, *, max_chars: int) -> ExtractedPage:
     parser = _BasicTextExtractor(ignore_boilerplate=True)
     parser.feed(html_text)
-    full_text = _normalize_text("\n".join(parser.parts), max_chars=max_chars)
+    full_text, warnings = _normalize_extracted_html_text("\n".join(parser.parts), max_chars=max_chars)
     title = parser.title.strip() or (parser.headings[0] if parser.headings else "")
     byline = parser.byline.strip() or None
     return ExtractedPage(
@@ -140,6 +142,7 @@ def _extract_article_fallback(html_text: str, *, max_chars: int) -> ExtractedPag
         headings=parser.headings[:8],
         full_text=full_text,
         extractor="html_parser",
+        warnings=warnings,
     )
 
 
@@ -152,7 +155,7 @@ def _extract_visible_text_page(html_text: str, *, max_chars: int) -> ExtractedPa
         visible_parts.append(title)
     visible_parts.extend(parser.headings[:8])
     visible_parts.extend(parser.parts)
-    full_text = _normalize_text("\n".join(visible_parts), max_chars=max_chars)
+    full_text, warnings = _normalize_extracted_html_text("\n".join(visible_parts), max_chars=max_chars)
     return ExtractedPage(
         title=title or (parser.headings[0] if parser.headings else ""),
         byline=parser.byline.strip() or None,
@@ -160,6 +163,7 @@ def _extract_visible_text_page(html_text: str, *, max_chars: int) -> ExtractedPa
         headings=parser.headings[:8],
         full_text=full_text,
         extractor="html_text",
+        warnings=warnings,
     )
 
 
@@ -179,6 +183,48 @@ def _extract_plain_text_page(text: str, *, max_chars: int) -> ExtractedPage:
 def _normalize_text(text: str, *, max_chars: int) -> str:
     normalized = re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
     return normalized[:max_chars].rstrip()
+
+
+def _normalize_extracted_html_text(text: str, *, max_chars: int) -> tuple[str, list[str]]:
+    normalized = _normalize_text(text, max_chars=max_chars)
+    cleaned, removed = _strip_leading_documentation_chrome(normalized)
+    warnings = (
+        ["Removed documentation search/navigation boilerplate from fetched text."]
+        if removed
+        else []
+    )
+    return cleaned[:max_chars].rstrip(), warnings
+
+
+def _strip_leading_documentation_chrome(text: str) -> tuple[str, bool]:
+    lines = str(text or "").splitlines()
+    nonempty_prefix = [line.strip().lower() for line in lines[:40] if line.strip()]
+    has_search_overlay = any(
+        marker in nonempty_prefix
+        for marker in (
+            "loading search index...",
+            "start typing to search documentation",
+            "no results found",
+        )
+    )
+    has_menu_control = any(marker in nonempty_prefix for marker in ("toggle menu", "search", "esc"))
+    if not (has_search_overlay and has_menu_control):
+        return text, False
+
+    cutoff: int | None = None
+    for index, line in enumerate(lines[:40]):
+        if line.strip().lower() == "toggle menu":
+            cutoff = index + 1
+            break
+    if cutoff is None:
+        for index, line in enumerate(lines[:25]):
+            if line.strip().lower() in {"search", "esc to close", "to close"}:
+                cutoff = index + 1
+
+    if cutoff is None:
+        return text, False
+    cleaned = "\n".join(lines[cutoff:]).lstrip()
+    return cleaned, bool(cleaned and cleaned != text)
 
 
 def _find_headings(html_text: str) -> list[str]:

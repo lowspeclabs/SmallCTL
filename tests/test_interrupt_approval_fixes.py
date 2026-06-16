@@ -844,6 +844,64 @@ class TestInterruptApprovalFixes:
         assert payload["files_changed_after_latest_task_start"] is True
         assert payload["verification_after_latest_change"] is False
 
+    def test_session_summary_aggregates_task_step_counts_including_current_task(self, tmp_path) -> None:
+        from smallctl.harness.core_facade import _finalize
+        from types import SimpleNamespace
+        import json
+
+        run_dir = tmp_path / "run"
+        prior_dir = run_dir / "tasks" / "task-0001"
+        latest_dir = run_dir / "tasks" / "task-0002"
+        latest_dir.mkdir(parents=True)
+        prior_dir.mkdir(parents=True)
+        (prior_dir / "task_summary.json").write_text(
+            json.dumps({"task_id": "task-0001", "status": "completed", "step_count": 4}),
+            encoding="utf-8",
+        )
+        (latest_dir / "task_summary.json").write_text(
+            json.dumps({"task_id": "task-0002", "status": "failed", "step_count": 7, "last_recent_error": "Guard tripped: max_consecutive_errors (5)"}),
+            encoding="utf-8",
+        )
+
+        class MockHarness:
+            def __init__(self):
+                self.run_logger = SimpleNamespace(run_dir=run_dir)
+                self.state = SimpleNamespace(
+                    step_count=7,
+                    inactive_steps=0,
+                    token_usage={},
+                    recent_errors=["Guard tripped: max_consecutive_errors (5)"],
+                    scratchpad={},
+                    challenge_progress=None,
+                    run_brief=SimpleNamespace(original_task="install pihole"),
+                    working_memory=SimpleNamespace(current_goal=""),
+                )
+                self.checkpoint_on_exit = False
+                self._cancel_requested = False
+                self._active_dispatch_task = None
+
+            def _finalize_task_scope(self, **kwargs):
+                return {"task_id": "task-0002", "summary_path": str(latest_dir / "task_summary.json")}
+
+            def _record_terminal_experience(self, result):
+                pass
+
+            def _rewrite_active_plan_export(self):
+                pass
+
+            def _persist_checkpoint(self, result):
+                pass
+
+            def _runlog(self, *args, **kwargs):
+                pass
+
+        _finalize(MockHarness(), {"status": "failed", "reason": "Guard tripped: max_consecutive_errors (5)"})
+
+        payload = json.loads((run_dir / "session_summary.json").read_text(encoding="utf-8"))
+        assert payload["total_tool_calls"] == 11
+        assert payload["guard_trips"] == 1
+        assert payload["task_count"] == 2
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

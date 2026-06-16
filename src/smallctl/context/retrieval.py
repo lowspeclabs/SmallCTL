@@ -900,9 +900,11 @@ class LexicalRetriever:
         best_score = bundle.best_scores.get("artifacts", 0.0)
         synthetic_score = max(best_score, 50.0)
         for _, artifact in failure_artifacts[:2]:
+            if not is_retrieval_visible_artifact(artifact):
+                continue
             text = self._artifact_text(artifact)
             bundle.artifacts.append(ArtifactSnippet(artifact_id=artifact.artifact_id, text=text, score=synthetic_score))
-        if failure_artifacts[:2]:
+        if any(is_retrieval_visible_artifact(art) for _, art in failure_artifacts[:2]):
             bundle.best_scores["artifacts"] = synthetic_score
             bundle.miss_reasons.setdefault("refinement", []).append("failure_artifact_boost_injected")
 
@@ -932,6 +934,20 @@ class LexicalRetriever:
         active_intent = normalize_intent_label(state.active_intent)
         remote_recovery_mode = self._is_remote_ssh_recovery_turn(state=state, query_text=query_text)
         memory_tool_name = str(m.tool_name or "").strip().lower()
+        state_failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
+
+        if state_failure_mode == "ssh_host_key_verification":
+            memory_failure_mode = str(m.failure_mode or "").strip().lower()
+            memory_text = f"{memory_tool_name} {safe_notes} {' '.join(m.entity_tags)}".lower()
+            directly_relevant = (
+                memory_failure_mode == "ssh_host_key_verification"
+                or "known_hosts" in memory_text
+                or "host key" in memory_text
+                or "ssh-keygen -r" in memory_text
+                or "ssh-keygen -R" in str(m.notes or "")
+            )
+            if not directly_relevant and not m.pinned:
+                return 0.0
 
         score = 0.0
         if namespace_bucket(memory_namespace, routing) == "preferred":
@@ -977,7 +993,6 @@ class LexicalRetriever:
 
         if m.failure_mode and m.failure_mode in query_text.lower():
             score += 2.0
-        state_failure_mode = str(getattr(state, "last_failure_class", "") or "").strip().lower()
         if state_failure_mode and str(m.failure_mode or "").strip().lower() == state_failure_mode:
             score += 4.0
 

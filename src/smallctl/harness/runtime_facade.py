@@ -569,6 +569,20 @@ async def request_sudo_password(
     return await self.approvals.request_sudo_password(command=command, prompt_text=prompt_text)
 
 
+def get_sudo_password(self: Any, *, command: str = "") -> str | None:
+    """Return a configured sudo password if available, otherwise None.
+
+    The harness uses this as the non-TUI password source when a running
+    shell command prompts for sudo.  It intentionally does not prompt the
+    user inline; callers that need interactive prompting should use
+    request_sudo_password instead.
+    """
+    password = getattr(self.config, "sudo_password", None) or getattr(self, "sudo_password", None)
+    if isinstance(password, str) and password.strip():
+        return password.strip()
+    return None
+
+
 def resolve_shell_approval(self: Any, approval_id: str, approved: bool) -> None:
     self.approvals.resolve_shell_approval(approval_id, approved)
 
@@ -747,6 +761,7 @@ def bind_runtime_facade(cls: type[Any]) -> None:
     cls.teardown = teardown
     cls.request_shell_approval = request_shell_approval
     cls.request_sudo_password = request_sudo_password
+    cls.get_sudo_password = get_sudo_password
     cls.resolve_shell_approval = resolve_shell_approval
     cls.resolve_sudo_password = resolve_sudo_password
     cls._reject_pending_shell_approvals = _reject_pending_shell_approvals

@@ -191,6 +191,7 @@ def build_harness_config_kwargs(
         "subtask_max_active": getattr(config, "subtask_max_active", 1),
         "subtask_max_history": getattr(config, "subtask_max_history", 12),
         "subtask_inject_completed_limit": getattr(config, "subtask_inject_completed_limit", 3),
+        "sudo_password": getattr(config, "sudo_password", None),
         "verbose": getattr(config, "verbose", False),
         **({"task": task} if task is not None else {}),
     }

@@ -9,9 +9,28 @@ from smallctl.models.conversation import ConversationMessage
 from smallctl.state_schema import WorkingMemory
 from smallctl.tools.shell_support_argparse import (
     _build_argparse_unrecognized_args_hint,
+    _detect_unbalanced_quotes,
     _extract_unrecognized_argparse_arguments,
 )
 from smallctl.tools.shell_support_constants import _ARGPARSE_UNRECOGNIZED_ARGS_PATTERN
+
+
+def test_detect_unbalanced_quotes_finds_single_quote() -> None:
+    msg = _detect_unbalanced_quotes("echo '")
+    assert msg is not None
+    assert "unmatched single quote" in msg
+
+
+def test_detect_unbalanced_quotes_finds_double_quote() -> None:
+    msg = _detect_unbalanced_quotes('echo "')
+    assert msg is not None
+    assert "unmatched double quote" in msg
+
+
+def test_detect_unbalanced_quotes_allows_balanced() -> None:
+    assert _detect_unbalanced_quotes("echo 'hello'") is None
+    assert _detect_unbalanced_quotes('echo "hello"') is None
+    assert _detect_unbalanced_quotes("echo `date`") is None
 
 
 def test_task_is_local_coding_target_broadened_to_any_local_py() -> None:

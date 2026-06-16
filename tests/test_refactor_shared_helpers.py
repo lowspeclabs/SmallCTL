@@ -667,6 +667,62 @@ def test_harness_core_facade_restores_small_model_name_helper() -> None:
     assert harness._is_small_model_name("gpt-oss-120b") is False
 
 
+def test_artifact_visibility_respects_hidden_flag() -> None:
+    from smallctl.context.artifact_visibility import is_retrieval_visible_artifact
+
+    hidden = SimpleNamespace(metadata={"hidden": True, "model_visible": False})
+    assert is_retrieval_visible_artifact(hidden) is False
+
+    forced = SimpleNamespace(metadata={"hidden": True, "force_retrieval_visible": True})
+    assert is_retrieval_visible_artifact(forced) is True
+
+    verifier_hidden = SimpleNamespace(metadata={"hidden": True, "verifier_verdict": "pass"})
+    assert is_retrieval_visible_artifact(verifier_hidden) is False
+
+
+def test_inject_failure_artifacts_skips_hidden_artifacts() -> None:
+    from smallctl.context.retrieval import LexicalRetriever, RetrievalBundle
+    from smallctl.state import ArtifactRecord, LoopState
+
+    state = LoopState(cwd="/tmp")
+    visible = ArtifactRecord(
+        artifact_id="A1",
+        kind="tool_result",
+        source="shell_exec",
+        created_at="2026-01-01T00:00:00",
+        size_bytes=0,
+        summary="failed visible",
+        tool_name="shell_exec",
+        preview_text="error output",
+        metadata={"success": False},
+    )
+    hidden = ArtifactRecord(
+        artifact_id="A2",
+        kind="tool_result",
+        source="shell_exec",
+        created_at="2026-01-01T00:00:01",
+        size_bytes=0,
+        summary="blocked hidden",
+        tool_name="shell_exec",
+        preview_text="blocked by guard",
+        metadata={"success": False, "hidden": True, "model_visible": False},
+    )
+    state.artifacts["A1"] = visible
+    state.artifacts["A2"] = hidden
+
+    bundle = RetrievalBundle(
+        query="test",
+        summaries=[],
+        artifacts=[],
+        experiences=[],
+        best_scores={"artifacts": 0.0},
+    )
+    LexicalRetriever()._inject_failure_artifacts(state, bundle)
+
+    assert len(bundle.artifacts) == 1
+    assert bundle.artifacts[0].artifact_id == "A1"
+
+
 def test_harness_initialization_preserves_small_model_flag(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 

@@ -60,6 +60,56 @@ def _command_uses_leading_sudo(command: str) -> bool:
     return bool(tokens) and tokens[0].lower() == "sudo"
 
 
+def _command_may_need_sudo(command: str) -> bool:
+    """Return True if the command is likely to prompt for a sudo password."""
+    if _command_uses_leading_sudo(command):
+        return True
+    lowered = str(command or "").lower()
+    # Match common sudo invocations inside a shell pipeline, but avoid false
+    # positives from words that merely contain "sudo".
+    return bool(re.search(r"(^|[\s;&|({\[])sudo([\s-]|$)", lowered))
+
+
+async def _feed_sudo_password_to_process(
+    proc: Any,
+    command: str,
+    harness: Any,
+) -> dict[str, Any] | None:
+    """Feed a configured sudo password to a running process.
+
+    Returns None when a password was written, or a needs_human/fail envelope
+    when no password is available.  The caller is responsible for stopping the
+    process if this returns a guard envelope.
+    """
+    password_fn = getattr(harness, "get_sudo_password", None)
+    password: str | None = None
+    if callable(password_fn):
+        password = password_fn(command=command)
+    if not isinstance(password, str) or not password.strip():
+        return needs_human(
+            f"Command requires sudo/password input: '{command}'. "
+            "Set a sudo password in config or configure passwordless sudo.",
+            metadata={"command": command, "reason": "sudo_password_required"},
+        )
+
+    stdin = getattr(proc, "stdin", None)
+    if stdin is None:
+        return fail(
+            "Process has no stdin pipe; cannot feed sudo password.",
+            metadata={"command": command, "reason": "sudo_stdin_unavailable"},
+        )
+    try:
+        stdin.write(f"{password}\n".encode("utf-8"))
+        await stdin.drain()
+        stdin.close()
+    except Exception as exc:
+        return fail(
+            f"Failed to write sudo password to process: {exc}",
+            metadata={"command": command, "reason": "sudo_password_write_failed"},
+        )
+    return None
+
+
 async def shell_exec_foreground(
     command: str,
     *,
@@ -142,19 +192,31 @@ async def shell_exec_foreground(
                     denied["status"] = "denied"
                     return denied
 
-            sudo_guard = await ensure_sudo_credentials(
-                command=command,
-                cwd=state.cwd,
-                is_leading_sudo=_command_uses_leading_sudo(command),
-                create_process=create_process,
-                harness=harness,
-                timeout_sec=timeout_sec,
-                sudo_human_message=sudo_human_message,
-            )
-            if sudo_guard is not None:
-                return sudo_guard
+            sudo_password_configured = False
+            get_sudo_password_fn = getattr(harness, "get_sudo_password", None)
+            if callable(get_sudo_password_fn):
+                sudo_password_configured = bool(get_sudo_password_fn(command=command))
 
-            proc = await create_process(command=command, cwd=state.cwd, harness=harness)
+            # Only run the pre-flight sudo validation prompt when no configured
+            # password is available.  When a password is configured we feed it
+            # inline as the process runs, avoiding the TUI password prompt.
+            if not sudo_password_configured or not _command_may_need_sudo(command):
+                sudo_guard = await ensure_sudo_credentials(
+                    command=command,
+                    cwd=state.cwd,
+                    is_leading_sudo=_command_uses_leading_sudo(command),
+                    create_process=create_process,
+                    harness=harness,
+                    timeout_sec=timeout_sec,
+                    sudo_human_message=sudo_human_message,
+                )
+                if sudo_guard is not None:
+                    return sudo_guard
+
+            stdin_setting = asyncio.subprocess.PIPE if _command_may_need_sudo(command) else asyncio.subprocess.DEVNULL
+            proc = await create_process(
+                command=command, cwd=state.cwd, harness=harness, stdin=stdin_setting
+            )
 
             stdout_data = []
             stderr_data = []
@@ -163,6 +225,9 @@ async def shell_exec_foreground(
             invalid_input_detector = InvalidInputLoopDetector()
             heartbeat_interval = _shell_status_update_interval(timeout_sec)
             start_time = time.monotonic()
+            sudo_password_fed = False
+            sudo_password_unavailable: dict[str, Any] | None = None
+            sudo_feed_lock = asyncio.Lock()
             stream_emitter = BufferedUIEventEmitter(
                 harness=harness,
                 event_type=UIEventType.SHELL_STREAM,
@@ -170,10 +235,10 @@ async def shell_exec_foreground(
             )
 
             async def read_stream(stream, out_list, is_stderr: bool = False):
-                nonlocal password_prompt_detected, detection_buffer, invalid_input_loop
+                nonlocal password_prompt_detected, detection_buffer, invalid_input_loop, sudo_password_fed, sudo_password_unavailable
 
                 async def handle_chunk(chunk_str: str) -> None:
-                    nonlocal password_prompt_detected, detection_buffer, invalid_input_loop
+                    nonlocal password_prompt_detected, detection_buffer, invalid_input_loop, sudo_password_fed, sudo_password_unavailable
 
                     if not password_prompt_detected:
                         detection_buffer += chunk_str
@@ -183,6 +248,13 @@ async def shell_exec_foreground(
                         for pattern in SUDO_PROMPT_PATTERNS:
                             if pattern.search(detection_buffer):
                                 password_prompt_detected = True
+                                async with sudo_feed_lock:
+                                    if not sudo_password_fed and sudo_password_unavailable is None:
+                                        sudo_password_unavailable = await _feed_sudo_password_to_process(
+                                            proc, command, harness
+                                        )
+                                        if sudo_password_unavailable is None:
+                                            sudo_password_fed = True
                                 break
                     if invalid_input_loop is None:
                         loop_metadata = invalid_input_detector.observe(chunk_str)
@@ -286,16 +358,25 @@ async def shell_exec_foreground(
                 )
 
             if password_prompt_detected:
-                if proc and proc.returncode is None:
-                    try:
-                        proc.kill()
-                        await asyncio.wait_for(proc.wait(), timeout=1.0)
-                    except Exception:
-                        pass
-                return needs_human(
-                    f"Command requires sudo/password input: '{command}'. {sudo_human_message}",
-                    metadata={"output": output, "command": command, "reason": "password_prompt_detected"},
-                )
+                if sudo_password_unavailable is not None:
+                    if proc and proc.returncode is None:
+                        try:
+                            proc.kill()
+                            await asyncio.wait_for(proc.wait(), timeout=1.0)
+                        except Exception:
+                            pass
+                    return sudo_password_unavailable
+                if not sudo_password_fed:
+                    if proc and proc.returncode is None:
+                        try:
+                            proc.kill()
+                            await asyncio.wait_for(proc.wait(), timeout=1.0)
+                        except Exception:
+                            pass
+                    return needs_human(
+                        f"Command requires sudo/password input: '{command}'. {sudo_human_message}",
+                        metadata={"output": output, "command": command, "reason": "password_prompt_detected"},
+                    )
 
             if proc.returncode not in (0, None):
                 err_output = output.get("stderr", "")
@@ -319,6 +400,12 @@ async def shell_exec_foreground(
                     "sudo: must be run from a terminal",
                 )
                 if any(p.lower() in error.lower() for p in sudo_prompts):
+                    if sudo_password_fed:
+                        return fail(
+                            "Sudo password was provided but the command still failed. "
+                            "The password may be incorrect or the user is not in the sudoers file.",
+                            metadata={"output": output, "command": command, "reason": "sudo_password_rejected"},
+                        )
                     return needs_human(
                         sudo_human_message,
                         metadata={"output": output, "command": command},
@@ -370,6 +457,14 @@ async def shell_exec_foreground(
                 execution_sec = time.monotonic() - start_time
             await stop_process(proc, harness=harness, timeout=1.0)
             if password_prompt_detected:
+                if sudo_password_unavailable is not None:
+                    return sudo_password_unavailable
+                if sudo_password_fed:
+                    return fail(
+                        f"Command timed out after {timeout_sec}s. "
+                        "A sudo password was provided but the command did not complete.",
+                        metadata={"command": command, "reason": "sudo_password_timeout"},
+                    )
                 return needs_human(
                     f"Command timed out waiting for sudo/password input: '{command}'. {sudo_human_message}",
                     metadata={"command": command, "reason": "password_prompt_timeout"},

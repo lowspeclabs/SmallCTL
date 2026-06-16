@@ -401,6 +401,8 @@ def classify_runtime_intent(
         return RuntimeIntent(label="contextual_execute", task_mode=task_mode)
     if looks_like_author_write_request(text):
         return RuntimeIntent(label="author_write", task_mode=task_mode)
+    if looks_like_readonly_chat_request(text):
+        return RuntimeIntent(label="readonly_lookup", task_mode=task_mode)
     if (
         looks_like_write_patch_request(text)
         or looks_like_write_file_request(text)
@@ -411,8 +413,6 @@ def classify_runtime_intent(
         return RuntimeIntent(label="execute", task_mode=task_mode)
     if needs_loop_for_content_lookup(text):
         return RuntimeIntent(label="content_lookup", task_mode=task_mode)
-    if looks_like_readonly_chat_request(text):
-        return RuntimeIntent(label="readonly_lookup", task_mode=task_mode)
     return RuntimeIntent(label="chat_only", task_mode=task_mode)
 
 

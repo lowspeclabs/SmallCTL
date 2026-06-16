@@ -21,6 +21,7 @@ from smallctl.tools.base import ToolSpec
 from smallctl.tools.dispatcher import ToolDispatcher, normalize_tool_request
 from smallctl.tools.registry import ToolRegistry
 from smallctl.tools import network
+from smallctl.tools.network_ssh_helpers import ssh_semantic_failure
 
 
 class _FakeStream:
@@ -66,6 +67,28 @@ class _Registry:
     @staticmethod
     def names() -> set[str]:
         return {"task_complete"}
+
+
+def test_ssh_semantic_failure_detects_pipelined_dnf_error_exit_zero() -> None:
+    output = {
+        "stdout": "dnf search: error: unrecognized arguments: --allrepo\n",
+        "stderr": "",
+        "exit_code": 0,
+    }
+
+    reason = ssh_semantic_failure("dnf search --allrepo pihole 2>&1 | head -50", output)
+
+    assert "unrecognized arguments" in reason
+
+
+def test_ssh_semantic_failure_ignores_plain_diagnostic_probe() -> None:
+    output = {
+        "stdout": "bash: line 1: which: command not found\n/bin/dnf\n",
+        "stderr": "",
+        "exit_code": 0,
+    }
+
+    assert ssh_semantic_failure("which apt apt-get yum dnf 2>&1; ls /bin/dnf", output) == ""
 
 
 def test_qwen_distilled_wrappers_preserve_task_complete_and_plan_reasoning() -> None:
@@ -2222,3 +2245,228 @@ def test_remote_scope_guard_allows_shell_exec_after_repeated_ssh_auth_failure() 
     assert tool_name == "shell_exec"
     assert args == {"command": "ls /etc/nginx/sites-available"}
     assert intercepted is None
+
+
+def test_ssh_exec_retries_on_host_key_verification_failure() -> None:
+    state = LoopState(cwd="/tmp")
+    create_process = AsyncMock(
+        side_effect=[
+            _FakeProc(
+                returncode=255,
+                stderr=(
+                    b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                    b"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
+                    b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                    b"Host key verification failed.\n"
+                ),
+            ),
+            _FakeProc(
+                returncode=0,
+                stdout=b"pihole\n",
+            ),
+        ]
+    )
+
+    with patch.object(network, "create_process", create_process):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.161",
+                user="root",
+                password="Temp@Pass",
+                command="hostname",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
+    assert result["output"]["stdout"] == "pihole\n"
+    assert result["metadata"]["ssh_option_retry"] == "strict_host_key_checking_no"
+    assert result["metadata"]["ssh_option_retry_reason"] == "host_key_verification"
+    assert create_process.await_count == 2
+
+
+def test_ssh_exec_host_key_circuit_breaker_blocks_third_attempt() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "root@192.168.1.161": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "last_error_class": "host_key_verification",
+            "consecutive_count": 2,
+            "last_command": "hostname",
+            "last_error": "Host key verification failed.",
+        }
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.161",
+            "user": "root",
+            "password": "Temp@Pass",
+            "command": "hostname",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_exec"
+    assert intercepted is not None
+    assert intercepted.metadata["reason"] == "ssh_host_key_recovery_required"
+    assert metadata["ssh_host_key_recovery_required"] is True
+
+
+def test_ssh_exec_records_host_key_failure_for_circuit_breaker() -> None:
+    state = LoopState(cwd="/tmp")
+
+    def _make_proc(**kwargs):
+        return _FakeProc(
+            returncode=255,
+            stderr=(
+                b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                b"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
+                b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                b"Host key verification failed.\n"
+            ),
+        )
+
+    create_process = AsyncMock(side_effect=_make_proc)
+
+    with patch.object(network, "create_process", create_process):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.161",
+                user="root",
+                password="Temp@Pass",
+                command="hostname",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is False
+    assert result["metadata"]["ssh_error_class"] == "host_key_verification"
+    recovery_state = state.scratchpad.get("_ssh_auth_recovery_state", {})
+    record = recovery_state.get("root@192.168.1.161", {})
+    assert record.get("last_error_class") == "host_key_verification"
+    assert record.get("consecutive_count") == 1
+    assert record.get("host_key_retry_done") is True
+
+
+def _ssh_registry():
+    return SimpleNamespace(
+        get=lambda name: SimpleNamespace(
+            phase_allowed=lambda phase: True,
+            profile_allowed=lambda profiles: True,
+        )
+        if name == "ssh_exec"
+        else None
+    )
+
+
+def test_normalize_tool_request_allows_ssh_keygen_known_hosts_removal() -> None:
+    for command in (
+        "ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts",
+        "ssh-keygen -f ~/.ssh/known_hosts -R 192.168.1.161",
+    ):
+        state = LoopState(cwd=".")
+        tool_name, args, intercepted, _metadata = normalize_tool_request(
+            _ssh_registry(),
+            "shell_exec",
+            {"command": command},
+            phase="execute",
+            state=state,
+        )
+
+        assert intercepted is None, f"{command} should not be intercepted"
+        assert tool_name == "shell_exec"
+        assert args["command"] == command
+
+
+def test_normalize_tool_request_blocks_non_removal_ssh_keygen() -> None:
+    state = LoopState(cwd=".")
+    tool_name, args, intercepted, _metadata = normalize_tool_request(
+        _ssh_registry(),
+        "shell_exec",
+        {"command": "ssh-keygen -t rsa -f /tmp/key"},
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is not None
+    assert intercepted.metadata["reason"] == "raw_ssh_shell_blocked"
+    assert tool_name == "shell_exec"
+
+
+def test_normalize_tool_request_blocks_or_rewrites_raw_ssh_family() -> None:
+    for command, expected_tool, reason in (
+        ("ssh root@192.168.1.161 whoami", "ssh_exec", None),
+        ("sshpass -p secret ssh root@192.168.1.161 whoami", "ssh_exec", None),
+        ("sftp root@192.168.1.161:/tmp/file", "shell_exec", "raw_ssh_shell_blocked"),
+    ):
+        state = LoopState(cwd=".")
+        tool_name, args, intercepted, _metadata = normalize_tool_request(
+            _ssh_registry(),
+            "shell_exec",
+            {"command": command},
+            phase="execute",
+            state=state,
+        )
+
+        assert tool_name == expected_tool, command
+        if reason:
+            assert intercepted is not None, command
+            assert intercepted.metadata["reason"] == reason
+        else:
+            assert intercepted is None, command
+            assert args.get("host") == "192.168.1.161"
+
+
+def test_normalize_tool_request_host_key_circuit_breaker_suggests_ssh_keygen() -> None:
+    state = LoopState(cwd=".")
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "root@192.168.1.161": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "last_error_class": "host_key_verification",
+            "consecutive_count": 2,
+            "last_command": "hostname",
+            "last_error": "Host key verification failed.",
+        }
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.161",
+            "user": "root",
+            "password": "Temp@Pass",
+            "command": "hostname",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "ssh_exec"
+    assert intercepted is not None
+    assert intercepted.metadata["reason"] == "ssh_host_key_recovery_required"
+    assert "ssh-keygen -R 192.168.1.161" in intercepted.metadata.get("suggested_command", "")
+    assert "shell_exec" in intercepted.metadata["next_required_action"]["tool_names"]
+    assert metadata["ssh_host_key_recovery_required"] is True
+
+
+def test_record_ssh_failure_resets_consecutive_count_on_error_class_change() -> None:
+    state = LoopState(cwd="/tmp")
+    network._record_ssh_failure(state, "host", "user", "cmd1", "auth_permission_denied", "err")
+    network._record_ssh_failure(state, "host", "user", "cmd2", "host_key_verification", "err")
+
+    record = state.scratchpad["_ssh_auth_recovery_state"]["user@host"]
+    assert record["consecutive_count"] == 1
+    assert record["last_error_class"] == "host_key_verification"
+
+    network._record_ssh_failure(state, "host", "user", "cmd3", "host_key_verification", "err")
+    record = state.scratchpad["_ssh_auth_recovery_state"]["user@host"]
+    assert record["consecutive_count"] == 2

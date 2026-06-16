@@ -26,6 +26,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "repeated_remote_installer_failure_capsule": "The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
     "source_invalid_install_capsule": "Installer source looks invalid upstream. Do not keep retrying local DNS or shell execution. Research the current official install path, ask for approval for an alternate/manual path, or explain the blocker.",
     "remote_auth_failure_capsule": "SSH authentication failed. Do not retry the same SSH command — the credential/access issue will persist. Try a different host, use local shell_exec, or ask the user for corrected credentials.",
+    "ssh_host_key_recovery_capsule": "SSH host key changed for the remote host. This is a local SSH client trust-store issue: `~/.ssh/known_hosts` is on the harness machine, not the remote host. Do not use `ssh_file_read`/`ssh_file_write` for it and do not infer a wrong password until trust is fixed. Ask approval, then use local `ssh-keygen -R <host> -f ~/.ssh/known_hosts`, and retry SSH only after approval.",
     "preexisting_state_as_success_capsule": "Distinguish 'state already existed' from 'I caused the state'. Verify that your actions produced the intended outcome, not that it was already present.",
     "repeated_shell_failure_collapsed": "Multiple identical shell failures were collapsed in the transcript. Do NOT repeat the same command. Use the preserved last occurrence as evidence, diagnose the root cause, and try a fundamentally different approach.",
     "dead_end_pivot_capsule": "Multiple attempts have failed with the same root cause. This may be an unfixable external blocker. If DNS, source resolution, or upstream availability is broken and cannot be repaired from this session, stop retrying and explain the blocker. Call task_fail with a clear description if no alternative path exists.",
@@ -52,7 +53,11 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
     mitigations = sorted(active_mitigations(state), key=lambda item: (item.priority, item.activated_step, item.name))
     mitigation_names = {m.name for m in mitigations}
     for mitigation in mitigations:
-        line = CAPSULE_TEXT.get(mitigation.name)
+        line: str | None
+        if mitigation.name == "ssh_host_key_recovery_capsule":
+            line = mitigation.reason or ""
+        else:
+            line = CAPSULE_TEXT.get(mitigation.name)
         if not line or line in seen:
             continue
         line_tokens = estimate_text_tokens(line)

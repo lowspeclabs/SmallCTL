@@ -27,6 +27,7 @@ class FamaFailureKind(str, Enum):
     REPEATED_REMOTE_INSTALLER_FAILURE = "repeated_remote_installer_failure"
     UPSTREAM_INSTALL_SOURCE_INVALID = "upstream_install_source_invalid"
     PREEXISTING_STATE_AS_SUCCESS = "preexisting_state_as_success"
+    SSH_HOST_KEY_VERIFICATION = "ssh_host_key_verification"
 
 
 FAILURE_CLASSES = {
@@ -54,6 +55,7 @@ FAILURE_CLASSES = {
     "repeated_remote_installer_failure": "Remote installer preflight or execution failed repeatedly.",
     "upstream_install_source_invalid": "Installer fetches or package hosts are invalid upstream while general connectivity still works.",
     "preexisting_state_as_success": "Model treated pre-existing state as successful task completion.",
+    "ssh_host_key_verification": "SSH host key verification failed repeatedly.",
 }
 
 
@@ -74,6 +76,7 @@ DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.REPEATED_REMOTE_INSTALLER_FAILURE: "repeated_remote_installer_failure",
     FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID: "upstream_install_source_invalid",
     FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: "preexisting_state_as_success",
+    FamaFailureKind.SSH_HOST_KEY_VERIFICATION: "ssh_host_key_verification",
 }
 
 

@@ -43,6 +43,7 @@ from .prompts_support import (
     _graph_step_budget_prompt,
     _is_write_first_task,
     _phase_contract_prompt,
+    _readonly_lookup_hint,
     _render_plan_step,
     _state_has_remote_cleanup_intent,
 )
@@ -191,6 +192,9 @@ def build_system_prompt(
     step_budget_prompt = _graph_step_budget_prompt(scratchpad)
     if step_budget_prompt:
         parts.append(step_budget_prompt)
+    readonly_lookup_hint = _readonly_lookup_hint(state)
+    if readonly_lookup_hint:
+        parts.append(readonly_lookup_hint)
     if isinstance(scratchpad, dict) and isinstance(scratchpad.get("_stderr_signature_circuit_breaker"), dict):
         breaker = scratchpad["_stderr_signature_circuit_breaker"]
         parts.append(

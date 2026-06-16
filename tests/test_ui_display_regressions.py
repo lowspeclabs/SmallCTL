@@ -84,6 +84,23 @@ def test_ui_status_detail_and_rca_surface_install_source_blocker() -> None:
     assert "Context invalidated: artifacts=2, observations=1, summaries=0" in rca
 
 
+def test_backend_rca_surfaces_latest_execution_blocker() -> None:
+    state = LoopState()
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "dnf install -y vikunja-server",
+        "latest_blocker": {
+            "salient_error": "Errors during downloading metadata for repository 'vikunja': repomd.xml 404",
+        },
+    }
+    harness = SimpleNamespace(state=state)
+
+    rca = _build_backend_rca_strip(harness)
+
+    assert "Primary blocker" in rca
+    assert "repomd.xml 404" in rca
+
+
 def test_should_render_event_shows_critical_events_despite_system_messages_off() -> None:
     event = UIEvent(
         event_type=UIEventType.SYSTEM,
@@ -146,6 +163,22 @@ def test_build_backend_rca_strip_shows_recent_failures() -> None:
     assert "Error 1" in rca
     assert "Error 2" in rca
     assert "Error 3" in rca
+
+
+def test_build_backend_rca_strip_sanitizes_shell_recent_failures() -> None:
+    harness = SimpleNamespace(
+        state=LoopState(),
+    )
+    harness.state.recent_errors = [
+        "ssh_exec: bash: line 1: pip3: command not found",
+        "Guard tripped: max_consecutive_errors (5) - Errors: ['ssh_exec: /usr/bin/python3: No module named pip']",
+    ]
+
+    rca = _build_backend_rca_strip(harness)
+
+    assert "ssh_exec failed; see tool output" in rca
+    assert "pip3: command not found" not in rca
+    assert "No module named pip" not in rca
 
 
 def test_build_backend_rca_strip_shows_fama_health() -> None:
@@ -289,7 +322,40 @@ def test_critical_backend_interrupt_suppressed_by_default() -> None:
     console._add_bubble = _record_add_bubble  # type: ignore[assignment]
     asyncio.run(console.append_event(event))
     assert "critical_interrupt" not in calls
-    assert any("bubble:system" in c for c in calls)
+    assert not any(c.startswith("bubble:") for c in calls)
+    assert console.get_last_system_message() == "Context invalidated"
+
+
+def test_suppressed_system_event_preserves_active_assistant_turn() -> None:
+    console = ConsolePane(verbose=False)
+    active_turn = object()
+    console._active_assistant_turn = active_turn  # type: ignore[assignment]
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        data={"ui_kind": "info", "display_text": "Background status"},
+        content="Background status",
+    )
+
+    asyncio.run(console.append_event(event))
+
+    assert console._active_assistant_turn is active_turn
+    assert console.get_last_system_message() == "Background status"
+
+
+def test_suppressed_critical_event_preserves_active_assistant_turn() -> None:
+    console = ConsolePane(verbose=False)
+    active_turn = object()
+    console._active_assistant_turn = active_turn  # type: ignore[assignment]
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        data={"ui_kind": "context_invalidated", "display_text": "Context invalidated"},
+        content="Context invalidated",
+    )
+
+    asyncio.run(console.append_event(event))
+
+    assert console._active_assistant_turn is active_turn
+    assert console.get_last_system_message() == "Context invalidated"
 
 
 def test_critical_backend_interrupt_rendered_when_verbose() -> None:
@@ -322,3 +388,39 @@ def test_console_verbose_toggle() -> None:
     assert console._verbose is True
     console.set_verbose(False)
     assert console._verbose is False
+
+
+def test_should_render_event_shows_ssh_host_key_recovery_required() -> None:
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        data={
+            "event": "ssh_host_key_recovery_required",
+            "host": "192.168.1.161",
+            "suggested_command": "ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts",
+        },
+    )
+    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
+def test_format_run_log_row_ssh_host_key_recovery_required() -> None:
+    row = {
+        "channel": "harness",
+        "event": "ssh_host_key_recovery_required",
+        "data": {
+            "host": "192.168.1.161",
+            "suggested_command": "ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts",
+        },
+    }
+    formatted = format_run_log_row(row)
+    assert "SSH host key changed for 192.168.1.161" in formatted
+    assert "ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts" in formatted
+
+
+def test_format_recovery_banner_ssh_host_key_recovery_required() -> None:
+    data = {
+        "host": "192.168.1.161",
+        "suggested_command": "ssh-keygen -R 192.168.1.161 -f ~/.ssh/known_hosts",
+    }
+    banner = format_recovery_banner("ssh_host_key_recovery_required", data)
+    assert "192.168.1.161" in banner
+    assert "ssh-keygen -R" in banner

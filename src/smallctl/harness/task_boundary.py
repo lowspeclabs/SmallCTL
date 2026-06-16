@@ -224,8 +224,22 @@ class TaskBoundaryService(
         reason = self._clip_task_summary_text(payload.get("reason"), limit=140)
         full_reason = str(payload.get("reason") or payload.get("message") or "").strip()
         status = str(payload.get("status") or "").strip()
+        result_status = str(payload.get("result_status") or "").strip()
         is_guard_trip = status == "failed" and "guard tripped:" in full_reason.lower()
-        notes = [f"Task {task_id} {status}: {task_text}".strip()]
+
+        # Classify outcome more honestly for future context retrieval.
+        if status == "completed" and result_status == "completed":
+            outcome_status = "completed"
+        elif status == "completed" and result_status in {"failed", "stopped", "error"}:
+            outcome_status = "failed"
+        elif status == "aborted":
+            outcome_status = "blocked"
+        elif status == "failed" or is_guard_trip:
+            outcome_status = "failed"
+        else:
+            outcome_status = status or "stopped"
+
+        notes = [f"Task {task_id} {outcome_status}: {task_text}".strip()]
         if message:
             notes.append(message)
         elif reason:
@@ -237,7 +251,7 @@ class TaskBoundaryService(
             if count:
                 artifacts = list((getattr(self.harness.state, "artifacts", {}) or {}).keys())[-min(count, 5):]
 
-        decisions = [f"status={status}"] if status else []
+        decisions = [f"status={outcome_status}"] if outcome_status else []
         remaining_plan: list[str] = []
         if payload.get("replacement_task"):
             remaining_plan.append(str(payload.get("replacement_task") or "").strip())

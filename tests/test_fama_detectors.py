@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from smallctl.fama.detectors import detect_early_stop_from_result, detect_verifier_failure_from_result
+from smallctl.fama.detectors import (
+    detect_early_stop_from_result,
+    detect_ssh_host_key_verification_failure_from_result,
+    detect_verifier_failure_from_result,
+)
 from smallctl.fama.signals import FamaFailureKind
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
@@ -115,3 +119,34 @@ def test_detect_verifier_failure_ignores_expected_diagnostic_failure() -> None:
     signal = detect_verifier_failure_from_result(state, tool_name="ssh_exec", result=result)
 
     assert signal is None
+
+
+def test_detect_ssh_host_key_failure_from_single_tool_result() -> None:
+    state = LoopState(step_count=4)
+    result = ToolEnvelope(
+        success=False,
+        error=(
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+            "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n"
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+            "Offending RSA key in /home/stephen/.ssh/known_hosts:24\n"
+            "  remove with:\n"
+            "  ssh-keygen -f '/home/stephen/.ssh/known_hosts' -R '192.168.1.161'\n"
+            "Host key verification failed."
+        ),
+    )
+
+    signal = detect_ssh_host_key_verification_failure_from_result(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.161"},
+    )
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.SSH_HOST_KEY_VERIFICATION
+    assert signal.failure_class == "ssh_host_key_verification"
+    assert "192.168.1.161" in signal.evidence
+    assert "known_hosts" in signal.evidence
+    assert "local harness file" in str(signal.next_safe_action)
+    assert signal.suggested_mitigations == ["ssh_host_key_recovery_capsule"]

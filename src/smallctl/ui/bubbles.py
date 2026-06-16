@@ -81,6 +81,8 @@ class BubbleWidget(Static):
         if nested:
             classes += " bubble-nested"
         super().__init__("", id=id, classes=classes)
+        self.styles.width = "100%"
+        self.styles.max_width = "100%"
         self.text = text
         self._refresh_content()
 
@@ -114,6 +116,8 @@ class TextBlockWidget(Static):
 
     def __init__(self, text: str = "", id: str | None = None, classes: str | None = None) -> None:
         super().__init__("", id=id, classes=classes)
+        self.styles.width = "100%"
+        self.styles.max_width = "100%"
         self.text = text
         self._refresh_content()
 

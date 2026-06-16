@@ -46,13 +46,19 @@ def _strip_environment_and_wrappers(words: list[str]) -> list[str]:
     import re
     from pathlib import Path
     stripped = list(words)
-    while stripped and "=" in stripped[0] and not stripped[0].startswith("="):
-        key, _value = stripped[0].split("=", 1)
-        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            break
-        stripped.pop(0)
-    while stripped and Path(stripped[0]).name.lower() in {"sudo", "doas", "env", "command"}:
-        stripped.pop(0)
-        while stripped and stripped[0].startswith("-"):
+    while stripped:
+        removed = False
+        while stripped and "=" in stripped[0] and not stripped[0].startswith("="):
+            key, _value = stripped[0].split("=", 1)
+            if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                break
             stripped.pop(0)
+            removed = True
+        if stripped and Path(stripped[0]).name.lower() in {"sudo", "doas", "env", "command"}:
+            stripped.pop(0)
+            removed = True
+            while stripped and stripped[0].startswith("-"):
+                stripped.pop(0)
+        if not removed:
+            break
     return stripped

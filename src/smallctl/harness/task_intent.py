@@ -7,6 +7,7 @@ from typing import Any
 from ..experience_tags import PHASE_TAG_PREFIX
 from ..state import clip_string_list, clip_text_value
 from .task_classifier import (
+    classify_runtime_intent,
     is_smalltalk,
     looks_like_author_write_request,
     looks_like_write_file_request,
@@ -76,8 +77,38 @@ def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[
     requested_tool = infer_requested_tool_name(harness, task)
     author_write_request = looks_like_author_write_request(task)
 
-    primary = "general_task"
-    if author_write_request:
+    # Runtime intent classification can override heuristic extraction for
+    # answer-only / research-style tasks that would otherwise be misclassified
+    # as execution (e.g. "do a websearch on X then respond back").
+    runtime_intent = classify_runtime_intent(
+        task,
+        recent_messages=list(getattr(harness.state, "recent_messages", []) or []),
+        pending_interrupt=getattr(harness.state, "pending_interrupt", None),
+    )
+    suggestion_only = any(
+        marker in text
+        for marker in (
+            "list improvement",
+            "list improvements",
+            "improvements you would make",
+            "improvements would you make",
+            "what improvements",
+            "recommend improvements",
+            "suggest improvements",
+            "suggest changes",
+            "would change",
+            "would improve",
+        )
+    )
+    if suggestion_only and any(token in text for token in {"inspect", "read", "grep", "find", "search", "list"}):
+        primary = "inspect_repo"
+        secondary.append("read_artifacts")
+    elif runtime_intent.label == "readonly_lookup" and not author_write_request:
+        primary = "readonly_lookup"
+        secondary.append("answer_only")
+        secondary.append("complete_validation_task")
+        tags.append("research")
+    elif author_write_request:
         primary = "author_write"
         secondary.extend(["mutate_repo", "complete_validation_task"])
         tags.append("write_file")
@@ -98,6 +129,8 @@ def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[
     elif "contract" in text or "plan" in text:
         primary = "plan_execution"
         secondary.append("complete_validation_task")
+    else:
+        primary = "general_task"
 
     if harness.state.working_memory.failures:
         secondary.append("recover_from_validation_error")

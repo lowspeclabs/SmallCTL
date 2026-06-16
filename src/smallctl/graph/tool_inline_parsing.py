@@ -137,6 +137,28 @@ def _extract_inline_tool_calls(
                 }
             )
 
+        # Gemma-style self-closing call tag: <call:tool_name key="value" />
+        call_match = re.match(
+            r"^\s*<call:([\w_-]+)\s+([^>]*)/?>\s*$",
+            block_text,
+            re.DOTALL,
+        )
+        if call_match:
+            tool_name = call_match.group(1).strip()
+            attr_text = call_match.group(2).strip()
+            params: dict[str, str] = {}
+            for key, _quote, value in re.findall(
+                r'([\w_-]+)\s*=\s*(["\'])(.*?)\2',
+                attr_text,
+            ):
+                params[key] = value
+            if params:
+                return PendingToolCall(
+                    tool_name=tool_name,
+                    args=params,
+                    raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
+                )
+
         struct_patterns = (
             r"<function=([\w_-]+)>(.*?)</function>",
             r"<function\s+name=['\"]?([\w_-]+)['\"]?\s*>(.*?)</function>",
@@ -271,6 +293,23 @@ def _extract_inline_tool_calls(
                 start, end = match.span()
                 cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
                 offset += end - start
+
+    # Gemma-style self-closing call tags: <call:tool_name key="value" />
+    call_tag_matches = list(
+        re.finditer(
+            r"<call:([\w_-]+)\s+([^>]*)/?>",
+            cleaned_text,
+            re.DOTALL,
+        )
+    )
+    offset = 0
+    for match in call_tag_matches:
+        pending = _parse_xml_function_block(match.group(0))
+        if pending is not None:
+            results.append(pending)
+            start, end = match.span()
+            cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
+            offset += end - start
 
     bracket_tool_pattern = r"\[\s*([A-Za-z0-9_-]+)\s*\]\s*(\{.*?\})"
     bracket_matches = list(re.finditer(bracket_tool_pattern, cleaned_text, re.DOTALL))

@@ -5,9 +5,8 @@ _RESPONSE_STRUCTURE_THINK = (
 )
 
 _RESPONSE_STRUCTURE_GEMMA = (
-    "RESPONSE STRUCTURE: This Gemma model may use its native reasoning format. "
-    "Do not force a <think> block or add conflicting wrapper tags. "
-    "Use the model's normal reasoning flow, then continue with tool calls or the final answer as needed. "
+    "RESPONSE STRUCTURE: Start EVERY response with a <think> block for plan and rationale. "
+    "Then continue with tool calls or the final answer as needed. "
 )
 
 _RESPONSE_STRUCTURE_SMALL_GEMMA = (

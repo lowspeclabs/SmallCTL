@@ -2470,3 +2470,95 @@ def test_record_ssh_failure_resets_consecutive_count_on_error_class_change() -> 
     network._record_ssh_failure(state, "host", "user", "cmd3", "host_key_verification", "err")
     record = state.scratchpad["_ssh_auth_recovery_state"]["user@host"]
     assert record["consecutive_count"] == 2
+
+
+def test_gemma_call_tag_self_closing_tool_call_is_parsed() -> None:
+    text = '<call:task_complete message="Hello! How can I help you today?" />'
+    cleaned, calls = _extract_inline_tool_calls(text)
+    assert cleaned == ""
+    assert len(calls) == 1
+    assert calls[0].tool_name == "task_complete"
+    assert calls[0].args == {"message": "Hello! How can I help you today?"}
+
+
+def test_gemma_call_tag_with_multiple_attributes() -> None:
+    text = '<call:ssh_exec host="192.168.1.161" user="root" command="hostname" />'
+    cleaned, calls = _extract_inline_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].tool_name == "ssh_exec"
+    assert calls[0].args == {
+        "host": "192.168.1.161",
+        "user": "root",
+        "command": "hostname",
+    }
+
+
+def test_streaming_gemma_channel_marker_ends_thinking_block() -> None:
+    events: list[object] = []
+    runlog: list[tuple[str, str, dict[str, object]]] = []
+
+    async def _emit(_handler: object, event: object) -> None:
+        events.append(event)
+
+    harness = SimpleNamespace(
+        thinking_visibility=True,
+        state=SimpleNamespace(planning_mode_enabled=False),
+        _emit=_emit,
+        _runlog=lambda event, message, **kwargs: runlog.append((event, message, kwargs)),
+        _stream_print=lambda _text: None,
+    )
+    deps = SimpleNamespace(event_handler=object())
+    state = StreamTagState()
+    first_token_time = None
+    chunks: list[dict[str, object]] = []
+
+    # Split <think> across chunks, matching real Gemma streams.
+    stream_events = [
+        {"data": {"choices": [{"delta": {"content": "<think"}}]}},
+        {"data": {"choices": [{"delta": {"content": ">"}}]}},
+        {"data": {"choices": [{"delta": {"content": "\n"}}]}},
+        {"data": {"choices": [{"delta": {"content": "<channel|>"}}]}},
+        {"data": {"choices": [{"delta": {"content": "Hello!"}}]}},
+    ]
+
+    for event in stream_events:
+        state, first_token_time = asyncio.run(
+            handle_model_stream_chunk(
+                harness=harness,
+                deps=deps,
+                event=event,
+                start_tag="<think>",
+                end_tag="</think>",
+                echo_to_stdout=False,
+                chunks=chunks,
+                stream_state=state,
+                first_token_time=first_token_time,
+            )
+        )
+
+    asyncio.run(
+        flush_model_stream_buffer(
+            harness=harness,
+            deps=deps,
+            stream_state=state,
+            start_tag="<think>",
+            end_tag="</think>",
+            echo_to_stdout=False,
+        )
+    )
+
+    assistant_text = "".join(
+        event.content
+        for event in events
+        if getattr(event, "event_type", None) == UIEventType.ASSISTANT
+    )
+    thinking_text = "".join(
+        event.content
+        for event in events
+        if getattr(event, "event_type", None) == UIEventType.THINKING
+    )
+
+    assert assistant_text == "Hello!"
+    assert thinking_text == "\n"
+    assert "<channel|>" not in assistant_text
+

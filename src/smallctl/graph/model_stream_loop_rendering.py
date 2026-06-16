@@ -5,6 +5,7 @@ import time
 from typing import Any, Literal
 
 from ..models.events import UIEvent, UIEventType
+from ..client.chunk_parser import find_protocol_control_marker
 from .model_stream_fallback_recovery import _with_speaker
 
 
@@ -159,6 +160,13 @@ async def _route_stream_content(
             end_index = lowered.find(current_end)
             if end_index != -1:
                 candidates.append((end_index, 0, -len(current_end), "end", current_end, None))
+            # Protocol control markers (e.g. <channel|>) implicitly terminate a
+            # thinking block for models that open <think> but never close it.
+            if current_frame.kind == "thinking":
+                control_marker = find_protocol_control_marker(pending)
+                if control_marker is not None:
+                    control_index, control_length = control_marker
+                    candidates.append((control_index, -1, -control_length, "control_end", pending[control_index:control_index + control_length], None))
         else:
             for _start, end, _kind in wrapper_pairs:
                 end_lower = end.lower()
@@ -207,6 +215,8 @@ async def _route_stream_content(
             if matching_end:
                 stream_state.wrapper_stack.append(_WrapperFrame(kind=next_kind, end_tag=matching_end))
         elif action == "end" and stream_state.wrapper_stack:
+            stream_state.wrapper_stack.pop()
+        elif action == "control_end" and stream_state.wrapper_stack:
             stream_state.wrapper_stack.pop()
 
 

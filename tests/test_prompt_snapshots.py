@@ -69,8 +69,7 @@ class TestSystemPromptSnapshots:
     def test_gemma_model_response_structure(self) -> None:
         state = _make_state("google_gemma-4-e2b-it")
         prompt = build_system_prompt(state, "execute")
-        assert "This Gemma model may use its native reasoning format" in prompt
-        assert "Do not force a <think> block" in prompt
+        assert "Start EVERY response with a <think> block" in prompt
 
     def test_small_gemma_format_notes(self) -> None:
         state = _make_state("gemma-4-e2b-it")

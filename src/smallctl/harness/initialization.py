@@ -15,6 +15,7 @@ from ..context import (
     PromptAssembler,
     SubtaskRunner,
 )
+from ..graph.tool_model_rules_model_detection import _model_uses_gemma_rules
 from ..guards import GuardConfig
 from ..phases import normalize_phase
 from ..tools import ToolDispatcher, build_registry
@@ -88,6 +89,8 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         )
 
     self.reasoning_mode = config.reasoning_mode
+    if _model_uses_gemma_rules(config.model) and self.reasoning_mode in {"off", "field"}:
+        self.reasoning_mode = "tags"
     self.thinking_visibility = config.thinking_visibility
     self.thinking_start_tag = config.thinking_start_tag
     self.thinking_end_tag = config.thinking_end_tag

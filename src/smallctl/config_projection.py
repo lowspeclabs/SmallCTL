@@ -41,6 +41,7 @@ LOCAL_ONLY_FIELDS = {
     "shell_preflight_require_approval_for_service_changes",
     "shell_preflight_transparent",
     "shell_preflight_warn_large_output",
+    "show_system_messages",
     "staged_reasoning",
     "no_fama",
     "task",

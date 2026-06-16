@@ -141,6 +141,7 @@ _BOOL_CONFIG_KEYS = {
     "escalation_auto_trigger",
     "escalation_require_tool_plan_evidence",
     "escalation_redact_secrets",
+    "show_system_messages",
     "verbose",
 }
 
@@ -439,6 +440,7 @@ def _env_raw_config(env_or_dotenv: Any) -> dict[str, Any]:
         "subtask_max_history": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_MAX_HISTORY"),
         "subtask_inject_completed_limit": env_or_dotenv(f"{ENV_PREFIX}SUBTASK_INJECT_COMPLETED_LIMIT"),
         "sudo_password": env_or_dotenv(f"{ENV_PREFIX}SUDO_PASSWORD"),
+        "show_system_messages": env_or_dotenv(f"{ENV_PREFIX}SHOW_SYSTEM_MESSAGES"),
         "verbose": env_or_dotenv(f"{ENV_PREFIX}VERBOSE"),
     }
 

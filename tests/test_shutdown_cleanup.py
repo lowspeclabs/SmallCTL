@@ -216,12 +216,13 @@ def test_teardown_waits_for_background_autosave_snapshot_work(tmp_path) -> None:
 def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> None:
     import smallctl.ui as ui_module
 
-    alerts: list[str] = []
+    alerts: list[tuple[str, str, bool]] = []
 
     class _FakeApp:
         def __init__(self, harness_kwargs: dict[str, object]) -> None:
             self.harness_kwargs = dict(harness_kwargs)
             self.closed_by_ctrl_c = True
+            self._show_system_messages = bool(harness_kwargs.get("show_system_messages", False))
             self.harness = SimpleNamespace(
                 state=SimpleNamespace(thread_id="thread-123"),
                 conversation_id="conversation-ignored",
@@ -281,16 +282,47 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
         log_file=None,
         debug=False,
         compatibility_warnings=[],
+        show_system_messages=True,
     )
 
     monkeypatch.setattr(main_module, "resolve_config", lambda _args: config)
     monkeypatch.setattr(main_module, "setup_logging", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_module, "create_run_logger", lambda _path: SimpleNamespace(run_dir=Path(".")))
     monkeypatch.setattr(main_module, "log_kv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main_module, "_print_shutdown_alert", lambda session_id, status="alert": alerts.append(session_id))
+    monkeypatch.setattr(
+        main_module,
+        "_print_shutdown_alert",
+        lambda session_id, status="alert", include_message=True: alerts.append(
+            (session_id, status, include_message)
+        ),
+    )
     monkeypatch.setattr(ui_module, "SmallctlApp", _FakeApp)
 
     result = main_module.cli(["--tui"])
 
     assert result == 130
-    assert alerts == ["thread-123"]
+    assert alerts == [("thread-123", "exited", True)]
+
+    alerts.clear()
+    config.show_system_messages = None
+
+    result = main_module.cli(["--tui"])
+
+    assert result == 130
+    assert alerts == [("thread-123", "exited", False)]
+
+    alerts.clear()
+    config.show_system_messages = False
+
+    result = main_module.cli(["--tui", "--hide-system-messages"])
+
+    assert result == 130
+    assert alerts == [("thread-123", "exited", False)]
+
+    alerts.clear()
+    config.show_system_messages = True
+
+    result = main_module.cli(["--tui", "--show-system-message"])
+
+    assert result == 130
+    assert alerts == [("thread-123", "exited", True)]

@@ -1,5 +1,5 @@
 from smallctl.models.events import UIEvent, UIEventType
-from smallctl.ui.display import should_render_event
+from smallctl.ui.display import _CRITICAL_EVENTS, should_render_event
 
 
 def test_alert_suppressed_when_system_messages_hidden() -> None:
@@ -79,3 +79,9 @@ def test_shell_stream_suppressed_when_tool_calls_hidden() -> None:
 def test_tool_result_visible_when_tool_calls_shown() -> None:
     event = UIEvent(event_type=UIEventType.TOOL_RESULT, content="ok")
     assert should_render_event(event, show_system_messages=True, show_tool_calls=True) is True
+
+
+def test_harness_diagnostic_run_log_events_are_not_critical() -> None:
+    assert "mode_decision" not in _CRITICAL_EVENTS
+    assert "retrieval_selected" not in _CRITICAL_EVENTS
+    assert "retrieval_ranked_with_intent" not in _CRITICAL_EVENTS

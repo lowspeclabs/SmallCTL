@@ -39,9 +39,6 @@ _CRITICAL_EVENTS = {
     "verifier_loop_detected",
     "generic_tool_loop_nudge",
     "recent_message_limit_tuned",
-    "mode_decision",
-    "retrieval_ranked_with_intent",
-    "retrieval_selected",
 }
 
 _DUPLICATE_STOPWORDS = {

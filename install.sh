@@ -332,10 +332,11 @@ install_smallctl() {
   "$VENV_DIR/bin/python" -m pip install --upgrade pip wheel setuptools
 
   if [ -n "$SMALLCTL_DEV_MODE" ]; then
-    "$VENV_DIR/bin/python" -m pip install -e "$BUNDLE_ROOT"
-    echo "smallctl installed in editable mode (SMALLCTL_DEV_MODE)."
+    "$VENV_DIR/bin/python" -m pip install -e "$BUNDLE_ROOT[dev]"
+    echo "smallctl installed in editable mode with dev tools (SMALLCTL_DEV_MODE)."
   else
     "$VENV_DIR/bin/python" -m pip install "$BUNDLE_ROOT"
+    "$VENV_DIR/bin/python" -m pip install pytest
     echo "smallctl installed."
   fi
 }

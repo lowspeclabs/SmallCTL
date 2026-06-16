@@ -360,6 +360,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show verbose backend/interrupt messages in assistant turns",
     )
     parser.add_argument(
+        "--show-system-messages",
+        "--show-system-message",
+        dest="show_system_messages",
+        action="store_true",
+        default=None,
+        help="Show system-level TUI messages and shutdown alerts",
+    )
+    parser.add_argument(
+        "--hide-system-messages",
+        "--hide-system-message",
+        dest="show_system_messages",
+        action="store_false",
+        default=None,
+        help="Hide system-level TUI messages and shutdown alerts",
+    )
+    parser.add_argument(
         "--cleanup",
         action="store_true",
         help="Remove Python cache artifacts before starting harness",
@@ -436,23 +452,18 @@ def _resolve_session_id(harness: object | None, fallback: str | None = None) -> 
     return ""
 
 
-def _print_shutdown_alert(session_id: str, status: str = "alert") -> None:
-    message = (
-        "smallctl closed via Ctrl+C"
-        if status == "alert"
-        else "smallctl TUI closed"
-    )
-    print(
-        json.dumps(
-            {
-                "status": status,
-                "message": message,
-                "session_id": session_id or "unknown",
-            },
-            indent=2,
-            sort_keys=True,
+def _print_shutdown_alert(session_id: str, status: str = "alert", *, include_message: bool = True) -> None:
+    payload = {
+        "status": status,
+        "session_id": session_id or "unknown",
+    }
+    if include_message:
+        payload["message"] = (
+            "smallctl closed via Ctrl+C"
+            if status == "alert"
+            else "smallctl TUI closed"
         )
-    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def cli(argv: list[str] | None = None) -> int:
@@ -506,7 +517,10 @@ def cli(argv: list[str] | None = None) -> int:
         )
 
     if args.tui:
-        if not sys.stdin.isatty():
+        show_system_setting = getattr(config, "show_system_messages", None)
+        show_system_messages = bool(show_system_setting) if show_system_setting is not None else False
+        include_shutdown_message = bool(show_system_setting)
+        if show_system_messages and not sys.stdin.isatty():
             print(
                 json.dumps(
                     {
@@ -525,6 +539,7 @@ def cli(argv: list[str] | None = None) -> int:
         harness_kwargs = build_harness_config_kwargs(config, run_logger=run_logger, task=config.task)
         harness_kwargs["restore_graph_state_on_startup"] = config.restore_graph_state
         harness_kwargs["restore_thread_id"] = config.graph_thread_id
+        harness_kwargs["show_system_messages"] = show_system_messages
         app = SmallctlApp(harness_kwargs=harness_kwargs)
         try:
             app.run()
@@ -543,7 +558,8 @@ def cli(argv: list[str] | None = None) -> int:
                 _resolve_session_id(
                     getattr(app, "harness", None),
                     fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
-                )
+                ),
+                include_message=include_shutdown_message,
             )
             return 130
         except Exception as exc:
@@ -566,6 +582,7 @@ def cli(argv: list[str] | None = None) -> int:
                     fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
                 ),
                 status="exited",
+                include_message=include_shutdown_message,
             )
             return 130
     elif config.task or config.restore_graph_state:

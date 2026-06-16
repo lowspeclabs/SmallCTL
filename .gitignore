@@ -8,6 +8,7 @@ __pycache__/
 # Environment
 .env
 .env.*
+!.env.example
 
 # Caches
 .mypy_cache/

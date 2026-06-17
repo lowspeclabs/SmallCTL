@@ -376,8 +376,8 @@ def parse_tool_calls(
     if final_assistant_text.strip():
         stripped, _ = extract_thinking_from_tags(
             final_assistant_text,
-            thinking_start_tag=harness.thinking_start_tag or "<think>",
-            thinking_end_tag=harness.thinking_end_tag or "</think>",
+            thinking_start_tag=getattr(harness, "thinking_start_tag", "<think>") or "<think>",
+            thinking_end_tag=getattr(harness, "thinking_end_tag", "</think>") or "</think>",
         )
         final_assistant_text = stripped.strip()
 

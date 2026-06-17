@@ -355,7 +355,26 @@ class TaskBoundaryClassificationMixin:
             or ""
         )
 
+    def _last_failed_continuation_task(self) -> str:
+        scratchpad = getattr(self.harness.state, "scratchpad", {})
+        payload = scratchpad.get("_last_failed_continuation_task") if isinstance(scratchpad, dict) else None
+        if not isinstance(payload, dict):
+            return ""
+        task = collapse_task_chain(str(payload.get("task") or "").strip())
+        if not task:
+            return ""
+        status_like = {"status", "status?", "continue"}
+        current = normalize_task_text(self.harness.state.run_brief.original_task or "")
+        handoff = self.last_task_handoff()
+        handoff_task = normalize_task_text(handoff.get("effective_task") or handoff.get("raw_task") or "")
+        if current in status_like or handoff_task in status_like:
+            return task
+        return ""
+
     def _current_or_handoff_continuity_task(self) -> str:
+        failed_continuation_task = self._last_failed_continuation_task()
+        if failed_continuation_task:
+            return failed_continuation_task
         handoff = self.last_task_handoff()
         return collapse_task_chain(
             self.harness.state.working_memory.current_goal

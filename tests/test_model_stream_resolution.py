@@ -230,6 +230,10 @@ class _ProgressingReasoningClient:
             },
         }
 
+class _LfmProgressingReasoningClient(_ProgressingReasoningClient):
+    model = "lfm2.5-8b-a1b"
+
+
 
 def _incident_native_tool_call_chunks(*, wrapped: bool = True) -> list[dict[str, object]]:
     raw_chunks: list[dict[str, object]] = [
@@ -490,6 +494,40 @@ def test_progressing_reasoning_only_stream_gets_hard_budget_before_retry(monkeyp
     assert len(harness.client.calls) == 1
     assert result["stream_completed_cleanly"] is True
     assert any(event[0][0] == "reasoning_only_stream_progress_defer" for event in harness.runlog_events)
+
+def test_lfm_progressing_reasoning_only_stream_retries_without_hard_budget(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _LfmProgressingReasoningClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "ssh_exec", "parameters": {"type": "object"}}}]
+
+    monkeypatch.setattr(model_stream_loop_module, "_LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS", 4)
+    monkeypatch.setattr(model_stream_loop_module, "_LFM25_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_CHUNKS", 8)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "install pihole"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert len(harness.client.calls) == 2
+    assert any(event[0][0] == "reasoning_only_stream_retry" for event in harness.runlog_events)
+    assert not any(event[0][0] == "reasoning_only_stream_progress_defer" for event in harness.runlog_events)
+    assert result["stream_completed_cleanly"] is False
+    assert result["stream_ended_without_done_details"]["reason"] == "reasoning_only_stream_stall"
 
 
 def test_stream_chunk_error_schedules_one_auto_resume_for_recoverable_write_session() -> None:

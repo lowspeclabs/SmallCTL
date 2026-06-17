@@ -264,6 +264,47 @@ def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
         )
     ]
 
+def test_lfm_plan_json_is_stripped_and_next_action_tool_recovered() -> None:
+    stream = SimpleNamespace(
+        assistant_text=(
+            '{\n'
+            '  "plan": "Check remote state, then continue.",\n'
+            '  "next_actions": [\n'
+            '    {"tool_name": "ssh_exec", "arguments": {"host": "192.168.1.161", "user": "root", "command": "test -d /opt/pi-hole && echo present"}}\n'
+            '  ],\n'
+            '  "status_required": "low",\n'
+            '  "next_step": null\n'
+            '}'
+        ),
+        thinking_text="",
+        tool_calls=[],
+    )
+    registry = SimpleNamespace(names=lambda: {"ssh_exec", "task_complete", "task_fail"})
+    harness = SimpleNamespace(
+        registry=registry,
+        state=LoopState(cwd="."),
+        client=SimpleNamespace(model="lfm2.5-8b-a1b"),
+        _runlog=lambda *args, **kwargs: None,
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+    )
+
+    parse_result = parse_tool_calls(
+        stream,
+        timeline=[],
+        graph_state=SimpleNamespace(run_mode="chat"),
+        deps=SimpleNamespace(harness=harness),
+        model_name="lfm2.5-8b-a1b",
+    )
+
+    assert parse_result.final_assistant_text == ""
+    assert "next_actions" not in parse_result.cleaned_text
+    assert len(parse_result.pending_tool_calls) == 1
+    pending = parse_result.pending_tool_calls[0]
+    assert pending.tool_name == "ssh_exec"
+    assert pending.args["command"] == "test -d /opt/pi-hole && echo present"
+    assert pending.parser_metadata["lfm_plan_json_recovered"] is True
+
 
 def test_qwen_response_wrapper_is_unwrapped_into_assistant_text() -> None:
     chunks = [

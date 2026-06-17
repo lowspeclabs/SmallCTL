@@ -13,6 +13,7 @@ from .tool_model_rules_model_detection import (
     _GLM_BOX_MODEL_MARKERS,
     _GPT_OSS_MODEL_MARKERS,
     _QWEN_MODEL_MARKERS,
+    _model_is_lfm25_8b_a1b,
     _model_is_exact_qwen_25_7b_instruct,
     _model_is_exact_small_gemma_4_it,
     _model_uses_gemma_rules,

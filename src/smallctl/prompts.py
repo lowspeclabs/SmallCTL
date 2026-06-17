@@ -11,6 +11,7 @@ from .prompt_fragments import (
     _CONTRACT_PHASE_FOCUS_SMALL,
     _EVIDENCE_ANCHORED_DIAGNOSIS_RULE,
     _LARGE_GEMMA_26B_ANTI_LOOP_RULE,
+    _LFM_25_8B_STRICT_FORMAT,
     _LARGE_MODEL_STRUCTURED_REASONING,
     _LOCAL_ARTIFACT_TASK_PREFIX,
     _LOCAL_SCOPE_PREFERENCE,
@@ -38,6 +39,7 @@ from .prompt_model_classifiers import (
     is_exact_large_gemma_4_26b_a4b_it_model_name,
     is_exact_small_gemma_4_it_model_name,
     is_gemma_model_name,
+    is_lfm25_8b_a1b_model_name,
 )
 from .state import LoopState, clip_text_value
 from .prompts_support import (
@@ -70,6 +72,7 @@ def build_system_prompt(
     gemma_mode = is_gemma_model_name(model_name)
     exact_small_gemma_mode = is_exact_small_gemma_4_it_model_name(model_name)
     exact_large_gemma_26b_mode = is_exact_large_gemma_4_26b_a4b_it_model_name(model_name)
+    lfm25_8b_mode = is_lfm25_8b_a1b_model_name(model_name)
     small_model = is_seven_b_or_under_model_name(model_name)
     large_model = is_over_twenty_b_model_name(model_name)
     if gemma_mode:
@@ -106,6 +109,7 @@ def build_system_prompt(
                 _TOOL_CALL_FORMAT_JSON,
                 _TOOL_CALL_FORMAT_TERMINAL,
                 "STRICT: No hallucinations. Only report what tools actually returned. ",
+                _LFM_25_8B_STRICT_FORMAT if lfm25_8b_mode else "",
                 "CONCISENESS: Summarize findings briefly, then call `task_complete(message='...')` when done. ",
                 "REDUNDANCY: Reuse what you already know. Do not repeat identical or near-identical tool calls. ",
                 f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",

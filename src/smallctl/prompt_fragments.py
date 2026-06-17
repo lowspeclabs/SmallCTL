@@ -85,6 +85,13 @@ _SMALL_GEMMA_STRICT_FORMAT = (
     "describe intent only; do not copy that literal syntax into the response. "
 )
 
+_LFM_25_8B_STRICT_FORMAT = (
+    "LFM2.5-8B STRICT FORMAT: Do not write JSON planning objects into chat. "
+    "Never output top-level fields like `plan`, `next_actions`, `status_required`, or `next_step` as assistant text. "
+    "If an action is needed, emit the actual tool call only. If no action is needed, answer briefly and call the terminal tool. "
+    "Do not copy literal examples such as `task_complete(message=...)`; use the tool-call JSON protocol. "
+)
+
 _LARGE_GEMMA_26B_ANTI_LOOP_RULE = (
     "ANTI-LOOP RULE: Do not restart from the beginning of a task once concrete steps have already succeeded. "
     "If a directory was already created, a file was already written, or a container was already started, "

@@ -37,6 +37,10 @@ _GEMMA_MODEL_MARKERS = (
     "gemma-3",
     "gemma/",
 )
+_EXACT_LFM_25_8B_A1B_MODELS = (
+    "lfm2.5-8b-a1b",
+    "liquid/lfm2.5-8b-a1b",
+)
 
 
 def _model_uses_glm_box_rules(model_name: str | None) -> bool:
@@ -73,3 +77,8 @@ def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
             for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
         )
     )
+
+
+def _model_is_lfm25_8b_a1b(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    return normalized in _EXACT_LFM_25_8B_A1B_MODELS

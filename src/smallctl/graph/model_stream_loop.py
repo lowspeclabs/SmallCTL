@@ -17,6 +17,7 @@ from ..state import json_safe_value
 from .deps import GraphRuntimeDeps
 from .state import GraphRunState
 from .tool_call_parser import _detect_empty_file_write_payload
+from .tool_model_rules import _model_is_lfm25_8b_a1b
 from .model_stream_fallback import StreamProcessingResult
 from .model_stream_fallback_support import (
     _classify_model_call_error,
@@ -35,6 +36,8 @@ _REASONING_ONLY_MAX_SECONDS = 60.0
 _REASONING_ONLY_MAX_CHUNKS = 4096
 _REASONING_ONLY_TOOL_MAX_SECONDS = 25.0
 _REASONING_ONLY_TOOL_MAX_CHUNKS = 1500
+_LFM25_REASONING_ONLY_TOOL_MAX_SECONDS = 12.0
+_LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS = 512
 _REASONING_ONLY_MAX_RETRIES = 1
 _REASONING_PROGRESS_MIN_FRAGMENTS = 4
 _REASONING_PROGRESS_MIN_UNIQUE_RATIO = 0.35
@@ -139,9 +142,18 @@ def _tool_names(tools: list[dict[str, Any]]) -> list[str]:
     return names
 
 
-def _reasoning_only_limits(tools: list[dict[str, Any]]) -> tuple[float, int]:
+def _reasoning_only_limits(
+    tools: list[dict[str, Any]],
+    *,
+    model_name: str | None = None,
+) -> tuple[float, int]:
     if not tools:
         return _REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_MAX_CHUNKS
+    if _model_is_lfm25_8b_a1b(model_name):
+        return (
+            min(_REASONING_ONLY_MAX_SECONDS, _LFM25_REASONING_ONLY_TOOL_MAX_SECONDS),
+            min(_REASONING_ONLY_MAX_CHUNKS, _LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS),
+        )
     return (
         min(_REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_TOOL_MAX_SECONDS),
         min(_REASONING_ONLY_MAX_CHUNKS, _REASONING_ONLY_TOOL_MAX_CHUNKS),
@@ -218,7 +230,12 @@ async def run_model_stream_loop(
             _stop_after_reasoning_only_stall = False
             attempt_started_at = time.monotonic()
             reasoning_only_chunks = 0
-            reasoning_only_max_seconds, reasoning_only_max_chunks = _reasoning_only_limits(tools)
+            active_model_name = str(getattr(getattr(harness, "client", None), "model", "") or "")
+            lfm25_reasoning_guard = _model_is_lfm25_8b_a1b(active_model_name)
+            reasoning_only_max_seconds, reasoning_only_max_chunks = _reasoning_only_limits(
+                tools,
+                model_name=active_model_name,
+            )
             reasoning_only_base_seconds = reasoning_only_max_seconds
             reasoning_only_base_chunks = reasoning_only_max_chunks
             reasoning_only_progress_deferred = False
@@ -404,6 +421,7 @@ async def run_model_stream_loop(
                                 or reasoning_only_max_chunks < hard_max_chunks
                             )
                             and progress_assessment.progress
+                            and not lfm25_reasoning_guard
                         ):
                             reasoning_only_progress_deferred = True
                             reasoning_only_max_seconds = hard_max_seconds

@@ -6,7 +6,11 @@ from typing import Any
 
 from ..state import json_safe_value
 from .state import PendingToolCall
-from .tool_model_rules import _parse_raw_function_call, _strip_exact_small_gemma_4_protocol_noise
+from .tool_model_rules import (
+    _model_is_lfm25_8b_a1b,
+    _parse_raw_function_call,
+    _strip_exact_small_gemma_4_protocol_noise,
+)
 
 
 _INLINE_TOOL_SCHEMA_KEYS = {
@@ -252,6 +256,50 @@ def _extract_inline_tool_calls(
                 pending.parser_metadata["inline_json_extra_fields"] = extra_fields
         return pending
 
+    def _try_parse_lfm_plan_data(data: Any) -> list[PendingToolCall]:
+        if not _model_is_lfm25_8b_a1b(model_name) or not isinstance(data, dict):
+            return []
+        if not any(key in data for key in ("plan", "next_actions", "status_required", "next_step")):
+            return []
+        actions = data.get("next_actions")
+        if not isinstance(actions, list):
+            return []
+        calls: list[PendingToolCall] = []
+        for action in actions:
+            pending = _try_parse_data(action)
+            if pending is None or not pending.tool_name:
+                continue
+            if allowed_raw_function_names is not None and pending.tool_name not in allowed_raw_function_names:
+                continue
+            pending.parser_metadata["lfm_plan_json_recovered"] = True
+            calls.append(pending)
+        return calls
+
+    def _try_strip_lfm_plan_json_object(start: int) -> bool:
+        nonlocal cleaned_text
+        brace_count = 0
+        end = -1
+        for i in range(start, len(cleaned_text)):
+            if cleaned_text[i] == "{":
+                brace_count += 1
+            elif cleaned_text[i] == "}":
+                brace_count -= 1
+            if brace_count == 0:
+                end = i + 1
+                break
+        if end == -1:
+            return False
+        try:
+            data = json.loads(cleaned_text[start:end])
+        except Exception:
+            return False
+        recovered = _try_parse_lfm_plan_data(data)
+        if not recovered:
+            return False
+        results.extend(recovered)
+        cleaned_text = cleaned_text[:start] + cleaned_text[end:]
+        return True
+
     xml_patterns = [
         r"<tool_code>(.*?)</tool_code>",
         r"<tool_call>(.*?)</tool_call>",
@@ -356,6 +404,9 @@ def _extract_inline_tool_calls(
             pass
 
     if "{" in cleaned_text:
+        start = cleaned_text.find("{")
+        while start != -1 and _try_strip_lfm_plan_json_object(start):
+            start = cleaned_text.find("{", start)
         start = cleaned_text.find("{")
         while start != -1:
             brace_count = 0

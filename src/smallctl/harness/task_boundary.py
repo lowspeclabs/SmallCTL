@@ -277,6 +277,15 @@ class TaskBoundaryService(
             )
         )
         self.harness.state.episodic_summaries = self.harness.state.episodic_summaries[-12:]
+        if outcome_status == "failed" and task_text:
+            normalized_task_text = normalize_task_text(task_text)
+            if normalized_task_text not in {"status", "status?", "continue"}:
+                self.harness.state.scratchpad["_last_failed_continuation_task"] = {
+                    "task": task_text,
+                    "reason": self._clip_task_summary_text(full_reason, limit=260),
+                    "task_id": task_id,
+                    "updated_at": str(payload.get("finished_at") or ""),
+                }
         if is_guard_trip:
             self._record_guard_trip_recovery_context(
                 summary_id=summary_id,

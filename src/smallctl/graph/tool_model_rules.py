@@ -4,6 +4,7 @@ from .tool_model_rules_support import (
     _clean_reasoning_fallback_text,
     _model_is_exact_qwen_25_7b_instruct,
     _model_is_exact_small_gemma_4_it,
+    _model_is_lfm25_8b_a1b,
     _model_uses_glm_box_rules,
     _model_uses_gemma_rules,
     _model_uses_gpt_oss_rules,

@@ -105,6 +105,28 @@ def test_bare_continue_preserves_last_effective_task_wrapper() -> None:
     assert state.working_memory.current_goal == prior
 
 
+def test_bare_continue_after_status_resumes_last_failed_task() -> None:
+    state = LoopState(cwd="/tmp")
+    failed = "get pihole installed on the remote host"
+    state.run_brief.original_task = "status?"
+    state.working_memory.current_goal = "status?"
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": "status?",
+        "effective_task": "status?",
+        "current_goal": "status?",
+    }
+    state.scratchpad["_last_failed_continuation_task"] = {
+        "task": failed,
+        "reason": "Guard tripped: max_consecutive_errors",
+        "task_id": "task-0004",
+    }
+    harness = _make_harness(state)
+
+    resolved = Harness._resolve_followup_task(harness, "continue")
+
+    assert resolved == failed
+
+
 def test_store_task_handoff_tracks_recent_research_artifacts() -> None:
     state = LoopState(cwd="/tmp")
     prior = "Debug nginx on the remote host and do a websearch first"

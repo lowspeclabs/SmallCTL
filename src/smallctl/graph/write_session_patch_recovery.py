@@ -344,6 +344,54 @@ def _clear_patch_existing_stage_read_autocontinue_count_after_success(
     return True
 
 
+def _invalidate_prior_file_read_artifacts(harness: Any, target_path: str) -> None:
+    """Mark any prior file_read artifacts for `target_path` stale/hidden.
+
+    Used during patch recovery so the next model call cannot rely on an
+    outdated full-file snapshot when deciding whether to re-patch.
+    """
+    if not target_path:
+        return
+    try:
+        from pathlib import Path
+        from ..tools.fs import _same_target_path
+
+        for artifact_id, artifact in list(getattr(harness.state, "artifacts", {}).items()):
+            art_tool = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+            if art_tool not in {"file_read", "ssh_file_read"}:
+                continue
+            metadata = getattr(artifact, "metadata", {}) or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            art_path = str(metadata.get("path") or "").strip()
+            if not art_path:
+                args = metadata.get("arguments")
+                if isinstance(args, dict):
+                    art_path = str(args.get("path") or "").strip()
+            if not art_path:
+                art_path = str(getattr(artifact, "source", "") or "").strip()
+            if not art_path:
+                continue
+            try:
+                same = _same_target_path(art_path, target_path, getattr(harness.state, "cwd", None))
+            except Exception:
+                same = Path(art_path).as_posix().lower() == Path(target_path).as_posix().lower()
+            if not same:
+                continue
+            metadata["stale"] = True
+            metadata["artifact_stale_reason"] = "patch_recovery_forces_fresh_read"
+            metadata["authoritative_path"] = art_path
+            staleness_index = harness.state.scratchpad.setdefault("_artifact_staleness", {})
+            if isinstance(staleness_index, dict) and artifact_id:
+                staleness_index[artifact_id] = {
+                    "stale": True,
+                    "reason": "patch_recovery_forces_fresh_read",
+                    "paths": [art_path],
+                }
+    except Exception:
+        pass
+
+
 def _recent_successful_mutation_on_same_path(harness: Any, target_path: str) -> bool:
     records = getattr(harness.state, "tool_execution_records", None)
     if not isinstance(records, dict):
@@ -398,6 +446,11 @@ def _maybe_schedule_file_patch_read_recovery(
     ).strip()
     if not target_path:
         return False
+
+    # Mark any prior full-file artifact reads for this path as stale so the
+    # model is forced to use the fresh recovery file_read instead of replaying
+    # an outdated patch target.
+    _invalidate_prior_file_read_artifacts(harness, target_path)
 
     recent_success = _recent_successful_mutation_on_same_path(harness, target_path)
     recovery_key = _file_patch_recovery_key(record, target_path=target_path)

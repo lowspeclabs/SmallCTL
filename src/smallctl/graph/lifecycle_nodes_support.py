@@ -32,7 +32,12 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
             capsule.setdefault("goal", resolved_task or task)
             capsule["continued_after_guard"] = True
         harness.state.scratchpad["_continued_after_guard_trip"] = True
-    harness.state.recent_errors = [item for item in recent_errors if "Guard tripped:" not in item]
+        harness.state.recent_errors = []
+        harness.state.tool_history = []
+        harness.state.stagnation_counters = {}
+        harness.state.scratchpad.pop("_tool_attempt_history", None)
+    else:
+        harness.state.recent_errors = [item for item in recent_errors if "Guard tripped:" not in item]
     harness.state.step_count = 0
     harness.state.inactive_steps = 0
     harness.state.stagnation_counters.pop("no_actionable_progress", None)

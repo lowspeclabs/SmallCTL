@@ -94,8 +94,15 @@ def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None
     state.step_count = 8
     state.inactive_steps = 3
     state.recent_errors = [
-        "transient network warning",
+        "ssh_exec: Unit postgresql.service could not be found.",
+        "ssh_exec: Remote SSH command exited with code 1",
+        "ssh_exec: error: no such object: netbox",
         "Guard tripped: max_consecutive_errors (5)",
+    ]
+    state.tool_history = ["ssh_exec|inspect|fail"]
+    state.stagnation_counters["no_progress"] = 2
+    state.scratchpad["_tool_attempt_history"] = [
+        {"tool_name": "ssh_exec", "fingerprint": "inspect-netbox"},
     ]
     harness = SimpleNamespace(
         state=state,
@@ -106,7 +113,10 @@ def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None
 
     assert state.step_count == 0
     assert state.inactive_steps == 0
-    assert state.recent_errors == ["transient network warning"]
+    assert state.recent_errors == []
+    assert state.tool_history == []
+    assert state.stagnation_counters == {}
+    assert "_tool_attempt_history" not in state.scratchpad
     assert state.scratchpad["_continued_after_guard_trip"] is True
     capsule = state.scratchpad["_guard_trip_recovery_capsule"]
     assert capsule["reason"] == "Guard tripped: max_consecutive_errors (5)"

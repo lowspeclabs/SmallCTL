@@ -220,7 +220,7 @@ class SmallctlAppFlowMixin:
                 skip_promotion = False
                 if name == "task_complete" and console:
                     active_text = console.get_active_assistant_text().strip()
-                    skip_promotion = bool(active_text) or check_duplicate_promotion(
+                    skip_promotion = check_duplicate_promotion(
                         promote_text.lower(),
                         active_text.lower(),
                     )

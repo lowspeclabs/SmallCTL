@@ -315,7 +315,8 @@ def _build_openrouter_recovery_payload(
     }
     request_max_tokens = client._request_max_completion_tokens(tools, messages=messages)
     if request_max_tokens is not None:
-        payload["max_tokens"] = int(request_max_tokens)
+        param_name = client.adapter.stream_policy.max_tokens_parameter_name
+        payload[param_name] = int(request_max_tokens)
     if getattr(client, "temperature", None) is not None:
         payload["temperature"] = float(getattr(client, "temperature"))
     if tools and not reduced_features:

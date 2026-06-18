@@ -340,7 +340,7 @@ def test_stream_chat_openrouter_caps_auto_max_tokens_with_large_context_limit(mo
     events = asyncio.run(_run())
 
     assert [event["type"] for event in events] == ["done"]
-    assert payloads[0]["max_tokens"] == 4096
+    assert payloads[0]["max_completion_tokens"] == 4096
 
 
 def test_openrouter_context_probe_remembers_model_capabilities(monkeypatch) -> None:

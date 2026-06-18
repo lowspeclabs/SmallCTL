@@ -13,6 +13,7 @@ class StreamPolicy:
     supports_stream_options: bool = True
     first_token_timeout_sec: float = 30.0
     tool_call_continuation_timeout_sec: float = 30.0
+    max_tokens_parameter_name: str = "max_tokens"
 
 
 class ProviderAdapter(Protocol):

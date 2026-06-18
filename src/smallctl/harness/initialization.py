@@ -70,6 +70,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         runtime_context_probe=config.runtime_context_probe,
         run_logger=config.run_logger,
         backend_recovery_handler=self.recover_backend_wedge,
+        max_completion_tokens=config.max_completion_tokens,
     )
     self.summarizer_client = None
     if config.summarizer_endpoint:
@@ -86,6 +87,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
             first_token_timeout_sec=config.first_token_timeout_sec,
             runtime_context_probe=False,
             run_logger=config.run_logger,
+            max_completion_tokens=config.max_completion_tokens,
         )
 
     self.reasoning_mode = config.reasoning_mode

@@ -435,6 +435,16 @@ class _FakeExc:
         self.response = _FakeResponse(status_code, text)
 
 
+def test_openrouter_prefers_max_completion_tokens() -> None:
+    adapter = get_provider_adapter("openrouter")
+    assert adapter.stream_policy.max_tokens_parameter_name == "max_completion_tokens"
+
+
+def test_generic_adapter_uses_max_tokens() -> None:
+    adapter = get_provider_adapter("generic")
+    assert adapter.stream_policy.max_tokens_parameter_name == "max_tokens"
+
+
 def test_retry_hint_for_stream_options_error() -> None:
     adapter = get_provider_adapter("generic")
     exc = _FakeExc(400, "unknown field: stream_options.include_usage")

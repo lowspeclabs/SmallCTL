@@ -255,7 +255,10 @@ class OpenAICompatClient:
         tools: list[dict[str, Any]],
         messages: list[dict[str, Any]] | None = None,
     ) -> int | None:
-        if not self._request_supports_parameter("max_tokens"):
+        if not (
+            self._request_supports_parameter("max_tokens")
+            or self._request_supports_parameter("max_completion_tokens")
+        ):
             return None
         limit = _request_budget_client_context_limit(self)
         metadata_limit = self._metadata_max_completion_tokens()

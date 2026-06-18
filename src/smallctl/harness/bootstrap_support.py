@@ -57,8 +57,9 @@ def build_client(
     runtime_context_probe: bool,
     run_logger: Any,
     backend_recovery_handler: Any = None,
+    max_completion_tokens: int | None = None,
 ) -> OpenAICompatClient:
-    return OpenAICompatClient(
+    client = OpenAICompatClient(
         base_url=endpoint,
         model=model,
         api_key=api_key,
@@ -69,6 +70,9 @@ def build_client(
         run_logger=run_logger,
         backend_recovery_handler=backend_recovery_handler,
     )
+    if max_completion_tokens is not None:
+        client.max_completion_tokens = max_completion_tokens
+    return client
 
 
 def build_context_policy(

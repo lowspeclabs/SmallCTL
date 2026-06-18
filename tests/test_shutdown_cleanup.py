@@ -256,6 +256,7 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
         graph_thread_id=None,
         context_limit=None,
         max_prompt_tokens=None,
+        max_completion_tokens=None,
         reserve_completion_tokens=1024,
         reserve_tool_tokens=512,
         first_token_timeout_sec=30,

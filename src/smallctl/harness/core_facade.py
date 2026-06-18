@@ -632,6 +632,7 @@ def switch_model(self: Any, model: str) -> None:
         runtime_context_probe=bool(config.runtime_context_probe),
         run_logger=getattr(self, "run_logger", None),
         backend_recovery_handler=self.recover_backend_wedge,
+        max_completion_tokens=getattr(config, "max_completion_tokens", None),
     )
     self.provider_profile = self.client.provider_profile
     config.model = model_name

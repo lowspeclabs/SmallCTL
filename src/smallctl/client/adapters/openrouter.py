@@ -15,6 +15,7 @@ class OpenRouterAdapter:
         supports_stream_options=False,
         first_token_timeout_sec=30.0,
         tool_call_continuation_timeout_sec=30.0,
+        max_tokens_parameter_name="max_completion_tokens",
     )
 
     def sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

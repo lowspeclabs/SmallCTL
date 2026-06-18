@@ -21,6 +21,7 @@ class HarnessConfig:
     context_limit: int | None = None
     max_prompt_tokens: int | None = None
     max_prompt_tokens_explicit: bool = False
+    max_completion_tokens: int | None = None
     reserve_completion_tokens: int = 1024
     reserve_tool_tokens: int = 512
     first_token_timeout_sec: int | None = None

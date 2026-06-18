@@ -45,6 +45,59 @@ _REASONING_PROGRESS_MIN_DISTINCT_WORDS = 12
 _REASONING_PROGRESS_MIN_NOVEL_WORDS = 4
 _REASONING_WORD_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{2,}")
 
+# Degenerate-repetition guard: detect models that fall into a loop emitting the
+# same short phrase/token many times within a single completion.
+_DEGENERATE_REPETITION_MIN_REPEAT = 6
+_DEGENERATE_REPETITION_WINDOW_CHARS = 400
+_DEGENERATE_REPETITION_MIN_REPEATED_PHRASE_LENGTH = 4
+
+
+class _ModelOutputDegenerate(Exception):
+    """Raised when the model stream is detected to be a degenerate repetition loop."""
+
+    def __init__(self, *, repeated_phrase: str, repeat_count: int, window: str) -> None:
+        self.repeated_phrase = repeated_phrase
+        self.repeat_count = repeat_count
+        self.window = window
+        super().__init__(f"Degenerate repetition detected: {repeated_phrase!r} x{repeat_count}")
+
+
+def _detect_degenerate_repetition(buffer: str) -> tuple[str, int, str] | None:
+    """Return (phrase, count, window) if buffer contains a repetitive phrase loop."""
+    text = str(buffer or "")
+    if len(text) < _DEGENERATE_REPETITION_WINDOW_CHARS:
+        return None
+    window = text[-_DEGENERATE_REPETITION_WINDOW_CHARS:]
+    lowered = window.lower()
+    # Try progressively shorter phrase windows, looking for a substring that
+    # appears many times consecutively or near-consecutively.
+    for phrase_len in range(80, _DEGENERATE_REPETITION_MIN_REPEATED_PHRASE_LENGTH - 1, -1):
+        if phrase_len * 2 > len(lowered):
+            continue
+        start = 0
+        end = phrase_len
+        while end <= len(lowered):
+            phrase = lowered[start:end]
+            # Skip whitespace-only or very low-entropy phrases
+            if len(phrase.strip()) < _DEGENERATE_REPETITION_MIN_REPEATED_PHRASE_LENGTH:
+                start += 1
+                end += 1
+                continue
+            # Count non-overlapping occurrences in the window
+            count = 0
+            scan = 0
+            while True:
+                idx = lowered.find(phrase, scan)
+                if idx == -1:
+                    break
+                count += 1
+                scan = idx + len(phrase)
+                if count >= _DEGENERATE_REPETITION_MIN_REPEAT:
+                    return phrase, count, window
+            start += 1
+            end += 1
+    return None
+
 
 @dataclass(frozen=True)
 class _ReasoningProgressAssessment:
@@ -242,6 +295,7 @@ async def run_model_stream_loop(
             reasoning_only_fragments: deque[str] = deque(maxlen=512)
             saw_assistant_content = False
             saw_tool_call = False
+            assistant_text_buffer = ""
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
                 if harness._cancel_requested:
                     await harness._emit(
@@ -525,6 +579,18 @@ async def run_model_stream_loop(
                         stream_state=stream_state,
                         first_token_time=first_token_time,
                     )
+                    delta = _chunk_delta(event)
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        assistant_text_buffer += content
+                        repetition = _detect_degenerate_repetition(assistant_text_buffer)
+                        if repetition is not None:
+                            phrase, count, window = repetition
+                            raise _ModelOutputDegenerate(
+                                repeated_phrase=phrase,
+                                repeat_count=count,
+                                window=window,
+                            )
                     continue
             else:
                 await flush_model_stream_buffer(
@@ -546,6 +612,37 @@ async def run_model_stream_loop(
                 continue
             if _model_attempt < _CHUNK_ERROR_MAX_RETRIES:
                 await asyncio.sleep(float(_model_attempt + 1))
+        except _ModelOutputDegenerate as exc:
+            harness._runlog(
+                "model_output_degenerate_loop",
+                "detected degenerate repetition loop in model output",
+                repeated_phrase=exc.repeated_phrase,
+                repeat_count=exc.repeat_count,
+                buffer_chars=len(assistant_text_buffer),
+            )
+            await harness._emit(
+                deps.event_handler,
+                UIEvent(
+                    event_type=UIEventType.ALERT,
+                    content="Model output entered a repetition loop; halting this turn and requesting recovery.",
+                    data={
+                        "reason": "model_output_degenerate_loop",
+                        "repeated_phrase": exc.repeated_phrase,
+                        "repeat_count": exc.repeat_count,
+                    },
+                ),
+            )
+            stream_ended_without_done = True
+            stream_ended_without_done_details = {
+                "reason": "model_output_degenerate_loop",
+                "repeated_phrase": exc.repeated_phrase,
+                "repeat_count": exc.repeat_count,
+                "buffer_chars": len(assistant_text_buffer),
+            }
+            harness.state.scratchpad["_last_stream_halted_without_done"] = True
+            harness.state.scratchpad["_last_stream_halt_reason"] = "model_output_degenerate_loop"
+            harness.state.scratchpad["_last_stream_halt_details"] = dict(stream_ended_without_done_details)
+            break
         except asyncio.CancelledError:
             await harness._emit(
                 deps.event_handler,

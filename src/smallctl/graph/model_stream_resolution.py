@@ -229,6 +229,61 @@ async def resolve_model_stream_result(
         graph_state.error = graph_state.final_result["error"]
         return StreamProcessingResult(chunks=chunks)
 
+    if (
+        stream_ended_without_done
+        and stream_ended_without_done_details.get("reason") == "model_output_degenerate_loop"
+    ):
+        harness._runlog(
+            "model_output_degenerate_loop_exhausted",
+            "model stream halted after degenerate repetition loop",
+            details=stream_ended_without_done_details,
+            error_type="model_output_degenerate_loop",
+        )
+        await harness._emit(
+            deps.event_handler,
+            UIEvent(
+                event_type=UIEventType.ALERT,
+                content="Model output degenerated into a repetition loop. Recovery nudge injected.",
+                data=stream_ended_without_done_details,
+            ),
+        )
+        repeated_phrase = str(stream_ended_without_done_details.get("repeated_phrase") or "")
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    "Your previous response degenerated into a loop. "
+                    "Stop repeating and emit ONE concrete next action as a tool call. "
+                    "If you do not know what to do next, ask a focused clarification or call task_fail."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "model_output_degenerate_loop",
+                    "repeated_phrase": repeated_phrase,
+                },
+            )
+        )
+        stream = OpenAICompatClient.collect_stream(
+            chunks,
+            reasoning_mode=harness.reasoning_mode,
+            thinking_start_tag=harness.thinking_start_tag,
+            thinking_end_tag=harness.thinking_end_tag,
+        )
+        end_time = time.perf_counter()
+        duration = end_time - start_time
+        ttft = (first_token_time - start_time) if first_token_time else duration
+        return StreamProcessingResult(
+            chunks=chunks,
+            stream=stream,
+            timeline=[],
+            usage=getattr(stream, "usage", {}) or {},
+            duration=duration,
+            ttft=ttft,
+            halted=True,
+            halt_reason="model_output_degenerate_loop",
+            halt_details=stream_ended_without_done_details,
+        )
+
     enter_fallback_block = (
         not stream_completed_cleanly
         and (

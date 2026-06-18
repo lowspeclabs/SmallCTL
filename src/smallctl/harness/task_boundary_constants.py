@@ -392,4 +392,4 @@ _REMOTE_SCRIPT_HINT_RE = re.compile(
     r"\b(?:script|js|javascript|jave\s+script|java\s+script)\b",
     re.IGNORECASE,
 )
-_SEMANTIC_RECENT_TAIL_TOKEN_CAP = 320
+_SEMANTIC_RECENT_TAIL_TOKEN_CAP = 1024

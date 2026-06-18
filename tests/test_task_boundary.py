@@ -302,7 +302,77 @@ def test_task_boundary_reset_preserves_mission_anchor_in_recent_tail() -> None:
     assert state.recent_messages[-1].content == "also make the footer consistent on every page"
 
 
-def test_store_task_handoff_records_recent_remote_target_paths() -> None:
+def test_semantic_recent_tail_truncates_assistant_instead_of_dropping() -> None:
+    from smallctl.harness.task_boundary_semantic_tail import semantic_recent_tail_messages
+
+    long_list = "\n".join(f"{i}. improvement item number {i} with some detail" for i in range(1, 100))
+    messages = [
+        ConversationMessage(role="user", content="read the script and suggest improvements"),
+        ConversationMessage(role="assistant", content=long_list),
+    ]
+    tail = semantic_recent_tail_messages(messages, token_cap=200)
+
+    assert len(tail) == 1
+    assert tail[0].role == "assistant"
+    assert "improvement item number 1" in tail[0].content
+    assert "[prior assistant response truncated]" in tail[0].content
+    assert tail[0].content != long_list
+
+
+def test_semantic_recent_tail_preserves_terminal_assistant_turn_for_ordinal_followup() -> None:
+    from smallctl.harness.task_boundary_semantic_tail import semantic_recent_tail_messages
+
+    numbered_answer = (
+        "### 1. Architectural & Performance Improvements\n"
+        "* Asynchronous Support: migrate to httpx.AsyncClient.\n"
+        "* Connection Pooling: reuse the httpx.Client instance.\n\n"
+        "### 2. Robustness & Error Handling\n"
+        "* Configuration Validation: guard int(os.getenv(...)).\n"
+        "* Graceful Not Implemented Handling.\n"
+    )
+    messages = [
+        ConversationMessage(role="user", content="read, then run ./temp/vikunja-9b.py, what improvements would you make?"),
+        ConversationMessage(role="assistant", content=numbered_answer, tool_calls=[{"function": {"name": "task_complete"}}]),
+    ]
+    tail = semantic_recent_tail_messages(messages, token_cap=1024)
+
+    assert len(tail) == 2
+    assert tail[0].role == "user"
+    assert tail[1].role == "assistant"
+    assert "Asynchronous Support" in tail[1].content
+    assert tail[1].tool_calls
+
+
+def test_task_boundary_reset_with_semantic_tail_keeps_last_assistant_for_followup() -> None:
+    from smallctl.harness.task_boundary_facade import _task_boundary_service_for
+
+    state = LoopState(cwd="/tmp")
+    state.recent_message_limit = 6
+    numbered_answer = (
+        "### 1. Architectural & Performance Improvements\n"
+        "* Asynchronous Support: migrate to httpx.AsyncClient.\n"
+        "* Connection Pooling: reuse the httpx.Client instance.\n\n"
+        "### 2. Robustness & Error Handling\n"
+        "* Configuration Validation: guard int(os.getenv(...)).\n"
+    )
+    state.recent_messages = [
+        ConversationMessage(role="user", content="read, then run ./temp/vikunja-9b.py, what improvements would you make?"),
+        ConversationMessage(role="assistant", content=numbered_answer, tool_calls=[{"function": {"name": "task_complete"}}]),
+    ]
+    harness = _make_harness(state)
+
+    _task_boundary_service_for(harness).reset_task_boundary_state(
+        reason="task_soft_switch",
+        new_task="edit the script and address #1, start and run the script afterwards",
+        preserve_recent_tail=True,
+        semantic_recent_tail=True,
+    )
+
+    roles = [message.role for message in state.recent_messages]
+    assert "assistant" in roles
+    assistant_messages = [m for m in state.recent_messages if m.role == "assistant"]
+    assert any("Asynchronous Support" in (m.content or "") for m in assistant_messages)
+
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = "Continue remote task over SSH on root@192.168.1.63. User follow-up: update llm-explainer.html"
     command = "tail -3 /var/www/html/llm-explainer.html && grep -c 'HTMLEOF' /var/www/html/llm-explainer.html"

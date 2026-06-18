@@ -28,6 +28,7 @@ from ..write_session_fsm import new_write_session, record_write_session_event
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.planning import _refresh_plan_playbook_artifact
 from . import nodes as _nodes
+from .chat_progress import build_repeated_reasoning_loop_message
 from .deps import GraphRuntimeDeps
 from .routing import LoopRoute
 from .state import GraphRunState, PendingToolCall
@@ -94,6 +95,33 @@ def _readonly_answer_looks_complete(text: str) -> bool:
     if any(marker in lowered for marker in ("to install", "steps:", "summary", "conclusion", "in summary", "recommended")):
         return True
     return False
+
+
+_NON_ACTIONABLE_FORWARD_MARKERS = (
+    "i'll ",
+    "i will ",
+    "let me ",
+    "i need to ",
+    "next i ",
+    "i'm going to ",
+    "im going to ",
+    "gonna ",
+    "going to ",
+)
+
+
+def _looks_like_non_actionable_prose(text: str) -> bool:
+    """Detect prose that announces intent without concrete action."""
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if not normalized:
+        return True
+    return any(marker in normalized for marker in _NON_ACTIONABLE_FORWARD_MARKERS)
+
+
+def _non_actionable_turn_signature(text: str) -> str:
+    """Stable signature for a non-actionable assistant turn."""
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    return normalized[:120]
 
 
 async def interpret_model_output(
@@ -853,6 +881,73 @@ async def interpret_model_output(
 
     stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
 
+    if (
+        not reasoning_fallback_active
+        and graph_state.run_mode not in {"chat", "planning"}
+        and not harness.state.planning_mode_enabled
+        and not graph_state.pending_tool_calls
+        and not stream_halted
+        and _looks_like_non_actionable_prose(assistant_text_for_guards)
+        and not _readonly_answer_looks_complete(assistant_text_for_guards)
+    ):
+        signature = _non_actionable_turn_signature(assistant_text_for_guards)
+        counts = harness.state.scratchpad.setdefault("_non_actionable_prose_counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
+            harness.state.scratchpad["_non_actionable_prose_counts"] = counts
+        count = int(counts.get(signature, 0)) + 1
+        counts[signature] = count
+        harness.state.scratchpad["_non_actionable_prose_last_signature"] = signature
+
+        registry = getattr(harness, "registry", None)
+        has_escalate = False
+        if registry is not None:
+            names_fn = getattr(registry, "names", None)
+            if callable(names_fn):
+                try:
+                    has_escalate = "escalate_to_bigger_model" in {str(n).strip() for n in names_fn()}
+                except Exception:
+                    has_escalate = False
+
+        if count >= 3:
+            if has_escalate:
+                msg = (
+                    "Your last response did not include a concrete tool call. "
+                    "You appear to be stuck repeating intent without acting. "
+                    "Call `escalate_to_bigger_model(reason='repeated non-actionable turns')` now, or call `task_fail` if blocked."
+                )
+            else:
+                msg = (
+                    "Your last response did not include a concrete tool call. "
+                    "You appear to be stuck repeating intent without acting. "
+                    "Call `task_fail(message='...')` now to avoid an endless loop."
+                )
+        else:
+            msg = (
+                "Your last response did not include a tool call. "
+                "Emit ONE concrete next action as a tool call now, or call `task_fail` if blocked."
+            )
+
+        harness.state.append_message(ConversationMessage(
+            role="user",
+            content=msg,
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "non_actionable_prose",
+                "signature": signature,
+                "count": count,
+                "has_escalate": has_escalate,
+            },
+        ))
+        harness._runlog(
+            "non_actionable_prose_recovery",
+            "injected recovery nudge for non-actionable assistant turn",
+            signature=signature,
+            count=count,
+            has_escalate=has_escalate,
+        )
+        return LoopRoute.NEXT_STEP
+
     if not assistant_text_for_guards.strip() and not graph_state.pending_tool_calls and not stream_halted:
         blank_nudges = int(harness.state.scratchpad.get("_blank_message_nudges", 0))
         if blank_nudges < 2:
@@ -873,6 +968,35 @@ async def interpret_model_output(
                 "blank_message_recovery",
                 "injected recovery nudge for an empty assistant turn",
                 retry_count=blank_nudges + 1,
+            )
+            return LoopRoute.NEXT_STEP
+
+    # Guard against repeated reasoning-only turns that never call a tool.
+    if (
+        assistant_text_for_guards
+        and not graph_state.pending_tool_calls
+        and not stream_halted
+        and _nodes._looks_like_freeze_or_hang(harness, assistant_text_for_guards)
+    ):
+        reasoning_loop_nudges = int(harness.state.scratchpad.get("_repeated_reasoning_loop_nudges", 0))
+        if reasoning_loop_nudges < 2:
+            harness.state.scratchpad["_repeated_reasoning_loop_nudges"] = reasoning_loop_nudges + 1
+            msg = build_repeated_reasoning_loop_message(harness, graph_state)
+            harness.state.append_message(
+                ConversationMessage(
+                    role="user",
+                    content=msg,
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "repeated_reasoning_loop",
+                        "retry_count": reasoning_loop_nudges + 1,
+                    },
+                )
+            )
+            harness._runlog(
+                "repeated_reasoning_loop_recovery",
+                "injected recovery nudge for repeated reasoning without action",
+                retry_count=reasoning_loop_nudges + 1,
             )
             return LoopRoute.NEXT_STEP
 

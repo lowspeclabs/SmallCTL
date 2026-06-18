@@ -70,7 +70,7 @@ class _FakeHarness:
         return None
 
 
-def test_small_model_empty_turn_gets_blank_message_nudge() -> None:
+def test_small_model_empty_turn_gets_non_actionable_prose_nudge() -> None:
     async def _run() -> tuple[object, object]:
         harness = _FakeHarness()
         deps = SimpleNamespace(harness=harness, event_handler=None)
@@ -91,10 +91,11 @@ def test_small_model_empty_turn_gets_blank_message_nudge() -> None:
     harness, route = asyncio.run(_run())
 
     assert route == LoopRoute.NEXT_STEP
-    assert harness.state.scratchpad["_blank_message_nudges"] == 1
+    assert harness.state.scratchpad["_non_actionable_prose_counts"] == {"": 1}
     assert harness.state.recent_messages
     assert harness.state.recent_messages[-1].role == "user"
-    assert "The assistant turn was empty." in harness.state.recent_messages[-1].content
+    assert harness.state.recent_messages[-1].metadata["recovery_kind"] == "non_actionable_prose"
+    assert "did not include a tool call" in harness.state.recent_messages[-1].content
 
 
 def test_stream_halt_without_done_gets_goal_recap_nudge_for_any_model() -> None:

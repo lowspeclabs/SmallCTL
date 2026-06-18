@@ -92,3 +92,61 @@ def test_file_patch_schema_repair_keeps_tactical_hint_and_appends_schema() -> No
     assert "Use exact target text and replacement text including whitespace" in decision.repair_message
     assert "Compact schema for `file_patch`" in decision.repair_message
     assert "target_text:string" in decision.repair_message
+
+
+def test_schema_validation_repair_reports_malformed_arguments_as_system_nudge() -> None:
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "ssh_exec",
+            "parameters": {
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {"type": "string"},
+                    "target": {"type": "string"},
+                },
+            },
+        },
+    }
+    harness = _harness(schema)
+    raw_arguments = '{"command": "cd /opt/qwen-compose-medium && docker compose up -d"{}'
+    pending = PendingToolCall.from_payload(
+        {
+            "id": "call_step4",
+            "type": "function",
+            "function": {"name": "ssh_exec", "arguments": raw_arguments},
+        }
+    )
+    assert pending is not None
+
+    decision = schema_validation_repair_decision(
+        harness,
+        pending,
+        "missing required field",
+        {"required_fields": ["command"]},
+    )
+
+    assert "malformed JSON arguments" in decision.repair_message
+    assert "without arguments" not in decision.repair_message
+    assert decision.details["arguments_malformed"] is True
+    assert decision.details["arguments_empty"] is False
+    assert decision.alert_data["arguments_malformed"] is True
+    assert decision.runlog_data["arguments_malformed"] is True
+    assert decision.conversation_message is not None
+    assert decision.conversation_message.role == "system"
+    assert decision.conversation_message.metadata["is_recovery_nudge"] is True
+    assert decision.conversation_message.metadata["recovery_kind"] == "schema_validation"
+    assert decision.conversation_message.metadata["raw_arguments_preview"] == raw_arguments
+    traces = harness.state.scratchpad["_tool_call_parse_failures"]
+    assert traces == [
+        {
+            "tool_name": "ssh_exec",
+            "tool_call_id": "call_step4",
+            "step_count": 5,
+            "parse_error": decision.details["arguments_parse_error"],
+            "raw_arguments_preview": raw_arguments,
+            "source": "model",
+            "replayable": False,
+        }
+    ]

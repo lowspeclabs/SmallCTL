@@ -33,6 +33,7 @@ from .task_intent import (
     infer_entity_tags,
     infer_environment_tags,
     next_action_for_task,
+    preserve_promoted_active_intent,
 )
 from .task_classifier import classify_task_mode
 from .tool_message_compaction import trim_recent_messages_window
@@ -423,6 +424,12 @@ class MemoryService:
         self.prime_write_policy(task)
         self.harness.state.task_mode = classify_task_mode(task)
         primary, secondary, tags = extract_intent_state(self.harness, task)
+        primary, secondary, tags = preserve_promoted_active_intent(
+            self.harness.state,
+            primary,
+            secondary,
+            tags,
+        )
         self.harness.state.active_intent = primary
         self.harness.state.secondary_intents = secondary
         self.harness.state.intent_tags = tags

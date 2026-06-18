@@ -337,6 +337,7 @@ class TaskBoundaryLifecycleMixin:
             "_last_task_text",
             "_last_task_handoff",
             "_task_transaction",
+            "_pending_deliverable_paths",
             "_resolved_remote_followup",
             "_task_boundary_previous_task",
             "_task_sequence",
@@ -365,6 +366,14 @@ class TaskBoundaryLifecycleMixin:
         preserved_scratchpad.pop("_tool_attempt_history", None)
         if preserved_previous_task:
             preserved_scratchpad["_task_boundary_previous_task"] = preserved_previous_task
+            pending_paths = extract_task_target_paths(preserved_previous_task)
+            if pending_paths:
+                existing_pending = preserved_scratchpad.get("_pending_deliverable_paths")
+                merged_pending = list(existing_pending) if isinstance(existing_pending, list) else []
+                for path in pending_paths:
+                    if path not in merged_pending:
+                        merged_pending.append(path)
+                preserved_scratchpad["_pending_deliverable_paths"] = merged_pending[-20:]
 
         background_processes = json_safe_value(self.harness.state.background_processes)
         preserved_artifacts = dict(self.harness.state.artifacts)
@@ -543,6 +552,21 @@ class TaskBoundaryLifecycleMixin:
             key_discoveries.extend(state.working_memory.known_facts[-4:])
         if state.working_memory.decisions:
             key_discoveries.extend(state.working_memory.decisions[-4:])
+        pending_deliverables = []
+        scratchpad = getattr(state, "scratchpad", None)
+        if isinstance(scratchpad, dict):
+            pending_deliverables = [
+                str(path).strip()
+                for path in scratchpad.get("_pending_deliverable_paths", [])
+                if str(path).strip()
+            ]
+        for path in extract_task_target_paths(str(state.run_brief.original_task or "")):
+            if path not in pending_deliverables:
+                pending_deliverables.append(path)
+        if pending_deliverables:
+            key_discoveries.append(
+                "Pending deliverables from prior task: " + ", ".join(pending_deliverables[-6:])
+            )
         if not key_discoveries:
             key_discoveries = ["Task boundary brief: no explicit discoveries recorded"]
         tools_tried = [
@@ -566,7 +590,11 @@ class TaskBoundaryLifecycleMixin:
             blockers=state.working_memory.failures[-4:],
             files_touched=list(set(files_touched))[:8],
             artifact_ids=list((getattr(state, "artifacts", {}) or {}).keys())[-10:],
-            next_action_hint=str(state.working_memory.next_actions[-1] if state.working_memory.next_actions else ""),
+            next_action_hint=(
+                "Verify or create pending deliverables: " + ", ".join(pending_deliverables[-6:])
+                if pending_deliverables
+                else str(state.working_memory.next_actions[-1] if state.working_memory.next_actions else "")
+            ),
             staleness_step=state.step_count,
             facts_confirmed=key_discoveries[:4],
             state_changes=["task_boundary_reset"],

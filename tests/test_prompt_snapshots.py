@@ -151,3 +151,25 @@ class TestSystemPromptSnapshots:
             state = _make_state(model)
             prompt = build_system_prompt(state, "execute")
             assert "task_complete" in prompt
+
+    def test_all_models_include_deliverable_verification(self) -> None:
+        for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
+            state = _make_state(model)
+            prompt = build_system_prompt(state, "execute")
+            assert "DELIVERABLE VERIFICATION" in prompt
+            assert "verify every file, path, or artifact" in prompt
+
+    def test_all_models_include_docker_inspect_hint(self) -> None:
+        for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
+            state = _make_state(model)
+            prompt = build_system_prompt(state, "execute")
+            assert "DOCKER INSPECT HINT" in prompt, f"missing header for {model}"
+            assert "NetworkSettings.Ports" in prompt, f"missing NetworkSettings.Ports for {model}"
+            assert "`.PortMappings` is not a valid key" in prompt, f"missing PortMappings note for {model}: {prompt[:500]}..."
+
+    def test_all_models_include_installer_timeout_recovery(self) -> None:
+        for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
+            state = _make_state(model)
+            prompt = build_system_prompt(state, "execute")
+            assert "INSTALLER TIMEOUT RECOVERY" in prompt
+            assert "larger `timeout_sec`" in prompt

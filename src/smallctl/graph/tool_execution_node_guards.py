@@ -20,21 +20,47 @@ _FILE_WRITE_TOOLS = {
 }
 
 _EXPLICIT_FILE_EDIT_TASK_RE = re.compile(
-    r"\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix)\b.*\b(?:file|path|script|config|document)\b"
+    r"\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix|save)\b.*\b(?:file|path|script|config|document|report|summary|notes|artifact)\b"
     r"|"
-    r"\b(?:file|path|script|config|document)\b.*\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix)\b"
+    r"\b(?:file|path|script|config|document|report|summary|notes|artifact)\b.*\b(?:write|create|edit|modify|patch|replace|append|update|delete|remove|fix|save)\b"
+    r"|"
+    r"\b(?:create|write|save)\b.{0,80}?\bat\s+[`\"']?/?[^\s`\"']+"
     r"|"
     r"\b(?:ssh_file_write|file_write|file_patch|ast_patch)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
+_TASK_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\./)?/?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
 
-def _task_explicitly_requests_file_edit(state: Any) -> bool:
+
+def _task_text(state: Any) -> str:
     run_brief = getattr(state, "run_brief", None)
     task = str(getattr(run_brief, "original_task", "") or "").strip()
     if not task:
         wm = getattr(state, "working_memory", None)
         task = str(getattr(wm, "current_goal", "") or "").strip()
+    return task
+
+
+def _normalize_task_path(path: str) -> str:
+    normalized = str(path or "").strip().strip("`\"'")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.rstrip("/.,;:")
+
+
+def _task_mentions_target_path(state: Any, target: str) -> bool:
+    normalized_target = _normalize_task_path(target)
+    if not normalized_target:
+        return False
+    for candidate in _TASK_PATH_RE.findall(_task_text(state)):
+        if _normalize_task_path(candidate) == normalized_target:
+            return True
+    return False
+
+
+def _task_explicitly_requests_file_edit(state: Any) -> bool:
+    task = _task_text(state)
     return bool(task and _EXPLICIT_FILE_EDIT_TASK_RE.search(task))
 
 
@@ -45,11 +71,11 @@ def _long_running_remote_timeout_write_guard(state: Any, pending: PendingToolCal
     timeout_context = scratchpad.get("_last_long_running_remote_command_timeout") if isinstance(scratchpad, dict) else None
     if not isinstance(timeout_context, dict):
         return None
-    if _task_explicitly_requests_file_edit(state):
+    target = str(pending.args.get("path") or pending.args.get("target_path") or "").strip()
+    if _task_explicitly_requests_file_edit(state) or _task_mentions_target_path(state, target):
         return None
     command = str(timeout_context.get("command") or "").strip()
     host = str(timeout_context.get("host") or "").strip()
-    target = str(pending.args.get("path") or pending.args.get("target_path") or "").strip()
     remote = f" on {host}" if host else ""
     target_text = f" Target attempted: {target}." if target else ""
     return (

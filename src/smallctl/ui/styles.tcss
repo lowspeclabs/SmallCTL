@@ -19,7 +19,7 @@
   width: 1fr;
   min-width: 0;
   overflow: hidden hidden;
-  border: round #374151;
+  border: round #4b5563;
   padding: 0;
   background: #000000;
 }
@@ -217,7 +217,7 @@
 .assistant-detail > CollapsibleTitle {
   width: 100%;
   padding: 0;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 .assistant-detail.-collapsed {
@@ -231,7 +231,7 @@
 
 .assistant-detail-thinking {
   border: none;
-  color: #6b7280;
+  color: #9ca3af;
 }
 
 .assistant-detail-tool_call {
@@ -274,19 +274,19 @@
   height: 1;
   background: #121212;
   width: 100%;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #status {
   width: 1fr;
-  color: #9ca3af;
+  color: #d1d5db;
   padding: 0 1;
 }
 
 #model-sidebar {
   width: 28;
   height: 100%;
-  border: round #374151;
+  border: round #4b5563;
   background: #121212;
   padding: 0 1;
 }
@@ -294,7 +294,7 @@
 #status-sidebar {
   width: 100%;
   height: 1fr;
-  color: #9ca3af;
+  color: #d1d5db;
   padding: 1 0;
 }
 
@@ -302,7 +302,7 @@
   width: 100%;
   height: auto;
   max-height: 8;
-  color: #9ca3af;
+  color: #d1d5db;
   padding: 1 0 0 0;
 }
 
@@ -315,7 +315,7 @@
   margin: 0;
   border: none;
   background: #121212;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #model-button-sidebar {
@@ -325,20 +325,20 @@
   margin: 0;
   border: none;
   background: #121212;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #model-button:hover,
 #model-button:focus,
 #model-button-sidebar:hover,
 #model-button-sidebar:focus {
-  background: #374151;
+  background: #4b5563;
   text-style: bold;
 }
 
 #model-button.model-button-busy,
 #model-button-sidebar.model-button-busy {
-  color: #6b7280;
+  color: #9ca3af;
   text-style: dim;
 }
 
@@ -351,7 +351,7 @@
   margin: 0;
   border: none;
   background: #121212;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #chat-button-sidebar {
@@ -361,20 +361,20 @@
   margin: 0;
   border: none;
   background: #121212;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #chat-button:hover,
 #chat-button:focus,
 #chat-button-sidebar:hover,
 #chat-button-sidebar:focus {
-  background: #374151;
+  background: #4b5563;
   text-style: bold;
 }
 
 #chat-button.chat-button-busy,
 #chat-button-sidebar.chat-button-busy {
-  color: #6b7280;
+  color: #9ca3af;
   text-style: dim;
 }
 
@@ -385,7 +385,7 @@
   margin: 0;
   border: none;
   background: #121212;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #model-bar-toggle {
@@ -401,7 +401,7 @@
 #model-bar-toggle:focus,
 #model-bar-toggle-sidebar:hover,
 #model-bar-toggle-sidebar:focus {
-  background: #374151;
+  background: #4b5563;
   text-style: bold;
 }
 
@@ -438,7 +438,7 @@
   width: 88;
   max-width: 90%;
   padding: 1 2;
-  border: round #9ca3af;
+  border: round #d1d5db;
   background: #121212;
   color: #e5e7eb;
 }
@@ -457,7 +457,7 @@
 
 #model-select-message {
   width: 100%;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #model-select-filter {
@@ -498,7 +498,7 @@
   width: 88;
   max-width: 90%;
   padding: 1 2;
-  border: round #9ca3af;
+  border: round #d1d5db;
   background: #121212;
   color: #e5e7eb;
 }
@@ -520,7 +520,7 @@
 #chat-menu-message,
 #chat-session-message {
   width: 100%;
-  color: #9ca3af;
+  color: #d1d5db;
 }
 
 #chat-menu-resume,
@@ -556,7 +556,7 @@
 
 #input {
   height: 3;
-  border: round #374151;
+  border: round #4b5563;
   background: #121212;
   color: #e5e7eb;
 }
@@ -573,7 +573,7 @@
 
 .bubble-artifact > CollapsibleTitle {
   background: transparent;
-  color: #9ca3af;
+  color: #d1d5db;
   text-style: bold;
 }
 
@@ -585,6 +585,22 @@
 
 .assistant-detail-nested {
   margin-top: 0;
+}
+
+.assistant-detail-liveoutput > CollapsibleTitle {
+  color: #0891b2;
+}
+
+.assistant-detail-liveoutput .assistant-detail-content {
+  color: #0891b2;
+}
+
+.bubble-liveoutput > CollapsibleTitle {
+  color: #0891b2;
+}
+
+.bubble-liveoutput .assistant-detail-content {
+  color: #0891b2;
 }
 
 .tool-calls-container {
@@ -654,7 +670,7 @@
 }
 
 #quit-confirm-no {
-  background: #374151;
+  background: #4b5563;
   color: #e5e7eb;
   border: round #ca8a04;
   margin: 0 1;

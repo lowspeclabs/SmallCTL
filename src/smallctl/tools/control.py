@@ -42,6 +42,7 @@ from .control_loop_status_helpers import (
 from .control_task_complete_gates import (
     task_complete_gate_acceptance as _task_complete_gate_acceptance,
     task_complete_gate_command_backed_file_creation as _task_complete_gate_command_backed_file_creation,
+    task_complete_gate_docker_compose_lifecycle_report as _task_complete_gate_docker_compose_lifecycle_report,
     task_complete_gate_interactive_program as _task_complete_gate_interactive_program,
     task_complete_gate_missing_input as _task_complete_gate_missing_input,
     task_complete_gate_mutation_expectation as _task_complete_gate_mutation_expectation,
@@ -252,6 +253,7 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
         lambda: _task_complete_gate_verifier_failure(state, message),
         lambda: _task_complete_gate_command_backed_file_creation(state),
         lambda: _task_complete_gate_sysadmin_report_consistency(state, message),
+        lambda: _task_complete_gate_docker_compose_lifecycle_report(state, message),
         lambda: _task_complete_gate_phase_contract(state),
         lambda: _task_complete_gate_phase_promotion(state, message),
         lambda: _task_complete_gate_plan_subtasks(state),

@@ -9,7 +9,7 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 if TYPE_CHECKING:
-    from .app import SmallctlApp
+    pass
 
 
 KIND_LABEL = {
@@ -103,6 +103,7 @@ class BubbleWidget(Static):
         content.append(self.text, style=color)
         self.update(content)
 
+
     def get_selection(self, selection: Any) -> Any:
         try:
             return super().get_selection(selection)
@@ -179,7 +180,10 @@ class AssistantDetailWidget(Collapsible):
     def set_text(self, value: str) -> None:
         self._text = value
         self._content_widget.set_text(value)
-        self.title = self._build_title(value)
+        new_title = self._build_title(value)
+        if self.title != new_title:
+            self.title = new_title
+            self.refresh(layout=True)
 
     def append_text(self, value: str) -> None:
         self.set_text(f"{self._text}{value}")
@@ -189,12 +193,18 @@ class AssistantDetailWidget(Collapsible):
         if self.kind == "thinking" and self._thinking_start_time is not None:
             import time
             self._thinking_done_time = time.monotonic()
-            self.title = self._build_title(self._text)
+            new_title = self._build_title(self._text)
+            if self.title != new_title:
+                self.title = new_title
+                self.refresh(layout=True)
 
     def update_thinking_timer(self) -> None:
         """Update title with live timer while thinking."""
         if self.kind == "thinking" and self._thinking_done_time is None:
-            self.title = self._build_title(self._text)
+            new_title = self._build_title(self._text)
+            if self.title != new_title:
+                self.title = new_title
+                self.refresh(layout=True)
 
     def _build_title(self, text: str) -> str:
         color = KIND_COLOR.get(self.kind, "#9ca3af")
@@ -223,6 +233,7 @@ class AssistantDetailWidget(Collapsible):
 
     async def add_child_widget(self, widget: Widget) -> None:
         await self._body_widget.mount(widget)
+        self._body_widget.refresh(layout=True)
 
 
 class ArtifactBubbleWidget(Collapsible):
@@ -239,7 +250,7 @@ class ArtifactBubbleWidget(Collapsible):
         self.text_content = text
         self._title_base = title
         self._content_widget = TextBlockWidget(text)
-        
+
         super().__init__(
             self._content_widget,
             title=self._build_title(),
@@ -261,6 +272,58 @@ class ArtifactBubbleWidget(Collapsible):
     def append_text(self, text: str) -> None:
         self.text_content += text
         self._refresh_content()
+
+
+class LiveOutputBubbleWidget(ArtifactBubbleWidget):
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        command: str | None = None,
+        success: bool | None = None,
+        id: str | None = None,
+    ) -> None:
+        self.command = str(command or "").strip()
+        self.success = success
+        super().__init__(
+            title="Live Output",
+            text=text,
+            collapsed=True,
+            id=id,
+        )
+        self._set_content_color()
+        self.add_class("bubble-liveoutput")
+
+    def set_command(self, command: str | None) -> None:
+        if not command:
+            return
+        self.command = str(command).strip()
+        self.title = self._build_title()
+
+    def set_success(self, success: bool | None) -> None:
+        self.success = success
+        self._set_content_color()
+        self.title = self._build_title()
+
+    def _set_content_color(self) -> None:
+        self._content_widget.styles.color = "#ef4444" if self.success is False else "#0891b2"
+
+    def _build_title(self) -> str:
+        if self.success is False:
+            status_color = "#ef4444"
+            status_suffix = " (failed)"
+        elif self.success is True:
+            status_color = "#16a34a"
+            status_suffix = ""
+        else:
+            status_color = "#16a34a"
+            status_suffix = ""
+        command = self.command or "Command ran"
+        display_cmd = command
+        if len(display_cmd) > 80:
+            display_cmd = display_cmd[:77].rstrip() + "..."
+        display_cmd = markup_escape(display_cmd)
+        return f"[bold #0891b2]Live Output: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
 
 
 class TaskChecklistWidget(Collapsible):
@@ -294,11 +357,14 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         text: str,
         tool_name: str,
         tool_call_id: str | None = None,
+        args: dict[str, Any] | None = None,
         id: str | None = None,
     ) -> None:
         import time
         self.tool_name = tool_name
         self.tool_call_id = tool_call_id
+        self._args: dict[str, Any] = dict(args) if args else {}
+        self._success: bool | None = None
         self._result_widgets: list[Widget] = []
         self._pending_full_printouts: list[ArtifactBubbleWidget] = []
         self._start_time: float = time.monotonic()
@@ -319,6 +385,20 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             import time
             elapsed = time.monotonic() - self._start_time
             duration_str = f" ({_format_duration(elapsed)})"
+
+        if self.tool_name in {"shell_exec", "ssh_exec"}:
+            if self._done_time is not None:
+                if self._success is True:
+                    base = f"{self.tool_name} succeeded"
+                elif self._success is False:
+                    color = "#ef4444"
+                    base = f"{self.tool_name} failed"
+                else:
+                    base = self.tool_name or self.kind.upper()
+            else:
+                base = self.tool_name or self.kind.upper()
+            return f"[bold {color}]{base}{duration_str}[/]"
+
         preview = " ".join(text.split())
         if len(preview) > self.PREVIEW_LIMIT:
             preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
@@ -331,24 +411,47 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             import time
             self._done_time = time.monotonic()
             self.title = self._build_title(self._text)
+            self.refresh(layout=True)
 
     def update_timer(self) -> None:
         if self._done_time is None:
-            self.title = self._build_title(self._text)
+            new_title = self._build_title(self._text)
+            if self.title != new_title:
+                self.title = new_title
+                self.refresh(layout=True)
 
     async def add_result(self, text: str, *, tool_name: str | None = None, data: dict[str, Any] | None = None) -> Widget:
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            self._success = bool(data.get("success")) if isinstance(data, dict) else None
+            command = self._args.get("command") if isinstance(self._args, dict) else None
+            live_bubble = await self.get_or_create_live_output_bubble(command=command, success=self._success)
+            current = live_bubble.text_content
+            if current and text.startswith(current.rstrip("\n")):
+                suffix = text[len(current.rstrip("\n")):]
+                if suffix:
+                    live_bubble.append_text(suffix)
+            else:
+                live_bubble.append_text(text)
+            self.finalize()
+            self._last_shell_stream = None
+            self._last_assistant_block = None
+            self._last_thinking_detail = None
+            return live_bubble
+
         data = data or {}
         artifact_id = data.get("artifact_id")
-        
+
         # If it's a known artifact-generating tool or has an artifact_id, use the new bubble
         # Otherwise fall back to the standard detail block
         if artifact_id or tool_name in {"file_read", "shell_exec", "artifact_read", "grep", "yaml_read"}:
             title = "File Content" if tool_name == "file_read" else "Command Output"
-            if tool_name == "grep": title = "Grep Matches"
-            if artifact_id: title += f" ({artifact_id})"
-            
+            if tool_name == "grep":
+                title = "Grep Matches"
+            if artifact_id:
+                title += f" ({artifact_id})"
+
             path = data.get("source") or data.get("command") or data.get("path")
-            
+
             bubble = ArtifactBubbleWidget(
                 title=title,
                 path=path,
@@ -360,7 +463,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             await self._flush_pending_full_printouts()
             self.finalize()
             return bubble
-            
+
         detail = AssistantDetailWidget(kind="tool_result", text=text, id=None)
         detail.add_class("assistant-detail-nested")
         await self.add_child_widget(detail)
@@ -373,7 +476,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         for w in self._result_widgets:
             if isinstance(w, ArtifactBubbleWidget) and w._title_base == title:
                 return w
-        
+
         # Create a new one if not found
         bubble = ArtifactBubbleWidget(
             title=title,
@@ -381,6 +484,26 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             text="",
             collapsed=True
         )
+        bubble.add_class("assistant-detail-nested")
+        await self.add_child_widget(bubble)
+        self._result_widgets.append(bubble)
+        return bubble
+
+    async def get_or_create_live_output_bubble(
+        self,
+        *,
+        command: str | None = None,
+        success: bool | None = None,
+    ) -> LiveOutputBubbleWidget:
+        for w in self._result_widgets:
+            if isinstance(w, LiveOutputBubbleWidget):
+                if command:
+                    w.set_command(command)
+                if success is not None:
+                    w.set_success(success)
+                return w
+
+        bubble = LiveOutputBubbleWidget(text="", command=command, success=success)
         bubble.add_class("assistant-detail-nested")
         await self.add_child_widget(bubble)
         self._result_widgets.append(bubble)
@@ -433,10 +556,14 @@ class ToolCallsContainerWidget(Collapsible):
             import time
             self._done_time = time.monotonic()
             self.title = self._build_title()
+            self.refresh(layout=True)
 
     def update_timer(self) -> None:
         if self._done_time is None:
-            self.title = self._build_title()
+            new_title = self._build_title()
+            if self.title != new_title:
+                self.title = new_title
+                self.refresh(layout=True)
 
     async def add_tool_call(self, detail: Widget) -> None:
         await self._body_widget.mount(detail)
@@ -501,6 +628,7 @@ class AssistantTurnWidget(Vertical):
         if self._task_checklist_widget is None:
             self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
             await self._content_widget.mount(self._task_checklist_widget)
+            self._content_widget.refresh(layout=True)
         else:
             self._task_checklist_widget.set_text(text)
             self._task_checklist_widget.set_title(title)
@@ -509,14 +637,15 @@ class AssistantTurnWidget(Vertical):
     async def _ensure_checklist_at_bottom(self) -> None:
         if self._task_checklist_widget is None:
             return
-        if self._content_widget.children and self._content_widget.children[-1] is self._task_checklist_widget:
+        try:
+            children = self._content_widget.children
+        except Exception:
             return
-        # Recreate widget at the bottom to avoid Textual move/remove quirks
-        text = self._task_checklist_widget._content_widget.text
-        title = self._task_checklist_widget.title
-        await self._content_widget.remove_children(".assistant-detail-checklist")
-        self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
-        await self._content_widget.mount(self._task_checklist_widget)
+        if not children or children[-1] is self._task_checklist_widget:
+            return
+        # Move existing widget to the bottom instead of destroying it
+        self._content_widget.move_child(self._task_checklist_widget, after=children[-1])
+        self._content_widget.refresh(layout=True)
 
     def compose(self) -> ComposeResult:
         yield self._label_widget
@@ -625,8 +754,14 @@ class AssistantTurnWidget(Vertical):
 
         detail = self._match_tool_call_detail(tool_name=tool_name, tool_call_id=tool_call_id)
         if detail is not None:
-            bubble = await detail.get_or_create_artifact_bubble("Live Output")
+            bubble = await detail.get_or_create_live_output_bubble()
             bubble.append_text(text)
+            self._last_shell_stream = None
+            self._last_assistant_block = None
+            self._last_thinking_detail = None
+            return
+
+        if tool_name in {"shell_exec", "ssh_exec"}:
             self._last_shell_stream = None
             self._last_assistant_block = None
             self._last_thinking_detail = None
@@ -658,8 +793,9 @@ class AssistantTurnWidget(Vertical):
         *,
         tool_name: str,
         tool_call_id: str | None = None,
+        args: dict[str, Any] | None = None,
     ) -> ToolCallDetailWidget:
-        detail = ToolCallDetailWidget(text=text, tool_name=tool_name, tool_call_id=tool_call_id)
+        detail = ToolCallDetailWidget(text=text, tool_name=tool_name, tool_call_id=tool_call_id, args=args)
         container = self._current_tool_calls_container
         if container is None:
             container = ToolCallsContainerWidget()

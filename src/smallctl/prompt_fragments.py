@@ -189,6 +189,25 @@ _REMOTE_CLEANUP_TASK_KEYWORDS = (
     "get rid of", "wipe", "tear down", "teardown", "disable",
 )
 
+_DELIVERABLE_VERIFICATION = (
+    "DELIVERABLE VERIFICATION: Before calling `task_complete`, verify every file, path, or artifact explicitly requested in the task. "
+    "If the task says to create a report at `/path/to/file`, use the appropriate read tool (e.g., `file_read` or `ssh_file_read`) to confirm the file exists and contains the expected content. "
+    "Do not call `task_complete` based on the successful infrastructure step alone if a required deliverable is still missing. "
+)
+
+_DOCKER_INSPECT_HINT = (
+    "DOCKER INSPECT HINT: To read container port mappings, use the correct Go template path: "
+    "`docker inspect --format='{{json .NetworkSettings.Ports}}' <container>` or "
+    "`docker inspect --format='{{json .HostConfig.PortBindings}}' <container>`. "
+    "`.PortMappings` is not a valid key."
+)
+
+_INSTALLER_TIMEOUT_RECOVERY = (
+    "INSTALLER TIMEOUT RECOVERY: If a remote installer or `docker run/pull` command times out but appears to be progressing, "
+    "retry with a larger `timeout_sec` (e.g., 300) or run the command detached with output redirected to a log, then poll the log or service state. "
+    "Do not abandon the task just because the first attempt exceeded the default timeout."
+)
+
 _PLANNING_MODE_INTRO = (
     "PLANNING MODE IS ACTIVE. "
     "Gather facts before proposing execution, use planning tools to create and refine a structured plan, "

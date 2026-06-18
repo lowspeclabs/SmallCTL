@@ -13,6 +13,7 @@ from smallctl.chat_sessions import (
     format_relative_age,
     load_chat_session_summaries,
     persist_chat_session_state,
+    persist_chat_session_ui_transcript,
     record_chat_session_prompt,
 )
 from smallctl.models.conversation import ConversationMessage
@@ -270,6 +271,11 @@ def test_smallctl_app_chat_resume_falls_back_to_saved_state(monkeypatch, tmp_pat
         state_payload=state.to_dict(),
         model="alpha-model",
     )
+    persist_chat_session_ui_transcript(
+        cwd=tmp_path,
+        thread_id="thread-1",
+        ui_transcript=[{"event_type": "system", "content": "thread one note", "data": {}}],
+    )
 
     async def _fake_create_harness(self: SmallctlApp) -> None:
         async def _teardown() -> None:
@@ -314,8 +320,10 @@ def test_smallctl_app_chat_resume_falls_back_to_saved_state(monkeypatch, tmp_pat
         app = SmallctlApp({"endpoint": "http://example.test/v1", "model": "alpha-model"})
         async with app.run_test(size=(120, 32)) as pilot:
             await pilot.pause(0.2)
+            app._ui_transcript = [{"event_type": "system", "content": "old thread note", "data": {}}]
             await app._resume_chat_session("thread-1")
             await pilot.pause(0.2)
+            assert app._ui_transcript[0]["content"] == "thread one note"
             return list(restored_states)
 
     assert asyncio.run(_run()) == ["thread-1"]

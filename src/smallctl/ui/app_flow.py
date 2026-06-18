@@ -714,6 +714,35 @@ class SmallctlAppFlowMixin:
             self._ui_transcript = transcript
         transcript.append(event.to_dict())
         del transcript[:-500]
+        self._schedule_ui_transcript_persist()
+
+    def _schedule_ui_transcript_persist(self) -> None:
+        delay = getattr(self, "_ui_transcript_debounce_seconds", None)
+        if delay is None:
+            self._persist_ui_transcript()
+            return
+        try:
+            delay_seconds = max(0.0, float(delay))
+        except (TypeError, ValueError):
+            delay_seconds = 0.25
+        handle = getattr(self, "_ui_transcript_persist_handle", None)
+        if handle is not None and not handle.cancelled():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._persist_ui_transcript()
+            return
+        self._ui_transcript_persist_handle = loop.call_later(
+            delay_seconds,
+            self._flush_ui_transcript_persist,
+        )
+
+    def _flush_ui_transcript_persist(self) -> None:
+        handle = getattr(self, "_ui_transcript_persist_handle", None)
+        if handle is not None and not handle.cancelled():
+            handle.cancel()
+        self._ui_transcript_persist_handle = None
         self._persist_ui_transcript()
 
     def _persist_ui_transcript(self) -> None:

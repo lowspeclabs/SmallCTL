@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ from smallctl.chat_sessions import (
     load_chat_session_ui_transcript,
     persist_chat_session_state,
     persist_chat_session_ui_transcript,
+    session_state_path,
+    session_ui_transcript_path,
 )
 from smallctl.models.conversation import ConversationMessage
 from smallctl.models.events import UIEvent, UIEventType
@@ -173,6 +176,55 @@ def test_ui_transcript_does_not_persist_live_shell_stream() -> None:
     assert flow._ui_transcript[0]["event_type"] == "system"
     assert flow._ui_transcript[0]["content"] == "system note"
     assert len(persist_calls) == 1
+
+
+def test_ui_transcript_persistence_can_be_debounced() -> None:
+    persist_calls = []
+
+    class _Handle:
+        def __init__(self, callback) -> None:
+            self.callback = callback
+            self._cancelled = False
+
+        def cancelled(self) -> bool:
+            return self._cancelled
+
+        def cancel(self) -> None:
+            self._cancelled = True
+
+    class _Loop:
+        def __init__(self) -> None:
+            self.handles: list[_Handle] = []
+
+        def call_later(self, delay: float, callback):
+            handle = _Handle(callback)
+            self.handles.append(handle)
+            return handle
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._ui_transcript = []
+            self._ui_transcript_persist_handle = None
+            self._ui_transcript_debounce_seconds = 0.25
+
+        def _persist_ui_transcript(self) -> None:
+            persist_calls.append(list(self._ui_transcript))
+
+    loop = _Loop()
+    original_get_running_loop = asyncio.get_running_loop
+    asyncio.get_running_loop = lambda: loop  # type: ignore[assignment]
+    try:
+        flow = _Flow()
+        flow._record_ui_transcript_event(UIEvent(UIEventType.SYSTEM, "one"))
+        flow._record_ui_transcript_event(UIEvent(UIEventType.SYSTEM, "two"))
+        assert persist_calls == []
+        assert len(loop.handles) == 1
+        loop.handles[0].callback()
+    finally:
+        asyncio.get_running_loop = original_get_running_loop  # type: ignore[assignment]
+
+    assert len(persist_calls) == 1
+    assert [item["content"] for item in persist_calls[0]] == ["one", "two"]
 
 
 def test_render_restored_chat_hides_tool_output_when_tool_calls_hidden() -> None:
@@ -429,6 +481,12 @@ def test_saved_chat_state_preserves_separate_ui_transcript(tmp_path) -> None:
         thread_id="thread-ui",
         ui_transcript=[{"event_type": "system", "content": "UI-only recovery note", "data": {}}],
     )
+    runtime_payload = json.loads(session_state_path(tmp_path, "thread-ui").read_text(encoding="utf-8"))
+    ui_payload = json.loads(session_ui_transcript_path(tmp_path, "thread-ui").read_text(encoding="utf-8"))
+    assert "ui_transcript" not in runtime_payload
+    assert ui_payload["ui_transcript"] == [
+        {"event_type": "system", "content": "UI-only recovery note", "data": {}}
+    ]
     persist_chat_session_state(
         cwd=tmp_path,
         thread_id="thread-ui",
@@ -438,6 +496,57 @@ def test_saved_chat_state_preserves_separate_ui_transcript(tmp_path) -> None:
 
     assert load_chat_session_ui_transcript(cwd=tmp_path, thread_id="thread-ui") == [
         {"event_type": "system", "content": "UI-only recovery note", "data": {}}
+    ]
+
+
+def test_load_chat_session_ui_transcript_reads_legacy_combined_file(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-legacy-ui"
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-legacy-ui",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+    path = session_state_path(tmp_path, "thread-legacy-ui")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["ui_transcript"] = [
+        {"event_type": "system", "content": "legacy embedded note", "data": {}}
+    ]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    assert not session_ui_transcript_path(tmp_path, "thread-legacy-ui").exists()
+    assert load_chat_session_ui_transcript(cwd=tmp_path, thread_id="thread-legacy-ui") == [
+        {"event_type": "system", "content": "legacy embedded note", "data": {}}
+    ]
+
+
+def test_persist_chat_session_state_migrates_legacy_embedded_transcript(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-legacy-migrate"
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-legacy-migrate",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+    runtime_path = session_state_path(tmp_path, "thread-legacy-migrate")
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    payload["ui_transcript"] = [
+        {"event_type": "system", "content": "legacy note", "data": {}}
+    ]
+    runtime_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    persist_chat_session_state(
+        cwd=tmp_path,
+        thread_id="thread-legacy-migrate",
+        state_payload=state.to_dict(),
+        model="test-model",
+    )
+
+    assert "ui_transcript" not in json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert load_chat_session_ui_transcript(cwd=tmp_path, thread_id="thread-legacy-migrate") == [
+        {"event_type": "system", "content": "legacy note", "data": {}}
     ]
 
 

@@ -1,4 +1,8 @@
 from __future__ import annotations
+import asyncio
+import inspect
+import logging
+import time
 from typing import Any
 
 from textual.containers import Vertical, VerticalScroll
@@ -8,12 +12,21 @@ from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget, Sy
 from .display import _CRITICAL_EVENTS, format_test_time_scaling_event
 
 
+logger = logging.getLogger("smallctl.ui.console")
+
+
 class ConsolePane(VerticalScroll):
     def __init__(self, *args, verbose: bool = False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._active_assistant_turn: AssistantTurnWidget | None = None
         self._last_system_message: str = ""
         self._verbose = bool(verbose)
+        self._stream_flush_handle: asyncio.TimerHandle | None = None
+        self._stream_buffer_groups: list[dict[str, Any]] = []
+        self._stream_flush_interval = 0.05
+        self._visible_transcript_limit = 250
+        self._hidden_transcript_entries = 0
+        self._retention_placeholder: BubbleWidget | None = None
 
     def set_verbose(self, verbose: bool) -> None:
         self._verbose = bool(verbose)
@@ -24,14 +37,22 @@ class ConsolePane(VerticalScroll):
         self.styles.scrollbar_gutter = "auto"
         await self.mount(Vertical(id="bubble-stack"))
 
+    async def on_unmount(self) -> None:
+        await self.flush_stream_buffers()
+
     async def append_line(self, line: str, kind: str = "system") -> None:
+        await self.flush_stream_buffers()
         await self._add_bubble(kind, line)
         self._last_system_message = line
 
     async def clear_bubbles(self) -> None:
+        self._cancel_stream_flush()
+        self._clear_stream_buffers()
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.remove_children()
         self._active_assistant_turn = None
+        self._hidden_transcript_entries = 0
+        self._retention_placeholder = None
 
     def has_active_assistant_text(self) -> bool:
         if self._active_assistant_turn is None:
@@ -57,36 +78,47 @@ class ConsolePane(VerticalScroll):
         if event.event_type == UIEventType.ASSISTANT:
             await self._ensure_assistant_turn(speaker=speaker)
             if event.data.get("kind") == "print":
+                await self.flush_stream_buffers()
                 await self._append_full_printout(
                     event.content, 
                     artifact_id=event.data.get("artifact_id")
                 )
             elif event.data.get("kind") == "replace":
+                await self.flush_stream_buffers()
                 await self._replace_assistant(event.content)
             else:
-                await self._append_assistant(event.content)
+                self._append_stream_buffer("assistant", event.content)
+                self._schedule_stream_flush()
             return
         if event.event_type == UIEventType.THINKING:
             await self._ensure_assistant_turn(speaker=speaker)
             if event.data.get("kind") == "replace":
+                await self.flush_stream_buffers()
                 await self._replace_thinking(event.content)
             else:
-                await self._append_thinking(event.content)
+                self._append_stream_buffer("thinking", event.content)
+                self._schedule_stream_flush()
             return
         if event.event_type == UIEventType.SHELL_STREAM:
             await self._ensure_assistant_turn(speaker=speaker)
-            await self._append_shell_stream(
+            tool_name = _coerce_str(event.data.get("tool_name"))
+            tool_call_id = _coerce_str(event.data.get("tool_call_id"))
+            self._append_stream_buffer(
+                "shell",
                 event.content,
-                tool_name=_coerce_str(event.data.get("tool_name")),
-                tool_call_id=_coerce_str(event.data.get("tool_call_id")),
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
             )
+            self._schedule_stream_flush()
             return
+        await self.flush_stream_buffers()
         if event.event_type == UIEventType.TOOL_CALL:
             await self._ensure_assistant_turn(speaker=speaker)
             await self._append_tool_call(
                 str(event.data.get("display_text") or event.content),
                 tool_name=event.content,
                 tool_call_id=_coerce_str(event.data.get("tool_call_id")),
+                args=event.data.get("args"),
             )
             return
         if event.event_type == UIEventType.TOOL_RESULT:
@@ -214,10 +246,11 @@ class ConsolePane(VerticalScroll):
         text: str,
         *,
         tool_name: str,
-        tool_call_id: str | None,
+        tool_call_id: str | None = None,
+        args: dict[str, Any] | None = None,
     ) -> None:
         turn = await self._ensure_assistant_turn()
-        await turn.add_tool_call(text, tool_name=tool_name, tool_call_id=tool_call_id)
+        await turn.add_tool_call(text, tool_name=tool_name, tool_call_id=tool_call_id, args=args)
 
     async def _append_tool_result(
         self,
@@ -241,6 +274,7 @@ class ConsolePane(VerticalScroll):
         bubble = BubbleWidget(kind=kind, text=text)
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.mount(bubble)
+        await self._enforce_visible_retention()
         return bubble
 
     async def _append_test_time_scaling_event(self, event: UIEvent) -> None:
@@ -253,8 +287,89 @@ class ConsolePane(VerticalScroll):
         panel.add_class("assistant-detail-test-time-scaling")
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.mount(panel)
+        await self._enforce_visible_retention()
         self._active_assistant_turn = None
         self._last_system_message = event.content
+
+    def _schedule_stream_flush(self) -> None:
+        handle = self._stream_flush_handle
+        if handle is not None and not handle.cancelled():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._stream_flush_handle = loop.call_later(
+            self._stream_flush_interval,
+            lambda: asyncio.create_task(self.flush_stream_buffers()),
+        )
+
+    async def flush_stream_buffers(self) -> None:
+        started = time.perf_counter()
+        self._cancel_stream_flush()
+        groups = list(self._stream_buffer_groups)
+        self._clear_stream_buffers()
+        flushed_chars = 0
+        for item in groups:
+            text = "".join(item.get("parts") or [])
+            if not text:
+                continue
+            flushed_chars += len(text)
+            kind = item.get("kind")
+            if kind == "assistant":
+                await self._append_assistant(text)
+            elif kind == "thinking":
+                await self._append_thinking(text)
+            elif kind == "shell":
+                await self._append_shell_stream(
+                    text,
+                    tool_name=item.get("tool_name"),
+                    tool_call_id=item.get("tool_call_id"),
+                )
+        if groups:
+            logger.debug(
+                "ui_stream_flush %s",
+                {
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
+                    "group_count": len(groups),
+                    "flushed_chars": flushed_chars,
+                },
+            )
+
+    def _cancel_stream_flush(self) -> None:
+        handle = self._stream_flush_handle
+        if handle is not None and not handle.cancelled():
+            handle.cancel()
+        self._stream_flush_handle = None
+
+    def _clear_stream_buffers(self) -> None:
+        self._stream_buffer_groups = []
+
+    def _append_stream_buffer(
+        self,
+        kind: str,
+        text: str,
+        *,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
+        if not text:
+            return
+        key = (kind, tool_name or "", tool_call_id or "")
+        if self._stream_buffer_groups:
+            last = self._stream_buffer_groups[-1]
+            last_key = (last.get("kind"), last.get("tool_name") or "", last.get("tool_call_id") or "")
+            if last_key == key:
+                last.setdefault("parts", []).append(text)
+                return
+        self._stream_buffer_groups.append(
+            {
+                "kind": kind,
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "parts": [text],
+            }
+        )
 
     async def _append_critical_interrupt(self, event: UIEvent) -> None:
         text = str(event.data.get("display_text") or event.content)
@@ -264,6 +379,7 @@ class ConsolePane(VerticalScroll):
         else:
             stack = self.query_one("#bubble-stack", Vertical)
             await stack.mount(interrupt)
+            await self._enforce_visible_retention()
         self._last_system_message = event.content
 
     async def _ensure_assistant_turn(self, *, speaker: str | None = None) -> AssistantTurnWidget:
@@ -272,9 +388,64 @@ class ConsolePane(VerticalScroll):
             stack = self.query_one("#bubble-stack", Vertical)
             await stack.mount(turn)
             self._active_assistant_turn = turn
+            await self._enforce_visible_retention()
         elif speaker:
             self._active_assistant_turn.set_speaker(speaker)
         return self._active_assistant_turn
+
+    async def _enforce_visible_retention(self) -> None:
+        try:
+            limit = int(getattr(self, "_visible_transcript_limit", 250) or 0)
+        except (TypeError, ValueError):
+            limit = 250
+        if limit <= 0:
+            return
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+        except Exception:
+            return
+        removals = _select_visible_retention_removals(
+            children,
+            active=self._active_assistant_turn,
+            limit=limit,
+        )
+        if not removals:
+            return
+        self._hidden_transcript_entries += len(removals)
+        for child in removals:
+            if child is self._retention_placeholder:
+                continue
+            try:
+                result = child.remove()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                continue
+        await self._ensure_retention_placeholder()
+
+    async def _ensure_retention_placeholder(self) -> None:
+        if self._hidden_transcript_entries <= 0:
+            return
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+        except Exception:
+            return
+        text = (
+            f"{self._hidden_transcript_entries} older UI entries hidden to keep the TUI responsive. "
+            "Use session restore or artifacts for full history."
+        )
+        placeholder = self._retention_placeholder
+        if placeholder is not None:
+            try:
+                placeholder.set_text(text)
+                return
+            except Exception:
+                self._retention_placeholder = None
+        placeholder = BubbleWidget(kind="system", text=text)
+        placeholder.add_class("bubble-retention-placeholder")
+        await stack.mount(placeholder)
+        self._retention_placeholder = placeholder
 
     async def update_thinking_indicator(self) -> None:
         if self._active_assistant_turn is not None:
@@ -300,3 +471,24 @@ def _coerce_str(value: object) -> str | None:
 def _coerce_speaker(value: object) -> str:
     speaker = str(value or "assistant").strip().lower()
     return speaker or "assistant"
+
+
+def _select_visible_retention_removals(
+    children: list[Any],
+    *,
+    active: Any,
+    limit: int,
+) -> list[Any]:
+    if limit <= 0 or len(children) <= limit:
+        return []
+    excess = len(children) - limit
+    removals: list[Any] = []
+    for child in children:
+        if child is active:
+            continue
+        if getattr(child, "classes", None) and "bubble-retention-placeholder" in str(getattr(child, "classes", "")):
+            continue
+        removals.append(child)
+        if len(removals) >= excess:
+            break
+    return removals

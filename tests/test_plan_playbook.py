@@ -30,6 +30,7 @@ from smallctl.graph.tool_call_parser import (
     _detect_oversize_write_payload,
 )
 from smallctl.graph.tool_call_parser import _build_schema_repair_message
+from smallctl.graph.tool_execution_node_guards import _long_running_remote_timeout_write_guard
 from smallctl.graph.tool_loop_guards import _repeat_loop_limits
 from smallctl.graph.runtime import LoopGraphRuntime, ChatGraphRuntime
 from smallctl.graph.state import GraphRunState, PendingToolCall
@@ -39,6 +40,7 @@ from smallctl.state import ArtifactRecord, ExecutionPlan, LoopState, PlanStep, W
 from smallctl.graph.tool_outcomes import _maybe_emit_repair_recovery_nudge, apply_tool_outcomes
 from smallctl.graph.tool_outcomes import _shell_workspace_relative_retry_hint
 from smallctl.graph.state import ToolExecutionRecord
+from smallctl.guards import GuardConfig, check_guards
 from smallctl.harness import Harness, HarnessConfig
 from smallctl.harness.tool_visibility import hidden_tool_reason
 from smallctl.models.tool_result import ToolEnvelope
@@ -2429,6 +2431,38 @@ def test_store_verifier_classifies_remote_installer_timeout() -> None:
     assert state.scratchpad["_last_long_running_remote_command_timeout"]["host"] == "192.168.1.89"
 
 
+def test_docker_detached_run_timeout_with_container_id_is_not_long_running_failure() -> None:
+    state = _make_state()
+    result = ToolEnvelope(
+        success=False,
+        error="SSH command timed out after 60s",
+        metadata={
+            "failure_kind": "timeout",
+            "ssh_error_class": "command_timeout",
+            "output": {
+                "stdout": "Unable to find image 'nginx:latest' locally\nStatus: Downloaded newer image for nginx:latest\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+                "stderr": "",
+                "exit_code": None,
+            },
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.161",
+            "user": "root",
+            "command": "docker run -d --name qwen-nginx-easy -p 8088:80 nginx:latest",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["failure_mode"] != "long_running_remote_command"
+    assert "_last_long_running_remote_command_timeout" not in state.scratchpad
+
+
 def test_dispatch_blocks_file_write_after_remote_installer_timeout() -> None:
     state = _make_state()
     state.run_brief.original_task = "install fogserver on root@192.168.1.89"
@@ -2489,6 +2523,93 @@ def test_dispatch_blocks_file_write_after_remote_installer_timeout() -> None:
     assert state.recent_messages[-1].metadata["recovery_kind"] == "long_running_remote_command"
     assert "larger `timeout_sec`" in state.recent_messages[-1].content
     assert any(event == "long_running_remote_timeout_write_guard" for event, _message, _data in runlog_events)
+
+
+def test_dispatch_allows_required_report_write_after_remote_timeout() -> None:
+    state = _make_state()
+    state.run_brief.original_task = (
+        "Create a Docker nginx service and create a short report at /tmp/qwen-docker-easy-report.txt"
+    )
+    state.scratchpad["_last_long_running_remote_command_timeout"] = {
+        "host": "192.168.1.161",
+        "command": "docker run -d --name qwen-nginx-easy -p 8088:80 nginx:latest",
+    }
+    pending = PendingToolCall(
+        tool_name="ssh_file_write",
+        args={"path": "/tmp/qwen-docker-easy-report.txt", "content": "nginx running"},
+    )
+
+    assert _long_running_remote_timeout_write_guard(state, pending) is None
+
+
+def test_docker_report_chain_does_not_trip_guard_on_probe_failures() -> None:
+    """Replay the ae327dc2 chain: successful docker run timeout, report write, then probe failures.
+
+    With the fixes, the detached docker run timeout is not treated as a long-running
+    installer failure, the required report write is allowed, and the subsequent
+    docker-inspect syntax errors do not immediately trip max_consecutive_errors.
+    """
+    state = _make_state()
+    state.run_brief.original_task = (
+        "Create a Docker nginx service on 192.168.1.161 and create a short report "
+        "at /tmp/qwen-docker-easy-report.txt"
+    )
+
+    # 1) docker run -d succeeds but the local SSH client times out.
+    run_result = ToolEnvelope(
+        success=False,
+        error="SSH command timed out after 60s",
+        metadata={
+            "failure_kind": "timeout",
+            "ssh_error_class": "command_timeout",
+            "output": {
+                "stdout": (
+                    "Unable to find image 'nginx:latest' locally\n"
+                    "Status: Downloaded newer image for nginx:latest\n"
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+                ),
+                "stderr": "",
+                "exit_code": None,
+            },
+        },
+    )
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=run_result,
+        arguments={
+            "host": "192.168.1.161",
+            "user": "root",
+            "command": "docker run -d --name qwen-nginx-easy -p 8088:80 nginx:latest",
+        },
+    )
+    assert verdict is not None
+    assert verdict["failure_mode"] != "long_running_remote_command"
+    assert "_last_long_running_remote_command_timeout" not in state.scratchpad
+
+    # 2) Required report write is allowed because the task names the path explicitly.
+    report_write = PendingToolCall(
+        tool_name="ssh_file_write",
+        args={"path": "/tmp/qwen-docker-easy-report.txt", "content": "nginx is running"},
+    )
+    assert _long_running_remote_timeout_write_guard(state, report_write) is None
+
+    # 3) Model runs docker inspect with an invalid template (two probe failures).
+    for _ in range(2):
+        state.recent_errors.append(
+            "ssh_exec: docker inspect --format '{{json .PortMappings}}' qwen-nginx-easy failed: "
+            "Template parsing error: template: :1:7: executing \"\" at <.PortMappings>: map has no entry for key \"PortMappings\""
+        )
+
+    # 4) Guard does not trip on only the probe failures.
+    assert check_guards(state, GuardConfig(max_consecutive_errors=5)) is None
+
+    # 5) After enough additional countable errors, the guard should still trip.
+    for i in range(3):
+        state.recent_errors.append(f"ssh_exec: additional failure {i}")
+    guard_error = check_guards(state, GuardConfig(max_consecutive_errors=5))
+    assert guard_error is not None
+    assert "max_consecutive_errors" in guard_error
 
 
 def test_dispatch_tools_blocks_local_shell_exec_for_remote_task_and_nudges() -> None:

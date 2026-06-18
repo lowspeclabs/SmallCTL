@@ -154,6 +154,53 @@ def _inject_recovery_metrics(result: dict[str, Any], state: Any) -> None:
         result["recovery_metrics"] = dict(metrics)
 
 
+def _task_summary_status(item: dict[str, Any]) -> str:
+    return str(item.get("status") or item.get("result_status") or "").strip().lower()
+
+
+def _task_summary_failed(item: dict[str, Any]) -> bool:
+    status = _task_summary_status(item)
+    result_status = str(item.get("result_status") or "").strip().lower()
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("reason", "message", "last_recent_error", "postmortem_summary")
+    )
+    if status in {"failed", "aborted", "interrupted", "cancelled", "error", "stopped"}:
+        return True
+    if status == "completed" and result_status in {"failed", "aborted", "interrupted", "cancelled", "error", "stopped"}:
+        return True
+    if "Guard tripped" in text:
+        return True
+    if item.get("deliverable_verified") is False and item.get("diagnostic_only") is False:
+        return True
+    return False
+
+
+def _session_objective_status(task_summaries: list[dict[str, Any]], latest_status: str) -> dict[str, Any]:
+    incomplete_ids: list[str] = []
+    has_incomplete_prior = False
+    latest_index = len(task_summaries)
+    for index, item in enumerate(task_summaries, start=1):
+        if _task_summary_failed(item):
+            incomplete_ids.append(str(item.get("task_id") or f"task-{index:04d}"))
+            if index < latest_index:
+                has_incomplete_prior = True
+    if incomplete_ids:
+        overall_status = "incomplete"
+    elif latest_status in {"completed", "success", "succeeded"}:
+        overall_status = "completed"
+    elif latest_status:
+        overall_status = latest_status
+    else:
+        overall_status = "unknown"
+    return {
+        "local_task_status": latest_status or "unknown",
+        "overall_objective_status": overall_status,
+        "incomplete_task_ids": incomplete_ids,
+        "has_incomplete_prior_tasks": has_incomplete_prior,
+    }
+
+
 def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status: str = "") -> dict[str, Any]:
     task_text = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
     no_op = task_text in {"hi", "hello", "hey", "thanks", "thank you"} and int(getattr(state, "step_count", 0) or 0) <= 1
@@ -361,8 +408,11 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 str(item.get("terminal_event") or "").strip() == "task_interrupted"
                 for item in task_summaries[-1:]
             )
+            session_objective = _session_objective_status(task_summaries, status)
             session_summary_payload = {
                 **summary_payload,
+                **session_objective,
+                "final_task_status": status or summary_payload.get("status", ""),
                 "total_tool_calls": session_total_tool_calls or summary_payload.get("total_tool_calls", 0),
                 "guard_trips": session_guard_trips or summary_payload.get("guard_trips", 0),
                 "task_count": len(task_summary_paths),

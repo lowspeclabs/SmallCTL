@@ -230,6 +230,57 @@ def test_plain_json_without_tool_name_is_not_removed_by_inline_parser() -> None:
     assert calls == []
 
 
+def test_native_ssh_exec_malformed_arguments_preserve_parse_diagnostic() -> None:
+    raw_arguments = '{"command": "cd /opt/qwen-compose-medium && docker compose up -d"{}'
+
+    pending = PendingToolCall.from_payload(
+        {
+            "id": "call_step4",
+            "type": "function",
+            "function": {"name": "ssh_exec", "arguments": raw_arguments},
+        }
+    )
+
+    assert pending is not None
+    assert pending.tool_name == "ssh_exec"
+    assert pending.args == {}
+    assert pending.raw_arguments == raw_arguments
+    assert pending.parser_metadata["arguments_empty"] is False
+    assert pending.parser_metadata["raw_arguments_preview"] == raw_arguments
+    assert pending.parser_metadata["arguments_parse_error"]["kind"] == "malformed_json_arguments"
+
+
+def test_native_tool_empty_arguments_are_not_marked_malformed() -> None:
+    pending = PendingToolCall.from_payload(
+        {
+            "id": "call_empty",
+            "type": "function",
+            "function": {"name": "ssh_exec", "arguments": ""},
+        }
+    )
+
+    assert pending is not None
+    assert pending.args == {}
+    assert pending.parser_metadata["arguments_empty"] is True
+    assert "arguments_parse_error" not in pending.parser_metadata
+
+
+def test_native_tool_empty_json_object_arguments_are_not_marked_malformed() -> None:
+    pending = PendingToolCall.from_payload(
+        {
+            "id": "call_empty_object",
+            "type": "function",
+            "function": {"name": "ssh_exec", "arguments": "{}"},
+        }
+    )
+
+    assert pending is not None
+    assert pending.args == {}
+    assert pending.parser_metadata["raw_arguments_preview"] == "{}"
+    assert "arguments_empty" not in pending.parser_metadata
+    assert "arguments_parse_error" not in pending.parser_metadata
+
+
 def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
     runlog_events = []
     stream = SimpleNamespace(

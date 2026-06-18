@@ -129,16 +129,37 @@ def _detect_missing_required_tool_arguments(harness: Any, pending: PendingToolCa
     if not missing_fields:
         return None
 
-    message = (
-        f"Tool call '{pending.tool_name}' was emitted without arguments. "
-        f"Required fields: {', '.join(str(field) for field in missing_fields)}."
-    )
-    return message, {
+    parser_metadata = dict(getattr(pending, "parser_metadata", {}) or {})
+    parse_error = parser_metadata.get("arguments_parse_error")
+    if isinstance(parse_error, dict):
+        message = (
+            f"Tool call '{pending.tool_name}' had malformed arguments that could not be parsed. "
+            f"Required fields: {', '.join(str(field) for field in missing_fields)}."
+        )
+    elif pending.args:
+        message = (
+            f"Tool call '{pending.tool_name}' is missing required fields. "
+            f"Required fields: {', '.join(str(field) for field in missing_fields)}."
+        )
+    else:
+        message = (
+            f"Tool call '{pending.tool_name}' was emitted without arguments. "
+            f"Required fields: {', '.join(str(field) for field in missing_fields)}."
+        )
+    details = {
         "tool_name": pending.tool_name,
         "tool_call_id": pending.tool_call_id,
         "required_fields": list(missing_fields),
         "raw_arguments": pending.raw_arguments,
+        "arguments_empty": bool(parser_metadata.get("arguments_empty")) or not str(pending.raw_arguments or "").strip(),
     }
+    if parser_metadata:
+        details["parser_metadata"] = parser_metadata
+    if isinstance(parse_error, dict):
+        details["arguments_parse_error"] = parse_error
+        details["arguments_malformed"] = True
+        details["arguments_empty"] = False
+    return message, details
 
 
 def _detect_empty_file_write_payload(

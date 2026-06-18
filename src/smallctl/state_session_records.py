@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .durable_tool_results import compact_tool_result_for_durable_state
 from .state_schema import ArtifactRecord, ContextBrief, EpisodicSummary, PromptBudgetSnapshot, TurnBundle, WriteSession
 from .state_support import (
     _coerce_conversation_message_payload,
@@ -349,6 +350,7 @@ def _coerce_tool_envelope_payload(value: Any) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         metadata = {}
     normalized["success"] = bool(payload.get("success"))
+    normalized["status"] = payload.get("status")
     normalized["output"] = json_safe_value(payload.get("output"))
     error = payload.get("error")
     normalized["error"] = None if error is None else str(error)
@@ -379,7 +381,11 @@ def _coerce_tool_execution_record(value: Any, *, operation_id: str) -> dict[str,
         args = json_safe_value(payload.get("args") or {})
         normalized["args"] = args if isinstance(args, dict) else {}
     if "result" in payload:
-        normalized["result"] = _coerce_tool_envelope_payload(payload.get("result"))
+        normalized["result"] = compact_tool_result_for_durable_state(
+            _coerce_tool_envelope_payload(payload.get("result")),
+            tool_name=str(payload.get("tool_name", "") or ""),
+            artifact_id=payload.get("artifact_id"),
+        )
     tool_message = _coerce_conversation_message_payload(payload.get("tool_message"))
     if tool_message is not None:
         normalized["tool_message"] = tool_message

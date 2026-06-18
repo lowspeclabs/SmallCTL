@@ -424,3 +424,20 @@ def test_format_recovery_banner_ssh_host_key_recovery_required() -> None:
     banner = format_recovery_banner("ssh_host_key_recovery_required", data)
     assert "192.168.1.161" in banner
     assert "ssh-keygen -R" in banner
+
+
+def test_format_recovery_banner_long_running_remote_timeout_write_guard() -> None:
+    data = {"tool_name": "ssh_file_write"}
+    banner = format_recovery_banner("long_running_remote_timeout_write_guard", data)
+    assert "ssh_file_write" in banner
+    assert "blocked" in banner.lower()
+    assert "larger timeout_sec" in banner
+
+
+def test_should_render_event_shows_blocked_write_guard_alert() -> None:
+    event = UIEvent(
+        event_type=UIEventType.ALERT,
+        content="Blocked file-write repair after a long-running remote SSH command timed out.",
+        data={"event": "long_running_remote_timeout_write_guard", "tool_name": "ssh_file_write"},
+    )
+    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True

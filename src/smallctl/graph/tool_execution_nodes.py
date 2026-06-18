@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Any
 
+from ..harness.task_intent import promote_active_intent_for_tool_call
 from ..harness.tool_visibility import (
     consume_retry_tool_exposure,
     hidden_tool_reason,
@@ -478,6 +479,16 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 harness.state,
                 mode=graph_state.run_mode,
                 tool_name=pending.tool_name,
+            )
+
+        if promote_active_intent_for_tool_call(harness.state, pending.tool_name):
+            harness._runlog(
+                "active_intent_promoted_by_tool",
+                "promoted active intent from accepted tool call",
+                tool_name=pending.tool_name,
+                tool_call_id=pending.tool_call_id,
+                active_intent=getattr(harness.state, "active_intent", ""),
+                intent_tags=list(getattr(harness.state, "intent_tags", []) or []),
             )
 
         await harness._emit(

@@ -433,6 +433,14 @@ def _build_schema_repair_message(
     field_names = [str(field) for field in required_fields if str(field).strip()]
     required_text = ", ".join(field_names) or "path, content"
     schema_hint = compact_tool_schema_hint(harness, pending.tool_name)
+    parser_metadata = dict(getattr(pending, "parser_metadata", {}) or {})
+    parse_error = parser_metadata.get("arguments_parse_error")
+    if isinstance(parse_error, dict):
+        problem_text = f"Tool call '{pending.tool_name}' had malformed JSON arguments and could not be parsed."
+    elif pending.args:
+        problem_text = f"Tool call '{pending.tool_name}' is missing required fields."
+    else:
+        problem_text = f"Tool call '{pending.tool_name}' was emitted without arguments."
 
     def _with_schema_hint(message: str) -> str:
         if schema_hint:
@@ -468,7 +476,7 @@ def _build_schema_repair_message(
         )
         if session is not None:
             return _with_schema_hint(
-                f"Tool call '{pending.tool_name}' was emitted without arguments. "
+                f"{problem_text} "
                 f"Continue with Write Session `{session.write_session_id}` for `{session.write_target_path}` if this is the current target. "
                 "The active staged copy is the read/verify source. "
                 f"Resend `{pending.tool_name}` with these required fields: {required_text}."
@@ -476,7 +484,7 @@ def _build_schema_repair_message(
                 f"{structural_hint} The target path remains the canonical destination while the staged copy is the read/verify source."
             )
         return _with_schema_hint(
-            f"Tool call '{pending.tool_name}' was emitted without arguments. "
+            f"{problem_text} "
             f"Please resend the tool call with these required fields: {required_text}."
             f"{target_hint} "
             f"{structural_hint}"
@@ -497,7 +505,7 @@ def _build_schema_repair_message(
             if session.write_sections_completed and not session.write_next_section:
                 next_hint = " Omit `next_section_name` on the final chunk to finalize the session."
             return _with_schema_hint(
-                f"Tool call '{pending.tool_name}' was emitted without arguments. "
+                f"{problem_text} "
                 f"Continue writing to `{session.write_target_path}`. "
                 f"Resend `file_write` with these required fields: {required_text}, plus "
                 f"`section_name='{section_name}'`."
@@ -505,7 +513,7 @@ def _build_schema_repair_message(
                 " For a narrow repair inside the staged copy, use `file_patch` for exact text or `ast_patch` for structural edits instead of `file_write`."
             )
         return _with_schema_hint(
-            f"Tool call '{pending.tool_name}' was emitted without arguments. "
+            f"{problem_text} "
             f"Please resend the tool call with these required fields: {required_text}."
             f"{target_hint} "
             "If a full implementation is too large, break it down with a small valid scaffold first, "
@@ -513,7 +521,7 @@ def _build_schema_repair_message(
             "`file_patch` or `ast_patch` instead of retrying a full `file_write`."
         )
     return _with_schema_hint(
-        f"Tool call '{pending.tool_name}' was emitted without arguments. "
+        f"{problem_text} "
         f"Please resend the tool call with these required fields: {required_text}."
     )
 

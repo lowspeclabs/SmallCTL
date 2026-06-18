@@ -154,6 +154,37 @@ def record_schema_validation_repair_attempt(harness: Any, signature: str) -> int
     return updated
 
 
+def record_tool_call_parse_failure_trace(
+    harness: Any,
+    pending: PendingToolCall,
+    parse_error: dict[str, Any],
+    *,
+    raw_preview: str,
+) -> None:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    traces = scratchpad.get("_tool_call_parse_failures")
+    if not isinstance(traces, list):
+        traces = []
+        scratchpad["_tool_call_parse_failures"] = traces
+    trace = {
+        "tool_name": pending.tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "step_count": int(getattr(state, "step_count", 0) or 0),
+        "parse_error": json_safe_value(parse_error),
+        "raw_arguments_preview": raw_preview,
+        "source": str(getattr(pending, "source", "model") or "model"),
+        "replayable": False,
+    }
+    if traces and traces[-1] == trace:
+        return
+    traces.append(trace)
+    if len(traces) > 20:
+        del traces[:-20]
+
+
 @dataclass(frozen=True)
 class SchemaValidationRepairDecision:
     status: str
@@ -194,12 +225,31 @@ def schema_validation_repair_decision(
     tool_name = str(pending.tool_name or "")
     tool_call_id = str(pending.tool_call_id or "")
     raw_preview = str(getattr(pending, "raw_arguments", "") or details.get("raw_arguments") or "")[:500]
+    parser_metadata = dict(getattr(pending, "parser_metadata", {}) or details.get("parser_metadata") or {})
+    parse_error = details.get("arguments_parse_error")
+    if not isinstance(parse_error, dict):
+        parse_error = parser_metadata.get("arguments_parse_error")
+    if isinstance(parse_error, dict):
+        details["arguments_parse_error"] = parse_error
+        details["arguments_malformed"] = True
+        details["arguments_empty"] = False
+    if parser_metadata:
+        details["parser_metadata"] = parser_metadata
     base_runlog_data = {
         "tool_name": pending.tool_name,
         "tool_call_id": pending.tool_call_id,
         "required_fields": required_fields,
         "raw_arguments_preview": raw_preview,
     }
+    if isinstance(parse_error, dict):
+        base_runlog_data["arguments_parse_error"] = parse_error
+        base_runlog_data["arguments_malformed"] = True
+        record_tool_call_parse_failure_trace(
+            harness,
+            pending,
+            parse_error,
+            raw_preview=raw_preview,
+        )
     details["raw_arguments_preview"] = raw_preview
     error_data = {"error_type": "schema_validation_error", **details, "raw_arguments_preview": raw_preview}
     if retry_count >= schema_validation_retry_budget(harness):
@@ -225,17 +275,22 @@ def schema_validation_repair_decision(
             pending,
             required_fields,
         )
+    conversation_metadata = {
+        "is_recovery_nudge": True,
+        "recovery_kind": "schema_validation",
+        "tool_name": pending.tool_name,
+        "required_fields": required_fields,
+        "tool_call_id": pending.tool_call_id,
+        "target_path": resolved_target_path,
+    }
+    if isinstance(parse_error, dict):
+        conversation_metadata["arguments_parse_error"] = parse_error
+        conversation_metadata["arguments_malformed"] = True
+        conversation_metadata["raw_arguments_preview"] = raw_preview
     conversation_message = ConversationMessage(
-        role="user",
+        role="system",
         content=repair_message,
-        metadata={
-            "is_recovery_nudge": True,
-            "recovery_kind": "schema_validation",
-            "tool_name": pending.tool_name,
-            "required_fields": required_fields,
-            "tool_call_id": pending.tool_call_id,
-            "target_path": resolved_target_path,
-        },
+        metadata=conversation_metadata,
     )
     alert_data = {
         "repair_kind": "schema_validation",
@@ -246,6 +301,9 @@ def schema_validation_repair_decision(
         "target_path": resolved_target_path,
         "raw_arguments_preview": raw_preview,
     }
+    if isinstance(parse_error, dict):
+        alert_data["arguments_parse_error"] = parse_error
+        alert_data["arguments_malformed"] = True
     return SchemaValidationRepairDecision(
         status="repair",
         repair_message=repair_message,
@@ -269,6 +327,7 @@ def defer_schema_validation_repair_message(harness: Any, message: ConversationMe
         scratchpad["_deferred_schema_validation_repair_messages"] = queued
     queued.append(
         {
+            "role": str(message.role or "system"),
             "content": message.content,
             "metadata": dict(message.metadata or {}),
         }

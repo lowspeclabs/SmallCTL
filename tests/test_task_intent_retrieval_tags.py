@@ -18,12 +18,19 @@ from smallctl.harness.task_classifier import (
     runtime_policy_for_intent,
 )
 from smallctl.harness.tool_dispatch import chat_mode_tools
-from smallctl.harness.task_intent import derive_task_contract, extract_intent_state, memory_fact_hint
+from smallctl.harness.task_intent import (
+    derive_task_contract,
+    extract_intent_state,
+    memory_fact_hint,
+    preserve_promoted_active_intent,
+    promote_active_intent_for_tool_call,
+)
 from smallctl.memory_store import ExperienceStore
 from smallctl.state import ArtifactRecord, EpisodicSummary, ExperienceMemory, LoopState, WriteSession
 from smallctl.task_targets import extract_task_target_paths
 from smallctl.tools.control_task_complete_gates import (
     task_complete_gate_command_backed_file_creation,
+    task_complete_gate_docker_compose_lifecycle_report,
     task_complete_gate_sysadmin_report_consistency,
 )
 
@@ -1615,3 +1622,153 @@ def test_explicit_local_shell_override() -> None:
     primary, secondary, tags = extract_intent_state(harness, task)
     assert primary == "requested_shell_exec"
     assert "shell_exec" in tags
+
+
+def test_accepted_ssh_exec_promotes_readonly_lookup_intent() -> None:
+    state = LoopState()
+    state.current_phase = "execute"
+    state.active_intent = "readonly_lookup"
+    state.secondary_intents = ["answer_only"]
+    state.intent_tags = ["research"]
+
+    promoted = promote_active_intent_for_tool_call(state, "ssh_exec")
+
+    assert promoted is True
+    assert state.active_intent == "requested_ssh_exec"
+    assert "ssh_exec" in state.intent_tags
+    assert "execute" in state.intent_tags
+    assert "phase_execute" in state.intent_tags
+    assert state.scratchpad["_active_intent_promoted_by_tool"]["tool_name"] == "ssh_exec"
+
+
+def test_readonly_tool_does_not_promote_active_intent() -> None:
+    state = LoopState()
+    state.current_phase = "execute"
+    state.active_intent = "readonly_lookup"
+    state.intent_tags = ["research"]
+
+    promoted = promote_active_intent_for_tool_call(state, "file_read")
+
+    assert promoted is False
+    assert state.active_intent == "readonly_lookup"
+    assert state.intent_tags == ["research"]
+    assert "_active_intent_promoted_by_tool" not in state.scratchpad
+
+
+def test_refresh_preserves_observed_tool_intent_over_derived_readonly() -> None:
+    state = LoopState()
+    state.current_phase = "execute"
+    promote_active_intent_for_tool_call(state, "ssh_exec")
+
+    primary, secondary, tags = preserve_promoted_active_intent(
+        state,
+        "readonly_lookup",
+        ["answer_only"],
+        ["research"],
+    )
+
+    assert primary == "requested_ssh_exec"
+    assert secondary == ["complete_validation_task"]
+    assert "ssh_exec" in tags
+
+
+def test_refresh_keeps_stronger_derived_intent_over_promoted_tool_intent() -> None:
+    state = LoopState()
+    promote_active_intent_for_tool_call(state, "ssh_exec")
+
+    primary, secondary, tags = preserve_promoted_active_intent(
+        state,
+        "author_write",
+        ["mutate_repo"],
+        ["write_file"],
+    )
+
+    assert primary == "author_write"
+    assert secondary == ["mutate_repo"]
+    assert tags == ["write_file"]
+
+
+def _docker_lifecycle_state() -> LoopState:
+    state = LoopState()
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = (
+        "Create and verify a Docker Compose service named qwen-whoami on the remote host. "
+        "Then tear down the stack with docker compose down, recreate it, verify it again, "
+        "and write a report to /tmp/qwen-compose-medium-report.txt."
+    )
+    return state
+
+
+def _ssh_record(command: str, *, success: bool = True, stdout: str = "ok") -> dict[str, object]:
+    return {
+        "tool_name": "ssh_exec",
+        "args": {"command": command},
+        "result": {"success": success, "output": {"exit_code": 0 if success else 1, "stdout": stdout, "stderr": ""}},
+    }
+
+
+def test_docker_compose_lifecycle_report_gate_blocks_unsupported_offline_claim() -> None:
+    state = _docker_lifecycle_state()
+    state.tool_execution_records = {
+        "up1": _ssh_record("cd /opt/qwen-compose-medium && docker compose up -d"),
+        "verify1": _ssh_record("curl -fsS http://127.0.0.1:8091"),
+        "down": _ssh_record("cd /opt/qwen-compose-medium && docker compose down"),
+        "up2": _ssh_record("cd /opt/qwen-compose-medium && docker compose up -d"),
+        "verify2": _ssh_record("curl -fsS http://127.0.0.1:8091"),
+    }
+    state.artifacts = {
+        "report": ArtifactRecord(
+            artifact_id="report",
+            kind="ssh_file_write",
+            source="/tmp/qwen-compose-medium-report.txt",
+            created_at="2026-06-17T18:20:00+00:00",
+            size_bytes=200,
+            summary="qwen-compose-medium-report.txt written",
+            tool_name="ssh_file_write",
+            preview_text="The service was stopped and removed, then recreated and verified.",
+            metadata={"success": True, "arguments": {"path": "/tmp/qwen-compose-medium-report.txt"}},
+        )
+    }
+
+    result = task_complete_gate_docker_compose_lifecycle_report(state, "Task completed.")
+
+    assert result is not None
+    assert result["metadata"]["reason"] == "docker_compose_lifecycle_report_grounding_required"
+    issues = result["metadata"]["docker_compose_lifecycle_issues"]
+    assert any("post-down" in issue for issue in issues)
+    assert not any("recreated service" in issue for issue in issues)
+
+
+def test_docker_compose_lifecycle_report_gate_accepts_direct_teardown_and_recreate_evidence() -> None:
+    state = _docker_lifecycle_state()
+    state.tool_execution_records = {
+        "up1": _ssh_record("cd /opt/qwen-compose-medium && docker compose up -d"),
+        "verify1": _ssh_record("curl -fsS http://127.0.0.1:8091"),
+        "down": _ssh_record("cd /opt/qwen-compose-medium && docker compose down"),
+        "verify_down": _ssh_record("cd /opt/qwen-compose-medium && docker compose ps"),
+        "up2": _ssh_record("cd /opt/qwen-compose-medium && docker compose up -d"),
+        "verify2": _ssh_record("curl -fsS http://127.0.0.1:8091"),
+    }
+    state.artifacts = {
+        "report": ArtifactRecord(
+            artifact_id="report",
+            kind="ssh_file_write",
+            source="/tmp/qwen-compose-medium-report.txt",
+            created_at="2026-06-17T18:20:00+00:00",
+            size_bytes=200,
+            summary="qwen-compose-medium-report.txt written",
+            tool_name="ssh_file_write",
+            preview_text="The service was stopped and removed, then recreated and verified.",
+            metadata={"success": True, "arguments": {"path": "/tmp/qwen-compose-medium-report.txt"}},
+        )
+    }
+
+    assert task_complete_gate_docker_compose_lifecycle_report(state, "Task completed.") is None
+
+
+def test_docker_compose_lifecycle_report_gate_ignores_non_lifecycle_reports() -> None:
+    state = LoopState()
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = "Inspect Docker Compose status on a remote host and write a report."
+
+    assert task_complete_gate_docker_compose_lifecycle_report(state, "Report complete.") is None

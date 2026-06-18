@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from ..normalization import dedupe_keep_tail as _dedupe_keep_tail
+from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, clip_string_list, clip_text_value
+from .common import fail, ok
+
+SESSION_NOTEPAD_KEY = "_session_notepad"
+SESSION_NOTEPAD_LIMIT = 40
+SESSION_NOTEPAD_ITEM_CHAR_LIMIT = 240
+_VERIFIER_SUCCESS_CLAIM_MARKERS = (
+    "verified",
+    "verifier passed",
+    "verification passed",
+    "syntax verified",
+    "syntax is valid",
+    "nginx -t passed",
+    "nginx config syntax verified",
+    "tests pass",
+    "tests passed",
+)
+
+
+def _normalize_notepad_entry(content: str, *, tag: str = "") -> str:
+    clipped_content, _ = clip_text_value(content, limit=SESSION_NOTEPAD_ITEM_CHAR_LIMIT)
+    body = str(clipped_content or "").strip()
+    if not body:
+        return ""
+    clean_tag = str(tag or "").strip().lower()
+    if clean_tag:
+        return f"[{clean_tag}] {body}"
+    return body
+
+
+def _load_session_notepad(state: LoopState) -> dict[str, Any]:
+    payload = state.scratchpad.get(SESSION_NOTEPAD_KEY)
+    if not isinstance(payload, dict):
+        payload = {"entries": [], "updated_at": ""}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    normalized_entries: list[str] = []
+    for entry in entries:
+        text = str(entry or "").strip()
+        if text:
+            normalized_entries.append(text)
+    payload["entries"] = normalized_entries
+    payload["updated_at"] = str(payload.get("updated_at", "") or "").strip()
+    return payload
+
+
+def append_session_notepad_entry(
+    state: LoopState,
+    *,
+    content: str,
+    tag: str = "",
+) -> tuple[str, bool, int]:
+    entry = _normalize_notepad_entry(content, tag=tag)
+    if not entry:
+        return "", False, 0
+
+    payload = _load_session_notepad(state)
+    entries = list(payload.get("entries", []))
+    duplicate = entry in entries
+    if duplicate:
+        return entry, True, len(entries)
+
+    payload["entries"] = _dedupe_keep_tail(entries + [entry], limit=SESSION_NOTEPAD_LIMIT)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    state.scratchpad[SESSION_NOTEPAD_KEY] = payload
+    state.touch()
+    return entry, False, len(payload["entries"])
+
+
+def _looks_like_verifier_success_claim(content: str) -> bool:
+    text = " ".join(str(content or "").strip().lower().split())
+    if not text:
+        return False
+    return any(marker in text for marker in _VERIFIER_SUCCESS_CLAIM_MARKERS)
+
+
+def _latest_verifier_blocks_success_claim(state: LoopState, content: str) -> dict[str, Any] | None:
+    if not _looks_like_verifier_success_claim(content):
+        return None
+    verdict = state.current_verifier_verdict()
+    if not isinstance(verdict, dict) or not verdict:
+        return None
+    verdict_label = str(verdict.get("verdict") or "").strip().lower()
+    if verdict_label in {"", "pass"}:
+        return None
+    return verdict
+
+
+async def checkpoint(
+    state: LoopState,
+    label: str = "checkpoint",
+    output_path: str | None = None,
+) -> dict[str, Any]:
+    path = Path(output_path).resolve() if output_path else Path(state.cwd).resolve() / ".smallctl-checkpoint.json"
+    payload = {
+        "checkpoint_schema_version": 1,
+        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
+        "label": label,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "state": state.to_dict(),
+    }
+    try:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return ok({"path": str(path), "label": label})
+    except Exception as exc:
+        return fail(str(exc))
+
+
+async def memory_update(
+    state: LoopState,
+    *,
+    section: str,
+    content: str,
+    action: str = "add",
+) -> dict[str, Any]:
+    """
+    Update the pinned Working Memory sections (plan, decisions, known_facts, etc.).
+    
+    Args:
+        state: The current loop state (injected).
+        section: The section to update (e.g., 'known_facts', 'plan', 'decisions').
+        content: The text content to add or remove.
+        action: Either 'add' or 'remove' (default: 'add').
+    """
+    valid_sections = {
+        "plan",
+        "decisions",
+        "open_questions",
+        "known_facts",
+        "failures",
+        "next_actions",
+    }
+    if section not in valid_sections:
+        return fail(f"Invalid memory section: {section}. Must be one of: {', '.join(valid_sections)}")
+
+    target_list = getattr(state.working_memory, section)
+    
+    if action == "add":
+        if section in {"known_facts", "decisions"}:
+            contradictory_verdict = _latest_verifier_blocks_success_claim(state, content)
+            if contradictory_verdict is not None:
+                return fail(
+                    "Refusing to store a verifier success claim while the latest verifier is unresolved or failing. "
+                    "Fix the failure and rerun the verifier before recording success.",
+                    metadata={
+                        "section": section,
+                        "action": action,
+                        "reason": "contradictory_verifier_success_claim",
+                        "last_verifier_verdict": contradictory_verdict,
+                    },
+                )
+        # Enforce item-level limit first
+        char_limit = 400 if section in ("plan", "decisions") else 320
+        clipped_content, _ = clip_text_value(content, limit=char_limit)
+        
+        if clipped_content not in target_list:
+            # Add and then enforce list-level limit
+            list_limit = 10 if section in ("plan", "decisions") else (12 if section == "known_facts" else 8)
+            new_list = _dedupe_keep_tail(target_list + [clipped_content], limit=list_limit)
+            
+            # Update the state attribute
+            setattr(state.working_memory, section, new_list)
+            state.touch()
+            return ok(
+                f"Added to {section}: {clipped_content}",
+                metadata={"section": section, "action": action},
+            )
+        return ok(
+            f"No-op: content already exists in {section}. Continue with the next step or call task_complete if finished.",
+            metadata={
+                "section": section,
+                "action": action,
+                "duplicate": True,
+                "noop": True,
+                "skip_auto_fact_record": True,
+                "follow_up": "task_complete",
+            },
+        )
+    
+    if action == "remove":
+        if content in target_list:
+            target_list.remove(content)
+            state.touch()
+            return ok(
+                f"Removed from {section}: {content}",
+                metadata={"section": section, "action": action},
+            )
+        return fail(
+            f"Content not found in {section}: {content}",
+            metadata={"section": section, "action": action},
+        )
+
+    return fail(
+        f"Invalid action: {action}. Must be 'add' or 'remove'.",
+        metadata={"section": section, "action": action},
+    )
+
+
+async def log_note(
+    state: LoopState,
+    *,
+    content: str,
+    tag: str = "",
+) -> dict[str, Any]:
+    entry, duplicate, count = append_session_notepad_entry(
+        state,
+        content=content,
+        tag=tag,
+    )
+    if not entry:
+        return fail("Empty note. Provide non-empty `content`.")
+    if duplicate:
+        return ok(
+            "No-op: note already exists in session notepad.",
+            metadata={"duplicate": True, "count": count},
+        )
+    return ok(
+        {"entry": entry, "count": count},
+        metadata={"count": count, "tag": str(tag or "").strip().lower()},
+    )

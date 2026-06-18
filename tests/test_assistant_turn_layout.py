@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 
+from textual.color import Color
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.ui.bubbles import (
     AssistantDetailWidget,
-    ArtifactBubbleWidget,
     BubbleWidget,
+    LiveOutputBubbleWidget,
     TextBlockWidget,
     ToolCallDetailWidget,
     ToolCallsContainerWidget,
@@ -206,6 +207,7 @@ def test_tool_call_after_meta_and_assistant_stays_in_one_turn() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Second step is underway."))
+            await asyncio.sleep(0.2)
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -339,6 +341,7 @@ def test_matched_tool_result_keeps_active_assistant_turn() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Done."))
+            await asyncio.sleep(0.2)
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -360,7 +363,11 @@ def test_shell_stream_nests_under_matching_tool_call() -> None:
                 UIEvent(
                     UIEventType.TOOL_CALL,
                     "ssh_exec",
-                    data={"display_text": "ssh_exec(command='journalctl -f')", "tool_call_id": "tool-1"},
+                    data={
+                        "display_text": "ssh_exec(command='journalctl -f')",
+                        "tool_call_id": "tool-1",
+                        "args": {"command": "journalctl -f", "host": "192.168.1.161"},
+                    },
                 )
             )
             await console.append_event(
@@ -377,6 +384,18 @@ def test_shell_stream_nests_under_matching_tool_call() -> None:
                     data={"tool_name": "ssh_exec", "tool_call_id": "tool-1"},
                 )
             )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "SSH reached the remote host; remote command exited non-zero.",
+                    data={
+                        "tool_name": "ssh_exec",
+                        "tool_call_id": "tool-1",
+                        "success": True,
+                    },
+                )
+            )
+            await asyncio.sleep(0.2)
             await pilot.pause()
 
             turn = console._active_assistant_turn
@@ -393,11 +412,73 @@ def test_shell_stream_nests_under_matching_tool_call() -> None:
 
             detail = tool_children[0]
             assert isinstance(detail, ToolCallDetailWidget)
+            assert detail.tool_name == "ssh_exec"
+            assert "succeeded" in detail.title
             nested_results = detail._result_widgets
             assert len(nested_results) == 1
-            assert isinstance(nested_results[0], ArtifactBubbleWidget)
+            assert isinstance(nested_results[0], LiveOutputBubbleWidget)
             assert nested_results[0]._title_base == "Live Output"
-            assert nested_results[0]._content_widget.text == "line 1\nline 2\n"
+            assert nested_results[0].command == "journalctl -f"
+            assert "journalctl -f" in nested_results[0].title
+            assert "line 1\nline 2\n" in nested_results[0]._content_widget.text
+            assert nested_results[0]._content_widget.styles.color == Color(8, 145, 178)
+
+    asyncio.run(_run())
+
+
+def test_shell_exec_failure_shows_red_command_and_failed_status() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "ssh_exec",
+                    data={
+                        "display_text": "ssh_exec(command='docker ps')",
+                        "tool_call_id": "tool-1",
+                        "args": {"command": "docker ps", "host": "192.168.1.161"},
+                    },
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "Conflicting SSH targets provided via `target` and `host`.",
+                    data={
+                        "tool_name": "ssh_exec",
+                        "tool_call_id": "tool-1",
+                        "success": False,
+                    },
+                )
+            )
+            await asyncio.sleep(0.2)
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            tool_group = content.children[0]
+            assert isinstance(tool_group, ToolCallsContainerWidget)
+            detail = tool_group.query_one(".tool-calls-container", Vertical).children[0]
+            assert isinstance(detail, ToolCallDetailWidget)
+            assert detail.tool_name == "ssh_exec"
+            assert "failed" in detail.title
+            assert "#ef4444" in detail.title
+
+            nested_results = detail._result_widgets
+            assert len(nested_results) == 1
+            bubble = nested_results[0]
+            assert isinstance(bubble, LiveOutputBubbleWidget)
+            assert bubble.command == "docker ps"
+            assert "docker ps" in bubble.title
+            assert "(failed)" in bubble.title
+            assert "#ef4444" in bubble.title
+            assert bubble._content_widget.styles.color == Color(239, 68, 68)
+            assert "Conflicting SSH targets" in bubble._content_widget.text
 
     asyncio.run(_run())
 

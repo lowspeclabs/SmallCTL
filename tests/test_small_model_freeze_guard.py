@@ -19,7 +19,7 @@ from smallctl.graph.progress_guard import (
 )
 from smallctl.harness.tool_visibility import filter_tools_for_runtime_state
 from smallctl.models.tool_result import ToolEnvelope
-from smallctl.state import ArtifactRecord
+from smallctl.state import ArtifactRecord, LoopState
 
 
 class _FakeState:
@@ -206,6 +206,27 @@ def test_multiphase_discovery_uses_state_strategy_when_scratchpad_missing() -> N
     assert harness.state.recent_messages
     assert harness.state.recent_messages[-1].role == "user"
     assert "DISCOVERY phase" in harness.state.recent_messages[-1].content
+
+
+def test_check_guards_ignores_recovery_nudge_recent_errors() -> None:
+    state = LoopState()
+    state.recent_errors = [
+        "Blocked file-write repair after a long-running remote SSH command timed out. Continue remotely.",
+        "ssh_exec: docker inspect failed",
+        "ssh_exec: docker inspect failed again",
+        "VERIFIER LOOP HARD STOP: required action class change",
+        "ssh_exec: curl failed",
+    ]
+
+    assert check_guards(state, GuardConfig(max_consecutive_errors=4)) is None
+
+    state.recent_errors.append("ssh_exec: final verifier failed")
+    guard_error = check_guards(state, GuardConfig(max_consecutive_errors=4))
+
+    assert guard_error is not None
+    assert "max_consecutive_errors" in guard_error
+    assert "Blocked file-write repair" not in guard_error
+    assert "VERIFIER LOOP HARD STOP" not in guard_error
 
 
 def test_check_guards_uses_the_updated_repeated_action_threshold() -> None:

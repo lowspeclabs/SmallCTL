@@ -1,0 +1,650 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import re
+from typing import Callable, Iterable
+
+from ..interrupt_replies import is_interrupt_response
+from ..models.conversation import ConversationMessage
+from .task_classifier_constants import (
+    ANALYSIS_MARKERS,
+    AUTHORING_TARGET_MARKERS,
+    AUTHORING_TARGET_RE,
+    CAPABILITY_QUERY_CONTEXTUAL_MARKERS,
+    CAPABILITY_QUERY_NEGATIVE_PHRASES,
+    CAPABILITY_QUERY_STRONG_MARKERS,
+    CAPABILITY_QUERY_TARGETS,
+    CODE_TARGET_RE,
+    DEBUG_MARKERS,
+    EXECUTION_ACTION_MARKERS,
+    IP_ADDRESS_PATTERN,
+    LOCAL_SHELL_OVERRIDE_RE,
+    OPERATIONAL_ACTION_TARGETS,
+    OPERATIONAL_ACTION_VERBS,
+    PLAN_ONLY_PHRASES,
+    READONLY_FILE_TARGETS,
+    READONLY_SUGGESTION_MARKERS,
+    REMOTE_HINTS_WORD_BOUNDARIES_RE,
+    SSH_AUTH_MARKERS,
+    TOOL_PLAN_EVIDENCE_MARKERS,
+    WEB_LOOKUP_MARKERS,
+    WRITE_ACTION_MARKERS,
+    WRITE_FILE_CREATION_MARKERS,
+)
+from .task_classifier_content_lookup import needs_loop_for_content_lookup
+from .task_classifier_support import (
+    has_remote_execution_target,
+    is_smalltalk,
+    looks_like_analysis_request,
+    looks_like_debug_inspection_request,
+    looks_like_plan_only_request,
+    task_is_local_coding_target,
+    task_has_local_scope_markers,
+    task_is_local_ssh_file_target,
+    task_is_local_system_target,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskClassificationRule:
+    """Declarative rule for classify_task_mode precedence table."""
+
+    name: str
+    check: Callable[[str], bool]
+    mode: str
+
+@dataclass(frozen=True)
+class RuntimeIntent:
+    label: str
+    task_mode: str
+
+
+@dataclass(frozen=True)
+class RuntimePolicy:
+    route_mode: str | None
+    chat_requires_tools: bool
+
+
+
+_TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
+    TaskClassificationRule(
+        "local_shell_override", lambda t: bool(LOCAL_SHELL_OVERRIDE_RE.search(t)), "local_execute"
+    ),
+    TaskClassificationRule(
+        "local_coding_target", task_is_local_coding_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "local_ssh_file_target", task_is_local_ssh_file_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "hybrid_execute",
+        lambda t: has_remote_execution_target(t)
+        and any(marker in t.lower() for marker in ("local ", "locally", "./", "../")),
+        "hybrid_execute",
+    ),
+    TaskClassificationRule(
+        "local_system_target", task_is_local_system_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "smalltalk", is_smalltalk, "chat"
+    ),
+    TaskClassificationRule(
+        "plan_only", looks_like_plan_only_request, "plan_only"
+    ),
+    TaskClassificationRule(
+        "remote_execute",
+        lambda t: has_remote_execution_target(t)
+        and (
+            looks_like_action_request(t)
+            or looks_like_shell_request(t)
+            or looks_like_debug_inspection_request(t)
+            or needs_contextual_loop_escalation([], t)
+        ),
+        "remote_execute",
+    ),
+    TaskClassificationRule(
+        "write_patch",
+        lambda t: looks_like_write_patch_request(t) or looks_like_write_file_request(t) or looks_like_author_write_request(t),
+        "local_execute",
+    ),
+    TaskClassificationRule(
+        "debug_inspect", looks_like_debug_inspection_request, "debug_inspect"
+    ),
+    TaskClassificationRule(
+        "action_or_shell",
+        lambda t: looks_like_action_request(t) or looks_like_shell_request(t),
+        "local_execute",
+    ),
+    TaskClassificationRule(
+        "analysis", looks_like_analysis_request, "analysis"
+    ),
+]
+
+
+def classify_task_mode(task: str) -> str:
+    text = task.strip()
+    if not text:
+        return "chat"
+    for rule in _TASK_CLASSIFICATION_RULES:
+        if rule.check(text):
+            return rule.mode
+    lowered = text.lower()
+    if "error" in lowered or "failed" in lowered or "failure" in lowered:
+        return "analysis"
+    return "chat"
+
+
+def looks_like_execution_followup(text: str) -> bool:
+    followup_phrases = (
+        "use the command",
+        "use that command",
+        "run it",
+        "run that",
+        "execute it",
+        "execute that",
+        "try again",
+        "use the shell command",
+        "run the shell command",
+        "execute the shell command",
+    )
+    return any(phrase in text for phrase in followup_phrases)
+
+
+def looks_like_action_request(task: str) -> bool:
+    text = task.strip().lower()
+    if _looks_like_ssh_auth_request(text):
+        return True
+    if any(marker in text for marker in EXECUTION_ACTION_MARKERS):
+        return True
+    has_operational_verb = any(verb in text for verb in OPERATIONAL_ACTION_VERBS)
+    has_operational_target = any(target in text for target in OPERATIONAL_ACTION_TARGETS)
+    if has_operational_verb and (has_operational_target or bool(IP_ADDRESS_PATTERN.search(text))):
+        return True
+    return False
+
+
+def looks_like_write_patch_request(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if re.search(r"\b(?:new|fresh)\s+(?:script|file|module|code)\b", text) and looks_like_write_file_request(text):
+        return False
+    has_write_action = any(marker in text for marker in WRITE_ACTION_MARKERS)
+    return bool(has_write_action and CODE_TARGET_RE.search(text))
+
+
+def looks_like_write_file_request(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in READONLY_SUGGESTION_MARKERS):
+        return False
+    has_creation_marker = any(marker in text for marker in WRITE_FILE_CREATION_MARKERS)
+    has_code_target = "script" in text or bool(CODE_TARGET_RE.search(text))
+    return bool(has_creation_marker and has_code_target)
+
+
+def looks_like_author_write_request(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    has_creation_marker = any(marker in text for marker in WRITE_FILE_CREATION_MARKERS)
+    has_authoring_target = any(marker in text for marker in AUTHORING_TARGET_MARKERS)
+    has_authoring_path = bool(AUTHORING_TARGET_RE.search(text))
+    return bool(
+        has_creation_marker
+        and (has_authoring_target or has_authoring_path)
+        and not looks_like_write_patch_request(text)
+        and not looks_like_write_file_request(text)
+    )
+
+
+def needs_memory_persistence(task: str) -> bool:
+    text = task.strip().lower()
+    if not text:
+        return False
+    memory_markers = (
+        "save this in memory",
+        "save memory",
+        "remember this",
+        "store this in memory",
+        "store this",
+        "note this",
+        "pin this",
+        "persist this",
+        "keep this in memory",
+        "write this down",
+    )
+    return any(marker in text for marker in memory_markers)
+
+
+def looks_like_shell_request(task: str) -> bool:
+    text = task.strip().lower()
+    if not text:
+        return False
+    if looks_like_write_patch_request(text):
+        return False
+    if _looks_like_ssh_auth_request(text):
+        return True
+    shell_markers = (
+        "bash",
+        "shell",
+        "terminal",
+        "command",
+        "command line",
+        "run ",
+        "execute",
+        "exec",
+        "install",
+        "setup",
+        "set up",
+        "configure",
+        "deploy",
+        "provision",
+        "restart",
+        "stop",
+        "enable",
+        "disable",
+        "upgrade",
+        "scan",
+        "nmap",
+        "ssh",
+        "scp",
+        "sftp",
+        "ping",
+        "curl",
+        "wget",
+        "traceroute",
+        "tracepath",
+        "netstat",
+        "route",
+        "ip route",
+        "ip addr",
+        "tcpdump",
+        "netcat",
+        "nc ",
+        "dig",
+        "nslookup",
+        "whoami",
+        "ps ",
+        "top ",
+        "lsof",
+        "df ",
+        "du ",
+    )
+    if any(marker in text for marker in shell_markers):
+        return True
+    if any(verb in text for verb in OPERATIONAL_ACTION_VERBS) and (
+        any(target in text for target in OPERATIONAL_ACTION_TARGETS)
+        or bool(IP_ADDRESS_PATTERN.search(text))
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(run|execute|exec|launch|invoke|start)\b.*\b(command|shell|terminal|script|scan|nmap|port|ports|ssh|ping|curl|wget)\b",
+            text,
+        )
+    )
+
+
+def looks_like_tool_plan_candidate(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if looks_like_plan_only_request(text):
+        return False
+    if looks_like_shell_request(text) or looks_like_action_request(text):
+        return False
+    if any(marker in text for marker in TOOL_PLAN_EVIDENCE_MARKERS):
+        return True
+    if (
+        looks_like_write_patch_request(text)
+        or looks_like_write_file_request(text)
+        or looks_like_author_write_request(text)
+    ):
+        return False
+    if any(marker in text for marker in WEB_LOOKUP_MARKERS) and looks_like_readonly_chat_request(text):
+        return True
+    mode = classify_task_mode(text)
+    return mode in {"analysis", "debug_inspect"} and (
+        needs_loop_for_content_lookup(text) or looks_like_readonly_chat_request(text)
+    )
+
+
+def looks_like_readonly_chat_request(task: str) -> bool:
+    text = task.strip().lower()
+    if not text:
+        return False
+    if looks_like_execution_followup(text):
+        return False
+    readonly_markers = (
+        "what",
+        "which",
+        "show",
+        "read",
+        "find",
+        "search",
+        "grep",
+        "list",
+        "current",
+        "status",
+        "where",
+        "how many",
+        "inspect",
+        "check",
+        "look at",
+        "can you see",
+        "tell me",
+        "summarize",
+    )
+    readonly_targets = (
+        "file",
+        "files",
+        "folder",
+        "directory",
+        "repo",
+        "repository",
+        "cwd",
+        "working directory",
+        "log",
+        "logs",
+        "artifact",
+        "artifacts",
+        "process",
+        "cpu",
+        "ram",
+        "memory",
+        "host",
+        "system",
+        "status",
+        "code",
+        "source",
+        "src",
+        "web",
+        "website",
+        "internet",
+        "online",
+        "docs",
+        "documentation",
+        "pricing",
+        "release",
+        "releases",
+        "announcement",
+        "news",
+    )
+    has_readonly_marker = any(marker in text for marker in readonly_markers)
+    has_target = any(target in text for target in readonly_targets)
+    return has_readonly_marker and has_target
+
+
+def classify_runtime_intent(
+    task: str,
+    *,
+    recent_messages: Iterable[ConversationMessage],
+    pending_interrupt: dict | None = None,
+) -> RuntimeIntent:
+    text = str(task or "").strip()
+    if not text:
+        return RuntimeIntent(label="chat_only", task_mode="chat")
+
+    if is_interrupt_response(pending_interrupt, text):
+        return RuntimeIntent(label="interrupt_continuation", task_mode="loop")
+
+    task_mode = classify_task_mode(text)
+    if is_smalltalk(text):
+        return RuntimeIntent(label="smalltalk", task_mode="chat")
+    if looks_like_capability_query(text, recent_messages=recent_messages):
+        return RuntimeIntent(label="capability_query", task_mode=task_mode)
+    if needs_memory_persistence(text):
+        return RuntimeIntent(label="memory_persistence", task_mode=task_mode)
+    if needs_contextual_loop_escalation(recent_messages, text):
+        return RuntimeIntent(label="contextual_execute", task_mode=task_mode)
+    if looks_like_readonly_chat_request(text):
+        return RuntimeIntent(label="readonly_lookup", task_mode=task_mode)
+    if looks_like_author_write_request(text):
+        return RuntimeIntent(label="author_write", task_mode=task_mode)
+    if (
+        looks_like_write_patch_request(text)
+        or looks_like_write_file_request(text)
+        or task_mode in {"local_execute", "remote_execute"}
+        or looks_like_action_request(text)
+        or looks_like_shell_request(text)
+    ):
+        return RuntimeIntent(label="execute", task_mode=task_mode)
+    if needs_loop_for_content_lookup(text):
+        return RuntimeIntent(label="content_lookup", task_mode=task_mode)
+    return RuntimeIntent(label="chat_only", task_mode=task_mode)
+
+
+def runtime_policy_for_intent(intent: RuntimeIntent) -> RuntimePolicy:
+    if intent.label == "smalltalk":
+        return RuntimePolicy(route_mode="chat", chat_requires_tools=False)
+    if intent.label in {
+        "capability_query",
+        "author_write",
+        "memory_persistence",
+        "contextual_execute",
+        "execute",
+        "content_lookup",
+        "interrupt_continuation",
+    }:
+        return RuntimePolicy(route_mode="loop", chat_requires_tools=True)
+    if intent.label == "readonly_lookup":
+        return RuntimePolicy(route_mode=None, chat_requires_tools=True)
+    return RuntimePolicy(route_mode=None, chat_requires_tools=False)
+
+
+def looks_like_capability_query(
+    task: str,
+    *,
+    recent_messages: Iterable[ConversationMessage],
+) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if any(phrase in text for phrase in CAPABILITY_QUERY_NEGATIVE_PHRASES):
+        return False
+    if any(marker in text for marker in CAPABILITY_QUERY_STRONG_MARKERS):
+        return True
+    if any(marker in text for marker in CAPABILITY_QUERY_CONTEXTUAL_MARKERS) and any(
+        scope in text
+        for scope in (
+            "harness",
+            "environment",
+            "tool",
+            "tools",
+            "capability",
+            "capabilities",
+            "access",
+            "available",
+            "enabled",
+            "mode",
+            "right now",
+            "on this turn",
+        )
+    ):
+        return True
+
+    has_target = any(target in text for target in CAPABILITY_QUERY_TARGETS)
+    if not has_target:
+        return False
+
+    query_markers = (
+        "what",
+        "which",
+        "can you",
+        "do you",
+        "are",
+        "is",
+        "enabled",
+        "available",
+        "access",
+        "current",
+        "right now",
+    )
+    if any(marker in text for marker in query_markers) and any(
+        scope in text
+        for scope in (
+            "harness",
+            "environment",
+            "right now",
+            "available now",
+            "available on this turn",
+            "access to",
+            "enabled right now",
+            "mode",
+        )
+    ):
+        return True
+
+    if _recent_capability_context(recent_messages) and any(
+        marker in text for marker in ("what about", "which", "what", "are", "is", "enabled", "available")
+    ):
+        return True
+    return False
+
+
+def _recent_capability_context(messages: Iterable[ConversationMessage]) -> bool:
+    recent_contents = [
+        str(message.content or "").strip().lower()
+        for message in reversed(list(messages))
+        if str(getattr(message, "content", "") or "").strip()
+    ][:4]
+    if not recent_contents:
+        return False
+    return any(
+        any(token in content for token in ("tools", "capabilities", "access", "mode", "harness", "environment"))
+        for content in recent_contents
+    )
+
+
+def recent_assistant_proposed_command(messages: Iterable[ConversationMessage]) -> bool:
+    recent_assistants = [
+        message.content or ""
+        for message in reversed(list(messages))
+        if message.role == "assistant" and (message.content or "").strip()
+    ][:2]
+    if not recent_assistants:
+        return False
+    command_pattern = re.compile(
+        r"```(?:bash|sh|shell|zsh|pwsh|powershell)?\s*\n.+?```",
+        re.IGNORECASE | re.DOTALL,
+    )
+    shell_tokens = re.compile(
+        r"\b(top|ps|ls|pwd|cd|cat|grep|find|git|pytest|python|bash|sh|systemctl|journalctl)\b",
+        re.IGNORECASE,
+    )
+    for content in recent_assistants:
+        if command_pattern.search(content):
+            return True
+        if shell_tokens.search(content):
+            return True
+    return False
+
+
+def recent_assistant_referenced_tool_name(
+    messages: Iterable[ConversationMessage],
+    tool_name: str,
+) -> bool:
+    target = str(tool_name or "").strip().lower()
+    if not target:
+        return False
+    for message in reversed(list(messages)):
+        if message.role != "assistant" or not message.content:
+            continue
+        if target in message.content.lower():
+            return True
+    return False
+
+
+def needs_contextual_loop_escalation(
+    messages: Iterable[ConversationMessage],
+    task: str,
+) -> bool:
+    text = task.strip().lower()
+    if not text:
+        return False
+    if not looks_like_execution_followup(text):
+        return False
+    if recent_assistant_proposed_command(messages):
+        return True
+    return recent_assistant_referenced_tool_name(messages, "shell_exec")
+
+
+def looks_like_complex_task(task: str) -> bool:
+    """Return True when a task implies multiple steps, cross-file work, or
+    mixed local/remote operations that benefit from structured planning."""
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if "do not connect" in text and "remote" in text and ("./" in text or "local" in text):
+        return False
+
+    # Multi-step sequencing language
+    sequence_markers = (
+        "step 1", "step 2", "step 3", "phase 1", "phase 2",
+        "first ", "second ", "third ", "then ", "next ", "after that", "finally",
+        "and then", "followed by", "subsequently", "before ", "after ",
+    )
+    if sum(1 for m in sequence_markers if m in text) >= 2:
+        return True
+
+    # Large-scale restructuring
+    restructuring_markers = (
+        "refactor", "redesign", "restructure", "reorganize",
+        "project-wide", "across the codebase", "throughout the project",
+        "migrate", "deprecate", "modernize",
+    )
+    if any(m in text for m in restructuring_markers):
+        return True
+
+    # Multiple distinct operational verbs
+    operational_verbs = (
+        "install", "setup", "set up", "configure", "deploy",
+        "debug", "investigate", "find", "trace",
+        "fix", "patch", "repair", "resolve",
+        "implement", "write", "create", "build",
+        "test", "verify", "validate", "check",
+    )
+    verb_hits = sum(1 for v in operational_verbs if v in text)
+    if verb_hits >= 3:
+        return True
+
+    # Both remote and local targets
+    has_remote = bool(REMOTE_HINTS_WORD_BOUNDARIES_RE.search(text)) or bool(IP_ADDRESS_PATTERN.search(text))
+    has_local = any(m in text for m in ("file", "files", "code", "script", "patch", "edit", "module", "repo"))
+    if has_remote and has_local:
+        return True
+
+    # Multiple file targets
+    file_extensions = re.findall(r"[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|go|rs|java|kt|cpp|c|h|rb|php)", text)
+    if len(set(file_extensions)) >= 3:
+        return True
+
+    # Debug-investigate-fix-verify chain
+    if any(m in text for m in ("debug", "investigate", "find", "trace", "diagnose")) and any(
+        m in text for m in ("fix", "patch", "repair", "resolve", "solve")
+    ) and any(m in text for m in ("test", "verify", "validate", "check")):
+        return True
+
+    return False
+
+
+def _looks_like_ssh_auth_request(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    if not any(marker in normalized for marker in SSH_AUTH_MARKERS):
+        return False
+    return any(
+        token in normalized
+        for token in (
+            "auth",
+            "authentication",
+            "key",
+            "keys",
+            "ssh",
+            "pubkey",
+            "public key",
+        )
+    )

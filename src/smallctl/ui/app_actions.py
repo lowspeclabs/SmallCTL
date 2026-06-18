@@ -10,7 +10,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from ..chat_sessions import load_chat_session_state, load_chat_session_summaries
+from ..chat_sessions import load_chat_session_state, load_chat_session_summaries, load_chat_session_ui_transcript
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
@@ -289,6 +289,12 @@ class SmallctlAppActionsMixin:
         if not restored:
             await self._append_system_line(f"Could not restore chat session {thread_id}.", force=True)
             return
+        if self.harness is not None:
+            ui_transcript = load_chat_session_ui_transcript(
+                cwd=getattr(self.harness.state, "cwd", "."),
+                thread_id=thread_id,
+            )
+            self._ui_transcript = [dict(item) for item in ui_transcript if isinstance(item, dict)]
         await self._render_restored_chat(messages=restored_messages if isinstance(restored_messages, list) else None)
         await self._append_system_line(f"Restored chat session {thread_id}.", force=True)
 

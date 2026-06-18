@@ -29,6 +29,7 @@ _CRITICAL_EVENTS = {
     "fama_signal_detected",
     "fama_signal_to_mitigation",
     "fama_mitigation_activated",
+    "long_running_remote_timeout_write_guard",
     "reflexion_created",
     "recovery_human_resteer_recorded",
     "same_scope_iteration_recorded",
@@ -286,6 +287,9 @@ def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
         host = str(data.get("host") or "remote host").strip()
         command = str(data.get("suggested_command") or "ssh-keygen -R <host> -f ~/.ssh/known_hosts").strip()
         return f"Blocked: SSH host key changed for {host}. Approve `{command}` or fix known_hosts manually."
+    if event == "long_running_remote_timeout_write_guard":
+        tool_name = str(data.get("tool_name") or "file write").strip()
+        return f"Blocked: {tool_name} blocked after remote installer timeout. Retry with larger timeout_sec or detached execution."
     interrupt = data.get("interrupt") if isinstance(data, dict) else None
     if isinstance(interrupt, dict) and str(interrupt.get("kind") or "").strip() == "apt_deb822_validator_approval":
         host = str(interrupt.get("host") or "").strip()

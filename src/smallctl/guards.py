@@ -123,13 +123,30 @@ def _repeated_action_directive_hint(state: LoopState, tool_name: str) -> str:
     )
 
 
+_RECOVERY_NUDGE_ERROR_MARKERS = (
+    "Blocked file-write repair after a long-running remote SSH command timed out",
+    "VERIFIER LOOP HARD STOP:",
+)
+
+
+def _guard_countable_recent_errors(state: LoopState) -> list[str]:
+    countable: list[str] = []
+    for error in getattr(state, "recent_errors", []) or []:
+        text = str(error or "")
+        if any(marker in text for marker in _RECOVERY_NUDGE_ERROR_MARKERS):
+            continue
+        countable.append(text)
+    return countable
+
+
 def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
     if state.step_count >= cfg.max_steps:
         return f"Guard tripped: max_steps ({cfg.max_steps})"
     if cfg.max_tokens is not None and state.token_usage >= cfg.max_tokens:
         return f"Guard tripped: max_tokens ({cfg.max_tokens})"
-    if len(state.recent_errors) >= cfg.max_consecutive_errors:
-        return f"Guard tripped: max_consecutive_errors ({cfg.max_consecutive_errors}) - Errors: {state.recent_errors}"
+    countable_recent_errors = _guard_countable_recent_errors(state)
+    if len(countable_recent_errors) >= cfg.max_consecutive_errors:
+        return f"Guard tripped: max_consecutive_errors ({cfg.max_consecutive_errors}) - Errors: {countable_recent_errors}"
     
     no_progress = int(state.stagnation_counters.get("no_progress", 0))
     if no_progress >= 2:

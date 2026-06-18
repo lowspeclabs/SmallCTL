@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +12,8 @@ from typing import Any
 
 SESSION_INDEX_NAME = "chat_sessions.json"
 SESSION_STATE_DIR_NAME = "chat_states"
+_SESSION_SIZE_WARNING_BYTES = (5 * 1024 * 1024, 25 * 1024 * 1024, 100 * 1024 * 1024)
+logger = logging.getLogger("smallctl.chat_sessions")
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,11 @@ def session_index_path(cwd: str | Path) -> Path:
 def session_state_path(cwd: str | Path, thread_id: str) -> Path:
     safe_thread_id = _sanitize_filename(thread_id)
     return Path(cwd).resolve() / ".smallctl" / SESSION_STATE_DIR_NAME / f"{safe_thread_id}.json"
+
+
+def session_ui_transcript_path(cwd: str | Path, thread_id: str) -> Path:
+    safe_thread_id = _sanitize_filename(thread_id)
+    return Path(cwd).resolve() / ".smallctl" / SESSION_STATE_DIR_NAME / f"{safe_thread_id}.ui.json"
 
 
 def record_chat_session_prompt(
@@ -83,22 +92,23 @@ def persist_chat_session_state(
         return None
     state_path = session_state_path(cwd, resolved_thread_id)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_ui_transcript(cwd=cwd, thread_id=resolved_thread_id)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    existing_ui_transcript: list[Any] = []
-    try:
-        existing_payload = json.loads(state_path.read_text(encoding="utf-8"))
-        existing = existing_payload.get("ui_transcript") if isinstance(existing_payload, dict) else None
-        if isinstance(existing, list):
-            existing_ui_transcript = existing
-    except Exception:
-        existing_ui_transcript = []
     payload = {
         "thread_id": resolved_thread_id,
         "saved_at": now,
         "state": state_payload,
-        "ui_transcript": existing_ui_transcript,
     }
-    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    started = time.perf_counter()
+    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    state_path.write_text(serialized, encoding="utf-8")
+    _log_session_write(
+        "chat_runtime_state_write",
+        path=state_path,
+        payload_bytes=len(serialized.encode("utf-8")),
+        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        thread_id=resolved_thread_id,
+    )
 
     first_message = _first_user_message(state_payload.get("conversation_history"))
     if not first_message:
@@ -126,20 +136,24 @@ def persist_chat_session_ui_transcript(
     resolved_thread_id = str(thread_id or "").strip()
     if not resolved_thread_id or not isinstance(ui_transcript, list):
         return None
-    state_path = session_state_path(cwd, resolved_thread_id)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {"thread_id": resolved_thread_id, "state": {}}
-    if not isinstance(payload, dict):
-        payload = {"thread_id": resolved_thread_id, "state": {}}
-    payload["thread_id"] = resolved_thread_id
-    payload["saved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    payload["ui_transcript"] = ui_transcript[-500:]
-    payload.setdefault("state", {})
-    state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return state_path
+    path = session_ui_transcript_path(cwd, resolved_thread_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "thread_id": resolved_thread_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ui_transcript": ui_transcript[-500:],
+    }
+    started = time.perf_counter()
+    serialized = json.dumps(payload, indent=2, sort_keys=True)
+    path.write_text(serialized, encoding="utf-8")
+    _log_session_write(
+        "chat_ui_transcript_write",
+        path=path,
+        payload_bytes=len(serialized.encode("utf-8")),
+        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        thread_id=resolved_thread_id,
+    )
+    return path
 
 
 def load_chat_session_ui_transcript(
@@ -147,11 +161,11 @@ def load_chat_session_ui_transcript(
     cwd: str | Path,
     thread_id: str,
 ) -> list[dict[str, Any]]:
-    path = session_state_path(cwd, thread_id)
+    path = session_ui_transcript_path(cwd, thread_id)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return []
+        payload = _read_legacy_session_payload(cwd=cwd, thread_id=thread_id)
     if not isinstance(payload, dict):
         return []
     transcript = payload.get("ui_transcript")
@@ -174,6 +188,59 @@ def load_chat_session_state(
         return None
     state = payload.get("state")
     return state if isinstance(state, dict) else None
+
+
+def _read_legacy_session_payload(*, cwd: str | Path, thread_id: str) -> dict[str, Any] | None:
+    path = session_state_path(cwd, thread_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _migrate_legacy_ui_transcript(*, cwd: str | Path, thread_id: str) -> None:
+    split_path = session_ui_transcript_path(cwd, thread_id)
+    if split_path.exists():
+        return
+    legacy_payload = _read_legacy_session_payload(cwd=cwd, thread_id=thread_id)
+    if not isinstance(legacy_payload, dict):
+        return
+    transcript = legacy_payload.get("ui_transcript")
+    if not isinstance(transcript, list):
+        return
+    items = [item for item in transcript if isinstance(item, dict)]
+    if not items:
+        return
+    persist_chat_session_ui_transcript(cwd=cwd, thread_id=thread_id, ui_transcript=items)
+
+
+def _log_session_write(
+    event: str,
+    *,
+    path: Path,
+    payload_bytes: int,
+    elapsed_ms: float,
+    thread_id: str,
+) -> None:
+    payload = {
+        "event": event,
+        "thread_id": thread_id,
+        "path": str(path),
+        "payload_bytes": payload_bytes,
+        "elapsed_ms": round(elapsed_ms, 2),
+    }
+    threshold = _largest_crossed_threshold(payload_bytes)
+    if threshold:
+        payload["threshold_bytes"] = threshold
+        logger.warning("chat_session_size_warning %s", payload)
+    else:
+        logger.debug("chat_session_persistence %s", payload)
+
+
+def _largest_crossed_threshold(payload_bytes: int) -> int:
+    crossed = [threshold for threshold in _SESSION_SIZE_WARNING_BYTES if payload_bytes >= threshold]
+    return crossed[-1] if crossed else 0
 
 
 def load_chat_session_summaries(

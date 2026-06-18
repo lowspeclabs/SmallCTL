@@ -395,6 +395,188 @@ def task_complete_gate_sysadmin_report_consistency(state: LoopState, message: st
     )
 
 
+def _docker_compose_lifecycle_task_text(state: LoopState) -> str:
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    return "\n".join(
+        str(part or "")
+        for part in (
+            getattr(run_brief, "original_task", ""),
+            getattr(run_brief, "current_phase_objective", ""),
+            getattr(working_memory, "current_goal", ""),
+        )
+    )
+
+
+def _is_docker_compose_lifecycle_report_task(state: LoopState) -> bool:
+    text = _docker_compose_lifecycle_task_text(state).lower()
+    if "docker compose" not in text and "docker-compose" not in text:
+        return False
+    if "report" not in text:
+        return False
+    if not any(marker in text for marker in ("recreate", "re-create", "bring it back", "start it again")):
+        return False
+    if not any(marker in text for marker in ("tear down", "teardown", "compose down", "docker compose down", "stop and remove")):
+        return False
+    return any(marker in text for marker in ("create", "start", "bring up", "compose up", "docker compose up"))
+
+
+def _latest_docker_lifecycle_report_artifact(state: LoopState) -> Any | None:
+    candidates: list[Any] = []
+    for artifact in getattr(state, "artifacts", {}).values():
+        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+        if tool_name not in {"ssh_file_write", "file_write", "ssh_exec", "shell_exec"}:
+            continue
+        metadata = getattr(artifact, "metadata", None)
+        arguments = metadata.get("arguments") if isinstance(metadata, dict) else {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        target = " ".join(
+            str(value or "")
+            for value in (
+                getattr(artifact, "source", ""),
+                arguments.get("path"),
+                getattr(artifact, "summary", ""),
+            )
+        ).lower()
+        if "report" in target and re.search(r"(?:^|/|\s)[^\s]*report[^\s]*\.txt\b", target):
+            candidates.append(artifact)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: str(getattr(item, "created_at", "") or ""))[-1]
+
+
+def _docker_lifecycle_report_text(state: LoopState, message: str) -> str:
+    artifact = _latest_docker_lifecycle_report_artifact(state)
+    report = _artifact_text(artifact) if artifact is not None else ""
+    return re.sub(r"\s+", " ", f"{report} {message}".lower()).strip()
+
+
+def _tool_record_command(record: Any) -> str:
+    if not isinstance(record, dict):
+        return ""
+    args = record.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    return str(args.get("command") or "").strip()
+
+
+def _tool_record_success(record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return False
+    if result.get("success") is False:
+        return False
+    output = result.get("output")
+    if isinstance(output, dict):
+        exit_code = output.get("exit_code")
+        if exit_code not in {None, 0, "0"}:
+            return False
+    return True
+
+
+def _docker_lifecycle_evidence(state: LoopState) -> dict[str, bool]:
+    saw_down = False
+    saw_down_verifier = False
+    saw_recreate_up = False
+    saw_recreate_verifier = False
+    saw_any_up = False
+    for record in getattr(state, "tool_execution_records", {}).values():
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("tool_name") or "") not in {"ssh_exec", "shell_exec"}:
+            continue
+        if not _tool_record_success(record):
+            continue
+        command = _tool_record_command(record).lower()
+        if not command:
+            continue
+        is_compose = "docker compose" in command or "docker-compose" in command
+        is_up = is_compose and re.search(r"\bup\b", command) is not None
+        is_down = is_compose and re.search(r"\bdown\b", command) is not None
+        is_verify = (
+            (is_compose and re.search(r"\b(?:ps|logs)\b", command) is not None)
+            or re.search(r"(?:^|[;&|]\s*)curl\b", command) is not None
+            or re.search(r"(?:^|[;&|]\s*)wget\b", command) is not None
+            or ("docker ps" in command)
+        )
+        if is_up:
+            saw_any_up = True
+            if saw_down:
+                saw_recreate_up = True
+        if is_down:
+            saw_down = True
+            saw_down_verifier = False
+            saw_recreate_up = False
+            saw_recreate_verifier = False
+            continue
+        if saw_down and not saw_recreate_up and is_verify:
+            saw_down_verifier = True
+        if saw_recreate_up and is_verify:
+            saw_recreate_verifier = True
+    return {
+        "saw_initial_up": saw_any_up,
+        "saw_down": saw_down,
+        "saw_down_verifier": saw_down_verifier,
+        "saw_recreate_up": saw_recreate_up,
+        "saw_recreate_verifier": saw_recreate_verifier,
+    }
+
+
+def _docker_lifecycle_report_issues(state: LoopState, message: str) -> list[str]:
+    evidence = _docker_lifecycle_evidence(state)
+    report_text = _docker_lifecycle_report_text(state, message)
+    issues: list[str] = []
+    if not evidence["saw_down"]:
+        issues.append("docker compose teardown was not directly evidenced by a successful down command")
+    claims_absence = any(
+        marker in report_text
+        for marker in (
+            "offline",
+            "removed",
+            "stopped and removed",
+            "torn down",
+            "taken down",
+            "no longer running",
+        )
+    )
+    if claims_absence and not evidence["saw_down_verifier"]:
+        issues.append("teardown/offline report claim lacks a direct post-down Docker or HTTP verification probe")
+    if not evidence["saw_recreate_up"]:
+        issues.append("docker compose recreation was not directly evidenced by a successful up command after down")
+    if not evidence["saw_recreate_verifier"]:
+        issues.append("recreated service was not directly verified after the post-down up command")
+    return issues
+
+
+def task_complete_gate_docker_compose_lifecycle_report(state: LoopState, message: str) -> dict | None:
+    if not _is_docker_compose_lifecycle_report_task(state):
+        return None
+    issues = _docker_lifecycle_report_issues(state, message)
+    if not issues:
+        return None
+    return fail(
+        "Cannot complete the Docker Compose lifecycle report until teardown and recreate claims are directly evidence-backed.",
+        metadata={
+            "reason": "docker_compose_lifecycle_report_grounding_required",
+            "docker_compose_lifecycle_issues": issues,
+            "docker_compose_lifecycle_evidence": _docker_lifecycle_evidence(state),
+            "next_required_action": {
+                "tool_names": ["ssh_exec"],
+                "notes": [
+                    "Run or show the successful `docker compose down` command for the stack.",
+                    "Probe after teardown before claiming the service is offline or removed.",
+                    "Run `docker compose up -d` after teardown and verify the recreated service with `docker compose ps`, `docker ps`, or curl/wget.",
+                    "Update the report only with lifecycle claims supported by those command outputs.",
+                ],
+            },
+            "last_verifier_verdict": _normalized_verifier_verdict(state),
+        },
+    )
+
+
 def task_complete_gate_mutation_expectation(state: LoopState, message: str) -> dict | None:
     mutation_block = _mutation_expectation_block(state, message=message)
     if mutation_block is not None:

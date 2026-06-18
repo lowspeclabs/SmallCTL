@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..durable_tool_results import compact_tool_result_for_durable_state
 from ..harness.subtask_checklist import emit_subtask_checklist_if_changed
 from .state import GraphRunState
 from .tool_execution_support import (
@@ -39,6 +40,11 @@ async def persist_tool_results(graph_state: GraphRunState, deps: Any) -> None:
                         if value not in (None, ""):
                             metadata[key] = value
                     artifact.metadata = metadata
+            stored["result"] = compact_tool_result_for_durable_state(
+                record.result.to_dict(),
+                tool_name=record.tool_name,
+                artifact_id=stored.get("artifact_id"),
+            )
             harness.state.tool_execution_records[record.operation_id] = stored
             harness._record_experience(
                 tool_name=record.tool_name,

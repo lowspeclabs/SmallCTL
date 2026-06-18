@@ -65,7 +65,7 @@ class PendingToolCall:
         function = _coerce_dict_payload(payload.get("function"))
         raw_args = function.get("arguments", "")
         tool_name, signature_args = cls._parse_tool_signature(function.get("name", ""))
-        args = cls._parse_args(raw_args)
+        args, parser_metadata = cls._parse_args_with_metadata(raw_args)
         if signature_args:
             if not args:
                 args = signature_args
@@ -83,30 +83,60 @@ class PendingToolCall:
             args=args,
             tool_call_id=None if tool_call_id is None else str(tool_call_id),
             raw_arguments=raw_args,
+            parser_metadata=parser_metadata,
         )
 
     @staticmethod
     def _parse_args(raw: Any) -> dict[str, Any]:
-        if not isinstance(raw, str) or not raw:
-            return {}
+        args, _metadata = PendingToolCall._parse_args_with_metadata(raw)
+        return args
 
-        def _parse_mapping(candidate: str) -> dict[str, Any]:
+    @staticmethod
+    def _parse_args_with_metadata(raw: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        metadata: dict[str, Any] = {}
+        if not isinstance(raw, str):
+            metadata["arguments_empty"] = True
+            metadata["arguments_parse_error"] = {
+                "kind": "non_string_arguments",
+                "message": f"Expected string arguments payload, got {type(raw).__name__}.",
+            }
+            return {}, metadata
+        if not raw:
+            metadata["arguments_empty"] = True
+            return {}, metadata
+
+        metadata["raw_arguments_preview"] = raw[:500]
+
+        def _parse_mapping(candidate: str) -> tuple[dict[str, Any], dict[str, str] | None]:
             try:
                 parsed = json.loads(candidate)
-            except Exception:
+            except Exception as json_exc:
                 try:
                     parsed = ast.literal_eval(candidate)
-                except Exception:
-                    return {}
-            return parsed if isinstance(parsed, dict) else {}
+                except Exception as ast_exc:
+                    return {}, {
+                        "kind": "malformed_json_arguments",
+                        "message": str(json_exc),
+                        "fallback_message": str(ast_exc),
+                    }
+            if not isinstance(parsed, dict):
+                return {}, {
+                    "kind": "non_object_arguments",
+                    "message": f"Parsed arguments as {type(parsed).__name__}, expected object.",
+                }
+            return parsed, None
 
         # Step 1: Basic cleanup
         cleaned = raw.strip()
-        
+        if not cleaned:
+            metadata["arguments_empty"] = True
+            return {}, metadata
+        last_error: dict[str, str] | None = None
+
         # Step 2: Fix trailing commas in objects and arrays
         # This regex looks for commas followed by any whitespace and then a closing brace or bracket.
         cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
-        
+
         # Step 3: Attempt to fix missing closing braces
         # If the string starts with '{' but is missing the balancing '}', we try to append it.
         if cleaned.startswith('{') and not cleaned.endswith('}'):
@@ -115,11 +145,14 @@ class PendingToolCall:
                 cleaned += '}'
                 # Clean AGAIN after adding brace to catch trailing commas that now have a bracket following them
                 repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
-                parsed = _parse_mapping(repaired)
+                parsed, parse_error = _parse_mapping(repaired)
                 if parsed:
-                    return parsed
+                    return parsed, metadata
+                last_error = parse_error
 
-        parsed = _parse_mapping(cleaned)
+        parsed, parse_error = _parse_mapping(cleaned)
+        if parse_error is not None:
+            last_error = parse_error
         if not parsed:
             # Step 4: Final fallback for very common 'code-block' wrap halluciations
             if "```json" in cleaned:
@@ -127,10 +160,19 @@ class PendingToolCall:
                 desperate = re.sub(r',\s*([\]}])', r'\1', cleaned)
                 match = re.search(r"```json\s*(\{.*?\})\s*```", desperate, re.DOTALL)
                 if match:
-                    parsed = _parse_mapping(match.group(1))
+                    parsed, parse_error = _parse_mapping(match.group(1))
+                    if parse_error is not None:
+                        last_error = parse_error
                 else:
-                    return {}
-        return parsed if isinstance(parsed, dict) else {}
+                    parsed = {}
+        if isinstance(parsed, dict) and parsed:
+            return parsed, metadata
+        metadata["arguments_empty"] = False
+        metadata["arguments_parse_error"] = last_error or {
+            "kind": "malformed_json_arguments",
+            "message": "Unable to parse tool-call arguments as a JSON object.",
+        }
+        return {}, metadata
 
     @staticmethod
     def _parse_tool_signature(raw_name: Any) -> tuple[str, dict[str, Any]]:

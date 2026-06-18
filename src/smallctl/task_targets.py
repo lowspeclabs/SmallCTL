@@ -11,7 +11,7 @@ _QUOTED_PATH_PATTERNS = (
     re.compile(r"'([^'\n]+)'"),
 )
 _BARE_PATH_PATTERN = re.compile(
-    r"(?<![\w/])(?:\./|\../)?[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+(?:\.[A-Za-z0-9._-]+)?"
+    r"(?<![\w/])(?:/|\./|\../)?[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+(?:\.[A-Za-z0-9._-]+)?"
 )
 
 

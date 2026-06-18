@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,6 +188,7 @@ class LoopState(LoopStateFlowMixin):
         self.touch()
 
     def to_dict(self) -> dict[str, Any]:
+        started = time.perf_counter()
         self.reasoning_graph.touch_ids()
         serialized_messages = [
             json_safe_value(m.to_dict(include_retrieval_safe_text=True))
@@ -279,6 +281,11 @@ class LoopState(LoopStateFlowMixin):
             "last_completion_tokens": self.last_completion_tokens,
         }
         payload["conversation_history"] = list(serialized_transcript_messages)
+        _log_loop_state_serialization(
+            self.log,
+            payload,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
         return payload
 
     @classmethod
@@ -428,3 +435,43 @@ class LoopState(LoopStateFlowMixin):
         state = cls(**_filter_dataclass_payload(cls, raw))
         state.sync_plan_mirror()
         return state
+
+
+def _log_loop_state_serialization(
+    log: logging.Logger,
+    payload: dict[str, Any],
+    *,
+    elapsed_ms: float,
+) -> None:
+    try:
+        tool_records = payload.get("tool_execution_records")
+        tool_records_bytes = _json_size_bytes(tool_records)
+        recent_messages = payload.get("recent_messages") if isinstance(payload.get("recent_messages"), list) else []
+        transcript_messages = payload.get("transcript_messages") if isinstance(payload.get("transcript_messages"), list) else []
+        log.debug(
+            "loop_state_serialization %s",
+            {
+                "elapsed_ms": round(elapsed_ms, 2),
+                "tool_execution_records_bytes": tool_records_bytes,
+                "recent_messages_chars": _message_content_chars(recent_messages),
+                "transcript_messages_chars": _message_content_chars(transcript_messages),
+                "tool_execution_record_count": len(tool_records) if isinstance(tool_records, dict) else 0,
+            },
+        )
+    except Exception:
+        return
+
+
+def _json_size_bytes(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _message_content_chars(messages: list[Any]) -> int:
+    total = 0
+    for item in messages:
+        if isinstance(item, dict):
+            total += len(str(item.get("content") or ""))
+    return total

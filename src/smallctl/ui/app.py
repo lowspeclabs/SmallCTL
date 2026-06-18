@@ -79,6 +79,8 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._pending_harness_events: list[UIEvent] = []
         self._pending_status_event: UIEvent | None = None
         self._ui_event_drain_task: asyncio.Task[None] | None = None
+        self._ui_transcript_persist_handle: asyncio.TimerHandle | None = None
+        self._ui_transcript_debounce_seconds = 0.25
         self._harness_bridge: HarnessBridge | None = None
         self._pending_user_echo: str | None = None
         self._active_approval_prompt: Screen | None = None
@@ -151,6 +153,8 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._refresh_status()
         if restore_status is not None:
             restored_messages = restore_status.get("ui_transcript") if isinstance(restore_status, dict) else None
+            if isinstance(restored_messages, list):
+                self._ui_transcript = [dict(item) for item in restored_messages if isinstance(item, dict)]
             if not isinstance(restored_messages, list):
                 restored_messages = restore_status.get("recent_messages") if isinstance(restore_status, dict) else None
             if isinstance(restored_messages, list):
@@ -192,6 +196,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self.query_one(InputPane).focus()
 
     async def on_unmount(self) -> None:
+        self._flush_ui_transcript_persist()
         self._dismiss_active_approval_prompt()
         bridge = self._harness_bridge
         if bridge is not None:

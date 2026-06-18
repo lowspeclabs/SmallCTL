@@ -63,6 +63,133 @@ _TRACEBACK_HEADER_RE = re.compile(r"Traceback\s*\(most recent call last\):", re.
 _TERMINAL_PROMPT_RE = re.compile(r"\S+@[\w.-]+[:~]?[^\$]*\$?\s*")
 
 
+_READONLY_INTENT_TOOLS = {
+    "artifact_grep",
+    "artifact_list",
+    "artifact_read",
+    "dir_list",
+    "file_read",
+    "git_diff",
+    "git_status",
+    "grep",
+    "long_context_lookup",
+    "loop_status",
+    "read_file",
+    "search",
+    "ssh_file_read",
+    "summarize_report",
+    "web_fetch",
+    "web_search",
+}
+
+_EXECUTION_INTENT_TOOLS = {
+    "shell_exec",
+    "ssh_exec",
+    "ssh_session_start",
+    "ssh_session_send",
+    "ssh_session_send_and_read",
+}
+
+_MUTATION_INTENT_TOOLS = {
+    "ast_patch",
+    "file_append",
+    "file_patch",
+    "file_write",
+    "memory_update",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+    "ssh_file_write",
+}
+
+_WEAK_RUNTIME_INTENTS = {
+    "",
+    "chat_only",
+    "content_lookup",
+    "general_task",
+    "inspect_repo",
+    "readonly_lookup",
+}
+
+
+def _phase_tag(state: Any) -> str:
+    phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+    return f"{PHASE_TAG_PREFIX}{phase}" if phase else ""
+
+
+def _promoted_intent_for_tool(tool_name: str) -> tuple[str, list[str], list[str]] | None:
+    normalized = str(tool_name or "").strip()
+    if not normalized or normalized in _READONLY_INTENT_TOOLS:
+        return None
+    if normalized in {"task_complete", "task_fail", "ask_human"}:
+        return None
+    if normalized in _EXECUTION_INTENT_TOOLS:
+        return f"requested_{normalized}", ["complete_validation_task"], [normalized, "execute"]
+    if normalized in _MUTATION_INTENT_TOOLS:
+        tags = [normalized, "mutate_repo"]
+        secondary = ["mutate_repo", "complete_validation_task"]
+        return f"requested_{normalized}", secondary, tags
+    return None
+
+
+def promote_active_intent_for_tool_call(state: Any, tool_name: str) -> bool:
+    promoted = _promoted_intent_for_tool(tool_name)
+    if promoted is None:
+        return False
+    active_intent, secondary, tags = promoted
+    current = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if current and current not in _WEAK_RUNTIME_INTENTS and current == active_intent:
+        return False
+
+    existing_tags = [str(tag).strip() for tag in (getattr(state, "intent_tags", []) or []) if str(tag).strip()]
+    phase_tag = _phase_tag(state)
+    merged_tags = []
+    for tag in [*tags, phase_tag, *existing_tags]:
+        if tag and tag not in merged_tags:
+            merged_tags.append(tag)
+
+    setattr(state, "active_intent", active_intent)
+    setattr(state, "secondary_intents", clip_string_list(secondary, limit=3, item_char_limit=48)[0])
+    setattr(state, "intent_tags", clip_string_list(merged_tags, limit=6, item_char_limit=64)[0])
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        scratchpad["_active_intent_promoted_by_tool"] = {
+            "active_intent": active_intent,
+            "secondary_intents": list(getattr(state, "secondary_intents", []) or []),
+            "intent_tags": list(getattr(state, "intent_tags", []) or []),
+            "tool_name": str(tool_name or ""),
+            "step_count": int(getattr(state, "step_count", 0) or 0),
+        }
+    return True
+
+
+def preserve_promoted_active_intent(
+    state: Any,
+    derived_intent: str,
+    derived_secondary: list[str],
+    derived_tags: list[str],
+) -> tuple[str, list[str], list[str]]:
+    scratchpad = getattr(state, "scratchpad", None)
+    marker = scratchpad.get("_active_intent_promoted_by_tool") if isinstance(scratchpad, dict) else None
+    if not isinstance(marker, dict):
+        return derived_intent, derived_secondary, derived_tags
+    promoted_intent = str(marker.get("active_intent") or "").strip()
+    if not promoted_intent:
+        return derived_intent, derived_secondary, derived_tags
+    if str(derived_intent or "").strip().lower() not in _WEAK_RUNTIME_INTENTS:
+        return derived_intent, derived_secondary, derived_tags
+    promoted_secondary = [
+        str(item).strip()
+        for item in (marker.get("secondary_intents") or [])
+        if str(item).strip()
+    ]
+    promoted_tags = [
+        str(item).strip()
+        for item in (marker.get("intent_tags") or [])
+        if str(item).strip()
+    ]
+    return promoted_intent, promoted_secondary, promoted_tags
+
+
 def _sanitize_task_for_intent_routing(task: str) -> str:
     """Strip terminal prompts from tracebacks so they don't trigger ssh_exec intent."""
     if not task:

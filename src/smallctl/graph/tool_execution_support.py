@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..durable_tool_results import compact_tool_result_for_durable_state
 from ..models.conversation import ConversationMessage
 from ..models.tool_result import ToolEnvelope
 from ..state import json_safe_value
@@ -13,6 +14,7 @@ def _tool_envelope_from_dict(payload: dict[str, Any]) -> ToolEnvelope:
         metadata = {}
     return ToolEnvelope(
         success=bool(payload.get("success")),
+        status=payload.get("status"),
         output=json_safe_value(payload.get("output")),
         error=None if payload.get("error") is None else str(payload.get("error")),
         metadata=metadata,
@@ -82,7 +84,10 @@ def _store_tool_execution_record(
             "tool_call_id": pending.tool_call_id,
             "source": str(getattr(pending, "source", "model") or "model"),
             "args": dict(pending.args),
-            "result": result.to_dict(),
+            "result": compact_tool_result_for_durable_state(
+                result.to_dict(),
+                tool_name=str(pending.tool_name or ""),
+            ),
             "plan_id": plan_id,
             "step_id": step_id,
             "step_run_id": step_run_id,

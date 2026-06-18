@@ -23,6 +23,29 @@ def _make_harness(state: LoopState) -> SimpleNamespace:
     return harness
 
 
+def test_task_boundary_reset_preserves_pending_deliverable_paths() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    previous = "Create a short report at /tmp/qwen-docker-easy-report.txt after verifying nginx."
+    state.run_brief.original_task = previous
+    state.working_memory.current_goal = previous
+    state.recent_messages = [ConversationMessage(role="assistant", content="curl passed but report is not written yet")]
+    harness = _make_harness(state)
+
+    harness._task_boundary_service.reset_task_boundary_state(
+        reason="task_switch",
+        new_task="status?",
+        previous_task=previous,
+        preserve_memory=False,
+        preserve_summaries=True,
+    )
+
+    assert state.scratchpad["_pending_deliverable_paths"] == ["/tmp/qwen-docker-easy-report.txt"]
+    assert state.context_briefs[-1].next_action_hint == (
+        "Verify or create pending deliverables: /tmp/qwen-docker-easy-report.txt"
+    )
+    assert "Pending deliverables" in state.context_briefs[-1].key_discoveries[-1]
+
+
 def test_remote_operational_followup_resolves_to_active_ssh_target() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = "ssh into 192.168.1.63 and pull vikunja"

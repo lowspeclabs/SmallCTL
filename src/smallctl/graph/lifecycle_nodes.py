@@ -607,9 +607,12 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             if not content:
                 continue
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            role = str(item.get("role") or "system").strip().lower()
+            if role not in {"system", "user", "assistant", "tool"}:
+                role = "system"
             harness.state.append_message(
                 ConversationMessage(
-                    role="user",
+                    role=role,
                     content=content,
                     metadata=metadata,
                 )

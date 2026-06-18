@@ -201,7 +201,7 @@ async def ssh_file_read(
     encoding: str = "utf-8",
     max_bytes: int = 262144,
     truncate: bool = True,
-    timeout_sec: int = 60,
+    timeout_sec: int = 120,
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
@@ -236,7 +236,7 @@ async def ssh_file_write(
     backup: bool = True,
     expected_sha256: str | None = None,
     source_artifact_id: str | None = None,
-    timeout_sec: int = 60,
+    timeout_sec: int = 120,
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
@@ -325,7 +325,7 @@ async def ssh_file_patch(
     source_artifact_id: str | None = None,
     whitespace_normalized: bool = False,
     dry_run: bool = False,
-    timeout_sec: int = 60,
+    timeout_sec: int = 120,
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:
@@ -409,7 +409,7 @@ async def ssh_file_replace_between(
     source_artifact_id: str | None = None,
     whitespace_normalized: bool = False,
     dry_run: bool = False,
-    timeout_sec: int = 60,
+    timeout_sec: int = 120,
     state: LoopState | None = None,
     harness: Any = None,
 ) -> dict[str, Any]:

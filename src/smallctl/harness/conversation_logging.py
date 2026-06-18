@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..client.chunk_parser import sanitize_assistant_content_for_history
 from ..models.conversation import ConversationMessage
 
 
@@ -52,9 +53,20 @@ def record_assistant_message(
         metadata["speaker"] = normalized_speaker
     if hidden_from_prompt:
         metadata["hidden_from_prompt"] = True
+
+    start_tag = getattr(harness, "thinking_start_tag", "<think>") or "<think>"
+    end_tag = getattr(harness, "thinking_end_tag", "</think>") or "</think>"
+    sanitized_text, extracted_thinking = sanitize_assistant_content_for_history(
+        assistant_text,
+        thinking_start_tag=start_tag,
+        thinking_end_tag=end_tag,
+    )
+    if extracted_thinking:
+        metadata["thinking_text"] = extracted_thinking
+
     message = ConversationMessage(
         role="assistant",
-        content=assistant_text or None,
+        content=sanitized_text or None,
         tool_calls=tool_calls,
         metadata=metadata,
     )
@@ -65,7 +77,7 @@ def record_assistant_message(
         return
     refresh_options = getattr(harness, "_refresh_task_handoff_action_options", None)
     if callable(refresh_options):
-        text_to_scan = assistant_text or ""
+        text_to_scan = sanitized_text or ""
         if not text_to_scan and tool_calls:
             text_to_scan = _extract_text_from_tool_calls(tool_calls)
         if text_to_scan:

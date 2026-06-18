@@ -182,6 +182,67 @@ def extract_thinking_from_tags(
     return strip_protocol_control_markers("".join(assistant_parts)), merge_reasoning_text(wrapped_reasoning, "".join(thinking_parts))
 
 
+def sanitize_assistant_content_for_history(
+    text: str,
+    *,
+    thinking_start_tag: str = "<think>",
+    thinking_end_tag: str = "</think>",
+) -> tuple[str, str]:
+    """Strip common reasoning wrappers from assistant content.
+
+    Returns ``(cleaned_assistant_text, extracted_thinking_text)``. Handles
+    ``<think>``/``<thinking>``/``<thought>`` blocks, ``<reasoning>`` blocks,
+    and channel protocol wrappers such as ``<|channel>...</channel|>``.
+    """
+    if not text or not str(text).strip():
+        return str(text or ""), ""
+
+    assistant_text = str(text)
+    thinking_parts: list[str] = []
+
+    def _capture_reasoning(match: re.Match[str]) -> str:
+        body = match.group("body")
+        if body:
+            thinking_parts.append(body)
+        return ""
+
+    # Extract channel protocol wrappers before the protocol-marker strip pass
+    # would delete the markers and leave reasoning content in assistant text.
+    # Models emit asymmetric markers like <|channel>...<channel|> as well as
+    # the symmetric <|channel|>...</|channel|> form.
+    for pattern in (
+        r"<\|channel>(?P<body>.*?)<channel\|>",
+        r"<\|channel\|>(?P<body>.*?)</\|channel\|>",
+        r"<channel\|>(?P<body>.*?)</channel\|>",
+    ):
+        assistant_text = re.sub(
+            pattern,
+            _capture_reasoning,
+            assistant_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+    # Extract <reasoning>...</reasoning> wrappers.
+    assistant_text = re.sub(
+        r"<reasoning>(?P<body>.*?)</reasoning>",
+        _capture_reasoning,
+        assistant_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Standard think tags, reasoning wrapper tags (analysis/plan), and any
+    # remaining protocol control markers.
+    assistant_text, extracted_thinking = extract_thinking_from_tags(
+        assistant_text,
+        thinking_start_tag=thinking_start_tag,
+        thinking_end_tag=thinking_end_tag,
+    )
+    if extracted_thinking:
+        thinking_parts.append(extracted_thinking)
+
+    return assistant_text.strip(), "".join(thinking_parts).strip()
+
+
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:
     """Extract content fragments from structured content."""
     fragments: list[tuple[Literal["assistant", "thinking"], str]] = []

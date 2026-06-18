@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..durable_tool_results import compact_tool_result_for_durable_state
 from ..models.tool_result import ToolEnvelope
 from ..state import LOOP_STATE_SCHEMA_VERSION, LoopState, json_safe_value
+
+
+log = logging.getLogger(__name__)
 
 
 def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -146,11 +151,13 @@ class PendingToolCall:
                 # Clean AGAIN after adding brace to catch trailing commas that now have a bracket following them
                 repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
                 parsed, parse_error = _parse_mapping(repaired)
-                if parsed:
+                if parse_error is None:
                     return parsed, metadata
                 last_error = parse_error
 
         parsed, parse_error = _parse_mapping(cleaned)
+        if parse_error is None:
+            return parsed, metadata
         if parse_error is not None:
             last_error = parse_error
         if not parsed:
@@ -289,6 +296,14 @@ def build_operation_id(
 
 
 def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
+    last_tool_results = [_serialize_tool_execution_record(item) for item in graph_state.last_tool_results]
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(
+            "graph_state_serialization thread_id=%s last_tool_results_count=%d last_tool_results_bytes=%d",
+            graph_state.thread_id,
+            len(last_tool_results),
+            len(json.dumps(last_tool_results, ensure_ascii=False, default=str).encode("utf-8")),
+        )
     return {
         "graph_state_schema_version": 1,
         "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
@@ -299,7 +314,7 @@ def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
         "last_assistant_text": graph_state.last_assistant_text,
         "last_thinking_text": graph_state.last_thinking_text,
         "last_usage": _coerce_dict_payload(graph_state.last_usage),
-        "last_tool_results": [_serialize_tool_execution_record(item) for item in graph_state.last_tool_results],
+        "last_tool_results": last_tool_results,
         "final_result": _coerce_optional_dict_payload(graph_state.final_result),
         "interrupt_payload": _coerce_optional_dict_payload(graph_state.interrupt_payload),
         "error": _coerce_optional_dict_payload(graph_state.error),
@@ -365,12 +380,20 @@ def _serialize_pending_tool_call(item: PendingToolCall) -> dict[str, Any]:
 
 
 def _serialize_tool_execution_record(item: ToolExecutionRecord) -> dict[str, Any]:
+    artifact_id = ""
+    metadata = item.result.metadata if isinstance(item.result.metadata, dict) else {}
+    if metadata:
+        artifact_id = str(metadata.get("artifact_id") or "").strip()
     return {
         "operation_id": item.operation_id,
         "tool_name": item.tool_name,
         "args": _coerce_dict_payload(item.args),
         "tool_call_id": item.tool_call_id,
-        "result": json_safe_value(item.result.to_dict()),
+        "result": compact_tool_result_for_durable_state(
+            item.result.to_dict(),
+            tool_name=item.tool_name,
+            artifact_id=artifact_id,
+        ),
         "replayed": item.replayed,
     }
 

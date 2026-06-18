@@ -21,9 +21,10 @@ class ConsolePane(VerticalScroll):
         self._active_assistant_turn: AssistantTurnWidget | None = None
         self._last_system_message: str = ""
         self._verbose = bool(verbose)
-        self._stream_flush_handle: asyncio.TimerHandle | None = None
+        self._stream_flush_handle: asyncio.Handle | None = None
         self._stream_buffer_groups: list[dict[str, Any]] = []
         self._stream_flush_interval = 0.05
+        self._stream_flush_soon_once = False
         self._visible_transcript_limit = 250
         self._hidden_transcript_entries = 0
         self._retention_placeholder: BubbleWidget | None = None
@@ -193,6 +194,7 @@ class ConsolePane(VerticalScroll):
             # events preserve the active turn to avoid interrupting the flow.
             if event.data.get("ui_kind") not in {"info", "status"}:
                 self._active_assistant_turn = None
+                self._stream_flush_soon_once = True
             self._last_system_message = text
             return
         if event.event_type in {
@@ -203,6 +205,7 @@ class ConsolePane(VerticalScroll):
             UIEventType.ALERT,
         }:
             self._active_assistant_turn = None
+            self._stream_flush_soon_once = True
         await self._add_bubble(kind, text)
         if kind == "system":
             self._last_system_message = text
@@ -299,10 +302,15 @@ class ConsolePane(VerticalScroll):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._stream_flush_handle = loop.call_later(
-            self._stream_flush_interval,
-            lambda: asyncio.create_task(self.flush_stream_buffers()),
-        )
+        callback = lambda: asyncio.create_task(self.flush_stream_buffers())
+        if self._stream_flush_soon_once:
+            self._stream_flush_soon_once = False
+            self._stream_flush_handle = loop.call_soon(callback)
+        else:
+            self._stream_flush_handle = loop.call_later(
+                self._stream_flush_interval,
+                callback,
+            )
 
     async def flush_stream_buffers(self) -> None:
         started = time.perf_counter()

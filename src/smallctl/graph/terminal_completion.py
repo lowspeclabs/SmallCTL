@@ -76,21 +76,6 @@ def readonly_answer_can_complete(
         return False
     if not any(marker in task_text for marker in ("read", "list", "summarize", "inspect", "review", "improvement", "recommend")):
         return False
-    # Explicit suggestion-only requests ("list improvements you would make") ask
-    # for ideas, not a final report, so do not auto-promote the answer as task
-    # complete even if it looks like a readonly summary.
-    suggestion_only_markers = (
-        "improvements you would make",
-        "improvements would you make",
-        "what improvements",
-        "recommend improvements",
-        "suggest improvements",
-        "suggest changes",
-        "would change",
-        "would improve",
-    )
-    if any(marker in task_text for marker in suggestion_only_markers):
-        return False
     lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
     if any(marker in lowered for marker in ("let me ", "i'll ", "i will ", "i need to ", "next i ", "can inspect")):
         return False

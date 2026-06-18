@@ -112,6 +112,42 @@ def test_remote_clarification_followup_preserves_ssh_context_and_network_profile
     assert state.recent_messages[-1].content == "I could not find an exact task tracker image yet."
 
 
+def test_ssh_password_followup_after_auth_failure_continues_remote_task() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    prior = "ssh into root@192.168.1.161 and install NetBox with Docker"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.active_tool_profiles = ["core", "network"]
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.161": {"host": "192.168.1.161", "user": "root", "confirmed": True}
+    }
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "192.168.1.161::root": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "failure_count": 1,
+            "last_error": "Permission denied (publickey,gssapi-keyex,gssapi-with-mic,password).",
+        }
+    }
+    harness = _make_harness(state)
+    Harness._store_task_handoff(harness, raw_task=prior, effective_task=prior)
+
+    raw = 'password is "Temp@Pass"'
+    resolved = Harness._resolve_followup_task(harness, raw)
+    Harness._maybe_reset_for_new_task(harness, resolved, raw_task=raw)
+    Harness._initialize_run_brief(harness, resolved, raw_task=raw)
+    Harness._activate_tool_profiles(harness, resolved)
+
+    assert resolved == (
+        "Continue current task: ssh into root@192.168.1.161 and install NetBox with Docker. "
+        'User follow-up: password is "Temp@Pass"'
+    )
+    assert state.scratchpad["_task_transaction"]["turn_type"] == "CORRECTION"
+    assert state.scratchpad["_task_transaction"]["reset_policy"]["preserve_guard_context"] is True
+    assert state.task_mode == "remote_execute"
+    assert "network" in state.active_tool_profiles
+
+
 def test_remote_research_install_task_activates_network_and_web_profiles() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     harness = _make_harness(state)

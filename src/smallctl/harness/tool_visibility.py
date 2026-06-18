@@ -44,6 +44,7 @@ _LOCAL_CODING_SSH_TOOLS = {
     "ssh_file_patch", "ssh_file_replace_between",
 }
 _RETRYABLE_HIDDEN_TOOL_NAMES = {
+    "ask_human",
     "shell_exec",
     "ssh_exec",
     "ssh_file_read",
@@ -55,6 +56,7 @@ _RETRYABLE_HIDDEN_TOOL_NAMES = {
     "file_write",
     "file_append",
     "finalize_write_session",
+    "task_fail",
     "web_fetch",
 }
 
@@ -167,7 +169,7 @@ def schedule_retry_tool_exposure(
     normalized_tool_name = str(tool_name or "").strip()
     if normalized_mode not in {"chat", "planning", "loop"}:
         return False
-    if normalized_mode == "loop" and normalized_tool_name != "web_fetch":
+    if normalized_mode == "loop" and normalized_tool_name not in {"ask_human", "task_fail", "web_fetch"}:
         return False
     if normalized_tool_name not in _RETRYABLE_HIDDEN_TOOL_NAMES:
         return False

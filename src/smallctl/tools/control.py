@@ -50,6 +50,7 @@ from .control_task_complete_gates import (
     task_complete_gate_phase_promotion as _task_complete_gate_phase_promotion,
     task_complete_gate_plan_subtasks as _task_complete_gate_plan_subtasks,
     task_complete_gate_post_change as _task_complete_gate_post_change,
+    task_complete_gate_remote_service_readiness as _task_complete_gate_remote_service_readiness,
     task_complete_gate_remote_mutation as _task_complete_gate_remote_mutation,
     task_complete_gate_runtime_error as _task_complete_gate_runtime_error,
     task_complete_gate_staged_execution as _task_complete_gate_staged_execution,
@@ -229,6 +230,7 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
         lambda: _task_complete_gate_post_change(state),
         lambda: _task_complete_gate_interactive_program(state),
         lambda: _task_complete_gate_remote_mutation(state),
+        lambda: _task_complete_gate_remote_service_readiness(state),
         lambda: _task_complete_gate_missing_input(state),
         lambda: _task_complete_gate_mutation_expectation(state, message),
     ]

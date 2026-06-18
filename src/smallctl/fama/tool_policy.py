@@ -63,6 +63,8 @@ def fama_hidden_tools_for_exposure(
     if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
         if _latest_verifier_is_remote_transport_failure(state):
             pass
+        elif _has_pending_ssh_auth_recovery(state):
+            pass
         # Dead-end escape hatch: if the same verifier has rejected 5+ times
         # on the same target, let the model call task_fail to report the
         # blocker rather than cycling indefinitely.
@@ -101,6 +103,16 @@ def fama_hidden_tools_for_exposure(
     if not _interactive_ssh_tools_exposed(state):
         hidden_tools.update(_INTERACTIVE_SSH_TOOLS & exported)
     return hidden_tools
+
+
+def _has_pending_ssh_auth_recovery(state: Any) -> bool:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    recovery_state = scratchpad.get("_ssh_auth_recovery_state")
+    if not isinstance(recovery_state, dict):
+        return False
+    return any(isinstance(record, dict) for record in recovery_state.values())
 
 
 def enforce_fama_tool_call(

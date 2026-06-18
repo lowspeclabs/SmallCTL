@@ -32,6 +32,7 @@ from .followup_signals import (
 from .task_boundary_followups import (
     has_plan_execution_approval_context as _has_plan_execution_approval_context,
     is_continue_like_followup as _is_continue_like_followup,
+    is_ssh_credential_followup as _is_ssh_credential_followup,
 )
 from .task_classifier import (
     classify_task_mode,
@@ -331,6 +332,9 @@ class TaskBoundaryClassificationMixin:
             return False
         return bool(_GUARD_RECOVERY_NUDGE_RE.search(text))
 
+    def _is_ssh_credential_followup(self, task: str) -> bool:
+        return _is_ssh_credential_followup(self.harness.state, task)
+
     def _is_corrective_resteer_followup(self, task: str) -> bool:
         text = str(task or "").replace("\u2019", "'").strip()
         if not text:
@@ -579,6 +583,7 @@ class TaskBoundaryClassificationMixin:
         remote_clarification = self._looks_like_remote_clarification_followup(raw, handoff)
         corrective_resteer = self._is_corrective_resteer_followup(raw)
         guard_recovery_followup = self._is_guard_recovery_followup(raw)
+        ssh_credential_followup = self._is_ssh_credential_followup(raw)
         quality_followup = self._is_quality_followup(raw)
         remote_live_correction = (
             bool(remote_correction)
@@ -606,7 +611,7 @@ class TaskBoundaryClassificationMixin:
                 contextual_reference=self._has_contextual_reference_to_current_task(raw)
                 or self._is_continue_like_followup(raw),
                 same_target_delta=bool(same_scope_followup) or has_overlap,
-                corrective_resteer=corrective_resteer or guard_recovery_followup,
+                corrective_resteer=corrective_resteer or guard_recovery_followup or ssh_credential_followup,
                 quality_followup=quality_followup,
                 remote_live_correction=remote_live_correction,
                 remote_clarification=remote_clarification,
@@ -704,6 +709,8 @@ class TaskBoundaryClassificationMixin:
         if self._is_quality_followup(task):
             return True
         if self._is_guard_recovery_followup(task):
+            return True
+        if self._is_ssh_credential_followup(task):
             return True
         if not self._is_affirmative_followup(task):
             return False
@@ -888,6 +895,7 @@ class TaskBoundaryClassificationMixin:
             self._has_contextual_reference_to_current_task(raw_task)
             or self._is_quality_followup(raw_task)
             or self._is_guard_recovery_followup(raw_task)
+            or self._is_ssh_credential_followup(raw_task)
         ):
             resolved = f"Continue current task: {candidate}. User follow-up: {raw_task}"
             self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)

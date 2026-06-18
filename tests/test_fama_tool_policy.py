@@ -8,6 +8,7 @@ from smallctl.fama.runtime import observe_tool_result
 from smallctl.fama.signals import ActiveMitigation
 from smallctl.fama.state import activate_mitigations, active_mitigation_names
 from smallctl.fama.tool_policy import apply_fama_tool_exposure, enforce_fama_tool_call
+from smallctl.harness.tool_visibility import schedule_retry_tool_exposure
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
 from smallctl.tools.base import ToolSpec
@@ -108,6 +109,40 @@ def test_fama_done_gate_hides_task_fail_when_repair_tools_are_available() -> Non
 
     names = [entry["function"]["name"] for entry in schemas]
     assert names == ["file_read", "file_patch"]
+
+
+def test_fama_keeps_task_fail_visible_for_pending_ssh_auth_recovery() -> None:
+    state = LoopState()
+    _activate_done_gate(state)
+    state.scratchpad["_ssh_auth_recovery_state"] = {
+        "192.168.1.161::root": {
+            "host": "192.168.1.161",
+            "user": "root",
+            "last_error": "Permission denied (publickey,password).",
+        }
+    }
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail"), _schema("ask_human"), _schema("ssh_exec")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "task_complete" not in names
+    assert "task_fail" in names
+    assert "ask_human" in names
+
+
+def test_recovery_control_tools_can_be_scheduled_after_unavailable_call() -> None:
+    state = LoopState()
+
+    assert schedule_retry_tool_exposure(state, mode="loop", tool_name="ask_human") is True
+    assert schedule_retry_tool_exposure(state, mode="loop", tool_name="task_fail") is True
+
+    scheduled = state.scratchpad["_retry_tool_exposures"]
+    assert [item["tool_name"] for item in scheduled] == ["ask_human", "task_fail"]
 
 
 def test_fama_done_gate_dispatch_blocks_hidden_task_complete() -> None:

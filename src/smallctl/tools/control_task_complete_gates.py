@@ -461,6 +461,25 @@ def _tool_record_command(record: Any) -> str:
     return str(args.get("command") or "").strip()
 
 
+def _tool_record_output_text(record: Any) -> str:
+    if not isinstance(record, dict):
+        return ""
+    result = record.get("result")
+    if not isinstance(result, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("error", "output"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            parts.extend(str(value.get(out_key) or "") for out_key in ("stdout", "stderr", "message"))
+        else:
+            parts.append(str(value or ""))
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        parts.extend(str(metadata.get(key) or "") for key in ("error", "stdout", "stderr", "message"))
+    return "\n".join(part for part in parts if part).lower()
+
+
 def _tool_record_success(record: Any) -> bool:
     if not isinstance(record, dict):
         return False
@@ -523,6 +542,128 @@ def _docker_lifecycle_evidence(state: LoopState) -> dict[str, bool]:
         "saw_recreate_up": saw_recreate_up,
         "saw_recreate_verifier": saw_recreate_verifier,
     }
+
+
+def _remote_service_task_text(state: LoopState) -> str:
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    return "\n".join(
+        str(part or "")
+        for part in (
+            getattr(run_brief, "original_task", ""),
+            getattr(run_brief, "current_phase_objective", ""),
+            getattr(working_memory, "current_goal", ""),
+        )
+    )
+
+
+def _is_remote_service_install_task(state: LoopState) -> bool:
+    text = _remote_service_task_text(state).lower()
+    if not any(marker in text for marker in ("ssh", "remote", "host", "192.168.", "10.")):
+        return False
+    if not any(marker in text for marker in ("install", "deploy", "spin up", "run", "launch", "start")):
+        return False
+    return any(marker in text for marker in ("service", "container", "docker", "app", "application", "netbox"))
+
+
+def _remote_service_readiness_evidence(state: LoopState) -> dict[str, Any]:
+    saw_detached_start = False
+    saw_readiness_probe = False
+    saw_weak_container_probe = False
+    saw_unhealthy_logs = False
+    latest_start_command = ""
+    negative_log_markers = (
+        "waiting on db",
+        "waited 30s or more for the db",
+        "database is not ready",
+        "connection refused",
+        "traceback",
+        "fatal:",
+        "error:",
+        "exception",
+    )
+    records = [record for record in getattr(state, "tool_execution_records", {}).values() if isinstance(record, dict)]
+    records.sort(key=lambda record: (int(record.get("step_count") or 0), str(record.get("operation_id") or "")))
+    for record in records:
+        if str(record.get("tool_name") or "") not in {"ssh_exec", "shell_exec"}:
+            continue
+        if not _tool_record_success(record):
+            continue
+        command = _tool_record_command(record).lower()
+        if not command:
+            continue
+        starts_service = bool(
+            re.search(r"\bdocker\s+run\b.*\s-d\b", command)
+            or re.search(r"\bdocker\s+compose\b.*\bup\b.*\s-d\b", command)
+            or re.search(r"\bdocker-compose\b.*\bup\b.*\s-d\b", command)
+            or re.search(r"\bdocker\s+start\b", command)
+            or re.search(r"\b(?:systemctl|service)\s+(?:start|restart)\b", command)
+        )
+        if starts_service:
+            saw_detached_start = True
+            saw_readiness_probe = False
+            saw_weak_container_probe = False
+            saw_unhealthy_logs = False
+            latest_start_command = command
+            continue
+        if not saw_detached_start:
+            continue
+        output_text = _tool_record_output_text(record)
+        reads_logs = bool(re.search(r"\bdocker(?:\s+compose)?\s+logs\b|\bdocker-compose\s+logs\b|\bjournalctl\b", command))
+        if reads_logs and any(marker in output_text for marker in negative_log_markers):
+            saw_unhealthy_logs = True
+        weak_probe = bool(re.search(r"\bdocker\s+ps\b|\bdocker(?:\s+compose)?\s+ps\b|\bdocker-compose\s+ps\b", command))
+        if weak_probe:
+            saw_weak_container_probe = True
+        strong_probe = bool(
+            re.search(r"(?:^|[;&|]\s*)(?:curl|wget|nc|nmap)\b", command)
+            or re.search(r"\bdocker\s+inspect\b.*\b(?:health|status)\b", command)
+            or (reads_logs and not saw_unhealthy_logs and bool(output_text.strip()))
+            or re.search(r"\b(?:systemctl|service)\s+(?:status|is-active)\b", command)
+        )
+        if strong_probe and not saw_unhealthy_logs:
+            saw_readiness_probe = True
+    return {
+        "saw_detached_start": saw_detached_start,
+        "saw_readiness_probe": saw_readiness_probe,
+        "saw_weak_container_probe": saw_weak_container_probe,
+        "saw_unhealthy_logs": saw_unhealthy_logs,
+        "latest_start_command": latest_start_command,
+    }
+
+
+def task_complete_gate_remote_service_readiness(state: LoopState) -> dict | None:
+    if not _is_remote_service_install_task(state):
+        return None
+    evidence = _remote_service_readiness_evidence(state)
+    if not evidence["saw_detached_start"]:
+        return None
+    if evidence["saw_readiness_probe"] and not evidence["saw_unhealthy_logs"]:
+        return None
+    issues: list[str] = []
+    if evidence["saw_unhealthy_logs"]:
+        issues.append("post-start logs show the service is not ready or is failing")
+    if not evidence["saw_readiness_probe"]:
+        issues.append("detached service start lacks a post-start readiness probe")
+    if evidence["saw_weak_container_probe"] and not evidence["saw_readiness_probe"]:
+        issues.append("docker ps/container listing alone is not service readiness proof")
+    return fail(
+        "Cannot complete the remote service install until the service has post-start readiness evidence.",
+        metadata={
+            "reason": "remote_service_readiness_required",
+            "remote_service_readiness_issues": issues,
+            "remote_service_readiness_evidence": evidence,
+            "next_required_action": {
+                "tool_names": ["ssh_exec", "task_fail"],
+                "notes": [
+                    "After detached service start, run an HTTP/readiness probe or inspect stable service logs.",
+                    "Do not treat `docker ps` alone as proof that the application is usable.",
+                    "If logs show a missing dependency such as DB/Redis, repair the deployment or call task_fail with the blocker.",
+                ],
+            },
+            "last_verifier_verdict": _normalized_verifier_verdict(state),
+        },
+    )
 
 
 def _docker_lifecycle_report_issues(state: LoopState, message: str) -> list[str]:

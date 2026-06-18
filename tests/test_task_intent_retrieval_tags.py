@@ -31,6 +31,7 @@ from smallctl.task_targets import extract_task_target_paths
 from smallctl.tools.control_task_complete_gates import (
     task_complete_gate_command_backed_file_creation,
     task_complete_gate_docker_compose_lifecycle_report,
+    task_complete_gate_remote_service_readiness,
     task_complete_gate_sysadmin_report_consistency,
 )
 
@@ -1772,3 +1773,61 @@ def test_docker_compose_lifecycle_report_gate_ignores_non_lifecycle_reports() ->
     state.run_brief.original_task = "Inspect Docker Compose status on a remote host and write a report."
 
     assert task_complete_gate_docker_compose_lifecycle_report(state, "Report complete.") is None
+
+
+def _remote_service_state() -> LoopState:
+    state = LoopState()
+    state.task_mode = "remote_execute"
+    state.run_brief.original_task = "SSH into root@192.168.1.161 and install NetBox as a Docker container."
+    state.working_memory.current_goal = state.run_brief.original_task
+    return state
+
+
+def _ssh_step(step: int, command: str, *, stdout: str = "ok", stderr: str = "") -> dict[str, object]:
+    return {
+        "operation_id": f"op-{step}",
+        "step_count": step,
+        "tool_name": "ssh_exec",
+        "args": {"host": "192.168.1.161", "user": "root", "command": command},
+        "result": {
+            "success": True,
+            "output": {"exit_code": 0, "stdout": stdout, "stderr": stderr},
+        },
+    }
+
+
+def test_remote_service_readiness_gate_rejects_docker_ps_only_after_detached_run() -> None:
+    state = _remote_service_state()
+    state.tool_execution_records = {
+        "run": _ssh_step(1, "docker run -d --name netbox -p 8000:8080 netboxcommunity/netbox:latest"),
+        "ps": _ssh_step(2, "docker ps --filter name=netbox"),
+    }
+
+    result = task_complete_gate_remote_service_readiness(state)
+
+    assert result is not None
+    assert result["metadata"]["reason"] == "remote_service_readiness_required"
+    assert any("docker ps" in issue for issue in result["metadata"]["remote_service_readiness_issues"])
+
+
+def test_remote_service_readiness_gate_rejects_unhealthy_post_start_logs() -> None:
+    state = _remote_service_state()
+    state.tool_execution_records = {
+        "run": _ssh_step(1, "docker run -d --name netbox -p 8000:8080 netboxcommunity/netbox:latest"),
+        "logs": _ssh_step(2, "docker logs netbox", stdout="Waiting on DB...\nWaited 30s or more for the DB to become ready"),
+    }
+
+    result = task_complete_gate_remote_service_readiness(state)
+
+    assert result is not None
+    assert "post-start logs" in result["metadata"]["remote_service_readiness_issues"][0]
+
+
+def test_remote_service_readiness_gate_accepts_http_probe_after_detached_run() -> None:
+    state = _remote_service_state()
+    state.tool_execution_records = {
+        "run": _ssh_step(1, "docker run -d --name netbox -p 8000:8080 netboxcommunity/netbox:latest"),
+        "curl": _ssh_step(2, "curl -fsS http://127.0.0.1:8000/login/", stdout="<html>NetBox</html>"),
+    }
+
+    assert task_complete_gate_remote_service_readiness(state) is None

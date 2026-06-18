@@ -55,6 +55,8 @@ _SENSITIVE_SUFFIXES = (
 )
 
 _SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)\s+)([^\s,;]+)", re.IGNORECASE),
+    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)=)([^\s,;]+)", re.IGNORECASE),
     re.compile(r"(\bpassword\s+is\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(\bpassword\s*(?:is\s+|=|:)?\s*")([^"\r\n]+)(")', re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s*')([^'\r\n]+)(')", re.IGNORECASE),
@@ -110,12 +112,15 @@ def redact_sensitive_data(value: Any, *, parent_key: str | None = None) -> Any:
     if parent_key == "arguments" and isinstance(value, str):
         stripped = value.strip()
         if stripped[:1] not in {"{", "["}:
-            return value
+            return redact_sensitive_text(value)
         try:
             parsed = json.loads(value)
         except Exception:
-            return value
+            return redact_sensitive_text(value)
         return json.dumps(redact_sensitive_data(parsed), ensure_ascii=True, sort_keys=True)
+
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
 
     return value
 

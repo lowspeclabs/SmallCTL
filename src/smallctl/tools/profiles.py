@@ -30,6 +30,10 @@ _CODE_FILE_EXT_RE = re.compile(
     r"(?:^|[\s`'\"(])[\w/\\.-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|pl|lua)\b",
     re.IGNORECASE,
 )
+_LOCAL_COMMAND_TARGET_RE = re.compile(
+    r"(?:^|[\s`'\"])(?:\./|\.\./|/)[^\s`'\"]+\.(?:py|sh|bash|js|ts|tsx|jsx|rb|pl|lua)\b",
+    re.IGNORECASE,
+)
 
 
 def classify_tool_profiles(
@@ -40,6 +44,7 @@ def classify_tool_profiles(
     if not text:
         return profiles
     local_ssh_file_task = _looks_like_local_ssh_file_task(text)
+    local_command_task = _looks_like_local_command_task(text)
 
     if _matches_any(
         text,
@@ -58,7 +63,7 @@ def classify_tool_profiles(
     ):
         profiles.add(DATA_PROFILE)
 
-    if not local_ssh_file_task and _matches_any(
+    if not local_ssh_file_task and not local_command_task and _matches_any(
         text,
         (
             "http",
@@ -269,6 +274,12 @@ def _looks_like_local_ssh_file_task(text: str) -> bool:
     ):
         return True
     return not _matches_any(text, ("ssh to", "connect to", "remote host", "remote server", "target host", "over ssh", "via ssh"))
+
+
+def _looks_like_local_command_task(text: str) -> bool:
+    if _LOCAL_COMMAND_TARGET_RE.search(text):
+        return True
+    return _matches_any(text, ("run ./", "execute ./", "python ./", "python3 ./"))
 
 
 def _looks_like_remote_access_request(text: str) -> bool:

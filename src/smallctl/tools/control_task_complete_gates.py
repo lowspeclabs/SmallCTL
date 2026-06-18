@@ -882,3 +882,69 @@ def task_complete_gate_acceptance(state: LoopState, message: str) -> dict | None
             },
         )
     return None
+
+
+def task_complete_gate_shell_table_coverage(state: LoopState, message: str) -> dict | None:
+    """Block incomplete summaries of numbered shell-output tables."""
+    table = _latest_numbered_shell_table(state)
+    if table is None:
+        return None
+    row_ids = table["row_ids"]
+    if len(row_ids) < 12:
+        return None
+    message_ids = set(re.findall(r"(?<!\d)(\d{1,6})(?!\d)", str(message or "")))
+    mentioned = [row_id for row_id in row_ids if row_id in message_ids]
+    if len(mentioned) >= max(8, len(row_ids) // 2):
+        return None
+    if any(marker in str(message or "").lower() for marker in ("first ", "partial", "sample", "truncated", "not all")):
+        return None
+    return fail(
+        "Cannot complete the task: the latest command output contained "
+        f"{len(row_ids)} numbered rows, but the completion message only mentions "
+        f"{len(mentioned)} of them. Summarize all rows, state that you are intentionally "
+        "showing a partial sample, or read the artifact before completing.",
+        metadata={
+            "reason": "shell_table_answer_incomplete",
+            "artifact_id": table["artifact_id"],
+            "row_count": len(row_ids),
+            "mentioned_row_count": len(mentioned),
+            "row_ids_preview": row_ids[:80],
+        },
+    )
+
+
+def _latest_numbered_shell_table(state: LoopState) -> dict[str, Any] | None:
+    artifacts = getattr(state, "artifacts", {}) or {}
+    for artifact_id, artifact in reversed(list(artifacts.items())):
+        tool_name = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
+        if tool_name not in {"shell_exec", "ssh_exec"}:
+            continue
+        text = _artifact_text(artifact)
+        rows = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(maxsplit=1)
+            if parts and parts[0].isdigit():
+                rows.append((parts[0], stripped))
+        if len(rows) >= 12:
+            return {
+                "artifact_id": str(artifact_id),
+                "row_ids": [row_id for row_id, _ in rows],
+                "rows": [row for _, row in rows],
+            }
+    return None
+
+
+def _artifact_text(artifact: Any) -> str:
+    text = str(getattr(artifact, "inline_content", "") or getattr(artifact, "preview_text", "") or "")
+    if text:
+        return text
+    content_path = str(getattr(artifact, "content_path", "") or "").strip()
+    if not content_path:
+        return ""
+    try:
+        return Path(content_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""

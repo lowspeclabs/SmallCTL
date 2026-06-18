@@ -16,6 +16,7 @@ _TERMINAL_PROSE_STRONG_MARKERS = (
     "final answer",
     "completed successfully",
 )
+_FUNCTIONAL_TASK_COMPLETE_RE = re.compile(r"\btask_complete\s*\(", re.IGNORECASE)
 _FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 
 
@@ -124,7 +125,9 @@ def terminal_prose_completion_message(
         return ""
     raw_terminal_message = raw_terminal_json_completion_message(text)
     lowered = re.sub(r"\s+", " ", text.lower()).strip()
-    has_strong_marker = any(marker in lowered for marker in _TERMINAL_PROSE_STRONG_MARKERS)
+    has_strong_marker = any(marker in lowered for marker in _TERMINAL_PROSE_STRONG_MARKERS) or bool(
+        len(text) >= 120 and _FUNCTIONAL_TASK_COMPLETE_RE.search(text)
+    )
     readonly_completion = readonly_answer_can_complete(text, harness=harness, nudge_count=nudge_count)
     looks_like_completion = (
         bool(raw_terminal_message)

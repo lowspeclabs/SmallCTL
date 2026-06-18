@@ -715,13 +715,17 @@ class PromptAssembler:
             content = self._compact_fresh_tool_output_content(state, record)
             if not content:
                 continue
-            if len(content) > 1200:
+            table_like = self._looks_like_shell_table_output(content)
+            content_limit = 4000 if table_like else 1200
+            if len(content) > content_limit:
                 suffix = " [truncated]"
                 if artifact_id and self._artifact_is_complete_file_read(state, artifact_id):
                     suffix = (
                         f" [preview clipped for prompt budget; Artifact {artifact_id} is complete]"
                     )
-                content = content[: max(0, 1200 - len(suffix))].rstrip() + suffix
+                elif table_like:
+                    suffix = " [table clipped for prompt budget; preserve row count before summarizing]"
+                content = content[: max(0, content_limit - len(suffix))].rstrip() + suffix
             label = f"[{tool_name}"
             if artifact_id:
                 label += f" {artifact_id}"
@@ -747,6 +751,16 @@ class PromptAssembler:
             return False
         metadata = getattr(artifact, "metadata", {}) if artifact is not None else {}
         return bool(isinstance(metadata, dict) and metadata.get("complete_file"))
+
+    @staticmethod
+    def _looks_like_shell_table_output(content: str) -> bool:
+        lines = str(content or "").splitlines()
+        row_count = 0
+        for line in lines:
+            stripped = line.strip()
+            if stripped and stripped.split(maxsplit=1)[0].isdigit():
+                row_count += 1
+        return row_count >= 8
 
     @classmethod
     def _compact_fresh_tool_output_content(cls, state: LoopState, record: dict[str, Any]) -> str:

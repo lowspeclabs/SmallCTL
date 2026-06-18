@@ -29,6 +29,7 @@ from ..state import (
 )
 from ..normalization import dedupe_keep_tail
 from ..redaction import redact_sensitive_text
+from ..redaction import redact_sensitive_data
 from ..tools import build_registry
 from ..tools.profiles import (
     MUTATE_PROFILE,
@@ -45,7 +46,7 @@ from .tool_message_compaction import trim_recent_messages_window
 
 def _write_json_file(path: Path, payload: dict[str, Any], *, trailing_newline: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2)
+    text = json.dumps(redact_sensitive_data(payload), indent=2)
     if trailing_newline:
         text += "\n"
     path.write_text(text, encoding="utf-8")
@@ -385,6 +386,10 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 current_summary_path = str(task_summary.get("summary_path") or "").strip()
                 if current_summary_path and current_summary_path not in task_summary_paths:
                     task_summary_paths.append(current_summary_path)
+                # Ensure the latest task identity is always reflected, even when
+                # the current task was interrupted/replaced and not yet on disk.
+                summary_payload["latest_task_id"] = current_task_id or summary_payload.get("latest_task_id", "")
+                summary_payload["latest_task_summary_path"] = current_summary_path or summary_payload.get("latest_task_summary_path", "")
             session_total_tool_calls = 0
             for item in task_summaries:
                 try:

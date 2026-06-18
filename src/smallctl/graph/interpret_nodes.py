@@ -763,6 +763,18 @@ async def interpret_model_output(
         return LoopRoute.DISPATCH_TOOLS
 
     if (
+        assistant_text_for_guards
+        and not graph_state.pending_tool_calls
+        and "task_complete" in low_text
+        and _maybe_promote_terminal_prose_task_complete(
+            graph_state,
+            harness,
+            nudge_count=nudges,
+        )
+    ):
+        return LoopRoute.DISPATCH_TOOLS
+
+    if (
         not reasoning_fallback_active
         and not graph_state.pending_tool_calls
         and (thinking_looks_like_action or text_looks_like_action_list or text_has_tool_tags or text_has_func_calls)

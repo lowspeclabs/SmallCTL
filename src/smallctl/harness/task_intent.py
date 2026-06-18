@@ -14,7 +14,7 @@ from .task_classifier import (
     looks_like_write_patch_request,
 )
 from .task_classifier_constants import LOCAL_SHELL_OVERRIDE_RE as _LOCAL_SHELL_OVERRIDE_RE
-from .task_classifier_support import task_is_local_ssh_file_target, task_is_local_system_target
+from .task_classifier_support import task_has_local_command_target, task_is_local_ssh_file_target, task_is_local_system_target
 
 _MEMORY_MARKERS = (
     "save this in memory",
@@ -293,6 +293,12 @@ def infer_entity_tags(task: str) -> list[str]:
 
 def infer_requested_tool_name(harness: Any, task: str) -> str:
     text = _sanitize_task_for_intent_routing(task).lower()
+    if task_has_local_command_target(task):
+        if looks_like_write_patch_request(task):
+            return "file_patch"
+        if looks_like_write_file_request(task) or looks_like_author_write_request(task):
+            return "write_file"
+        return "shell_exec"
     # Explicit local-shell override bypasses remote heuristic
     if _LOCAL_SHELL_OVERRIDE_RE.search(task):
         if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):

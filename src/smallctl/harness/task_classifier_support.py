@@ -48,6 +48,11 @@ _EXPLICIT_REMOTE_EXECUTION_MARKERS = (
     "via ssh",
 )
 
+_LOCAL_COMMAND_TARGET_RE = re.compile(
+    r"(?:^|[\s`'\"])(?:\./|\.\./|/)[^\s`'\"]+\.(?:py|sh|bash|js|ts|tsx|jsx|rb|pl|lua)\b",
+    re.IGNORECASE,
+)
+
 _REMOTE_EXECUTION_NEGATION_RE = re.compile(
     r"\b(?:do\s+not|never|don't|dont)\b[^.;\n]*\b(?:ssh\s+to|connect\s+to|use\s+ssh|ssh_exec)\b"
     r"|"
@@ -70,6 +75,16 @@ def task_has_local_scope_markers(task: str) -> bool:
     if any(marker in text for marker in _LOCAL_SCOPE_MARKERS):
         return True
     return any(marker in text for marker in _LOCAL_SSH_FILE_MARKERS)
+
+
+def task_has_local_command_target(task: str) -> bool:
+    """Detect a local executable/script path used as the command target."""
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if _LOCAL_COMMAND_TARGET_RE.search(text):
+        return True
+    return any(marker in text for marker in ("run ./", "execute ./", "python ./", "python3 ./"))
 
 
 def task_is_local_ssh_file_target(task: str) -> bool:
@@ -116,6 +131,8 @@ def looks_like_plan_only_request(task: str) -> bool:
 def has_remote_execution_target(task: str) -> bool:
     text = task.strip().lower()
     if not text:
+        return False
+    if task_has_local_command_target(text) and not _has_explicit_remote_execution_scope(text):
         return False
     if "working only inside" in text or "only inside ./temp" in text:
         return False

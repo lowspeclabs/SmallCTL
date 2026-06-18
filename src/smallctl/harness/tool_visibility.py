@@ -437,6 +437,15 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         state=harness.state,
         mode=normalized_mode,
     )
+    if _has_recent_tool_evidence(harness.state):
+        existing_names = set(_tool_names(schemas))
+        for terminal_tool in ("task_complete", "task_fail"):
+            if terminal_tool in existing_names:
+                continue
+            schema = _retry_tool_schema(harness, tool_name=terminal_tool)
+            if schema is not None:
+                schemas.append(schema)
+                existing_names.add(terminal_tool)
     schemas = _append_retry_tool_exposures(harness, schemas, mode=normalized_mode)
 
     # Phase 4C: tool exposure monotonicity — never hide a tool once exposed
@@ -518,3 +527,12 @@ def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) 
         active_mitigations=active,
         mode=mode,
     )
+
+
+def _has_recent_tool_evidence(state: Any) -> bool:
+    if bool(getattr(state, "artifacts", None)):
+        return True
+    for message in list(getattr(state, "recent_messages", []) or [])[-12:]:
+        if getattr(message, "role", "") == "tool":
+            return True
+    return False

@@ -22,6 +22,7 @@ from ..state import (
 from ..recovery_schema import FailureEvent
 from ..task_targets import extract_task_target_paths
 from ..normalization import dedupe_keep_tail
+from ..redaction import redact_sensitive_data
 from ..state_memory import trim_recent_messages
 from ..state_support import clip_text_value
 from .followup_signals import (
@@ -194,7 +195,7 @@ class TaskBoundaryService(
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps(json_safe_value(payload), indent=2, ensure_ascii=True) + "\n",
+                json.dumps(redact_sensitive_data(json_safe_value(payload)), indent=2, ensure_ascii=True) + "\n",
                 encoding="utf-8",
             )
             return str(path)
@@ -675,7 +676,6 @@ class TaskBoundaryService(
 
     def _strip_ordinal_prefix(self, task: str) -> str:
         return strip_ordinal_prefix(task)
-
 
 
 

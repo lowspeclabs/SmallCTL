@@ -53,6 +53,7 @@ from .control_task_complete_gates import (
     task_complete_gate_remote_service_readiness as _task_complete_gate_remote_service_readiness,
     task_complete_gate_remote_mutation as _task_complete_gate_remote_mutation,
     task_complete_gate_runtime_error as _task_complete_gate_runtime_error,
+    task_complete_gate_shell_table_coverage as _task_complete_gate_shell_table_coverage,
     task_complete_gate_staged_execution as _task_complete_gate_staged_execution,
     task_complete_gate_sysadmin_report_consistency as _task_complete_gate_sysadmin_report_consistency,
     task_complete_gate_verifier_approval as _task_complete_gate_verifier_approval,
@@ -259,6 +260,7 @@ async def task_complete(message: str, state: LoopState, harness: Any) -> dict:
         lambda: _task_complete_gate_phase_contract(state),
         lambda: _task_complete_gate_phase_promotion(state, message),
         lambda: _task_complete_gate_plan_subtasks(state),
+        lambda: _task_complete_gate_shell_table_coverage(state, message),
         lambda: _task_complete_gate_acceptance(state, message),
     ]
     for gate in gates:

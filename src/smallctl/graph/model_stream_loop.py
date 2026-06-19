@@ -645,6 +645,8 @@ async def run_model_stream_loop(
                     event_type=UIEventType.ALERT,
                     content="Model output entered a repetition loop; halting this turn and requesting recovery.",
                     data={
+                        "ui_kind": "model_output_degenerate_loop_exhausted",
+                        "event": "model_output_degenerate_loop_exhausted",
                         "reason": "model_output_degenerate_loop",
                         "repeated_phrase": exc.repeated_phrase,
                         "repeat_count": exc.repeat_count,

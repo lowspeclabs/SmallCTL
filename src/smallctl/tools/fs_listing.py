@@ -12,6 +12,20 @@ from .fs_loop_guard import clear_loop_guard_verification_requirement
 from .fs_sessions import _record_repair_cycle_read
 
 
+_SENSITIVE_FILE_NAMES = {
+    ".env",
+    ".env.local",
+    ".envrc",
+    ".netrc",
+}
+_SENSITIVE_FILE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+)
+
+
 def _resolve(path: str, cwd: str | None = None) -> Path:
     base = Path(cwd) if cwd else Path.cwd()
     candidate = Path(os.path.expanduser(path))
@@ -24,6 +38,18 @@ def _resolve(path: str, cwd: str | None = None) -> Path:
         else:
             candidate = base / candidate
     return candidate.resolve()
+
+
+def _looks_like_sensitive_read_path(path: str | Path) -> bool:
+    target = Path(str(path or ""))
+    name = target.name.lower()
+    if name in _SENSITIVE_FILE_NAMES:
+        return True
+    if name.startswith(".env."):
+        return True
+    if name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}:
+        return True
+    return any(name.endswith(suffix) for suffix in _SENSITIVE_FILE_SUFFIXES)
 
 
 def _active_session_staging_path(
@@ -279,6 +305,18 @@ async def file_read(
     target = _resolve(path, cwd)
     source = _active_session_staging_path(state, path, cwd) or target
     session = getattr(state, "write_session", None) if state is not None else None
+    if _looks_like_sensitive_read_path(target):
+        return fail(
+            f"Refusing to read likely secret-bearing file `{path}`. "
+            "Ask the user for the specific non-secret value needed, or use a safer command that prints only non-sensitive keys.",
+            metadata={
+                "path": str(target),
+                "requested_path": path,
+                "reason": "sensitive_file_read_blocked",
+                "failure_class": "sensitive_file_read_blocked",
+                "sensitive_path": True,
+            },
+        )
     if not source.exists():
         _record_repair_cycle_read(state, target)
         suggested = _nearby_path_suggestion(requested_path=path, resolved_path=target)

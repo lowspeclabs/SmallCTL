@@ -70,3 +70,17 @@ def test_resolve_tilde_in_file_read_missing() -> None:
     result = asyncio.run(file_read("~/nonexistent_file_12345.txt"))
     assert result["success"] is False
     assert "~" in result["error"]
+
+
+def test_file_read_blocks_likely_secret_file(tmp_path) -> None:
+    import asyncio
+    from smallctl.tools.fs_listing import file_read
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("API_TOKEN=secret-value\n", encoding="utf-8")
+
+    result = asyncio.run(file_read(str(env_file)))
+
+    assert result["success"] is False
+    assert result["metadata"]["reason"] == "sensitive_file_read_blocked"
+    assert "secret-value" not in result["error"]

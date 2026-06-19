@@ -627,6 +627,20 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 )
                 await harness._emit(
                     deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.SYSTEM,
+                        content=f"Tool dispatch cancelled: {pending.tool_name}.",
+                        data={
+                            "ui_kind": "tool_dispatch_cancelled",
+                            "event": "tool_dispatch_cancelled",
+                            "tool_name": pending.tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            "elapsed_sec": round(elapsed_sec, 3),
+                        },
+                    ),
+                )
+                await harness._emit(
+                    deps.event_handler,
                     UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
                 )
                 graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}

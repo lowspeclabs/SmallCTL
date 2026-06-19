@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from smallctl.graph.display import format_tool_result_display
+from smallctl.context.artifacts import ArtifactStore
 from smallctl.context.messages import format_compact_tool_message, format_reused_artifact_message
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord
@@ -492,3 +495,19 @@ def test_format_tool_result_display_includes_both_action_and_tool() -> None:
     assert "Next required action: fresh clone or clean reset" in rendered
     assert "Next required tool:" in rendered
     assert '"tool_name": "git_status"' in rendered
+
+
+def test_artifact_store_redacts_sensitive_tool_output(tmp_path) -> None:
+    store = ArtifactStore(tmp_path, run_id="run1")
+    result = ToolEnvelope(
+        success=True,
+        output={"stdout": "TOKEN=secret-value\n", "stderr": "", "exit_code": 0},
+        metadata={"arguments": {"command": "cat .env"}},
+    )
+
+    artifact = store.persist_tool_result(tool_name="shell_exec", result=result)
+
+    content = Path(artifact.content_path).read_text(encoding="utf-8")
+    assert "secret-value" not in content
+    assert "[REDACTED]" in content
+    assert artifact.preview_text is None or "secret-value" not in artifact.preview_text

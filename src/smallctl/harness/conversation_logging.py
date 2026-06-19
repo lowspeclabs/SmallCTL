@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..client.chunk_parser import sanitize_assistant_content_for_history
 from ..models.conversation import ConversationMessage
+from ..redaction import redact_sensitive_data
 
 
 def log_conversation_state(harness: Any, event: str) -> None:
     if harness.run_logger is None:
         return
+    history = redact_sensitive_data([m.to_dict() for m in harness.state.conversation_history])
+    recent_messages = redact_sensitive_data([m.to_dict() for m in harness.state.recent_messages])
     harness.run_logger.log(
         "chat",
         "conversation_history",
@@ -17,8 +21,8 @@ def log_conversation_state(harness: Any, event: str) -> None:
         conversation_id=harness.conversation_id,
         snapshot_event=event,
         step=harness.state.step_count,
-        history=[m.to_dict() for m in harness.state.conversation_history],
-        recent_messages=[m.to_dict() for m in harness.state.recent_messages],
+        history=history,
+        recent_messages=recent_messages,
         prompt_budget=harness.state.prompt_budget.__dict__,
     )
 
@@ -61,6 +65,12 @@ def record_assistant_message(
         thinking_start_tag=start_tag,
         thinking_end_tag=end_tag,
     )
+    if sanitized_text and re.fullmatch(
+        r"\s*(?:thought|thinking|analysis|reasoning)\s*",
+        sanitized_text,
+        flags=re.IGNORECASE,
+    ):
+        sanitized_text = ""
     if extracted_thinking:
         metadata["thinking_text"] = extracted_thinking
 

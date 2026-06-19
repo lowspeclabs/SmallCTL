@@ -24,6 +24,7 @@ _CRITICAL_EVENTS = {
     "context_invalidated",
     "context_lane_dropped",
     "file_patch_read_autocontinue",
+    "write_overwrite_guard_read_autocontinue",
     "fama_health_warning",
     "fama_capsule_health",
     "fama_signal_detected",
@@ -39,6 +40,7 @@ _CRITICAL_EVENTS = {
     "task_interrupted",
     "terminal_control_failed",
     "tool_blocked_not_exposed",
+    "tool_dispatch_cancelled",
     "verifier_loop_detected",
     "generic_tool_loop_nudge",
     "recent_message_limit_tuned",
@@ -144,6 +146,8 @@ def should_render_run_log_row(row: dict[str, Any]) -> bool:
 
 def should_render_event(event: UIEvent, *, show_system_messages: bool, show_tool_calls: bool) -> bool:
     """Determine if an event should be rendered based on user preferences."""
+    if event.data.get("hidden_from_ui") or event.data.get("ui_hidden"):
+        return False
     if event.event_type == UIEventType.STATUS:
         return False
     if event.data.get("ui_kind") == "subtask_checklist":
@@ -212,6 +216,12 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         error_kind = str(data.get("error_kind") or "patch mismatch").strip()
         suffix = f" for {target}" if target else ""
         return f"[harness] Patch recovery: auto-reading current file{suffix} after {error_kind}"
+    if event == "write_overwrite_guard_read_autocontinue":
+        target = str(data.get("target_path") or "").strip()
+        session_id = str(data.get("session_id") or "").strip()
+        target_text = f" for {target}" if target else ""
+        session_text = f" (session {session_id})" if session_id else ""
+        return f"[harness] Write recovery: auto-reading staged content{target_text}{session_text}; next edit should be file_patch/ast_patch or same-section repair"
     if event == "context_lane_dropped":
         lane = str(data.get("lane") or data.get("context_lane") or "context").strip()
         reason = str(data.get("reason") or data.get("drop_reason") or "stale or over budget").strip()
@@ -279,6 +289,11 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         allowed = data.get("allowed_tools") or []
         allowed_text = ", ".join(str(n) for n in allowed[:4]) or "none"
         return f"[harness] Blocked: `{tool_name}` not exposed this turn (allowed: {allowed_text})"
+    if event == "tool_dispatch_cancelled":
+        tool_name = str(data.get("tool_name") or "tool").strip()
+        elapsed = data.get("elapsed_sec")
+        suffix = f" after {elapsed}s" if elapsed not in (None, "") else ""
+        return f"[harness] Tool dispatch cancelled: {tool_name}{suffix}"
     if event == "model_output_degenerate_loop_exhausted":
         details = data.get("details") or {}
         phrase = str(details.get("repeated_phrase") or "").strip()

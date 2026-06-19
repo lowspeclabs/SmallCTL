@@ -70,6 +70,36 @@ def _command_may_need_sudo(command: str) -> bool:
     return bool(re.search(r"(^|[\s;&|({\[])sudo([\s-]|$)", lowered))
 
 
+def _classify_shell_failure(command: str, error: str, output: dict[str, Any]) -> dict[str, Any]:
+    lowered_error = str(error or "").lower()
+    lowered_command = str(command or "").lower()
+    stdout = str(output.get("stdout") or "") if isinstance(output, dict) else ""
+    stderr = str(output.get("stderr") or "") if isinstance(output, dict) else ""
+    combined = "\n".join(part for part in (stdout, stderr, str(error or "")) if part).lower()
+
+    if "connection refused" in combined or "errno 111" in combined:
+        return {
+            "failure_class": "environment_unavailable",
+            "reason": "connection_refused",
+            "suggested_next_action": "Confirm the target service is running and listening before retrying the command.",
+        }
+    if "not found" in lowered_error and re.search(r"(^|[/\s])(?:netstat|ss|lsof)(:|\s|$)", lowered_error):
+        return {
+            "failure_class": "diagnostic_tool_unavailable",
+            "reason": "port_probe_tool_missing",
+            "suggested_next_action": "Use an installed port probe such as `ss`, `lsof`, or a Python socket check.",
+        }
+    if re.search(r"\b(?:ss|lsof|netstat)\b", lowered_command) and re.search(r"\|\s*grep\s+[:]?\d+", lowered_command):
+        exit_code = output.get("exit_code") if isinstance(output, dict) else None
+        if exit_code == 1 and not stdout.strip() and not stderr.strip():
+            return {
+                "failure_class": "environment_unavailable",
+                "reason": "service_not_listening",
+                "suggested_next_action": "The port probe found no listener; start the service or ask the user for the correct endpoint.",
+            }
+    return {}
+
+
 async def _feed_sudo_password_to_process(
     proc: Any,
     command: str,
@@ -450,7 +480,9 @@ async def shell_exec_foreground(
                 ):
                     error = f"{error}\n\n{path_hint}"
 
-                return fail(error, metadata={"output": output})
+                failure_metadata = {"output": output, "command": command}
+                failure_metadata.update(_classify_shell_failure(command, error, output))
+                return fail(error, metadata=failure_metadata)
             return ok(output)
         except asyncio.TimeoutError:
             if start_time:

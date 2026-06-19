@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
+from ..redaction import redact_sensitive_data, redact_sensitive_text
 from ..state import ArtifactRecord, json_safe_value
 from ..tool_output_formatting import structured_plain_text, summarize_structured_output
 from .rendering import render_shell_failure, render_shell_output
@@ -81,11 +82,11 @@ class ArtifactStore:
         if tool_name in {"shell_exec", "ssh_exec"} and isinstance(result.metadata, dict):
             result.metadata.setdefault("model_visible", False)
             result.metadata.setdefault("hidden", True)
-        payload = result.to_dict()
+        payload = redact_sensitive_data(result.to_dict())
         serialized = json.dumps(payload, ensure_ascii=True, default=str, indent=2)
         artifact_id = f"A{self._next_index:04d}"
         self._next_index += 1
-        metadata = _coerce_metadata_payload(result.metadata)
+        metadata = redact_sensitive_data(_coerce_metadata_payload(result.metadata))
         metadata.setdefault("success", bool(result.success))
         if result.status is not None:
             metadata.setdefault("status", result.status)
@@ -153,10 +154,11 @@ class ArtifactStore:
         else:
             # Fallback to JSON-serialized output for structured data
             txt_content = json.dumps(result.output, ensure_ascii=True, default=str, indent=2)
+        txt_content = redact_sensitive_text(txt_content)
         txt_path.write_text(txt_content, encoding="utf-8")
 
-        source = self._source_from_metadata(tool_name=tool_name, metadata=metadata)
-        summary = self._summarize(tool_name=tool_name, result=result, metadata=metadata)
+        source = redact_sensitive_text(self._source_from_metadata(tool_name=tool_name, metadata=metadata))
+        summary = redact_sensitive_text(self._summarize(tool_name=tool_name, result=result, metadata=metadata))
         keywords = self._keywords(source=source, summary=summary, metadata=metadata)
         path_tags = self._path_tags(metadata)
         inline_content = None
@@ -168,6 +170,8 @@ class ArtifactStore:
             metadata=metadata,
             limit=self.policy.preview_char_limit,
         )
+        if preview_text:
+            preview_text = redact_sensitive_text(preview_text)
         return ArtifactRecord(
             artifact_id=artifact_id,
             kind=tool_name,
@@ -205,15 +209,16 @@ class ArtifactStore:
         txt_path = self.run_dir / f"{artifact_id}.txt"
         json_path = self.run_dir / f"{artifact_id}.json"
 
-        metadata_payload = _coerce_metadata_payload(metadata or {})
+        metadata_payload = redact_sensitive_data(_coerce_metadata_payload(metadata or {}))
         metadata_payload.setdefault("content_type", kind)
         metadata_payload.setdefault("generated", True)
         metadata_payload.setdefault("source_type", "generated")
         metadata_payload.setdefault("source", source)
         metadata_payload.setdefault("kind", kind)
 
+        content = redact_sensitive_text(content)
         txt_path.write_text(content, encoding="utf-8")
-        preview_payload = (preview_text if preview_text is not None else content[: self.policy.preview_char_limit])[: self.policy.preview_char_limit]
+        preview_payload = redact_sensitive_text((preview_text if preview_text is not None else content[: self.policy.preview_char_limit])[: self.policy.preview_char_limit])
         record_payload = {
             "artifact_id": artifact_id,
             "kind": kind,
@@ -260,6 +265,7 @@ class ArtifactStore:
         self._next_index += 1
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         txt_path = self.run_dir / f"{artifact_id}.txt"
+        raw_thinking = redact_sensitive_text(raw_thinking)
         txt_path.write_text(raw_thinking, encoding="utf-8")
 
         return ArtifactRecord(

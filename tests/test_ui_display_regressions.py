@@ -441,3 +441,21 @@ def test_should_render_event_shows_blocked_write_guard_alert() -> None:
         data={"event": "long_running_remote_timeout_write_guard", "tool_name": "ssh_file_write"},
     )
     assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
+def test_should_render_event_shows_tool_dispatch_cancelled_when_system_hidden() -> None:
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        content="Tool dispatch cancelled: shell_exec.",
+        data={"ui_kind": "tool_dispatch_cancelled", "tool_name": "shell_exec"},
+    )
+    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
+def test_format_run_log_row_tool_dispatch_cancelled() -> None:
+    row = {
+        "channel": "harness",
+        "event": "tool_dispatch_cancelled",
+        "data": {"tool_name": "shell_exec", "elapsed_sec": 3.711},
+    }
+    assert "Tool dispatch cancelled: shell_exec after 3.711s" in format_run_log_row(row)

@@ -25,6 +25,7 @@ from .task_classifier import (
     classify_runtime_intent,
     is_smalltalk,
     looks_like_complex_task,
+    looks_like_numbered_implementation_followup,
     looks_like_readonly_chat_request,
     looks_like_shell_request,
     runtime_policy_for_intent,
@@ -115,6 +116,49 @@ def _has_single_confirmed_session_ssh_target(harness: Any) -> bool:
             if confirmed > 1:
                 return False
     return confirmed == 1
+
+
+def _looks_like_implementation_followup_after_plan(raw_task: str, harness: Any) -> bool:
+    """Detect follow-ups that implement a previously proposed improvement.
+
+    When the assistant just produced a numbered list of improvements and the
+    user replies with a phrase like "now implement the testing fixes",
+    "apply fix 1", or "do the test suite improvement", we should treat it as
+    an execution task rather than a chat request.
+    """
+    text = str(raw_task or "").strip().lower()
+    if not text:
+        return False
+    if looks_like_numbered_implementation_followup(raw_task):
+        return True
+    implementation_verbs = (
+        "implement", "apply", "do", "fix", "patch", "build", "write",
+        "create", "add", "proceed with", "start on", "work on",
+    )
+    improvement_subjects = (
+        "fix", "fixes", "improvement", "improvements", "change", "changes",
+        "proposal", "proposals", "option", "options", "item", "items",
+        "step", "steps", "test suite", "tests", "testing",
+    )
+    has_verb = any(verb in text for verb in implementation_verbs)
+    has_subject = any(subject in text for subject in improvement_subjects)
+    if not (has_verb and has_subject):
+        return False
+    # Require a recently completed task that proposed improvements/fixes.
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    for message in reversed(getattr(state, "recent_messages", []) or []):
+        if message.role == "assistant" and message.content:
+            content_lower = message.content.lower()
+            if (
+                "improvement" in content_lower
+                or "improvemnts" in content_lower
+                or "proposed" in content_lower
+                or "fixes" in content_lower
+            ) and any(marker in content_lower for marker in ("1)", "1.", "#1", "first", "test suite")):
+                return True
+    return False
 
 
 def has_active_remote_handoff(harness: Any) -> bool:
@@ -423,6 +467,19 @@ class ModeDecisionService:
         if is_smalltalk(mode_task):
             self.harness._runlog("mode_decision", "selected run mode", mode="chat", raw="smalltalk_heuristic")
             return "chat"
+
+        # Fix for RCA 8ec35471: follow-ups that implement a previously proposed
+        # improvement must not fall through to the chat-prone LLM classifier.
+        if _looks_like_implementation_followup_after_plan(raw_task, self.harness):
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="loop",
+                raw="implementation_followup_after_plan",
+                raw_task=raw_task,
+                effective_task=mode_task,
+            )
+            return "loop"
 
         pending_interrupt = getattr(self.harness.state, "pending_interrupt", None)
         runtime_intent = classify_runtime_intent(

@@ -30,6 +30,7 @@ _CRITICAL_EVENTS = {
     "fama_signal_to_mitigation",
     "fama_mitigation_activated",
     "long_running_remote_timeout_write_guard",
+    "model_output_degenerate_loop_exhausted",
     "reflexion_created",
     "recovery_human_resteer_recorded",
     "same_scope_iteration_recorded",
@@ -37,9 +38,18 @@ _CRITICAL_EVENTS = {
     "subtask_transition",
     "task_interrupted",
     "terminal_control_failed",
+    "tool_blocked_not_exposed",
     "verifier_loop_detected",
     "generic_tool_loop_nudge",
     "recent_message_limit_tuned",
+}
+
+# UI visibility set for high-signal harness diagnostics that should be rendered
+# in the TUI transcript even though they are normal harness events.
+_UI_VISIBLE_EVENTS = {
+    "mode_decision",
+    "model_output_degenerate_loop_exhausted",
+    "tool_blocked_not_exposed",
 }
 
 _DUPLICATE_STOPWORDS = {
@@ -113,7 +123,7 @@ def should_render_run_log_row(row: dict[str, Any]) -> bool:
     event = str(row.get("event") or "")
 
     # Critical backend state changes should always be visible
-    if event in _CRITICAL_EVENTS:
+    if event in _CRITICAL_EVENTS or event in _UI_VISIBLE_EVENTS:
         return True
     if channel in {"tools", "chat", "model_output"}:
         return False
@@ -259,6 +269,21 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         new_status = str(data.get("new_status") or "").strip()
         bits = [bit for bit in (f"{subtask_id}", title, f"{old_status}->{new_status}") if bit]
         return f"[harness] Subtask update: {' | '.join(bits)}"
+    if event == "mode_decision":
+        mode = str(data.get("mode") or data.get("normalized") or "").strip()
+        raw = str(data.get("raw") or "").strip()
+        reason = raw or "model fallback"
+        return f"[harness] Mode: {mode} ({reason})"
+    if event == "tool_blocked_not_exposed":
+        tool_name = str(data.get("tool_name") or "").strip()
+        allowed = data.get("allowed_tools") or []
+        allowed_text = ", ".join(str(n) for n in allowed[:4]) or "none"
+        return f"[harness] Blocked: `{tool_name}` not exposed this turn (allowed: {allowed_text})"
+    if event == "model_output_degenerate_loop_exhausted":
+        details = data.get("details") or {}
+        phrase = str(details.get("repeated_phrase") or "").strip()
+        suffix = f" repeating `{phrase}`" if phrase else ""
+        return f"[harness] Model output loop detected{suffix}; recovery nudge injected"
     msg = row.get("message") or ""
     if len(msg) > 1024:
         msg = msg[:1024] + "... [truncated]"

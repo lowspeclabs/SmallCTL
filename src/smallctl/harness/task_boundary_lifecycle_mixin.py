@@ -80,6 +80,73 @@ from .task_boundary_semantic_tail import (
     message_is_semantic_tail_candidate,
     semantic_recent_tail_messages,
 )
+
+
+def _extract_improvement_plan_from_text(text: str) -> list[str]:
+    """Extract a numbered list of improvements/fixes from assistant prose.
+
+    Looks for patterns like:
+      1) Robust URL construction...
+      2) Migrating to async...
+      5) Adding a comprehensive test suite.
+    Returns up to 6 items.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return []
+    # Match lines/items that start with a number and a delimiter.
+    pattern = re.compile(
+        r"(?:^|\n)\s*(?:\*\s*)?(\d+)[.)]\s*\*?\*?([^\n]+?)(?=\n\s*(?:\*\s*)?\d+[.)]|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = sorted(
+        ((int(m.group(1)), re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".")) for m in pattern.finditer(text)),
+        key=lambda x: x[0],
+    )
+    if not matches:
+        return []
+    seen: set[str] = set()
+    items: list[str] = []
+    for _, item in matches:
+        normalized = item.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(item)
+        if len(items) >= 6:
+            break
+    return items
+
+
+def _extract_improvement_plan_from_messages(messages: list[ConversationMessage]) -> list[str]:
+    """Search recent assistant messages for a numbered improvement plan."""
+    if not messages:
+        return []
+    for message in reversed(messages):
+        if getattr(message, "role", None) != "assistant" or not getattr(message, "content", None):
+            continue
+        plan = _extract_improvement_plan_from_text(message.content)
+        if plan:
+            return plan
+    return []
+
+
+def _next_action_hint_for_boundary(
+    pending_deliverables: list[str],
+    improvement_plan: list[str],
+    next_actions: list[str],
+) -> str:
+    """Build a concrete next-action hint for a task boundary brief."""
+    if improvement_plan:
+        return (
+            "Next: implement a pending improvement from the prior task: "
+            + "; ".join(f"{i + 1}) {item}" for i, item in enumerate(improvement_plan[:6]))
+        )
+    if pending_deliverables:
+        return "Verify or create pending deliverables: " + ", ".join(pending_deliverables[-6:])
+    if next_actions:
+        return str(next_actions[-1])
+    return ""
 from .task_boundary_constants import (
     _ACTION_CONFIRMATION_PROMPTS,
     _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT,
@@ -572,6 +639,17 @@ class TaskBoundaryLifecycleMixin:
         for path in extract_task_target_paths(str(state.run_brief.original_task or "")):
             if path not in pending_deliverables:
                 pending_deliverables.append(path)
+        # Fix for RCA 8ec35471: preserve enumerated improvement plans across task
+        # boundaries so follow-ups like "now implement the testing fixes" map to
+        # a concrete next action instead of requiring the model to rediscover it.
+        improvement_plan = _extract_improvement_plan_from_messages(
+            getattr(state, "recent_messages", []) or []
+        )
+        if improvement_plan:
+            key_discoveries.append(
+                "Pending improvement plan from prior task: "
+                + "; ".join(f"{i + 1}) {item}" for i, item in enumerate(improvement_plan[:6]))
+            )
         if pending_deliverables:
             key_discoveries.append(
                 "Pending deliverables from prior task: " + ", ".join(pending_deliverables[-6:])
@@ -600,9 +678,11 @@ class TaskBoundaryLifecycleMixin:
             files_touched=list(set(files_touched))[:8],
             artifact_ids=list((getattr(state, "artifacts", {}) or {}).keys())[-10:],
             next_action_hint=(
-                "Verify or create pending deliverables: " + ", ".join(pending_deliverables[-6:])
-                if pending_deliverables
-                else str(state.working_memory.next_actions[-1] if state.working_memory.next_actions else "")
+                _next_action_hint_for_boundary(
+                    pending_deliverables,
+                    improvement_plan,
+                    state.working_memory.next_actions,
+                )
             ),
             staleness_step=state.step_count,
             facts_confirmed=key_discoveries[:4],

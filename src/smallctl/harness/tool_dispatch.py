@@ -68,6 +68,17 @@ def _refresh_task_mode(harness: Any, task: str) -> str:
     return task_mode
 
 
+def _current_user_task(harness: Any) -> str:
+    """Return the current raw user task, falling back to run_brief if needed."""
+    run_brief = getattr(getattr(harness, "state", None), "run_brief", None)
+    task = ""
+    if run_brief is not None:
+        task = str(getattr(run_brief, "original_task", "") or "").strip()
+    if not task:
+        task = str(getattr(getattr(harness, "state", None), "current_task", "") or "").strip()
+    return task
+
+
 def _refresh_runtime_intent(harness: Any, task: str) -> tuple[str, str]:
     runtime_intent = classify_runtime_intent(
         task,
@@ -211,8 +222,13 @@ def chat_mode_requires_tools(harness: Any, task: str) -> bool:
     if has_active_remote_handoff(harness):
         ensure_remote_tool_profile(harness)
         return True
+    # Fix for RCA 8ec35471: classify intent against the original user task,
+    # not recovery nudges or system messages injected after a blocked tool.
+    task_for_intent = task
+    if getattr(task, "startswith", lambda x: False)("Registered but unavailable on this turn:"):
+        task_for_intent = _current_user_task(harness)
     runtime_intent = classify_runtime_intent(
-        task,
+        task_for_intent,
         recent_messages=getattr(harness.state, "recent_messages", []),
         pending_interrupt=getattr(harness.state, "pending_interrupt", None),
     )
@@ -222,12 +238,12 @@ def chat_mode_requires_tools(harness: Any, task: str) -> bool:
     if _has_active_write_session(harness):
         return True
     if should_enable_complex_write_chat_draft(
-        task,
+        task_for_intent,
         model_name=model_name,
         cwd=getattr(harness.state, "cwd", None),
     ):
         return True
-    raw_task, resolved_task = resolve_mode_task(harness, task)
+    raw_task, resolved_task = resolve_mode_task(harness, task_for_intent)
     if is_contextual_affirmative_execution_continuation(
         harness,
         raw_task=raw_task,
@@ -242,7 +258,13 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
     selection_phase = "current_user_task"
     try:
         task = _resolved_followup_effective_task(harness, harness._current_user_task())
-        runtime_intent_label, task_mode = _refresh_runtime_intent(harness, task)
+        # Fix for RCA 8ec35471: do not let a blocked-tool recovery nudge become
+        # the task text used for intent classification and tool filtering.
+        # Intents must be derived from the user's actual request.
+        task_for_intent = task
+        if task.startswith("Registered but unavailable on this turn:"):
+            task_for_intent = _current_user_task(harness)
+        runtime_intent_label, task_mode = _refresh_runtime_intent(harness, task_for_intent)
         selection_phase = "requires_tools"
         if has_active_remote_handoff(harness):
             ensure_remote_tool_profile(harness)
@@ -265,7 +287,7 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
                 runtime_intent=runtime_intent_label,
             )
             return terminal_tools
-        if not chat_mode_requires_tools(harness, task):
+        if not chat_mode_requires_tools(harness, task_for_intent):
             terminal_tools = _chat_terminal_tools(harness)
             _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
             _scratchpad(harness)["_chat_tools_suppressed_reason"] = "non_lookup_chat_terminal_only"

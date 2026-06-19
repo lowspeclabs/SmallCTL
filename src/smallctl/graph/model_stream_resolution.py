@@ -248,14 +248,42 @@ async def resolve_model_stream_result(
             ),
         )
         repeated_phrase = str(stream_ended_without_done_details.get("repeated_phrase") or "")
+        # Fix for RCA 8ec35471: after a degenerate loop, re-anchor the model with
+        # the current user goal and the available tools instead of only asking it
+        # to stop repeating. This reduces the chance that the model emits the
+        # repeated phrase again and makes the recovery nudge actionable.
+        recovery_content_parts = [
+            "Your previous response degenerated into a loop.",
+            "Stop repeating and emit ONE concrete next action as a tool call.",
+        ]
+        user_task = ""
+        run_brief = getattr(getattr(harness, "state", None), "run_brief", None)
+        if run_brief is not None:
+            user_task = str(getattr(run_brief, "original_task", "") or "").strip()
+        if not user_task:
+            state = getattr(harness, "state", None)
+            user_task = str(getattr(state, "current_task", "") or "").strip()
+        if user_task:
+            recovery_content_parts.append(f"Current goal: {user_task}")
+        try:
+            from ..harness.tool_dispatch import chat_mode_tools
+            allowed_tools = chat_mode_tools(harness)
+            allowed_names = [
+                str(entry["function"]["name"])
+                for entry in allowed_tools
+                if isinstance(entry, dict) and isinstance(entry.get("function"), dict) and "name" in entry["function"]
+            ]
+            if allowed_names:
+                shown = ", ".join(allowed_names[:8])
+                recovery_content_parts.append(f"Available tools now: {shown}")
+        except Exception:
+            allowed_names = []
+        if not allowed_names:
+            recovery_content_parts.append("If you do not know what to do next, ask a focused clarification or call task_fail.")
         harness.state.append_message(
             ConversationMessage(
                 role="system",
-                content=(
-                    "Your previous response degenerated into a loop. "
-                    "Stop repeating and emit ONE concrete next action as a tool call. "
-                    "If you do not know what to do next, ask a focused clarification or call task_fail."
-                ),
+                content=" ".join(recovery_content_parts),
                 metadata={
                     "is_recovery_nudge": True,
                     "recovery_kind": "model_output_degenerate_loop",

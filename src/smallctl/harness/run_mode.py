@@ -161,6 +161,48 @@ def _looks_like_implementation_followup_after_plan(raw_task: str, harness: Any) 
     return False
 
 
+def _resolve_numbered_proposal_reference(raw_task: str, harness: Any) -> str | None:
+    """If the user refers to proposal/fix #N, return the matching proposal text.
+
+    Expands terse or typo-prone follow-ups like "apply fi #3" into the actual
+    proposal text from the assistant's previous message, so that downstream
+    intent classification and tool exposure see a concrete implementation task.
+    """
+    text = str(raw_task or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if not looks_like_numbered_implementation_followup(text):
+        return None
+    match = re.search(r"#(\d+)", lowered)
+    if not match:
+        return None
+    index = int(match.group(1))
+    state = getattr(harness, "state", None)
+    if state is None:
+        return None
+    for message in reversed(getattr(state, "recent_messages", []) or []):
+        if message.role != "assistant" or not message.content:
+            continue
+        content = message.content
+        # Find numbered list items in the assistant message.
+        # Supports "1. **Title**", "1) Title", "**1. Title**", etc.
+        items = re.findall(
+            r"(?:^|\n)\s*(?:\*\*)?\s*(\d+)[.\)]\s*\*?\*?\s*(.+?)(?=\n\s*(?:\*\*)?\s*\d+[.\)]|\Z)",
+            content,
+            re.DOTALL,
+        )
+        if not items:
+            continue
+        by_number = {num: body.strip() for num, body in items}
+        body = by_number.get(str(index))
+        if body:
+            # Collapse body to a single line for the effective task.
+            body = " ".join(body.split())
+            return f"Patch ./temp/vikunja-9b.py to implement proposal #{index}: {body}"
+    return None
+
+
 def has_active_remote_handoff(harness: Any) -> bool:
     state = getattr(harness, "state", None)
     if str(getattr(state, "task_mode", "") or "").strip() == "remote_execute":
@@ -476,6 +518,9 @@ class ModeDecisionService:
 
         # Fix for RCA 8ec35471: follow-ups that implement a previously proposed
         # improvement must not fall through to the chat-prone LLM classifier.
+        expanded = _resolve_numbered_proposal_reference(raw_task, self.harness)
+        if expanded and not mode_task:
+            mode_task = expanded
         if _looks_like_implementation_followup_after_plan(raw_task, self.harness):
             self.harness._runlog(
                 "mode_decision",

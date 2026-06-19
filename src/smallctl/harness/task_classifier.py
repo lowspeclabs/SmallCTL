@@ -190,6 +190,12 @@ def looks_like_numbered_implementation_followup(task: str) -> bool:
         return True
     if re.search(rf"\b{subject}\s*#?\d+\b", text) and re.search(r"\b(?:apply|implement|patch|fix|fixes|ux|cli|code|script)\b", text):
         return True
+    # Typo-tolerant fallback: a short action word followed by a hash/number
+    # can still be a numbered follow-up even if the user abbreviates or misspells
+    # the subject (e.g. "apply and implement fi #3").
+    loose_action = r"(?:apply|do|fix|fixes|implement|patch|use|make|add)"
+    if re.search(rf"\b{loose_action}\b(?:\s+\S+){{0,5}}\s+#\d+\b", text):
+        return True
     return False
 
 

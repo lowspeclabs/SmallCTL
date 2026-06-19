@@ -58,6 +58,36 @@ def _has_write_overwrite_guard_failures(failed_dispatches: list[dict[str, Any]])
     return False
 
 
+
+def _file_patch_target_loop_count(failed_dispatches: list[dict[str, Any]]) -> int:
+    count = 0
+    needles = (
+        "patch_target_not_found",
+        "target text not found",
+        "target_text_not_found",
+        "exact text",
+        "repair_cycle_read_required",
+        "fresh_file_read_required_before_patch",
+        "reading the target file before patching",
+        "old target text is gone",
+        "patch already landed",
+        "already matches",
+        "no changes needed",
+        "repeat_sensitive_patch_already_applied",
+    )
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        tool_name = str(data.get("tool_name") or "").strip()
+        if tool_name != "file_patch":
+            continue
+        text = json.dumps(data, default=str, ensure_ascii=False).lower()
+        if any(needle in text for needle in needles):
+            count += 1
+    return count
+
+
 def _has_chat_terminal_repetition_stall(records: list[dict[str, Any]], session: dict[str, Any]) -> bool:
     """Detect a chat-mode task that ended with a degenerate loop and no tools.
 
@@ -134,6 +164,8 @@ def _classify_failure(
         return "chat_terminal_repetition_stall"
     if _has_write_overwrite_guard_failures(failed_dispatches):
         return "write_session_overwrite_guard_loop"
+    if _file_patch_target_loop_count(failed_dispatches) >= 3:
+        return "file_patch_target_not_found_loop"
     if _has_ask_human_resume_terminal_stall(harness_records):
         return "ask_human_resume_terminal_tool_stall"
     if events.get("model_output_degenerate_loop_exhausted"):
@@ -209,6 +241,9 @@ def _recommend_next_steps(
         steps.append("Investigate model stream degeneration; check model_output.log for repeated phrases.")
     if _has_write_overwrite_guard_failures(failed_dispatches):
         steps.append("Write-session overwrite guard loop detected; trace failed file_write calls and force a current file_read followed by file_patch/ast_patch or same-section repair.")
+    patch_loop_count = _file_patch_target_loop_count(failed_dispatches)
+    if patch_loop_count >= 3:
+        steps.append(f"Repeated file_patch target mismatch loop detected ({patch_loop_count} failures); force a non-cached file_read of the target before allowing another patch and verify using exact live text.")
     if _has_ask_human_resume_terminal_stall(harness_records):
         steps.append("ask_human resume fell into terminal-only tool exposure; preserve original task context and expose file mutation tools after affirmative replies.")
     if _has_chat_terminal_repetition_stall(harness_records, session):
@@ -222,7 +257,13 @@ def _recommend_next_steps(
     if failed_dispatches:
         steps.append(f"{len(failed_dispatches)} tool dispatches failed; check tools.jsonl for error details.")
     if session.get("deliverable_verified") is False and session.get("overall_objective_status") == "incomplete":
-        steps.append("Deliverable not verified; confirm required artifacts exist and verifiers ran.")
+        progress = session.get("challenge_progress") if isinstance(session, dict) else None
+        if isinstance(progress, dict) and progress.get("code_change_count") and not progress.get("verified_after_last_change"):
+            command = str(progress.get("last_verifier_command") or "").strip()
+            suffix = f" Last known verifier: `{command}`." if command else ""
+            steps.append(f"Latest code changes were not verified before termination.{suffix}")
+        else:
+            steps.append("Deliverable not verified; confirm required artifacts exist and verifiers ran.")
     if not steps:
         steps.append("No obvious failure pattern; review harness.log manually or compare with a baseline run.")
     return steps

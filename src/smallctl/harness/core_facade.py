@@ -268,7 +268,8 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
         result["challenge_progress"] = challenge_progress
     result.update(_run_metric_flags(self.state, challenge_progress, status=status))
     unverified_change_warning = ""
-    if status == "cancelled" and challenge_progress:
+    terminal_not_success = status not in {"completed", "complete", "success", "succeeded", "chat_completed", "chat_success"}
+    if terminal_not_success and challenge_progress:
         code_changes = int(challenge_progress.get("code_change_count", 0) or 0)
         verified_after_last_change = bool(challenge_progress.get("verified_after_last_change"))
         if code_changes > 0 and not verified_after_last_change:
@@ -277,7 +278,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 changed_paths = []
             path_text = ", ".join(str(path) for path in changed_paths[:3] if str(path).strip())
             target_text = f" to {path_text}" if path_text else ""
-            unverified_change_warning = f"Task cancelled after modifying files{target_text}. Changes were not verified."
+            unverified_change_warning = f"Task ended with status {status or 'unknown'} after modifying files{target_text}. Changes were not verified after the latest edit."
             result["unverified_change_warning"] = unverified_change_warning
     _inject_recovery_metrics(result, self.state)
 
@@ -431,10 +432,20 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                     challenge_progress and challenge_progress.get("verified_after_last_change")
                 ),
             }
+            run_summary_path = self.run_logger.run_dir / "run_summary.json"
+            run_summary_payload = {
+                **session_summary_payload,
+                "summary_kind": "run",
+                "run_dir": str(self.run_logger.run_dir),
+                "session_summary_path": str(session_summary_path),
+                "latest_task_summary_path": summary_payload.get("latest_task_summary_path", ""),
+            }
             if callable(schedule):
                 schedule(_write_json_file, session_summary_path, session_summary_payload, trailing_newline=True)
+                schedule(_write_json_file, run_summary_path, run_summary_payload, trailing_newline=True)
             else:
                 _write_json_file(session_summary_path, session_summary_payload, trailing_newline=True)
+                _write_json_file(run_summary_path, run_summary_payload, trailing_newline=True)
         except Exception:
             pass
 

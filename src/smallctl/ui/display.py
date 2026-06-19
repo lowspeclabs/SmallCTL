@@ -24,14 +24,19 @@ _CRITICAL_EVENTS = {
     "context_invalidated",
     "context_lane_dropped",
     "file_patch_read_autocontinue",
+    "file_patch_blocked_pending_fresh_read",
+    "file_patch_fresh_read_required",
+    "file_patch_fresh_read_satisfied",
+    "guard_trip_diagnosis",
+    "near_budget_verifier_scheduled",
+    "repair_stall_recovery",
+    "stagnation_recovery",
     "write_overwrite_guard_read_autocontinue",
     "fama_health_warning",
     "fama_capsule_health",
     "fama_signal_detected",
     "fama_signal_to_mitigation",
     "fama_mitigation_activated",
-    "guard_trip_diagnosis",
-    "long_running_remote_timeout_write_guard",
     "model_output_degenerate_loop_exhausted",
     "partial_tool_call_cancelled",
     "reflexion_created",
@@ -44,7 +49,6 @@ _CRITICAL_EVENTS = {
     "tool_blocked_not_exposed",
     "tool_dispatch_cancelled",
     "verifier_loop_detected",
-    "generic_tool_loop_nudge",
     "recent_message_limit_tuned",
 }
 
@@ -179,10 +183,6 @@ def format_run_log_row(row: dict[str, Any]) -> str:
     """Format a run log row for display."""
     event = str(row.get("event") or "").strip()
     data = row.get("data") or {}
-    if event == "verifier_path_false_negative_guard":
-        target = str(data.get("target") or "")
-        command = str(data.get("command") or "")
-        return f"[harness] ⚠️ verifier path-failure overridden: {target} ({command})"
     if event == "timeout_override":
         requested = data.get("requested_timeout_sec")
         effective = data.get("effective_timeout_sec")
@@ -219,12 +219,36 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         error_kind = str(data.get("error_kind") or "patch mismatch").strip()
         suffix = f" for {target}" if target else ""
         return f"[harness] Patch recovery: auto-reading current file{suffix} after {error_kind}"
+    if event == "file_patch_fresh_read_required":
+        target = str(data.get("target_path") or "").strip()
+        count = data.get("recovery_count", "?")
+        return f"[harness] Patch recovery: fresh read required before another patch for {target or 'target'} ({count} attempts)"
+    if event == "file_patch_blocked_pending_fresh_read":
+        target = str(data.get("target_path") or "").strip()
+        return f"[harness] Patch blocked: read current file first for {target or 'target'}"
+    if event == "file_patch_fresh_read_satisfied":
+        target = str(data.get("target_path") or "").strip()
+        return f"[harness] Patch recovery: fresh read satisfied for {target or 'target'}"
     if event == "write_overwrite_guard_read_autocontinue":
         target = str(data.get("target_path") or "").strip()
         session_id = str(data.get("session_id") or "").strip()
         target_text = f" for {target}" if target else ""
         session_text = f" (session {session_id})" if session_id else ""
-        return f"[harness] Write recovery: auto-reading staged content{target_text}{session_text}; next edit should be file_patch/ast_patch or same-section repair"
+        return f"[harness] Write recovery: auto-reading staged content{target_text}{session_text}; use file_patch/ast_patch or same-section repair next"
+    if event == "repair_stall_recovery":
+        tool = str(data.get("tool_name") or "tool").strip()
+        failure = str(data.get("failure_class") or "no progress").strip()
+        return f"[harness] Repair stall: {tool} is not making progress ({failure}); pivot required"
+    if event == "stagnation_recovery":
+        return "[harness] Stagnation recovery: strategy pivot nudge injected"
+    if event == "near_budget_verifier_scheduled":
+        command = str(data.get("command") or "").strip()
+        suffix = f": `{command}`" if command else ""
+        return f"[harness] Verification reserved before step limit{suffix}"
+    if event == "guard_trip_diagnosis":
+        guard_error = str(data.get("guard_error") or "guard tripped").strip()
+        recent_count = data.get("recent_error_count", "?")
+        return f"[harness] Guard diagnosis: {guard_error} (recent errors: {recent_count})"
     if event == "context_lane_dropped":
         lane = str(data.get("lane") or data.get("context_lane") or "context").strip()
         reason = str(data.get("reason") or data.get("drop_reason") or "stale or over budget").strip()
@@ -247,9 +271,6 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         result_reason = str(result.get("reason") or "").strip() if isinstance(result, dict) else ""
         reason = str(data.get("reason") or result_reason).strip()
         return f"[harness] Task interrupted{': ' + reason if reason else ''}"
-    if event == "generic_tool_loop_nudge":
-        tool_name = str(data.get("tool_name") or "")
-        return f"[harness] ⚠️ Loop guard nudge: {tool_name}"
     if event == "ssh_host_key_recovery_required":
         host = str(data.get("host") or "").strip()
         command = str(data.get("suggested_command") or "").strip()
@@ -314,20 +335,15 @@ def format_run_log_row(row: dict[str, Any]) -> str:
 
 
 def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
-    """Build a compact status-bar banner for recovery/guard state."""
+    """Build a compact status-bar banner for recovery state."""
     if event == "upstream_install_source_invalid_pivot":
         return "Blocked: installer source invalid or unavailable"
     if event == "verifier_loop_detected":
         return f"Recovery: verifier loop ({data.get('rejection_count', '?')} rejects)"
-    if event == "generic_tool_loop_nudge":
-        tool_name = str(data.get("tool_name") or "tool").strip()
-        return f"Recovery: loop guard nudged {tool_name}"
-    if event == "remote_tool_guard_nudge":
-        tool_name = str(data.get("tool_name") or "tool").strip()
-        return f"Blocked: local tool {tool_name} blocked for remote task. Clarify if you want local operations."
-    if event == "remote_tool_guard_nudge":
-        tool_name = str(data.get("tool_name") or "tool").strip()
-        return f"Blocked: local tool {tool_name} blocked for remote task. Clarify if you want local operations."
+    if event == "near_budget_verifier_scheduled":
+        return "Verification reserved before step limit"
+    if event in {"file_patch_fresh_read_required", "file_patch_blocked_pending_fresh_read"}:
+        return "Recovery: fresh file read required before patching"
     if event == "recent_message_limit_tuned":
         adjusted = data.get("adjusted_limit")
         return f"Recovery: message window reduced to {adjusted}"
@@ -335,9 +351,6 @@ def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
         host = str(data.get("host") or "remote host").strip()
         command = str(data.get("suggested_command") or "ssh-keygen -R <host> -f ~/.ssh/known_hosts").strip()
         return f"Blocked: SSH host key changed for {host}. Approve `{command}` or fix known_hosts manually."
-    if event == "long_running_remote_timeout_write_guard":
-        tool_name = str(data.get("tool_name") or "file write").strip()
-        return f"Blocked: {tool_name} blocked after remote installer timeout. Retry with larger timeout_sec or detached execution."
     interrupt = data.get("interrupt") if isinstance(data, dict) else None
     if isinstance(interrupt, dict) and str(interrupt.get("kind") or "").strip() == "apt_deb822_validator_approval":
         host = str(interrupt.get("host") or "").strip()

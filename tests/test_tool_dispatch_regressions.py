@@ -9,16 +9,27 @@ from smallctl.state import LoopState
 
 
 def _make_fake_harness(state: LoopState) -> SimpleNamespace:
+    async def _dispatch(name, args):
+        return ToolEnvelope(success=True, output={"tool": name, "args": args})
+
     return SimpleNamespace(
         state=state,
         config=SimpleNamespace(graph_dispatch_tools_timeout_sec=300),
         registry=SimpleNamespace(
-            names=lambda: {"file_write", "file_patch", "ssh_file_write", "ssh_file_patch", "shell_exec", "ssh_exec", "ssh_file_read"},
+            names=lambda: {
+                "ast_patch",
+                "file_read",
+                "file_write",
+                "file_patch",
+                "ssh_file_write",
+                "ssh_file_patch",
+                "shell_exec",
+                "ssh_exec",
+                "ssh_file_read",
+            },
             get=lambda name: None,
         ),
-        dispatcher=SimpleNamespace(
-            dispatch=lambda name, args: ToolEnvelope(success=True, output={"tool": name, "args": args})
-        ),
+        dispatcher=SimpleNamespace(dispatch=_dispatch),
         _current_user_task=lambda: "test task",
         _runlog=lambda *args, **kwargs: None,
         artifact_store=SimpleNamespace(
@@ -92,3 +103,75 @@ def test_phase_not_reset_on_manual_task_fail() -> None:
 
     assert state.current_phase == "repair"
     assert state.last_failure_class == "verifier_failed"
+
+
+async def _async_file_patch_fresh_read_gate_blocks_only_file_patch() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_file_patch_fresh_read_required"] = {
+        "target_path": "./foo.py",
+        "error_kind": "patch_target_not_found",
+        "recovery_count": 2,
+    }
+    harness = _make_fake_harness(state)
+
+    blocked = await dispatch_tool_call(
+        harness,
+        "file_patch",
+        {"path": "./foo.py", "target_text": "old", "replacement_text": "new"},
+    )
+
+    assert blocked.success is False
+    assert blocked.status == "recoverable"
+    assert blocked.metadata["reason"] == "fresh_file_read_required_before_patch"
+    assert blocked.metadata["next_required_tool"]["tool_name"] == "file_read"
+
+    ast_result = await dispatch_tool_call(harness, "ast_patch", {"path": "./foo.py"})
+    assert ast_result.success is True
+    assert state.scratchpad.get("_file_patch_fresh_read_required") is not None
+
+
+def test_file_patch_fresh_read_gate_blocks_only_file_patch() -> None:
+    asyncio.run(_async_file_patch_fresh_read_gate_blocks_only_file_patch())
+
+
+async def _async_successful_uncached_file_read_clears_fresh_read_gate() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_file_patch_fresh_read_required"] = {
+        "target_path": "./foo.py",
+        "error_kind": "patch_target_not_found",
+        "recovery_count": 2,
+    }
+    harness = _make_fake_harness(state)
+
+    result = await dispatch_tool_call(harness, "file_read", {"path": "./foo.py"})
+
+    assert result.success is True
+    assert "_file_patch_fresh_read_required" not in state.scratchpad
+
+
+def test_successful_uncached_file_read_clears_fresh_read_gate() -> None:
+    asyncio.run(_async_successful_uncached_file_read_clears_fresh_read_gate())
+
+
+async def _async_cached_file_read_does_not_clear_fresh_read_gate() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_file_patch_fresh_read_required"] = {
+        "target_path": "./foo.py",
+        "error_kind": "patch_target_not_found",
+        "recovery_count": 2,
+    }
+    harness = _make_fake_harness(state)
+
+    async def _dispatch(name, args):
+        return ToolEnvelope(success=True, metadata={"cache_hit": True})
+
+    harness.dispatcher.dispatch = _dispatch
+
+    result = await dispatch_tool_call(harness, "file_read", {"path": "./foo.py"})
+
+    assert result.success is True
+    assert state.scratchpad.get("_file_patch_fresh_read_required") is not None
+
+
+def test_cached_file_read_does_not_clear_fresh_read_gate() -> None:
+    asyncio.run(_async_cached_file_read_does_not_clear_fresh_read_gate())

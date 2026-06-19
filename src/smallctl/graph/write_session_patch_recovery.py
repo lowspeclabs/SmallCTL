@@ -356,6 +356,7 @@ def _invalidate_prior_file_read_artifacts(harness: Any, target_path: str) -> Non
         from pathlib import Path
         from ..tools.fs import _same_target_path
 
+        stale_artifact_ids: set[str] = set()
         for artifact_id, artifact in list(getattr(harness.state, "artifacts", {}).items()):
             art_tool = str(getattr(artifact, "tool_name", "") or getattr(artifact, "kind", "") or "").strip()
             if art_tool not in {"file_read", "ssh_file_read"}:
@@ -388,8 +389,43 @@ def _invalidate_prior_file_read_artifacts(harness: Any, target_path: str) -> Non
                     "reason": "patch_recovery_forces_fresh_read",
                     "paths": [art_path],
                 }
+                stale_artifact_ids.add(str(artifact_id))
+        cache = getattr(harness.state, "scratchpad", {}).get("file_read_cache")
+        if isinstance(cache, dict) and stale_artifact_ids:
+            for key, artifact_id in list(cache.items()):
+                if str(artifact_id or "") in stale_artifact_ids:
+                    cache.pop(key, None)
     except Exception:
         pass
+
+
+def _require_fresh_read_before_next_patch(
+    harness: Any,
+    *,
+    target_path: str,
+    error_kind: str,
+    recovery_count: int,
+    recent_success: bool,
+) -> None:
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict) or not target_path:
+        return
+    if recovery_count < 2 and not recent_success:
+        return
+    scratchpad["_file_patch_fresh_read_required"] = {
+        "target_path": target_path,
+        "error_kind": error_kind,
+        "recovery_count": recovery_count,
+        "recent_success": bool(recent_success),
+    }
+    harness._runlog(
+        "file_patch_fresh_read_required",
+        "blocked further patches until a fresh file_read verifies current content",
+        target_path=target_path,
+        error_kind=error_kind,
+        recovery_count=recovery_count,
+        recent_success=recent_success,
+    )
 
 
 def _recent_successful_mutation_on_same_path(harness: Any, target_path: str) -> bool:
@@ -549,6 +585,13 @@ def _maybe_schedule_file_patch_read_recovery(
                 },
             )
         )
+    _require_fresh_read_before_next_patch(
+        harness,
+        target_path=target_path,
+        error_kind=error_kind,
+        recovery_count=recovery_count,
+        recent_success=recent_success,
+    )
     if recovery_count >= 2 and not recent_success:
         _maybe_emit_ast_patch_recovery_nudge(
             harness,
@@ -566,6 +609,104 @@ def _maybe_schedule_file_patch_read_recovery(
         error_kind=error_kind,
         recovery_count=recovery_count,
         recent_success=recent_success,
+    )
+    return True
+
+
+def _maybe_schedule_write_overwrite_guard_read_recovery(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name not in {"file_write", "file_append"} or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    error_kind = str(metadata.get("error_kind") or "").strip()
+    if error_kind != "chunked_write_overwrite_new_section_after_progress":
+        return False
+
+    target_path = str(metadata.get("path") or record.args.get("path") or "").strip()
+    if not target_path:
+        return False
+
+    session_id = str(metadata.get("write_session_id") or record.args.get("write_session_id") or "").strip()
+    recovery_key = "|".join([session_id, target_path, error_kind])
+    raw_counts = harness.state.scratchpad.get("_write_overwrite_guard_recovery_counts")
+    counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+    recovery_count = int(counts.get(recovery_key, 0) or 0) + 1
+    counts[recovery_key] = recovery_count
+    harness.state.scratchpad["_write_overwrite_guard_recovery_counts"] = counts
+
+    next_args = {"path": target_path}
+    pending = PendingToolCall(
+        tool_name="file_read",
+        args=next_args,
+        raw_arguments=json.dumps(next_args, ensure_ascii=True, sort_keys=True),
+        source="system",
+    )
+    graph_state.pending_tool_calls = [pending]
+    signature = "|".join(
+        [
+            str(record.operation_id or ""),
+            session_id,
+            target_path,
+            str(recovery_count),
+            "write_overwrite_guard_read_autocontinue",
+        ]
+    )
+    store_durable_autocontinue(
+        harness,
+        pending,
+        recovery_kind="write_overwrite_guard_read_autocontinue",
+        signature=signature,
+        reason="write-session overwrite guard scheduled a recovery file read",
+        metadata={
+            "session_id": session_id,
+            "target_path": target_path,
+            "error_kind": error_kind,
+            "recovery_count": recovery_count,
+            "operation_id": record.operation_id,
+            "tool_call_id": record.tool_call_id,
+        },
+    )
+    from .tool_call_parser import allow_repeated_tool_call_once
+
+    allow_repeated_tool_call_once(harness, "file_read", next_args)
+    completed_sections = metadata.get("write_sections_completed")
+    section_text = ""
+    if isinstance(completed_sections, list) and completed_sections:
+        section_text = " Completed sections: " + ", ".join(str(item) for item in completed_sections[-6:]) + "."
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Write-session overwrite recovery for `{target_path}`: a full staged overwrite was rejected because prior sections already exist. "
+                f"Auto-reading the current staged content through `file_read(path='{target_path}')`. "
+                "After that read, do not retry the same full-file `file_write` as a new section. "
+                "Use `file_patch` for a narrow exact edit, `ast_patch` for a Python structural edit, or replace an existing section by reusing its exact section_name. "
+                "Use `section_name='full_file'` with `replace_strategy='overwrite'` only if you intentionally replace the complete staged file."
+                f"{section_text}"
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "write_overwrite_guard_read_autocontinue",
+                "session_id": session_id,
+                "target_path": target_path,
+                "error_kind": error_kind,
+                "recovery_count": recovery_count,
+            },
+        )
+    )
+    harness._runlog(
+        "write_overwrite_guard_read_autocontinue",
+        "scheduled automatic file read after write-session overwrite guard",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        session_id=session_id,
+        target_path=target_path,
+        error_kind=error_kind,
+        recovery_count=recovery_count,
     )
     return True
 

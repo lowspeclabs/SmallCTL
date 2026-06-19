@@ -49,6 +49,77 @@ def _scratchpad(harness: Any) -> dict[str, Any]:
     return scratchpad
 
 
+def _same_local_path_for_dispatch(harness: Any, left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    try:
+        from ..tools.fs import _same_target_path
+
+        return bool(_same_target_path(left, right, getattr(harness.state, "cwd", None)))
+    except Exception:
+        return _normalize_path(left) == _normalize_path(right)
+
+
+def _fresh_read_required_patch_block(harness: Any, tool_name: str, args: dict[str, Any]) -> ToolEnvelope | None:
+    if tool_name != "file_patch":
+        return None
+    required = _scratchpad(harness).get("_file_patch_fresh_read_required")
+    if not isinstance(required, dict):
+        return None
+    target_path = str(required.get("target_path") or "").strip()
+    requested_path = str(args.get("path") or "").strip()
+    if not _same_local_path_for_dispatch(harness, requested_path, target_path):
+        return None
+    recovery_count = int(required.get("recovery_count", 0) or 0)
+    error_kind = str(required.get("error_kind") or "patch mismatch").strip()
+    return ToolEnvelope(
+        success=False,
+        status="recoverable",
+        error=(
+            f"Patch recovery requires a fresh file_read of `{target_path}` before another `{tool_name}`. "
+            f"The previous patch failed with {error_kind} after {recovery_count} recovery attempt(s). "
+            "Read the smallest relevant current slice, copy the exact live text, then retry with a new patch or use ast_patch."
+        ),
+        metadata={
+            "tool_name": tool_name,
+            "reason": "fresh_file_read_required_before_patch",
+            "target_path": target_path,
+            "error_kind": error_kind,
+            "recovery_count": recovery_count,
+            "next_required_tool": {
+                "tool_name": "file_read",
+                "required_arguments": {"path": target_path},
+                "reason": "fresh_read_required_before_patch",
+            },
+        },
+    )
+
+
+def _clear_fresh_read_patch_requirement_after_read(harness: Any, tool_name: str, args: dict[str, Any], result: Any) -> None:
+    if tool_name != "file_read":
+        return
+    if not getattr(result, "success", False):
+        return
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, dict) and metadata.get("cache_hit"):
+        return
+    scratchpad = _scratchpad(harness)
+    required = scratchpad.get("_file_patch_fresh_read_required")
+    if not isinstance(required, dict):
+        return
+    target_path = str(required.get("target_path") or "").strip()
+    read_path = str(args.get("path") or "").strip()
+    if not _same_local_path_for_dispatch(harness, read_path, target_path):
+        return
+    scratchpad.pop("_file_patch_fresh_read_required", None)
+    harness._runlog(
+        "file_patch_fresh_read_satisfied",
+        "fresh file_read satisfied patch recovery requirement",
+        target_path=target_path,
+        read_path=read_path,
+    )
+
+
 def _resolved_followup_effective_task(harness: Any, task: str) -> str:
     scratchpad = _scratchpad(harness)
     resolved = scratchpad.get("_resolved_followup")
@@ -444,6 +515,18 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
     if cached is not None:
         return cached
 
+    fresh_read_block = _fresh_read_required_patch_block(harness, tool_name, args)
+    if fresh_read_block is not None:
+        harness._runlog(
+            "file_patch_blocked_pending_fresh_read",
+            "blocked patch until a fresh file_read is available",
+            tool_name=tool_name,
+            target_path=fresh_read_block.metadata.get("target_path"),
+            error_kind=fresh_read_block.metadata.get("error_kind"),
+            recovery_count=fresh_read_block.metadata.get("recovery_count"),
+        )
+        return fresh_read_block
+
     if tool_name not in harness.registry.names():
         sanitized = attempt_tool_sanitization(harness, tool_name)
         if sanitized:
@@ -519,6 +602,7 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
         scratchpad = harness.state.scratchpad
         if "_first_tool_dispatch_complete_time" not in scratchpad:
             scratchpad["_first_tool_dispatch_complete_time"] = time.time()
+        _clear_fresh_read_patch_requirement_after_read(harness, tool_name, args, result)
     return result
 
 

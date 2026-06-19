@@ -19,6 +19,7 @@ from smallctl.graph.write_recovery_parsing import _attach_session_metadata
 from smallctl.graph.write_session_patch_recovery import _maybe_schedule_patch_existing_stage_read_recovery
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState, WriteSession
+from smallctl.state_schema import ArtifactRecord
 from smallctl.tools.fs_sessions import infer_write_session_intent
 from smallctl.write_session_fsm import archive_interrupted_write_session, new_write_session
 
@@ -438,6 +439,82 @@ def test_stale_file_patch_after_recent_success_nudges_verify_not_retry() -> None
     assert "already applied" in recovery_message.content.lower()
     assert "task_complete" in recovery_message.content
     assert "before asking for another patch" not in recovery_message.content.lower()
+
+
+def test_file_patch_recovery_invalidates_matching_file_read_cache(tmp_path: Path) -> None:
+    from smallctl.graph.write_session_patch_recovery import _invalidate_prior_file_read_artifacts
+    from smallctl.shell_utils import file_read_cache_key
+
+    state = _make_state()
+    state.cwd = str(tmp_path)
+    target = tmp_path / "pong.py"
+    other = tmp_path / "other.py"
+    state.artifacts = {
+        "art-target": ArtifactRecord(
+            artifact_id="art-target",
+            kind="file_read",
+            source=str(target),
+            created_at="now",
+            size_bytes=10,
+            summary="target",
+            tool_name="file_read",
+            metadata={"path": str(target)},
+        ),
+        "art-other": ArtifactRecord(
+            artifact_id="art-other",
+            kind="file_read",
+            source=str(other),
+            created_at="now",
+            size_bytes=10,
+            summary="other",
+            tool_name="file_read",
+            metadata={"path": str(other)},
+        ),
+    }
+    target_key = file_read_cache_key(state.cwd, {"path": str(target)})
+    other_key = file_read_cache_key(state.cwd, {"path": str(other)})
+    assert target_key and other_key
+    state.scratchpad["file_read_cache"] = {
+        target_key: "art-target",
+        other_key: "art-other",
+    }
+    harness = _make_harness(state)
+
+    _invalidate_prior_file_read_artifacts(harness, str(target))
+
+    assert target_key not in state.scratchpad["file_read_cache"]
+    assert state.scratchpad["file_read_cache"][other_key] == "art-other"
+    assert state.artifacts["art-target"].metadata["stale"] is True
+    assert "stale" not in state.artifacts["art-other"].metadata
+
+
+def test_repeated_file_patch_recovery_requires_fresh_read() -> None:
+    from smallctl.graph.write_session_patch_recovery import _maybe_schedule_file_patch_read_recovery
+
+    state = _make_state()
+    harness = _make_harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-retry", run_mode="loop")
+
+    record = ToolExecutionRecord(
+        operation_id="op-retry",
+        tool_name="file_patch",
+        args={"path": "./temp/pong.py", "target_text": "old", "replacement_text": "new"},
+        tool_call_id="tc-retry",
+        result=ToolEnvelope(
+            success=False,
+            error="Target text not found.",
+            metadata={"path": "./temp/pong.py", "error_kind": "patch_target_not_found"},
+        ),
+    )
+
+    assert _maybe_schedule_file_patch_read_recovery(graph_state, harness, record) is True
+    graph_state.pending_tool_calls = []
+    assert _maybe_schedule_file_patch_read_recovery(graph_state, harness, record) is True
+
+    required = state.scratchpad.get("_file_patch_fresh_read_required")
+    assert isinstance(required, dict)
+    assert required["target_path"] == "./temp/pong.py"
+    assert required["recovery_count"] == 2
 
 
 def test_already_applied_file_patch_autocontinues_with_traceback_focused_read(tmp_path: Path) -> None:

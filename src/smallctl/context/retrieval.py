@@ -1039,6 +1039,13 @@ class LexicalRetriever:
         # outrank actionable tool patterns during a live execution/resteer turn.
         if m.tool_name == "task_complete":
             score *= 0.7
+            progress = getattr(state, "challenge_progress", None)
+            if (
+                progress is not None
+                and int(getattr(progress, "code_change_count", 0) or 0) > 0
+                and not bool(getattr(progress, "verified_after_last_change", False))
+            ):
+                score *= 0.25
             if self._is_model_terminal_claim(m):
                 score *= 0.8
             if requested_tool in {"shell_exec", "ssh_exec"}:

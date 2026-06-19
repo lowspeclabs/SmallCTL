@@ -109,6 +109,13 @@ def score_artifact(
     artifact_source = str(metadata.get("source") or artifact.source or "").strip().lower()
     if artifact.tool_name == "task_complete" or artifact_source == "model_terminal_claim":
         terminal_claim_penalty *= 0.7
+        progress = getattr(state, "challenge_progress", None)
+        if (
+            progress is not None
+            and int(getattr(progress, "code_change_count", 0) or 0) > 0
+            and not bool(getattr(progress, "verified_after_last_change", False))
+        ):
+            terminal_claim_penalty *= 0.25
         if query_requests_live_remote_correction(query):
             terminal_claim_penalty *= 0.45
 

@@ -117,6 +117,76 @@ def _guard_error_signature(error: Any) -> str:
     return text[:160]
 
 
+
+def _maybe_schedule_near_budget_verifier(harness: Any, graph_state: GraphRunState) -> bool:
+    if graph_state.final_result is not None or graph_state.pending_tool_calls:
+        return False
+    progress = getattr(harness.state, "challenge_progress", None)
+    if progress is None:
+        return False
+    if str(getattr(progress, "task_category", "") or "").strip() != "coding":
+        return False
+    if int(getattr(progress, "code_change_count", 0) or 0) <= 0:
+        return False
+    if bool(getattr(progress, "verified_after_last_change", False)):
+        return False
+    command = str(getattr(progress, "last_verifier_command", "") or "").strip()
+    if not command:
+        return False
+    max_steps = int(getattr(getattr(harness, "guards", None), "max_steps", 50) or 50)
+    if int(getattr(harness.state, "step_count", 0) or 0) < max_steps - 2:
+        return False
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        harness.state.scratchpad = scratchpad
+    signature = f"{command}|{getattr(progress, 'last_code_change_step', 0)}"
+    if scratchpad.get("_near_budget_verifier_scheduled") == signature:
+        return False
+    scratchpad["_near_budget_verifier_scheduled"] = signature
+    args = {"command": command}
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="shell_exec",
+            args=args,
+            raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+            source="system",
+        )
+    ]
+    from .tool_call_parser import allow_repeated_tool_call_once
+
+    allow_repeated_tool_call_once(harness, "shell_exec", args)
+    changed_paths = [str(path) for path in getattr(progress, "last_code_change_paths", []) or [] if str(path).strip()]
+    path_text = ", ".join(changed_paths[:3]) or "changed files"
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Step budget nearly exhausted with unverified code changes in {path_text}. "
+                f"Auto-running the last known verifier now: `{command}`. "
+                "After this verifier, call task_complete if it passes or task_fail with the blocker if it fails."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "near_budget_verifier",
+                "command": command,
+                "changed_paths": changed_paths,
+            },
+        )
+    )
+    harness._runlog(
+        "near_budget_verifier_scheduled",
+        "scheduled verifier before max-step guard because latest code change was unverified",
+        command=command,
+        step_count=getattr(harness.state, "step_count", 0),
+        max_steps=max_steps,
+        changed_paths=changed_paths,
+        last_code_change_step=getattr(progress, "last_code_change_step", 0),
+        last_verifier_step=getattr(progress, "last_verifier_step", 0),
+    )
+    return True
+
+
 def _log_guard_trip_diagnosis(
     harness: Any, graph_state: GraphRunState, guard_error: str
 ) -> None:
@@ -831,6 +901,8 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
     harness.state.step_count += 1
 
     from .lifecycle_step_budget import STEP_BUDGET_NUDGE_THRESHOLD, _maybe_inject_step_budget_nudge
+
+    _maybe_schedule_near_budget_verifier(harness, graph_state)
 
     # Hard step-budget safety net for small models: if we've burned past the
     # threshold without convergence, force a synthesize-and-exit directive.

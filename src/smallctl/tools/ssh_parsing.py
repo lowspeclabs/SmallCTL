@@ -105,10 +105,6 @@ def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(arguments)
     target_text = normalize_optional_ssh_string(normalized.pop("target", None))
     explicit_host = normalize_optional_ssh_string(normalized.get("host"))
-    if target_text:
-        if explicit_host and explicit_host != target_text:
-            raise ValueError("Conflicting SSH targets provided via `target` and `host`.")
-        normalized["host"] = target_text
     alias_user = normalize_optional_ssh_string(normalized.pop("username", None))
     explicit_user = normalize_optional_ssh_string(normalized.get("user"))
     if alias_user:
@@ -120,6 +116,19 @@ def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         normalized.pop("user", None)
     else:
         normalized["user"] = explicit_user
+
+    if target_text:
+        target_host, target_user = normalize_ssh_target(host=target_text, user=explicit_user)
+        if explicit_host:
+            explicit_host_text, explicit_host_user = normalize_ssh_target(host=explicit_host, user=explicit_user)
+            if explicit_host_text != target_host:
+                raise ValueError("Conflicting SSH targets provided via `target` and `host`.")
+            if explicit_host_user and target_user and explicit_host_user != target_user:
+                raise ValueError("Conflicting SSH usernames provided via `target` and `host`.")
+        normalized["host"] = target_host
+        if target_user:
+            normalized["user"] = target_user
+            explicit_user = target_user
 
     host_text = normalize_optional_ssh_string(normalized.get("host")) or ""
     host_text, user_text = normalize_ssh_target(host=host_text, user=explicit_user)

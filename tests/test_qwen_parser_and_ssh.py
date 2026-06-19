@@ -2024,6 +2024,36 @@ def test_normalize_ssh_arguments_accepts_redundant_user_with_target() -> None:
     assert normalized["user"] == "root"
 
 
+def test_normalize_ssh_arguments_accepts_redundant_host_with_target_user() -> None:
+    normalized = network.normalize_ssh_arguments(
+        {
+            "target": "root@192.168.1.63",
+            "host": "192.168.1.63",
+            "user": "root",
+            "command": "whoami",
+        }
+    )
+
+    assert normalized["host"] == "192.168.1.63"
+    assert normalized["user"] == "root"
+    assert "target" not in normalized
+
+
+def test_normalize_ssh_arguments_rejects_conflicting_target_host() -> None:
+    try:
+        network.normalize_ssh_arguments(
+            {
+                "target": "root@192.168.1.63",
+                "host": "192.168.1.64",
+                "command": "whoami",
+            }
+        )
+    except ValueError as exc:
+        assert str(exc) == "Conflicting SSH targets provided via `target` and `host`."
+    else:
+        raise AssertionError("expected ValueError for conflicting SSH target host")
+
+
 def test_normalize_ssh_arguments_requires_host_or_target() -> None:
     try:
         network.normalize_ssh_arguments({"command": "whoami"})
@@ -2738,4 +2768,3 @@ def test_streaming_gemma_channel_marker_ends_thinking_block() -> None:
     assert assistant_text == "Hello!"
     assert thinking_text == "\n"
     assert "<channel|>" not in assistant_text
-

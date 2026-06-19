@@ -46,21 +46,21 @@ _TARGET_REPLACEMENT_RE = re.compile(
 _TARGET_LANGUAGE_RE = re.compile(r"\b(?:rust|go|typescript|javascript|python|bash|shell)\b", re.IGNORECASE)
 _ORDINAL_FOLLOWUP_RE = re.compile(
     r"\b(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:option\s+|proposal\s+|#)?(\d+)\b"
+    r"(?:option\s+|proposal\s+|issue\s+|fix\s+|#)?(\d+)\b"
     r"|"
-    r"\b(?:option|proposal)\s+#?(\d+)\b",
+    r"\b(?:option|proposal|issue|fix)\s+#?(\d+)\b",
     re.IGNORECASE,
 )
 _ORDINAL_WORD_FOLLOWUP_RE = re.compile(
     r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:the\s+)?(?P<word>first|second|third|fourth|fifth)\s+(?:one|option|proposal)?\b"
+    r"(?:the\s+)?(?P<word>first|second|third|fourth|fifth)\s+(?:one|option|proposal|issue|fix)?\b"
     r"|"
-    r"^\s*(?:option|proposal)\s+(?P<option_word>first|second|third|fourth|fifth)\b",
+    r"^\s*(?:option|proposal|issue|fix)\s+(?P<option_word>first|second|third|fourth|fifth)\b",
     re.IGNORECASE,
 )
 _ORDINAL_PREFIX_RE = re.compile(
     r"^\s*(?:start\s+(?:with|by|on)|do|use|choose|pick|implement|patch|apply)\s+"
-    r"(?:option\s+|proposal\s+|#)?\d+[.)]?\s*[,;:]?\s*",
+    r"(?:option\s+|proposal\s+|issue\s+|fix\s+|#)?\d+[.)]?\s*[,;:]?\s*",
     re.IGNORECASE,
 )
 _SEQUENTIAL_REMOTE_FOLLOWUP_RE = re.compile(

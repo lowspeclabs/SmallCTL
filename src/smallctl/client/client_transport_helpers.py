@@ -152,6 +152,9 @@ def provider_root(base_url: str) -> str:
 def latest_user_message_audit(messages: Any) -> dict[str, Any]:
     if not isinstance(messages, list):
         return {"latest_user_present": False}
+    latest_any: dict[str, Any] | None = None
+    latest_human: dict[str, Any] | None = None
+    latest_synthetic: dict[str, Any] | None = None
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
@@ -167,12 +170,64 @@ def latest_user_message_audit(messages: Any) -> dict[str, Any]:
             text = "\n".join(text_parts)
         else:
             text = str(content or "")
-        encoded = text.encode("utf-8", errors="replace")
-        preview = redact_sensitive_text(text).replace("\n", "\\n")[:240]
-        return {
-            "latest_user_present": bool(text.strip()),
-            "latest_user_sha256": hashlib.sha256(encoded).hexdigest()[:12] if text else "",
-            "latest_user_chars": len(text),
-            "latest_user_preview": preview,
-        }
-    return {"latest_user_present": False}
+        audit = _user_text_audit(text)
+        if latest_any is None:
+            latest_any = audit
+        if _looks_like_synthetic_user_context(text):
+            if latest_synthetic is None:
+                latest_synthetic = audit
+            continue
+        if latest_human is None:
+            latest_human = audit
+            break
+    if latest_any is None:
+        return {"latest_user_present": False}
+    result = {
+        "latest_user_present": latest_any["present"],
+        "latest_user_sha256": latest_any["sha256"],
+        "latest_user_chars": latest_any["chars"],
+        "latest_user_preview": latest_any["preview"],
+        "latest_user_is_synthetic_context": bool(
+            latest_synthetic is not None
+            and latest_synthetic.get("sha256") == latest_any.get("sha256")
+        ),
+    }
+    if latest_human is not None:
+        result.update(
+            {
+                "latest_human_user_present": latest_human["present"],
+                "latest_human_user_sha256": latest_human["sha256"],
+                "latest_human_user_chars": latest_human["chars"],
+                "latest_human_user_preview": latest_human["preview"],
+            }
+        )
+    else:
+        result["latest_human_user_present"] = False
+    if latest_synthetic is not None:
+        result.update(
+            {
+                "latest_synthetic_user_present": latest_synthetic["present"],
+                "latest_synthetic_user_chars": latest_synthetic["chars"],
+                "latest_synthetic_user_preview": latest_synthetic["preview"],
+            }
+        )
+    return result
+
+
+def _user_text_audit(text: str) -> dict[str, Any]:
+    encoded = text.encode("utf-8", errors="replace")
+    return {
+        "present": bool(text.strip()),
+        "sha256": hashlib.sha256(encoded).hexdigest()[:12] if text else "",
+        "chars": len(text),
+        "preview": redact_sensitive_text(text).replace("\n", "\\n")[:240],
+    }
+
+
+def _looks_like_synthetic_user_context(text: str) -> bool:
+    stripped = str(text or "").lstrip()
+    if stripped.startswith("<retrieved-knowledge-base>"):
+        return True
+    if stripped.startswith("### SYSTEM ALERT:") or stripped.startswith("### FORMAT ERROR:"):
+        return True
+    return bool(stripped.startswith("RELEVANT CONTEXT (RETRIEVED)"))

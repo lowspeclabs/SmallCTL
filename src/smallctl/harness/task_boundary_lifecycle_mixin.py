@@ -89,45 +89,138 @@ def _extract_improvement_plan_from_text(text: str) -> list[str]:
       1) Robust URL construction...
       2) Migrating to async...
       5) Adding a comprehensive test suite.
-    Returns up to 6 items.
+    Also captures markdown bullet items under numbered headings such as:
+      #### 1. Bug Fixes & Robustness
+      - **URL Normalization Edge Cases:** ...
+    And comma-separated summary phrases like:
+      Proposed improvements include X, Y, and Z.
+    Returns up to 6 concrete items.
     """
     text = str(text or "").strip()
     if not text:
         return []
-    # Match lines/items that start with a number and a delimiter.
-    pattern = re.compile(
-        r"(?:^|\n)\s*(?:\*\s*)?(\d+)[.)]\s*\*?\*?([^\n]+?)(?=\n\s*(?:\*\s*)?\d+[.)]|$)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    matches = sorted(
-        ((int(m.group(1)), re.sub(r"\s+", " ", m.group(2)).strip().rstrip(".")) for m in pattern.finditer(text)),
-        key=lambda x: x[0],
-    )
-    if not matches:
-        return []
-    seen: set[str] = set()
+
+    # First, try to extract from comma-separated "improvements include ..." summaries.
+    comma_items = _extract_comma_separated_improvements(text)
+    if comma_items:
+        return comma_items
+
     items: list[str] = []
-    for _, item in matches:
-        normalized = item.lower()
-        if normalized in seen:
+    seen: set[str] = set()
+    current_heading = ""
+    # Process line by line to capture heading context and list items.
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
             continue
-        seen.add(normalized)
-        items.append(item)
-        if len(items) >= 6:
-            break
+        heading_match = re.match(r"^#+\s*\d+[.)]?\s*\*?\*?(.+?)\*?\*?\s*$", stripped)
+        if heading_match:
+            current_heading = re.sub(r"\s+", " ", heading_match.group(1)).strip().rstrip(":.")
+            continue
+        item_match = re.match(r"^(?:[-*]|\d+[.)])\s*\*?\*?([^\n*]+?)\*?\*?(?::\s*(.+))?$", stripped)
+        if not item_match:
+            continue
+        title = re.sub(r"\s+", " ", item_match.group(1)).strip().rstrip(":.")
+        detail = item_match.group(2)
+        if detail:
+            detail = re.sub(r"\s+", " ", detail).strip().rstrip(".")
+        if current_heading and title.lower() not in current_heading.lower():
+            item = f"{current_heading}: {title}"
+        else:
+            item = title
+        if detail and len(detail) > 10 and detail.lower() not in item.lower():
+            item = f"{item} - {detail[:120]}"
+        normalized = item.lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            items.append(item)
+            if len(items) >= 6:
+                break
     return items
 
 
-def _extract_improvement_plan_from_messages(messages: list[ConversationMessage]) -> list[str]:
-    """Search recent assistant messages for a numbered improvement plan."""
+def _extract_comma_separated_improvements(text: str) -> list[str]:
+    """Extract items from phrases like 'improvements include A, B, and C'."""
+    lowered = text.lower()
+    triggers = (
+        "improvements include",
+        "proposed improvements",
+        "fixes include",
+        "improvements are",
+        "proposed fixes",
+    )
+    trigger_pos = -1
+    for trigger in triggers:
+        pos = lowered.find(trigger)
+        if pos != -1:
+            trigger_pos = pos + len(trigger)
+            break
+    if trigger_pos == -1:
+        return []
+    remainder = text[trigger_pos:].strip()
+    # Trim leading colon/space.
+    remainder = re.sub(r"^[\s:,-]+", "", remainder)
+    # Split on commas and 'and'.
+    raw_parts = re.split(r",|\band\b", remainder)
+    items: list[str] = []
+    seen: set[str] = set()
+    for part in raw_parts:
+        item = re.sub(r"[.]+$", "", part.strip()).strip()
+        # Strip leading articles/verbs.
+        item = re.sub(r"^(?:adding|include|such\s+as|like)\s+", "", item, flags=re.IGNORECASE)
+        normalized = item.lower()
+        if normalized and len(item) > 3 and normalized not in seen:
+            seen.add(normalized)
+            items.append(item)
+            if len(items) >= 6:
+                break
+    return items
+
+
+def _extract_improvement_plan_from_messages(
+    messages: list[ConversationMessage],
+    *extra_texts: Any,
+) -> list[str]:
+    """Search recent assistant messages and task handoff text for an improvement plan.
+
+    Also inspects task_complete tool calls, because the prior task's final
+    summary is often carried in the tool-call arguments rather than the
+    assistant prose.
+    """
+    for extra in extra_texts:
+        plan = _extract_improvement_plan_from_text(str(extra or ""))
+        if plan:
+            return plan
     if not messages:
         return []
     for message in reversed(messages):
-        if getattr(message, "role", None) != "assistant" or not getattr(message, "content", None):
+        if getattr(message, "role", None) != "assistant":
             continue
-        plan = _extract_improvement_plan_from_text(message.content)
-        if plan:
-            return plan
+        content = getattr(message, "content", None) or ""
+        if content:
+            plan = _extract_improvement_plan_from_text(content)
+            if plan:
+                return plan
+        # Inspect tool calls for a task_complete summary message.
+        for tc in getattr(message, "tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            func = tc.get("function") or {}
+            if str(func.get("name") or "").strip().lower() != "task_complete":
+                continue
+            args = func.get("arguments", "")
+            if isinstance(args, str) and args:
+                try:
+                    parsed = json.loads(args)
+                except Exception:
+                    parsed = {}
+            else:
+                parsed = args if isinstance(args, dict) else {}
+            msg = str(parsed.get("message") or parsed.get("content") or "").strip()
+            if msg:
+                plan = _extract_improvement_plan_from_text(msg)
+                if plan:
+                    return plan
     return []
 
 
@@ -138,15 +231,17 @@ def _next_action_hint_for_boundary(
 ) -> str:
     """Build a concrete next-action hint for a task boundary brief."""
     if improvement_plan:
-        return (
-            "Next: implement a pending improvement from the prior task: "
-            + "; ".join(f"{i + 1}) {item}" for i, item in enumerate(improvement_plan[:6]))
+        plan_text = "; ".join(
+            f"{i + 1}) {item}" for i, item in enumerate(improvement_plan[:6])
         )
+        return "Next: implement a pending improvement from the prior task: " + plan_text
     if pending_deliverables:
         return "Verify or create pending deliverables: " + ", ".join(pending_deliverables[-6:])
     if next_actions:
         return str(next_actions[-1])
     return ""
+
+
 from .task_boundary_constants import (
     _ACTION_CONFIRMATION_PROMPTS,
     _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT,

@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from ..guards import check_guards
-from ..interrupt_replies import interrupt_response_action
+from ..interrupt_replies import interrupt_response_action, is_interrupt_affirmative_response
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -160,6 +160,51 @@ def _log_guard_trip_diagnosis(
             active_sessions if isinstance(active_sessions, dict) else {}
         ),
     )
+
+
+_VACUOUS_REQUIREMENT_REPLIES = {
+    "yes",
+    "y",
+    "yeah",
+    "yep",
+    "ok",
+    "okay",
+    "sure",
+    "approved",
+    "approve",
+    "proceed",
+    "go ahead",
+    "do it",
+}
+
+
+def _question_requires_concrete_details(question: Any) -> bool:
+    lowered = str(question or "").strip().lower()
+    if not lowered:
+        return False
+    detail_markers = (
+        "provide the requirements",
+        "provide requirements",
+        "provide the requirement",
+        "provide the description",
+        "provide a description",
+        "what issue",
+        "issue #",
+        "specifically requires",
+        "missing information",
+        "details of",
+    )
+    return any(marker in lowered for marker in detail_markers)
+
+
+def _is_vacuous_requirement_reply(human_input: str) -> bool:
+    lowered = " ".join(str(human_input or "").strip().lower().split())
+    if lowered in _VACUOUS_REQUIREMENT_REPLIES:
+        return True
+    tokens = lowered.split()
+    if len(tokens) <= 3 and any(token in _VACUOUS_REQUIREMENT_REPLIES for token in tokens):
+        return not any(char.isdigit() for char in lowered)
+    return False
 
 
 async def initialize_loop_run(
@@ -406,6 +451,44 @@ async def resume_loop_run(
         harness.state.scratchpad.pop("_progress_prior_plan_step", None)
         harness.state.scratchpad.pop("_ssh_auth_recovery_state", None)
 
+    ask_human_affirmative_resume = (
+        str(pending.get("kind") or "").strip() == "ask_human"
+        and is_interrupt_affirmative_response(pending, human_input)
+    )
+    ambiguous_ask_human_resume = bool(
+        ask_human_affirmative_resume
+        and _question_requires_concrete_details(pending.get("question"))
+        and _is_vacuous_requirement_reply(human_input)
+    )
+    if ambiguous_ask_human_resume:
+        ask_human_affirmative_resume = False
+        harness.state.scratchpad["_ask_human_ambiguous_resume"] = {
+            "question": str(pending.get("question") or "").strip(),
+            "response": human_input.strip(),
+            "created_at": time.time(),
+        }
+        harness._runlog(
+            "ask_human_ambiguous_resume",
+            "human reply did not answer the clarification request",
+            question=str(pending.get("question") or "").strip(),
+            response=human_input.strip(),
+        )
+    if ask_human_affirmative_resume:
+        run_brief = getattr(harness.state, "run_brief", None)
+        original_task = str(getattr(run_brief, "original_task", "") or getattr(harness.state, "current_task", "") or "").strip()
+        harness.state.scratchpad["_ask_human_affirmative_resume"] = {
+            "original_task": original_task,
+            "question": str(pending.get("question") or "").strip(),
+            "response": human_input.strip(),
+            "created_at": time.time(),
+        }
+        if original_task:
+            harness.state.scratchpad["_resolved_followup"] = {
+                "raw_task": human_input.strip(),
+                "effective_task": original_task,
+                "target_inheritance": "ask_human_affirmative_resume",
+            }
+
     _clear_tool_attempt_history(harness)
     if hasattr(harness.state, "tool_history") and isinstance(harness.state.tool_history, list):
         harness.state.tool_history.clear()
@@ -438,6 +521,41 @@ async def resume_loop_run(
             },
         )
     )
+    if ambiguous_ask_human_resume:
+        harness.state.append_message(
+            ConversationMessage(
+                role="system",
+                content=(
+                    "The human reply did not provide the requested requirements or issue description. "
+                    "Do not infer the missing issue details from warm memory alone. Ask for the concrete requirements, "
+                    "or proceed only if the current task already contains a specific numbered proposal with an explicit source."
+                ),
+                metadata={
+                    "is_recovery_nudge": True,
+                    "recovery_kind": "ask_human_ambiguous_resume",
+                    "hidden_from_ui": True,
+                },
+            )
+        )
+    elif ask_human_affirmative_resume:
+        run_brief = getattr(harness.state, "run_brief", None)
+        original_task = str(getattr(run_brief, "original_task", "") or getattr(harness.state, "current_task", "") or "").strip()
+        if original_task:
+            harness.state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        "The human answered affirmatively to the clarification request. "
+                        f"Continue the original objective now: {original_task}. "
+                        "Do not ask the same clarification again. If the target file is known from context, use file_read then file_patch/ast_patch or the smallest safe write."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "ask_human_affirmative_resume",
+                        "hidden_from_ui": True,
+                    },
+                )
+            )
     maybe_record_reported_runtime_error(harness.state, human_input)
     if apt_validator_pending is not None:
         graph_state.pending_tool_calls = [apt_validator_pending]

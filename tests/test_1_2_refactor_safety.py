@@ -1752,6 +1752,16 @@ def test_client_transport_helpers_shape_retry_audit_and_diagnostics() -> None:
     assert audit["latest_user_chars"] == len("hello secret=abc")
     assert len(audit["latest_user_sha256"]) == 12
 
+    synthetic_audit = latest_user_message_audit(
+        [
+            {"role": "user", "content": "fix issue #3"},
+            {"role": "user", "content": "<retrieved-knowledge-base>\nNormalized observations: ..."},
+        ]
+    )
+    assert synthetic_audit["latest_user_is_synthetic_context"] is True
+    assert synthetic_audit["latest_human_user_preview"] == "fix issue #3"
+    assert synthetic_audit["latest_synthetic_user_present"] is True
+
     diagnostics = context_pressure_diagnostics({"messages": ["x"], "tools": []}, context_limit=1)
     assert diagnostics["known_context_limit"] == 1
     assert "estimated_payload_tokens" in diagnostics

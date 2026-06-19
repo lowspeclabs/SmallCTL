@@ -138,7 +138,7 @@ def _looks_like_implementation_followup_after_plan(raw_task: str, harness: Any) 
     improvement_subjects = (
         "fix", "fixes", "improvement", "improvements", "change", "changes",
         "proposal", "proposals", "option", "options", "item", "items",
-        "step", "steps", "test suite", "tests", "testing",
+        "step", "steps", "issue", "issues", "test suite", "tests", "testing",
     )
     has_verb = any(verb in text for verb in implementation_verbs)
     has_subject = any(subject in text for subject in improvement_subjects)
@@ -418,6 +418,27 @@ class ModeDecisionService:
             return "planning"
 
         model_name = getattr(self.harness.client, "model", None)
+
+        # Continuation approvals (e.g. "apply the fixes", "proceed", "yes")
+        # must be resolved before the complex-write heuristic. Otherwise a
+        # follow-up that inherits prior task context can be misclassified as a
+        # brand-new complex write and forced into chat mode, where mutating
+        # tools are blocked and the run ends with chat_action_blocked.
+        if is_contextual_affirmative_execution_continuation(
+            self.harness,
+            raw_task=raw_task,
+            resolved_task=mode_task,
+        ):
+            self.harness._runlog(
+                "mode_decision",
+                "selected run mode",
+                mode="loop",
+                raw="contextual_affirmative_execution_continuation",
+                raw_task=raw_task,
+                effective_task=mode_task,
+            )
+            return "loop"
+
         # Fix 1 (RCA 8b79ca76): Only apply complex_write_sync_heuristic on the
         # user's raw input, not on resolved/inherited effective_task which may
         # carry forward prior write context (e.g. "Continue current task: ...
@@ -438,7 +459,7 @@ class ModeDecisionService:
                 effective_task=mode_task,
             )
             return sync_mode
-            
+
         if self.harness.state.planning_mode_enabled and not (self.harness.state.active_plan and self.harness.state.active_plan.approved):
             self.harness._runlog(
                 "mode_decision",
@@ -448,21 +469,6 @@ class ModeDecisionService:
             )
             await self._announce_mode_change(mode="planning", reason="planning_mode_enabled")
             return "planning"
-
-        if is_contextual_affirmative_execution_continuation(
-            self.harness,
-            raw_task=raw_task,
-            resolved_task=mode_task,
-        ):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="loop",
-                raw="contextual_affirmative_execution_continuation",
-                raw_task=raw_task,
-                effective_task=mode_task,
-            )
-            return "loop"
 
         if is_smalltalk(mode_task):
             self.harness._runlog("mode_decision", "selected run mode", mode="chat", raw="smalltalk_heuristic")

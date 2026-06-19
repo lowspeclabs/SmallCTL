@@ -1085,6 +1085,31 @@ def test_ordinal_followup_blocks_inherited_path_when_user_changes_target_languag
     assert state.scratchpad["_resolved_followup"]["target_inheritance"] == "blocked_by_user_constraint"
 
 
+def test_numbered_issue_followup_resolves_from_handoff_improvement_plan() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "read temp/vikunja-9b.py and propose improvements"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "message": """
+1. Robustness & Error Handling Improvements
+2. Code Quality & Maintainability
+3. Feature Enhancements
+""",
+        "target_paths": ["temp/vikunja-9b.py"],
+    }
+    harness = _make_harness(state)
+
+    resolved = Harness._resolve_followup_task(harness, "fix issue #3 feature enhancements")
+
+    assert "implement proposal #3: Feature Enhancements" in resolved
+    assert "temp/vikunja-9b.py" in resolved
+    assert state.scratchpad["_resolved_followup"]["option_index"] == 3
+
+
 def test_affirmative_followup_resolves_to_prior_task_after_action_confirmation() -> None:
     state = LoopState(cwd="/tmp")
     task = "read ./portainer_cli.py and recommend updates to that script"

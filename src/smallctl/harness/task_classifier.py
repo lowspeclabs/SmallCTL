@@ -104,7 +104,10 @@ _TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
     ),
     TaskClassificationRule(
         "write_patch",
-        lambda t: looks_like_write_patch_request(t) or looks_like_write_file_request(t) or looks_like_author_write_request(t),
+        lambda t: looks_like_write_patch_request(t)
+        or looks_like_write_file_request(t)
+        or looks_like_author_write_request(t)
+        or looks_like_implementation_followup(t),
         "local_execute",
     ),
     TaskClassificationRule(
@@ -179,13 +182,37 @@ def looks_like_numbered_implementation_followup(task: str) -> bool:
     text = str(task or "").strip().lower()
     if not text:
         return False
-    action = r"(?:apply|do|fix|implement|patch|proceed\s+with|start\s+(?:with|on)|use|choose|pick)"
-    subject = r"(?:fix|proposal|option|improvement|change|item|step)"
+    action = r"(?:apply|do|fix|fixes|implement|patch|proceed\s+with|start\s+(?:with|on)|use|choose|pick)"
+    subject = r"(?:fix|fixes|proposal|proposals|option|options|improvement|improvements|change|changes|item|items|step|steps|issue|issues)"
     if re.search(rf"\b{action}\b(?:\s+the)?\s+{subject}\s*#?\d+\b", text):
         return True
     if re.search(rf"\b{action}\b\s+#\d+\b", text):
         return True
-    if re.search(rf"\b{subject}\s*#?\d+\b", text) and re.search(r"\b(?:apply|implement|patch|fix|ux|cli|code|script)\b", text):
+    if re.search(rf"\b{subject}\s*#?\d+\b", text) and re.search(r"\b(?:apply|implement|patch|fix|fixes|ux|cli|code|script)\b", text):
+        return True
+    return False
+
+
+def looks_like_implementation_followup(task: str) -> bool:
+    """Detect direct commands to apply/make unnumbered improvements/fixes.
+
+    Matches phrases like "apply the bug and robustness fixes" or
+    "make the UX improvements", but avoids analysis requests such as
+    "list improvements you would make".
+    """
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    if looks_like_numbered_implementation_followup(text):
+        return False
+    # Reject pure analysis/question phrasing before checking action verbs.
+    if re.search(r"\b(list|describe|explain|what|which|how|should|would)\s+(?:the\s+)?(?:fix|fixes|improvement|improvements|change|changes)\b", text):
+        return False
+    action = r"(?:apply|do|fix|implement|patch|proceed\s+with|start\s+(?:with|on)|use|make|add)"
+    subject = r"(?:fix|fixes|proposal|proposals|improvement|improvements|change|changes)"
+    # Require action followed by subject within a short window, optionally
+    # separated by modifiers such as "the", "bug and robustness", "UX", etc.
+    if re.search(rf"\b{action}\b(?:\s+\S+){{0,8}}\s+{subject}\b", text):
         return True
     return False
 
@@ -416,7 +443,7 @@ def classify_runtime_intent(
         return RuntimeIntent(label="memory_persistence", task_mode=task_mode)
     if needs_contextual_loop_escalation(recent_messages, text):
         return RuntimeIntent(label="contextual_execute", task_mode=task_mode)
-    if looks_like_author_write_request(text):
+    if looks_like_author_write_request(text) or looks_like_implementation_followup(text):
         return RuntimeIntent(label="author_write", task_mode=task_mode)
     if looks_like_readonly_chat_request(text):
         return RuntimeIntent(label="readonly_lookup", task_mode=task_mode)
@@ -424,7 +451,7 @@ def classify_runtime_intent(
         looks_like_write_patch_request(text)
         or looks_like_write_file_request(text)
         or task_mode in {"local_execute", "remote_execute"}
-        or looks_like_numbered_implementation_followup(text)
+        or looks_like_implementation_followup(text)
         or looks_like_action_request(text)
         or looks_like_shell_request(text)
     ):

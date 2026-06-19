@@ -29,6 +29,7 @@ from .followup_signals import (
     is_affirmative_followup,
     recent_assistant_requested_action_confirmation,
 )
+from .task_boundary_lifecycle_mixin import _extract_improvement_plan_from_messages
 from .task_boundary_followups import (
     has_plan_execution_approval_context as _has_plan_execution_approval_context,
     is_continue_like_followup as _is_continue_like_followup,
@@ -887,6 +888,43 @@ class TaskBoundaryClassificationMixin:
 
         if not self._is_contextual_followup(raw_task):
             return raw_task
+
+        # Numbered implementation follow-ups should resolve to the specific
+        # improvement, not collapse back onto the previous task. Use the
+        # improvement plan extracted from prior assistant messages when
+        # available.
+        if looks_like_numbered_implementation_followup(raw_task):
+            plan = _extract_improvement_plan_from_messages(
+                getattr(self.harness.state, "recent_messages", []) or [],
+                handoff.get("message"),
+                handoff.get("next_action_hint"),
+                handoff.get("current_goal"),
+                handoff.get("effective_task"),
+            )
+            index = ordinal_followup_index(raw_task)
+            if plan and index is not None and 1 <= index <= len(plan):
+                resolved = f"Implement proposal #{index}: {plan[index - 1]}."
+                previous_task = str(
+                    handoff.get("effective_task")
+                    or handoff.get("current_goal")
+                    or self.harness.state.run_brief.original_task
+                    or ""
+                )
+                target_paths = self._followup_allowed_paths(
+                    raw_task=raw_task,
+                    effective_task=resolved,
+                    previous_task=previous_task or "",
+                )
+                if target_paths:
+                    resolved = f"Patch {', '.join(target_paths)} to {resolved[0].lower()}{resolved[1:]}"
+                self._apply_resolved_followup_metadata(
+                    raw_task,
+                    {"index": index, "title": plan[index - 1]},
+                    {"target_paths": target_paths, "target_inheritance": "inferred_from_plan"},
+                    resolved,
+                )
+                self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+                return resolved
 
         continuity_candidate = self._current_or_handoff_continuity_task()
         candidate = base_task_from_task_chain(

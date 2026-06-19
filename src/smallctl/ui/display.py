@@ -32,6 +32,7 @@ _CRITICAL_EVENTS = {
     "fama_mitigation_activated",
     "long_running_remote_timeout_write_guard",
     "model_output_degenerate_loop_exhausted",
+    "partial_tool_call_cancelled",
     "reflexion_created",
     "recovery_human_resteer_recorded",
     "same_scope_iteration_recorded",
@@ -51,6 +52,7 @@ _CRITICAL_EVENTS = {
 _UI_VISIBLE_EVENTS = {
     "mode_decision",
     "model_output_degenerate_loop_exhausted",
+    "partial_tool_call_cancelled",
     "tool_blocked_not_exposed",
 }
 
@@ -296,9 +298,14 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         return f"[harness] Tool dispatch cancelled: {tool_name}{suffix}"
     if event == "model_output_degenerate_loop_exhausted":
         details = data.get("details") or {}
-        phrase = str(details.get("repeated_phrase") or "").strip()
+        phrase = str(details.get("repeated_phrase") or data.get("repeated_phrase") or "").strip()
         suffix = f" repeating `{phrase}`" if phrase else ""
         return f"[harness] Model output loop detected{suffix}; recovery nudge injected"
+    if event == "partial_tool_call_cancelled":
+        tool_name = str(data.get("tool_name") or "tool").strip()
+        argument_chars = data.get("argument_chars")
+        suffix = f" ({argument_chars} argument chars received)" if argument_chars not in (None, "") else ""
+        return f"[harness] Partial tool call cancelled before dispatch: {tool_name}{suffix}"
     msg = row.get("message") or ""
     if len(msg) > 1024:
         msg = msg[:1024] + "... [truncated]"

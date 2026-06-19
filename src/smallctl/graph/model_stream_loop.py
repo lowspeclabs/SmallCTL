@@ -215,6 +215,81 @@ def _tool_names(tools: list[dict[str, Any]]) -> list[str]:
     return names
 
 
+
+
+def _partial_tool_call_summaries(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    partials: dict[int, dict[str, Any]] = {}
+    for event in chunks:
+        if not isinstance(event, dict) or event.get("type") != "chunk":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            continue
+        delta = choices[0].get("delta") or {}
+        if not isinstance(delta, dict):
+            continue
+        for call in delta.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            try:
+                index = int(call.get("index") or 0)
+            except (TypeError, ValueError):
+                index = 0
+            item = partials.setdefault(index, {"index": index, "tool_name": "", "argument_chars": 0})
+            function = call.get("function") or {}
+            if isinstance(function, dict):
+                name = str(function.get("name") or "").strip()
+                if name:
+                    item["tool_name"] = name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    item["argument_chars"] = int(item.get("argument_chars", 0) or 0) + len(arguments)
+            call_id = str(call.get("id") or "").strip()
+            if call_id:
+                item["tool_call_id"] = call_id
+    return [item for item in partials.values() if item.get("tool_name") or item.get("argument_chars")]
+
+
+async def _emit_cancelled_partial_tool_calls(
+    *,
+    harness: Any,
+    deps: GraphRuntimeDeps,
+    chunks: list[dict[str, Any]],
+) -> None:
+    partials = _partial_tool_call_summaries(chunks)
+    if not partials:
+        return
+    first = partials[0]
+    tool_name = str(first.get("tool_name") or "tool").strip()
+    argument_chars = int(first.get("argument_chars", 0) or 0)
+    harness._runlog(
+        "partial_tool_call_cancelled",
+        "model stream contained a partial tool call when cancellation was requested",
+        tool_name=tool_name,
+        argument_chars=argument_chars,
+        partial_tool_calls=partials,
+    )
+    await harness._emit(
+        deps.event_handler,
+        UIEvent(
+            event_type=UIEventType.SYSTEM,
+            content=(
+                f"Model had started streaming `{tool_name}` when the run was cancelled "
+                f"({argument_chars} argument chars received, not dispatched)."
+            ),
+            data={
+                "ui_kind": "partial_tool_call_cancelled",
+                "event": "partial_tool_call_cancelled",
+                "tool_name": tool_name,
+                "argument_chars": argument_chars,
+                "partial_tool_calls": partials,
+            },
+        ),
+    )
+
 def _reasoning_only_limits(
     tools: list[dict[str, Any]],
     *,
@@ -317,6 +392,11 @@ async def run_model_stream_loop(
             assistant_text_buffer = ""
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
                 if harness._cancel_requested:
+                    await _emit_cancelled_partial_tool_calls(
+                        harness=harness,
+                        deps=deps,
+                        chunks=chunks,
+                    )
                     await harness._emit(
                         deps.event_handler,
                         UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
@@ -665,6 +745,11 @@ async def run_model_stream_loop(
             harness.state.scratchpad["_last_stream_halt_details"] = dict(stream_ended_without_done_details)
             break
         except asyncio.CancelledError:
+            await _emit_cancelled_partial_tool_calls(
+                harness=harness,
+                deps=deps,
+                chunks=chunks,
+            )
             await harness._emit(
                 deps.event_handler,
                 UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),

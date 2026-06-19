@@ -443,6 +443,24 @@ def test_should_render_event_shows_blocked_write_guard_alert() -> None:
     assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
 
 
+def test_should_render_event_shows_partial_tool_call_cancelled_when_system_hidden() -> None:
+    event = UIEvent(
+        event_type=UIEventType.SYSTEM,
+        content="Model had started streaming `file_write` when cancelled.",
+        data={"ui_kind": "partial_tool_call_cancelled", "tool_name": "file_write"},
+    )
+    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
+def test_format_run_log_row_partial_tool_call_cancelled() -> None:
+    row = {
+        "channel": "harness",
+        "event": "partial_tool_call_cancelled",
+        "data": {"tool_name": "file_write", "argument_chars": 4096},
+    }
+    assert "Partial tool call cancelled before dispatch: file_write (4096 argument chars received)" in format_run_log_row(row)
+
+
 def test_should_render_event_shows_tool_dispatch_cancelled_when_system_hidden() -> None:
     event = UIEvent(
         event_type=UIEventType.SYSTEM,

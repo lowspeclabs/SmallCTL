@@ -367,6 +367,56 @@ def test_task_complete_blocks_phase_begin_with_zero_mutations(tmp_path) -> None:
     assert "zero code changes" in result["error"]
 
 
+def test_task_complete_allows_reported_environment_blocker_for_run_report_task(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    task = "read, then run ./temp/vikunja-9b.py, then propose fixes/improvements to the script"
+    state.run_brief.original_task = task
+    state.working_memory.current_goal = task
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "failure_mode": "environment",
+        "command": "python3 ./temp/vikunja-9b.py info",
+        "key_stderr": "Network error: [Errno 111] Connection refused",
+    }
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(
+        task_complete(
+            "The run is blocked by an environment issue: connection refused because no Vikunja server is running.",
+            state,
+            harness,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["output"]["status"] == "complete"
+
+
+def test_task_complete_blocks_environment_failure_for_mutation_task(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    task = "improve the script input validation"
+    state.run_brief.original_task = task
+    state.working_memory.current_goal = task
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "failure_mode": "environment",
+        "command": "python3 ./temp/vikunja-9b.py info",
+        "key_stderr": "Network error: [Errno 111] Connection refused",
+    }
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(
+        task_complete(
+            "The run is blocked by an environment issue: connection refused because no Vikunja server is running.",
+            state,
+            harness,
+        )
+    )
+
+    assert result["success"] is False
+    assert "latest verifier verdict is still failing" in result["error"]
+
+
 def test_force_finalize_completion_signal_ignores_missing_required_input(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.scratchpad["_task_complete"] = True

@@ -29,6 +29,37 @@ from .control_verifier_helpers import (
 from .verifier_quality import verifier_quality as _verifier_quality
 
 
+_ENVIRONMENT_FAILURE_MARKERS = (
+    "connection refused",
+    "connection timed out",
+    "network is unreachable",
+    "no route to host",
+    "could not resolve hostname",
+    "permission denied",
+)
+
+_RUN_REPORT_TASK_MARKERS = ("run", "execute", "test", "check", "verify")
+_REPORT_DELIVERABLE_MARKERS = (
+    "propose",
+    "proposal",
+    "recommend",
+    "report",
+    "summarize",
+    "inspect",
+    "review",
+    "read",
+)
+_MUTATION_TASK_MARKERS = (
+    "implement",
+    "improve",
+    "patch",
+    "change",
+    "update",
+    "add",
+    "modify",
+)
+
+
 def unresolved_missing_input_file(state: LoopState) -> dict | None:
     scratchpad = getattr(state, "scratchpad", {})
     if not isinstance(scratchpad, dict):
@@ -37,6 +68,62 @@ def unresolved_missing_input_file(state: LoopState) -> dict | None:
     if isinstance(blocker, dict) and str(blocker.get("path") or "").strip():
         return blocker
     return None
+
+
+def _state_task_text(state: LoopState) -> str:
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    parts = (
+        getattr(run_brief, "original_task", ""),
+        getattr(working_memory, "current_goal", ""),
+        getattr(state, "active_intent", ""),
+        " ".join(str(item) for item in (getattr(state, "secondary_intents", []) or [])),
+        " ".join(str(item) for item in (getattr(state, "intent_tags", []) or [])),
+    )
+    return " ".join(
+        str(part or "").strip()
+        for part in parts
+        if str(part or "").strip()
+    ).casefold()
+
+
+def _environment_failure_completion_allowed(
+    state: LoopState,
+    *,
+    message: str,
+    verifier: dict[str, Any],
+) -> bool:
+    verdict = str(verifier.get("verdict") or "").strip().lower()
+    if verdict not in {"fail", "failed", "error"}:
+        return False
+    verifier_text = " ".join(
+        str(verifier.get(key) or "").strip().casefold()
+        for key in (
+            "failure_mode",
+            "absence_probe_reason",
+            "key_stdout",
+            "key_stderr",
+            "command",
+            "target",
+        )
+    )
+    if "environment" not in verifier_text and not any(
+        marker in verifier_text for marker in _ENVIRONMENT_FAILURE_MARKERS
+    ):
+        return False
+    message_text = str(message or "").casefold()
+    if "environment" not in message_text and not any(
+        marker in message_text for marker in _ENVIRONMENT_FAILURE_MARKERS
+    ):
+        return False
+    task_text = _state_task_text(state)
+    if not any(marker in task_text for marker in _RUN_REPORT_TASK_MARKERS):
+        return False
+    if not any(marker in task_text for marker in _REPORT_DELIVERABLE_MARKERS):
+        return False
+    if "propose" not in task_text and any(marker in task_text for marker in _MUTATION_TASK_MARKERS):
+        return False
+    return True
 
 
 def task_complete_gate_staged_execution(state: LoopState) -> dict | None:
@@ -769,6 +856,11 @@ def task_complete_gate_verifier_failure(state: LoopState, message: str) -> dict 
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
     )
+    verifier_failure_is_reported_environment_blocker = (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and _environment_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
+    )
     # A removal_absence_probe verdict on a non-removal task is a misclassification
     # (e.g. inventory task with "do not remove packages" in its constraints).  It
     # must not gate task completion for tasks that have no actual removal intent.
@@ -785,6 +877,7 @@ def task_complete_gate_verifier_failure(state: LoopState, message: str) -> dict 
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and not state.acceptance_waived
         and not verifier_failure_satisfies_diagnostic
+        and not verifier_failure_is_reported_environment_blocker
         and not verifier_is_spurious_absence_probe
     ):
         vkind = str(verifier_verdict.get("verifier_kind") or "unknown")
@@ -870,7 +963,16 @@ def task_complete_gate_acceptance(state: LoopState, message: str) -> dict | None
         and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
         and diagnostic_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
     )
-    if not state.acceptance_ready() and not verifier_failure_satisfies_diagnostic:
+    verifier_failure_is_reported_environment_blocker = (
+        verifier_verdict
+        and str(verifier_verdict.get("verdict", "")).strip() not in {"", "pass"}
+        and _environment_failure_completion_allowed(state, message=message, verifier=verifier_verdict)
+    )
+    if (
+        not state.acceptance_ready()
+        and not verifier_failure_satisfies_diagnostic
+        and not verifier_failure_is_reported_environment_blocker
+    ):
         checklist = state.acceptance_checklist()
         pending = [item["criterion"] for item in checklist if not item["satisfied"]]
         return fail(

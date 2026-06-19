@@ -312,6 +312,38 @@ def test_deliverable_verified_false_when_not_verified() -> None:
     assert flags["deliverable_verified"] is False
 
 
+def test_completed_test_only_coding_followup_is_not_diagnostic() -> None:
+    state = LoopState()
+    challenge_progress = {
+        "task_category": "coding",
+        "code_change_count": 0,
+        "verified_after_last_change": False,
+        "last_verifier_verdict": "pass",
+        "last_verifier_kind": "test_suite",
+    }
+
+    flags = _run_metric_flags(state, challenge_progress, status="completed")
+
+    assert flags["deliverable_verified"] is True
+    assert flags["diagnostic_only"] is False
+
+
+def test_completed_diagnostic_run_target_without_changes_stays_diagnostic() -> None:
+    state = LoopState()
+    challenge_progress = {
+        "task_category": "coding",
+        "code_change_count": 0,
+        "verified_after_last_change": False,
+        "last_verifier_verdict": "pass",
+        "last_verifier_kind": "run_target",
+    }
+
+    flags = _run_metric_flags(state, challenge_progress, status="completed")
+
+    assert flags["deliverable_verified"] is False
+    assert flags["diagnostic_only"] is True
+
+
 def test_verifier_matches_user_objective_allows_strong_verifier_for_install() -> None:
     state = LoopState()
     state.run_brief = SimpleNamespace(original_task="Install Pi-hole")

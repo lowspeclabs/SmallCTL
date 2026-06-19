@@ -156,10 +156,15 @@ def _classify_failure(
     overall = session.get("overall_objective_status")
     final = session.get("final_task_status")
     deliverable_verified = session.get("deliverable_verified")
+    completed = overall in {"complete", "completed", "chat_completed", "chat_success"}
+    incomplete_ids = session.get("incomplete_task_ids")
+    has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
     if overall in {"complete", "completed"} and deliverable_verified is True and errors:
         return "success_with_errors"
+    if completed and not has_incomplete_tasks:
+        return "success_with_errors" if errors else "success"
     if _has_chat_terminal_repetition_stall(harness_records, session):
         return "chat_terminal_repetition_stall"
     if _has_write_overwrite_guard_failures(failed_dispatches):

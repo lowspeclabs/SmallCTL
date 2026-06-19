@@ -208,6 +208,12 @@ def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status:
     code_changes = int(challenge_progress.get("code_change_count", 0) or 0) if challenge_progress else 0
     deliverable_verified = bool(challenge_progress.get("verified_after_last_change")) if challenge_progress else False
     task_category = str(challenge_progress.get("task_category") or "").strip().lower()
+    result_success = status in {"completed", "complete", "success", "succeeded", "chat_completed", "chat_success"}
+    if not deliverable_verified and result_success and code_changes <= 0 and challenge_progress:
+        last_verifier_verdict = str(challenge_progress.get("last_verifier_verdict") or "").strip().lower()
+        last_verifier_kind = str(challenge_progress.get("last_verifier_kind") or "").strip().lower()
+        if task_category == "coding" and last_verifier_verdict == "pass" and last_verifier_kind == "test_suite":
+            deliverable_verified = True
     # If the run was cancelled, do not claim deliverable_verified=true unless the objective verifier
     # passed after the last failure.
     if status == "cancelled" and deliverable_verified:

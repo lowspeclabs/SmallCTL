@@ -30,6 +30,7 @@ _CRITICAL_EVENTS = {
     "fama_signal_detected",
     "fama_signal_to_mitigation",
     "fama_mitigation_activated",
+    "guard_trip_diagnosis",
     "long_running_remote_timeout_write_guard",
     "model_output_degenerate_loop_exhausted",
     "partial_tool_call_cancelled",

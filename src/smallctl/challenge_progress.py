@@ -120,7 +120,18 @@ def record_verifier_result(
     if progress.last_verifier_verdict == "pass":
         if _verifier_matches_user_objective(state, command):
             if progress.task_category == "coding":
-                progress.verified_after_last_change = step >= progress.last_code_change_step
+                # The change is verified only if a mutation has been recorded
+                # for this coding task and the verifier ran at or after it.
+                # Guard against stale step counters after task boundaries by
+                # also accepting verifiers that target the most recently
+                # changed path(s) regardless of global step ordering.
+                progress.verified_after_last_change = (
+                    progress.code_change_count > 0
+                    and (
+                        step >= progress.last_code_change_step
+                        or _verifier_targets_last_changed_paths(progress, command)
+                    )
+                )
             else:
                 progress.verified_after_last_change = True
         else:
@@ -134,6 +145,17 @@ def record_verifier_result(
     else:
         progress.verified_after_last_change = False
         _set_phase(progress, "debug", step=step)
+
+
+def _verifier_targets_last_changed_paths(progress: Any, command: str) -> bool:
+    """Return True when a verifier command targets the same path(s) as the
+    most recent code change(s). This prevents task-boundary step resets from
+    leaving verified_after_last_change false indefinitely."""
+    paths = [str(path or "").strip().lstrip("./") for path in getattr(progress, "last_code_change_paths", []) or [] if str(path or "").strip()]
+    if not paths:
+        return False
+    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    return any(path.lower() in normalized for path in paths)
 
 
 def _verifier_matches_user_objective(state: Any, command: str) -> bool:

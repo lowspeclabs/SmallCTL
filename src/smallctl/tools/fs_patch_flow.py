@@ -84,6 +84,7 @@ async def handle_file_patch(
                 "expected_occurrences": expected_occurrences,
                 "target_text_preview": _build_patch_text_preview(normalized_target_text),
                 "replacement_text_preview": _build_patch_text_preview(normalized_replacement_text),
+                "suppress_failure_persistence": True,
             },
         )
 

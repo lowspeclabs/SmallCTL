@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
+from ..tools.fs_sessions import _normalize_replace_strategy
 from .tool_visibility import filter_tools_for_runtime_state
 from .task_classifier import (
     classify_runtime_intent,
     classify_task_mode,
     looks_like_author_write_request,
+    looks_like_implementation_followup,
     looks_like_write_file_request,
     looks_like_write_patch_request,
     runtime_policy_for_intent,
@@ -97,13 +99,21 @@ def _has_active_write_session(harness: Any) -> bool:
     return status != "complete"
 
 
+def _has_ask_human_affirmative_resume(harness: Any) -> bool:
+    marker = _scratchpad(harness).get("_ask_human_affirmative_resume")
+    return isinstance(marker, dict) and bool(str(marker.get("original_task") or "").strip())
+
+
 def _chat_write_tools_allowed(harness: Any, task: str) -> bool:
+    if _has_ask_human_affirmative_resume(harness):
+        return True
     if _has_active_write_session(harness):
         return True
     if (
         looks_like_write_patch_request(task)
         or looks_like_write_file_request(task)
         or looks_like_author_write_request(task)
+        or looks_like_implementation_followup(task)
     ):
         return True
     client = getattr(harness, "client", None)
@@ -237,6 +247,8 @@ def chat_mode_requires_tools(harness: Any, task: str) -> bool:
     model_name = getattr(harness.client, "model", None)
     if _has_active_write_session(harness):
         return True
+    if _has_ask_human_affirmative_resume(harness):
+        return True
     if should_enable_complex_write_chat_draft(
         task_for_intent,
         model_name=model_name,
@@ -258,6 +270,12 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
     selection_phase = "current_user_task"
     try:
         task = _resolved_followup_effective_task(harness, harness._current_user_task())
+        if _has_ask_human_affirmative_resume(harness):
+            marker = _scratchpad(harness).get("_ask_human_affirmative_resume")
+            if isinstance(marker, dict):
+                resumed_task = str(marker.get("original_task") or "").strip()
+                if resumed_task:
+                    task = resumed_task
         # Fix for RCA 8ec35471: do not let a blocked-tool recovery nudge become
         # the task text used for intent classification and tool filtering.
         # Intents must be derived from the user's actual request.
@@ -491,22 +509,9 @@ def attempt_tool_sanitization(harness: Any, tool_name: str) -> str | None:
 
 
 def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) -> None:
-    runlog = getattr(harness, "_runlog", None)
-    if not callable(runlog):
-        return
-    try:
-        from ..fama.state import active_mitigation_names
+    from .tool_exposure_logging import log_fama_tool_exposure
 
-        active = sorted(active_mitigation_names(harness.state))
-    except Exception:
-        active = []
-    runlog(
-        "fama_tool_exposure_applied",
-        "FAMA tool exposure policy applied",
-        hidden_tools=sorted(hidden_tools),
-        active_mitigations=active,
-        mode=mode,
-    )
+    log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=mode)
 
 
 def maybe_block_full_write_for_iteration(
@@ -532,6 +537,14 @@ def maybe_block_full_write_for_iteration(
     path = str(args.get("path") or args.get("target_path") or "").strip()
     if not path:
         return None
+
+    # Allow an explicit replace_strategy=overwrite to bypass the patch-first
+    # guard. The tool schema already advertises this override; honouring it
+    # lets models recover from a blocked full rewrite without repeating
+    # failing patch attempts.
+    if _normalize_replace_strategy(args.get("replace_strategy")) == "overwrite":
+        return None
+
     suggested = "file_patch" if tool_name == "file_write" else "ssh_file_patch"
     if not _patch_tool_available(harness, suggested):
         return None
@@ -553,7 +566,8 @@ def maybe_block_full_write_for_iteration(
         status="recoverable",
         error=(
             f"Patch-first policy for {turn_type}: `{tool_name}` would rewrite existing target `{path}`. "
-            f"Use `{suggested}` for the narrow edit, or explicitly request a full rewrite."
+            f"Use `{suggested}` for the narrow edit, or explicitly request a full rewrite "
+            f"with `replace_strategy='overwrite'`."
         ),
         metadata={
             "reason": "patch_first_required",

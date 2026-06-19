@@ -128,12 +128,20 @@ _RECOVERY_NUDGE_ERROR_MARKERS = (
     "VERIFIER LOOP HARD STOP:",
 )
 
+_NOOP_PATCH_ERROR_KINDS = {
+    "patch_noop_identical_text",
+}
+
 
 def _guard_countable_recent_errors(state: LoopState) -> list[str]:
     countable: list[str] = []
     for error in getattr(state, "recent_errors", []) or []:
         text = str(error or "")
         if any(marker in text for marker in _RECOVERY_NUDGE_ERROR_MARKERS):
+            continue
+        # Identical target/replacement patches are informative, not countable
+        # failures; do not advance the consecutive-error guard.
+        if any(kind in text for kind in _NOOP_PATCH_ERROR_KINDS):
             continue
         countable.append(text)
     return countable

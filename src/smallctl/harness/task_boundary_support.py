@@ -69,6 +69,38 @@ def canonicalize_inline_task_wrapper(value: Any) -> str:
     latest_suffix_kind = str(parsed.get("latest_suffix_kind") or "").strip().lower()
     if not base:
         return str(value or "").strip()
+
+    base_suffix_markers = list(_INLINE_USER_WRAP_MARKER_RE.finditer(base))
+    if base_suffix_markers:
+        marker = base_suffix_markers[-1]
+        contaminated_suffix = base[marker.end() :].strip()
+        nested_base_wrapper = parse_inline_task_wrapper(contaminated_suffix)
+        if nested_base_wrapper is not None:
+            prefix_base = base[: marker.start()].strip().rstrip(".")
+            nested_base = str(nested_base_wrapper.get("base") or "").strip()
+            if normalize_task_text(prefix_base) == normalize_task_text(nested_base):
+                base = nested_base
+
+    nested_suffix = parse_inline_task_wrapper(latest_suffix_text)
+    if nested_suffix is not None:
+        nested_base = str(nested_suffix.get("base") or "").strip()
+        nested_suffix_text = str(nested_suffix.get("latest_suffix_text") or "").strip()
+        nested_suffix_kind = str(nested_suffix.get("latest_suffix_kind") or "").strip().lower()
+        normalized_base = normalize_task_text(base)
+        normalized_nested_base = normalize_task_text(nested_base)
+        if (
+            nested_suffix_text
+            and normalized_nested_base
+            and (
+                normalized_nested_base == normalized_base
+                or normalized_base.endswith(f"user follow-up: continue current task: {normalized_nested_base}")
+                or normalized_base.endswith(f"user correction: continue current task: {normalized_nested_base}")
+            )
+        ):
+            base = nested_base
+            latest_suffix_text = nested_suffix_text
+            latest_suffix_kind = nested_suffix_kind or latest_suffix_kind
+
     if not latest_suffix_text:
         return f"Continue current task: {base}"
 

@@ -174,7 +174,12 @@ def _store_verifier_verdict(
             verdict = "fail"
             semantic_failure = install_weak_reason
 
-    failure_class = "approval_denied" if approval_denied else classify_execution_failure(result.error or stderr or stdout)
+    if approval_denied:
+        failure_class = "approval_denied"
+    elif str(metadata.get("reason") or "").strip() == "spec_not_approved":
+        failure_class = "approval_required"
+    else:
+        failure_class = classify_execution_failure(result.error or stderr or stdout)
     if not approval_denied and tool_name == "ssh_exec" and exit_code_matches(exit_code, {255}):
         failure_class = "environment"
     if insufficient_verifier:

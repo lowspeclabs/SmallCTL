@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+from types import SimpleNamespace
+
+from smallctl.graph.model_stream_loop import _next_model_call_trace_id
 from smallctl.logging_utils import RunLogger
 
 
@@ -35,3 +38,24 @@ def test_run_logger_redacts_sensitive_fields_in_jsonl_output(tmp_path) -> None:
     assert data["password"] != "hunter2"
     assert data["payload"]["token"] != "abc123"
     assert data["payload"]["nested"]["ssh_password"] != "secret"
+
+
+def test_model_call_trace_id_changes_when_step_count_resets() -> None:
+    state = SimpleNamespace(
+        thread_id="a89aa278",
+        step_count=0,
+        scratchpad={"_active_task_id": "task-0001"},
+    )
+    harness = SimpleNamespace(state=state, conversation_id="")
+
+    first = _next_model_call_trace_id(harness)
+    state.step_count = 3
+    second = _next_model_call_trace_id(harness)
+    state.step_count = 0
+    state.scratchpad["_active_task_id"] = "task-0002"
+    third = _next_model_call_trace_id(harness)
+
+    assert first == "a89aa278:task-0001:step-0:call-1"
+    assert second == "a89aa278:task-0001:step-3:call-2"
+    assert third == "a89aa278:task-0002:step-0:call-3"
+    assert len({first, second, third}) == 3

@@ -547,6 +547,26 @@ def test_file_improvement_listing_is_readonly_analysis_not_write_file() -> None:
     assert "write_file" not in tags
 
 
+def test_file_propose_fixes_is_readonly_analysis_not_patch_intent() -> None:
+    task = "read, then run ./temp/vikunja-9b.py, then propose fixes/improvemnts to the script"
+
+    assert classify_task_mode(task) == "local_execute"
+
+    harness = SimpleNamespace(
+        provider_profile="lmstudio",
+        state=SimpleNamespace(
+            current_phase="execute",
+            cwd="/home/stephen/Scripts/Harness-Redo",
+            working_memory=SimpleNamespace(failures=[], next_actions=[]),
+        ),
+        _looks_like_shell_request=lambda task: False,
+    )
+    primary, secondary, tags = extract_intent_state(harness, task)
+    assert primary == "inspect_repo"
+    assert "read_artifacts" in secondary
+    assert "write_file" not in tags
+
+
 def test_over_twenty_b_model_name_helper_is_strictly_greater_than_twenty_b() -> None:
     assert is_over_twenty_b_model_name("gpt-oss-120b") is True
     assert is_over_twenty_b_model_name("openai/gpt-oss-20b") is False

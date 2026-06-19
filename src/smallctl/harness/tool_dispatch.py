@@ -47,6 +47,21 @@ def _scratchpad(harness: Any) -> dict[str, Any]:
     return scratchpad
 
 
+def _resolved_followup_effective_task(harness: Any, task: str) -> str:
+    scratchpad = _scratchpad(harness)
+    resolved = scratchpad.get("_resolved_followup")
+    if not isinstance(resolved, dict):
+        return str(task or "").strip()
+    effective = str(resolved.get("effective_task") or "").strip()
+    if not effective:
+        return str(task or "").strip()
+    raw = str(resolved.get("raw_task") or "").strip()
+    normalized_task = str(task or "").strip()
+    if not raw or normalized_task == raw or normalized_task == effective:
+        return effective
+    return normalized_task
+
+
 def _refresh_task_mode(harness: Any, task: str) -> str:
     task_mode = classify_task_mode(task)
     harness.state.task_mode = task_mode
@@ -226,7 +241,7 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
     task = ""
     selection_phase = "current_user_task"
     try:
-        task = harness._current_user_task()
+        task = _resolved_followup_effective_task(harness, harness._current_user_task())
         runtime_intent_label, task_mode = _refresh_runtime_intent(harness, task)
         selection_phase = "requires_tools"
         if has_active_remote_handoff(harness):

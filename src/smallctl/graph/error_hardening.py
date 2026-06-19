@@ -5,7 +5,6 @@ import logging
 import re
 from typing import Any
 
-from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..state import json_safe_value
 from ..tools.ansi_utils import strip_ansi
@@ -42,8 +41,10 @@ _LOCAL_REMOTE_BLOCKER_RE = re.compile(
 )
 _HARNESS_POLICY_BLOCK_RE = re.compile(
     r"\b(?:raw_ssh_shell_blocked|nested_raw_ssh_in_ssh_exec|missing_supported_claim|"
-    r"patch_over_rewrite_guard|ssh_host_key_recovery_required)\b"
-    r"|Raw `ssh`/`scp`/`sftp` shell commands are (?:not allowed|blocked)",
+    r"patch_over_rewrite_guard|ssh_host_key_recovery_required|spec_not_approved)\b"
+    r"|Raw `ssh`/`scp`/`sftp` shell commands are (?:not allowed|blocked)"
+    r"|Shell execution is blocked until the spec contract is approved"
+    r"|SSH execution is blocked until the spec contract is approved",
     re.IGNORECASE | re.DOTALL,
 )
 _TERMINAL_UNKNOWN_RE = re.compile(r"\berror\s+opening\s+terminal:\s*unknown\b", re.IGNORECASE)

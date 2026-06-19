@@ -50,6 +50,26 @@ def test_new_task_replaces_old_goal_in_run_brief_and_retrieval_query() -> None:
     assert old_task not in query
 
 
+def test_numbered_fix_followup_preserves_prior_context() -> None:
+    state = LoopState(cwd="/tmp")
+    old_task = "read, then run ./temp/vikunja-9b.py, then propose improvements"
+    new_task = "now apply fix #3 the cli ux improvements"
+    state.run_brief.original_task = old_task
+    state.working_memory.current_goal = old_task
+    state.working_memory.known_facts = [
+        "Proposal #3: CLI UX improvements for ./temp/vikunja-9b.py"
+    ]
+
+    harness = _make_harness(state)
+
+    Harness._maybe_reset_for_new_task(harness, new_task, raw_task=new_task)
+
+    assert state.scratchpad["_task_transaction"]["turn_type"] == "ITERATION"
+    assert state.working_memory.known_facts == [
+        "Proposal #3: CLI UX improvements for ./temp/vikunja-9b.py"
+    ]
+
+
 def test_continue_collapses_legacy_followup_chain_to_current_task() -> None:
     state = LoopState(cwd="/tmp")
     old_task = "run nmap against 192.168.1.0/24 and list all hosts found in scan"
@@ -864,6 +884,14 @@ def test_repeated_inline_contextual_followups_do_not_keep_growing_resolved_task_
     assert query_after_second == query_after_first
 
 
+def test_nested_effective_followup_wrapper_is_flattened() -> None:
+    prior = "read temp/vikunja-9b.py and propose fixes"
+    raw = "proceed with fix and tests"
+    nested = f"Continue current task: {prior}. User follow-up: Continue current task: {prior}. User follow-up: {raw}"
+
+    assert _collapse_task_chain(nested) == f"Continue current task: {prior}. User follow-up: {raw}"
+
+
 def test_continue_web_research_directives_preserve_prior_research_goal() -> None:
     state = LoopState(cwd="/tmp")
     prior = "Do research on game of thrones and return back with a bulleted summary of its main plot points"
@@ -1325,6 +1353,48 @@ def test_bare_option_number_does_not_trigger_hard_task_switch() -> None:
     assert tx.get("turn_type") == "ITERATION"
     # Memory should be preserved, not wiped
     assert state.working_memory.current_goal == prior
+
+
+def test_bare_option_number_reset_preserves_resolved_followup_and_assistant_tail() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "read temp/vikunja-9b.py and list bug-fix options"
+    numbered_answer = (
+        "1. Fix headers.\n"
+        "2. Handle empty JSON responses.\n"
+        "3. Catch request exceptions.\n"
+        "4. Implement missing Vikunja commands.\n"
+    )
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.recent_messages = [
+        ConversationMessage(role="user", content=prior),
+        ConversationMessage(role="assistant", content=numbered_answer),
+    ]
+    state.scratchpad["_last_task_handoff"] = {
+        "raw_task": prior,
+        "effective_task": prior,
+        "current_goal": prior,
+        "target_paths": ["temp/vikunja-9b.py"],
+        "action_options": [
+            {
+                "index": 4,
+                "title": "Implement missing Vikunja commands",
+                "target_paths": ["temp/vikunja-9b.py"],
+            }
+        ],
+    }
+    harness = _make_harness(state)
+
+    raw = "#4"
+    resolved = Harness._resolve_followup_task(harness, raw)
+    Harness._maybe_reset_for_new_task(harness, resolved, raw_task=raw)
+
+    assert state.scratchpad["_resolved_followup"]["option_index"] == 4
+    assert "Implement missing Vikunja commands" in state.scratchpad["_resolved_followup"]["effective_task"]
+    assert any(
+        message.role == "assistant" and "Implement missing Vikunja commands" in str(message.content or "")
+        for message in state.recent_messages
+    )
 
 
 def test_local_ssh_file_followup_preserves_working_memory() -> None:

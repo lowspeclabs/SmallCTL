@@ -7,7 +7,7 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
-    _BAR_WIDTH = 20
+    _CONTEXT_CIRCLES = ("○", "◔", "◑", "◕", "●")
 
     def __init__(
         self,
@@ -138,16 +138,8 @@ class StatusBar(Static):
         if self._token_total >= 100000:
             parts.append("[bold red]TOKEN RUNAWAY[/]")
 
-        # Cumulative token progress bar
-        ratio = 0.0
-        if self._token_limit > 0:
-            ratio = min(1.0, self._token_total / (self._token_limit * 2))
-        
-        filled = int(round(ratio * self._BAR_WIDTH))
-        filled_segment = "█" * filled
-        bar_markup = f"[bold #fca5a5]{filled_segment}[/]"
-
-        parts.append(f"cumulative: {bar_markup} {self._token_total:,}")
+        parts.append(f"cumulative: {self._token_total:,}")
+        parts.append(self._context_usage_text())
 
         return " | ".join(parts)
 
@@ -184,15 +176,34 @@ class StatusBar(Static):
         if self._token_total >= 100000:
             lines.append("[bold red]TOKEN RUNAWAY[/]")
 
-        # Cumulative token progress bar
-        ratio = 0.0
-        if self._token_limit > 0:
-            ratio = min(1.0, self._token_total / (self._token_limit * 2))
-        filled = int(round(ratio * self._BAR_WIDTH))
-        bar_markup = f"[bold #fca5a5]{'█' * filled}[/]"
-
-        lines.extend(["", "[bold #93c5fd]Usage[/]", f"cumulative: {bar_markup} {self._token_total:,}"])
+        lines.extend(
+            [
+                "",
+                "[bold #93c5fd]Usage[/]",
+                f"cumulative: {self._token_total:,}",
+                self._context_usage_text(),
+            ]
+        )
         return "\n".join(lines)
+
+    def _context_usage_text(self) -> str:
+        limit = self._context_window or self._token_limit
+        if limit <= 0:
+            return "context: [dim]n/a[/]"
+        used = min(max(0, self._token_usage), limit)
+        ratio = used / limit
+        percent = int(round(ratio * 100))
+        circle_index = min(
+            len(self._CONTEXT_CIRCLES) - 1,
+            int(ratio * len(self._CONTEXT_CIRCLES)),
+        )
+        circle = self._CONTEXT_CIRCLES[circle_index]
+        color = "#86efac"
+        if percent >= 90:
+            color = "#f87171"
+        elif percent >= 70:
+            color = "#fbbf24"
+        return f"context: [bold {color}]{circle} {percent}%[/] ({used:,}/{limit:,})"
 
     def _refresh_display(self) -> None:
         self.update(self._build_status_text())

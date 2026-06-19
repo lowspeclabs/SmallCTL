@@ -418,8 +418,18 @@ class TaskBoundaryHandoffMixin:
         existing_goal = collapse_task_chain(self.harness.state.working_memory.current_goal or "")
         plan = self.harness.state.active_plan or self.harness.state.draft_plan
         plan_goal = collapse_task_chain(getattr(plan, "goal", "") or "")
+        resolved_followup = self.harness.state.scratchpad.get("_resolved_followup")
+        resolved_followup_task = ""
+        if isinstance(resolved_followup, dict):
+            resolved_followup_task = collapse_task_chain(resolved_followup.get("effective_task") or "")
         if self._is_corrective_resteer_followup(source_task) and existing_goal:
             next_goal = existing_goal
+        elif (
+            continue_like
+            and resolved_followup_task
+            and normalize_task_text(resolved_followup_task) == normalize_task_text(effective_task)
+        ):
+            next_goal = resolved_followup_task
         elif remote_mission_task:
             if is_remote_followup_wrapper(effective_task):
                 next_goal = canonical_task

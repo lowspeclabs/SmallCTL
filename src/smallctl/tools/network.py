@@ -817,6 +817,23 @@ async def run_ssh_command(
             _mark_deb822_preflight_clean(state, host=host, user=user)
         semantic_failure = _ssh_semantic_failure(command, output)
         if semantic_failure:
+            if harness is not None and hasattr(harness, "_runlog"):
+                harness._runlog(
+                    "ssh_remote_semantic_failure",
+                    "remote SSH command returned exit 0 with failure markers in output",
+                    host=host,
+                    user=user,
+                    command_preview=" ".join(str(command or "").split())[:200],
+                    exit_code=output.get("exit_code"),
+                    failure_mode="remote_semantic_failure",
+                    semantic_failure=semantic_failure,
+                    stdout_len=len(str(output.get("stdout") or "")),
+                    stderr_len=len(str(output.get("stderr") or "")),
+                    output_received=bool(
+                        str(output.get("stdout") or "").strip()
+                        or str(output.get("stderr") or "").strip()
+                    ),
+                )
             _record_ssh_failure(state, host, user, command, "remote_semantic_failure", semantic_failure)
             return fail(
                 semantic_failure,

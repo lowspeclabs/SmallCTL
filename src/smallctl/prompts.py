@@ -630,6 +630,11 @@ def build_system_prompt(
         )
     if getattr(state.working_memory, "current_goal", ""):
         parts.append(f"\n\n### CURRENT GOAL\n- {state.working_memory.current_goal}\n")
+    parts.append(
+        "\n\n### CLARIFICATION PROTOCOL\n"
+        "If the user refers to a numbered fix, improvement, step, or plan item that you cannot find in the conversation history, "
+        "Working Memory, or active plan, do not guess. Call `ask_human(question='...')` to request clarification before proceeding."
+    )
     if _is_write_first_task(state):
         parts.append(
             "\n\n### WRITE-FIRST GUIDANCE\n"

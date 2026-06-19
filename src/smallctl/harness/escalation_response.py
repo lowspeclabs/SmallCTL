@@ -77,6 +77,17 @@ def parse_and_validate_escalation_response(text: str, *, harness: Any) -> Escala
         increment_metric(harness.state, "escalation_validator_rejections")
         return EscalationValidationResult(False, payload, f"Unknown recommended action type: {action_type}")
 
+    # ask_human verdict must provide a concrete next action for the agent; a
+    # "none" action leaves the loop without guidance and produces confusing
+    # "No next action supplied" interrupts.
+    if verdict == "ask_human" and action_type == "none":
+        payload["recommended_next_action"] = {
+            "type": "ask_human",
+            "reason": str(action.get("reason") or "").strip() or "Human input is required to proceed.",
+        }
+        action = payload["recommended_next_action"]
+        action_type = "ask_human"
+
     if action_type == "tool_call":
         tool_name = str(action.get("tool") or "").strip()
         args_error = _validate_tool_call_args(action.get("args"))

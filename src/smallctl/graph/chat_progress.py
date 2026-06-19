@@ -108,6 +108,20 @@ def build_repeated_chat_thinking_message(harness: Any, graph_state: GraphRunStat
     )
 
 
+def build_repeated_reasoning_loop_message(harness: Any, graph_state: GraphRunState) -> str:
+    thinking_text = str(graph_state.last_thinking_text or "").strip()
+    clipped_thinking, was_clipped = clip_text_value(thinking_text, limit=240)
+    goal_recap = build_goal_recap(harness)
+    goal_note = f" {goal_recap}" if goal_recap else ""
+    repeat_note = f" Previous thinking: {clipped_thinking}{' [truncated]' if was_clipped else ''}." if clipped_thinking else ""
+    return (
+        "You are repeating the same reasoning without taking action."
+        f"{repeat_note}{goal_note} "
+        "Do not restate the same thoughts. Either call the next tool, call `task_complete(message='...')` if you are finished, "
+        "or call `ask_human(question='...')` to request clarification on what to do next."
+    )
+
+
 def chat_completion_recovery_guard(harness: Any) -> dict[str, str] | None:
     state = getattr(harness, "state", None)
     if state is None:

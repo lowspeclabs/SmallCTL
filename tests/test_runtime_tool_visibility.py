@@ -915,6 +915,46 @@ def test_chat_mode_tools_hide_typed_ssh_file_tools_for_local_execute_tasks(tmp_p
     assert _tool_names(tools) == ["file_read"]
 
 
+def test_chat_mode_tools_use_preserved_resolved_followup_for_bare_option(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.run_brief.original_task = "Patch temp/vikunja-9b.py to implement proposal #4: Missing commands."
+    state.recent_messages = [ConversationMessage(role="user", content="#4")]
+    state.scratchpad["_resolved_followup"] = {
+        "raw_task": "#4",
+        "option_index": 4,
+        "option_title": "Missing commands",
+        "target_paths": ["temp/vikunja-9b.py"],
+        "target_inheritance": "inherited",
+        "blocked_target_paths": [],
+        "effective_task": "Patch temp/vikunja-9b.py to implement proposal #4: Missing commands.",
+    }
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-e2b-it"),
+        state=state,
+        memory=SimpleNamespace(prime_write_policy=lambda _task: None),
+        _initial_phase="explore",
+        _configured_planning_mode=False,
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: Harness._current_user_task(harness),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("file_read"),
+                _tool_schema("file_patch"),
+                _tool_schema("task_complete"),
+            ],
+            get=lambda name: None,
+        ),
+    )
+
+    names = _tool_names(chat_mode_tools(harness))
+
+    assert "file_read" in names
+    assert "file_patch" in names
+    assert state.scratchpad.get("_chat_tools_suppressed_reason") != "non_lookup_chat_terminal_only"
+
+
 def test_select_planning_tools_and_exposure_share_the_same_filtered_names(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"

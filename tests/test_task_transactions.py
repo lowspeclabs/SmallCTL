@@ -200,6 +200,38 @@ def test_task_boundary_does_not_keep_transaction_for_unrelated_new_task() -> Non
     assert state.working_memory.plan == []
 
 
+def test_bare_continue_preserves_resolved_numbered_option_over_stale_plan_goal() -> None:
+    state = LoopState(cwd="/tmp")
+    broad_goal = "Improve usability, security, reliability, and UX of vikunja-9b.py, and verify with tests."
+    prior = "read, run, then propose fixes to ./temp/vikunja-9b.py"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = broad_goal
+    state.active_plan = SimpleNamespace(goal=broad_goal)
+    state.scratchpad["_last_task_handoff"] = {
+        "effective_task": prior,
+        "current_goal": broad_goal,
+        "target_paths": ["./temp/vikunja-9b.py"],
+        "action_options": [
+            {
+                "index": 4,
+                "title": "Refactor make_request for better maintainability",
+                "target_paths": ["./temp/vikunja-9b.py"],
+            }
+        ],
+    }
+    harness = _make_harness(state)
+
+    selected = Harness._resolve_followup_task(harness, "#4")
+    assert selected.startswith("Patch ./temp/vikunja-9b.py to implement proposal #4")
+
+    continued = Harness._resolve_followup_task(harness, "continue")
+    assert continued == selected
+
+    Harness._initialize_run_brief(harness, continued, raw_task="continue")
+    assert state.working_memory.current_goal == selected
+    assert state.working_memory.current_goal != broad_goal
+
+
 def test_resolve_remote_clarification_stores_transaction_and_mode_stays_chat() -> None:
     state = LoopState(cwd="/tmp")
     prior = "ssh into 192.168.1.63 and install a task tracker docker container"

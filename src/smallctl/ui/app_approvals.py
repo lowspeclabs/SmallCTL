@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from ..logging_utils import log_kv
-from ..models.events import UIEvent, UIEventType
+from ..models.events import UIEvent
 from .approval import PlanApprovalDecision
 from .approval import PlanApprovalScreen
 from .approval import ApprovePromptScreen
 from .approval import ShellApprovalDecision
 from .approval import SudoPasswordPromptScreen
+from .approval import InterruptPromptScreen
+from .approval import InterruptDecision
 
 
 async def maybe_handle_plan_approval_result(app, result: dict[str, Any]) -> dict[str, Any]:
@@ -21,16 +22,71 @@ async def maybe_handle_plan_approval_result(app, result: dict[str, Any]) -> dict
     interrupt = result.get("interrupt")
     if not isinstance(interrupt, dict):
         return result
-    if str(interrupt.get("kind") or "") != "plan_execute_approval":
-        return result
 
-    decision = await prompt_for_plan_approval(app, interrupt)
+    kind = str(interrupt.get("kind") or "").strip()
+    if kind == "plan_execute_approval":
+        decision = await prompt_for_plan_approval(app, interrupt)
+        if decision is None:
+            return result
+        bridge = getattr(app, "_harness_bridge", None)
+        if bridge is not None:
+            return await bridge.resume(decision.choice)
+        return await harness.resume_task_with_events(decision.choice, app.on_harness_event)
+
+    # Generic human interrupt handler
+    decision = await prompt_for_generic_interrupt(app, interrupt)
     if decision is None:
         return result
     bridge = getattr(app, "_harness_bridge", None)
     if bridge is not None:
         return await bridge.resume(decision.choice)
     return await harness.resume_task_with_events(decision.choice, app.on_harness_event)
+
+
+async def prompt_for_generic_interrupt(app, interrupt: dict[str, Any]) -> InterruptDecision | None:
+    title = "Input required"
+    question = str(interrupt.get("question") or "The harness needs your input to continue.").strip()
+    metadata = interrupt.get("metadata") or {}
+    details_lines: list[str] = []
+    if isinstance(metadata, dict):
+        escalation = metadata.get("escalation_result") or {}
+        if isinstance(escalation, dict):
+            diagnosis = str(escalation.get("failure_diagnosis") or "").strip()
+            repair_plan = str(escalation.get("repair_plan") or "").strip()
+            risk_notes = escalation.get("risk_notes") or []
+            if diagnosis:
+                details_lines.append(f"Diagnosis: {diagnosis}")
+            if repair_plan:
+                details_lines.append(f"Repair plan: {repair_plan}")
+            if isinstance(risk_notes, list) and risk_notes:
+                details_lines.append("Risk notes: " + "; ".join(str(n) for n in risk_notes))
+    details = "\n".join(details_lines)
+    prompt = InterruptPromptScreen(
+        title=title,
+        question=question,
+        details=details,
+    )
+    app._active_approval_prompt = prompt
+    app._refresh_status()
+    try:
+        loop = asyncio.get_running_loop()
+        decision_future: asyncio.Future[InterruptDecision | None] = loop.create_future()
+
+        def _resolve_decision(decision: InterruptDecision | None) -> None:
+            if decision_future.done():
+                return
+            if decision is None:
+                decision_future.set_result(None)
+                return
+            decision_future.set_result(decision)
+
+        await app.push_screen(prompt, callback=_resolve_decision)
+        return await decision_future
+    except Exception as exc:
+        app._app_logger.warning("Interrupt prompt failed: %s", exc)
+    finally:
+        app._active_approval_prompt = None
+    return None
 
 
 async def handle_approval_prompt(app, event: UIEvent) -> None:

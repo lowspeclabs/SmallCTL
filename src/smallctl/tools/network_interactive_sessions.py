@@ -19,6 +19,91 @@ from .shell_support import _expose_interactive_session_tools
 _SSH_INTERACTIVE_SESSIONS: dict[str, dict[str, Any]] = {}
 
 
+def _command_preview(command: Any, *, limit: int = 160) -> str:
+    text = " ".join(str(command or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _ssh_session_registry_snapshot() -> list[dict[str, Any]]:
+    snapshot: list[dict[str, Any]] = []
+    now = time.time()
+    for active_id, active in sorted(_SSH_INTERACTIVE_SESSIONS.items()):
+        if not isinstance(active, dict):
+            continue
+        proc = active.get("proc")
+        returncode = getattr(proc, "returncode", None)
+        started_at = active.get("started_at")
+        age_sec = None
+        if isinstance(started_at, (int, float)):
+            age_sec = round(max(0.0, now - float(started_at)), 3)
+        snapshot.append(
+            {
+                "session_id": active_id,
+                "host": active.get("host"),
+                "user": active.get("user"),
+                "status": "exited" if returncode is not None else "running",
+                "exit_code": returncode,
+                "age_sec": age_sec,
+                "command_preview": _command_preview(active.get("command")),
+                "unchanged_read_count": int(active.get("unchanged_read_count", 0) or 0),
+            }
+        )
+    return snapshot
+
+
+def _state_registry_snapshot(state: Any) -> list[dict[str, Any]]:
+    registry = _active_ssh_session_registry(state)
+    rows: list[dict[str, Any]] = []
+    for session_id, item in sorted(registry.items()):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "session_id": str(session_id),
+                "host": item.get("host"),
+                "user": item.get("user"),
+                "status": item.get("status"),
+                "started_at": item.get("started_at"),
+                "command_preview": _command_preview(item.get("command")),
+            }
+        )
+    return rows
+
+
+def _runlog_ssh_session_registry(
+    harness: Any,
+    event: str,
+    message: str,
+    *,
+    state: Any = None,
+    requested_session_id: str = "",
+    host: str = "",
+    user: str | None = None,
+    command: str = "",
+    reason: str = "",
+    status: str = "",
+    close_terminate: bool | None = None,
+) -> None:
+    if harness is None or not hasattr(harness, "_runlog"):
+        return
+    data: dict[str, Any] = {
+        "requested_session_id": str(requested_session_id or "").strip(),
+        "host": host,
+        "user": user,
+        "reason": reason,
+        "status": status,
+        "active_sessions": _ssh_session_registry_snapshot(),
+        "state_active_sessions": _state_registry_snapshot(state),
+    }
+    if command:
+        data["command_preview"] = _command_preview(command)
+    if close_terminate is not None:
+        data["terminate"] = bool(close_terminate)
+    harness._runlog(event, message, **data)
+
+
 def _active_ssh_session_registry(state: Any) -> dict[str, Any]:
     """Return the mutable registry of active SSH interactive sessions on state.scratchpad."""
     if state is None:
@@ -208,6 +293,18 @@ async def ssh_session_start(
         if str(active.get("host") or "") == host and str(
             active.get("user") or ""
         ) == str(user or ""):
+            _runlog_ssh_session_registry(
+                harness,
+                "ssh_interactive_session_rejected",
+                "rejected interactive SSH session start because target already has an active session",
+                state=state,
+                requested_session_id=active_id,
+                host=host,
+                user=user,
+                command=command,
+                reason="active_interactive_session_exists",
+                status="blocked",
+            )
             return fail(
                 f"An interactive SSH session is already active for this target. "
                 f"Use the existing session_id '{active_id}' with ssh_session_read/ssh_session_send, "
@@ -285,6 +382,17 @@ async def ssh_session_start(
     )
     _sync_active_ssh_session_to_state(state, session_id, session)
     _expose_interactive_session_tools(state)
+    _runlog_ssh_session_registry(
+        harness,
+        "ssh_interactive_session_started",
+        "started interactive SSH session",
+        state=state,
+        requested_session_id=session_id,
+        host=host,
+        user=user,
+        command=command,
+        status="running",
+    )
     return ok(
         _interactive_session_snapshot(session_id, session),
         metadata={
@@ -306,9 +414,19 @@ async def ssh_session_read(
     wait_sec: float = 1.0,
     max_chars: int = 6000,
     state: Any = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
     if not isinstance(session, dict):
+        _runlog_ssh_session_registry(
+            harness,
+            "ssh_interactive_session_unknown",
+            "interactive SSH session lookup failed",
+            state=state,
+            requested_session_id=session_id,
+            reason="unknown_session",
+            status="failed",
+        )
         return fail(
             "Unknown SSH interactive session.", metadata={"session_id": session_id}
         )
@@ -316,6 +434,17 @@ async def ssh_session_read(
     snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
     snapshot, metadata = _annotate_interactive_snapshot(session, snapshot, event="read")
     _sync_active_ssh_session_to_state(state, session_id, session)
+    _runlog_ssh_session_registry(
+        session.get("harness") or harness,
+        "ssh_interactive_session_read",
+        "read interactive SSH session",
+        state=state,
+        requested_session_id=session_id,
+        host=str(session.get("host") or ""),
+        user=session.get("user"),
+        command=str(session.get("command") or ""),
+        status=str(snapshot.get("status") or ""),
+    )
     if snapshot.get("status") == "exited":
         await _cleanup_interactive_session(
             session_id,
@@ -335,9 +464,19 @@ async def ssh_session_send(
     wait_sec: float = 0.5,
     max_chars: int = 6000,
     state: Any = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
     if not isinstance(session, dict):
+        _runlog_ssh_session_registry(
+            harness,
+            "ssh_interactive_session_unknown",
+            "interactive SSH session lookup failed",
+            state=state,
+            requested_session_id=session_id,
+            reason="unknown_session",
+            status="failed",
+        )
         return fail(
             "Unknown SSH interactive session.", metadata={"session_id": session_id}
         )
@@ -375,6 +514,17 @@ async def ssh_session_send(
     snapshot, metadata = _annotate_interactive_snapshot(session, snapshot, event="send")
     metadata["send_newline"] = bool(send_newline)
     _sync_active_ssh_session_to_state(state, session_id, session)
+    _runlog_ssh_session_registry(
+        session.get("harness") or harness,
+        "ssh_interactive_session_send",
+        "sent input to interactive SSH session",
+        state=state,
+        requested_session_id=session_id,
+        host=str(session.get("host") or ""),
+        user=session.get("user"),
+        command=str(session.get("command") or ""),
+        status=str(snapshot.get("status") or ""),
+    )
     return ok(snapshot, metadata=metadata)
 
 
@@ -386,6 +536,7 @@ async def ssh_session_send_and_read(
     wait_sec: float = 0.5,
     max_chars: int = 6000,
     state: Any = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     sent = await ssh_session_send(
         session_id=session_id,
@@ -394,11 +545,16 @@ async def ssh_session_send_and_read(
         wait_sec=wait_sec,
         max_chars=max_chars,
         state=state,
+        harness=harness,
     )
     if not bool(sent.get("success")):
         return sent
     return await ssh_session_read(
-        session_id=session_id, wait_sec=0, max_chars=max_chars, state=state
+        session_id=session_id,
+        wait_sec=0,
+        max_chars=max_chars,
+        state=state,
+        harness=harness,
     )
 
 
@@ -408,13 +564,35 @@ async def ssh_session_close(
     terminate: bool = True,
     max_chars: int = 6000,
     state: Any = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     session = _SSH_INTERACTIVE_SESSIONS.get(str(session_id or "").strip())
     if not isinstance(session, dict):
+        _runlog_ssh_session_registry(
+            harness,
+            "ssh_interactive_session_unknown",
+            "interactive SSH session lookup failed",
+            state=state,
+            requested_session_id=session_id,
+            reason="unknown_session",
+            status="failed",
+        )
         return fail(
             "Unknown SSH interactive session.", metadata={"session_id": session_id}
         )
     snapshot = _interactive_session_snapshot(session_id, session, max_chars=max_chars)
+    _runlog_ssh_session_registry(
+        session.get("harness") or harness,
+        "ssh_interactive_session_closed",
+        "closed interactive SSH session",
+        state=state,
+        requested_session_id=session_id,
+        host=str(session.get("host") or ""),
+        user=session.get("user"),
+        command=str(session.get("command") or ""),
+        status=str(snapshot.get("status") or ""),
+        close_terminate=terminate,
+    )
     await _cleanup_interactive_session(
         session_id,
         session,

@@ -36,6 +36,7 @@ from .task_boundary_followups import (
 )
 from .task_classifier import (
     classify_task_mode,
+    looks_like_numbered_implementation_followup,
     looks_like_write_file_request,
     looks_like_write_patch_request,
 )
@@ -422,6 +423,8 @@ class TaskBoundaryClassificationMixin:
             return True
         if self._is_contextual_followup(raw_task):
             return True
+        if looks_like_numbered_implementation_followup(raw_task) and previous_task:
+            return True
         resolved = self.harness.state.scratchpad.get("_resolved_followup")
         if isinstance(resolved, dict) and resolved.get("target_inheritance") == "inherited":
             return True
@@ -580,6 +583,9 @@ class TaskBoundaryClassificationMixin:
             and not same_scope_followup
         )
         selected_action = isinstance(self._selected_action_option(raw, handoff), dict)
+        numbered_implementation_followup = looks_like_numbered_implementation_followup(raw) and bool(
+            handoff or previous_task
+        )
         remote_clarification = self._looks_like_remote_clarification_followup(raw, handoff)
         corrective_resteer = self._is_corrective_resteer_followup(raw)
         guard_recovery_followup = self._is_guard_recovery_followup(raw)
@@ -610,7 +616,7 @@ class TaskBoundaryClassificationMixin:
                 selected_action_option=selected_action,
                 contextual_reference=self._has_contextual_reference_to_current_task(raw)
                 or self._is_continue_like_followup(raw),
-                same_target_delta=bool(same_scope_followup) or has_overlap,
+                same_target_delta=bool(same_scope_followup) or has_overlap or numbered_implementation_followup,
                 corrective_resteer=corrective_resteer or guard_recovery_followup or ssh_credential_followup,
                 quality_followup=quality_followup,
                 remote_live_correction=remote_live_correction,
@@ -697,6 +703,10 @@ class TaskBoundaryClassificationMixin:
 
     def _is_contextual_followup(self, task: str) -> bool:
         if self._is_continue_like_followup(task):
+            return True
+        if looks_like_numbered_implementation_followup(task) and (
+            self.has_task_local_context() or self.last_task_handoff()
+        ):
             return True
         if self._ordinal_followup_index(task) is not None and self.last_task_handoff().get("action_options"):
             return True
@@ -842,6 +852,14 @@ class TaskBoundaryClassificationMixin:
             self._apply_resolved_followup_metadata(raw_task, option, target_info, resolved)
             self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
             return resolved
+
+        if self._is_continue_like_followup(raw_task):
+            resolved_followup = self.harness.state.scratchpad.get("_resolved_followup")
+            if isinstance(resolved_followup, dict):
+                resolved = str(resolved_followup.get("effective_task") or "").strip()
+                if resolved:
+                    self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+                    return resolved
 
         remote_resolution = self._remote_followup_resolution(raw_task)
         if remote_resolution is not None:

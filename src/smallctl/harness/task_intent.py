@@ -14,6 +14,7 @@ from .task_classifier import (
     looks_like_write_patch_request,
 )
 from .task_classifier_constants import LOCAL_SHELL_OVERRIDE_RE as _LOCAL_SHELL_OVERRIDE_RE
+from .task_classifier_constants import READONLY_SUGGESTION_MARKERS
 from .task_classifier_support import task_has_local_command_target, task_is_local_ssh_file_target, task_is_local_system_target
 
 _MEMORY_MARKERS = (
@@ -212,21 +213,7 @@ def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[
         recent_messages=list(getattr(harness.state, "recent_messages", []) or []),
         pending_interrupt=getattr(harness.state, "pending_interrupt", None),
     )
-    suggestion_only = any(
-        marker in text
-        for marker in (
-            "list improvement",
-            "list improvements",
-            "improvements you would make",
-            "improvements would you make",
-            "what improvements",
-            "recommend improvements",
-            "suggest improvements",
-            "suggest changes",
-            "would change",
-            "would improve",
-        )
-    )
+    suggestion_only = any(marker in text for marker in READONLY_SUGGESTION_MARKERS)
     if suggestion_only and any(token in text for token in {"inspect", "read", "grep", "find", "search", "list"}):
         primary = "inspect_repo"
         secondary.append("read_artifacts")

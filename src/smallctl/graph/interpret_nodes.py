@@ -13,7 +13,12 @@ from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
 from ..phases import filter_phase_blocked_tools, is_phase_contract_active, phase_contract
 from ..state import normalize_intent_label
-from ..harness.task_classifier import classify_runtime_intent, runtime_policy_for_intent, looks_like_readonly_chat_request
+from ..harness.task_classifier import (
+    classify_runtime_intent,
+    looks_like_numbered_implementation_followup,
+    looks_like_readonly_chat_request,
+    runtime_policy_for_intent,
+)
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..runtime_error_repair import current_reported_runtime_error
 from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
@@ -1134,6 +1139,17 @@ async def interpret_chat_output(
     text_looks_like_action = any(keyword in low_text for keyword in action_keywords)
     text_has_tool_tags = any(tag in low_text for tag in html_tool_tags)
     text_has_func_calls = any(token in low_text for token in func_syntax)
+    current_task_fn = getattr(harness, "_current_user_task", None)
+    try:
+        current_task = current_task_fn() if callable(current_task_fn) else ""
+    except Exception:
+        current_task = ""
+    current_task = str(current_task or getattr(harness.state.run_brief, "original_task", "") or "")
+    recent_tool_block = any(
+        "registered but unavailable on this turn" in str(error or "").lower()
+        for error in list(getattr(harness.state, "recent_errors", []) or [])[-4:]
+    )
+    actionable_chat_task = looks_like_numbered_implementation_followup(current_task)
 
     # Smalltalk bypass: pure chat tasks with no actionable work should
     # finalize directly after a natural-language response, not nudge.
@@ -1161,7 +1177,7 @@ async def interpret_chat_output(
             or harness.state.active_plan is not None
             or harness.state.draft_plan is not None
         )
-        if not has_active_write and not has_active_plan:
+        if not has_active_write and not has_active_plan and not recent_tool_block and not actionable_chat_task:
             graph_state.final_result = {
                 "status": "chat_completed",
                 "assistant": assistant_text,
@@ -1260,6 +1276,16 @@ async def interpret_chat_output(
             )
         return LoopRoute.NEXT_STEP
 
+    if recent_tool_block or actionable_chat_task:
+        graph_state.final_result = {
+            "status": "stopped",
+            "reason": "chat_action_blocked",
+            "assistant": assistant_text,
+            "thinking": graph_state.last_thinking_text,
+            "usage": graph_state.last_usage,
+        }
+        return LoopRoute.FINALIZE
+
     graph_state.final_result = {
         "status": "chat_completed",
         "assistant": assistant_text,
@@ -1292,16 +1318,30 @@ async def interpret_planning_output(
             await pause_for_plan_approval(graph_state, deps)
             return LoopRoute.FINALIZE
 
+        planning_tool_names: set[str] = set()
+        try:
+            exposure = resolve_turn_tool_exposure(harness, "planning")
+            names = exposure.get("names") if isinstance(exposure, dict) else []
+            planning_tool_names = {str(name).strip() for name in names or [] if str(name).strip()}
+        except Exception:
+            planning_tool_names = set()
+        if "plan_set" in planning_tool_names:
+            nudge_content = "Planning mode is active. Create a structured plan with `plan_set` before trying to execute anything."
+        else:
+            nudge_content = (
+                "Planning mode is active. Provide a concise structured plan in plain text before trying to execute anything. "
+                "Do not mention unavailable planning tools."
+            )
+
         harness.state.append_message(
             ConversationMessage(
                 role="user",
-                content=(
-                    "Planning mode is active. Create a structured plan with `plan_set` before trying to execute anything."
-                ),
+                content=nudge_content,
                 metadata={
                     "is_recovery_nudge": True,
                     "recovery_kind": "planning_mode_requires_plan_set",
                     "planner_nudge": True,
+                    "plan_set_available": "plan_set" in planning_tool_names,
                 },
             )
         )

@@ -74,7 +74,13 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
         if "micro_plan_capsule" not in names:
             names.append("micro_plan_capsule")
     step = current_step(state)
-    expires_after_step = step + default_ttl_steps(config)
+    ttl = default_ttl_steps(config)
+    pending_interrupt = getattr(state, "pending_interrupt", None)
+    if isinstance(pending_interrupt, dict) and pending_interrupt:
+        # If a human interrupt is pending, keep acceptance/done_gate mitigations
+        # alive longer so they don't expire while waiting for user input.
+        ttl += max(3, ttl)
+    expires_after_step = step + ttl
     source_signal = f"{signal.kind.value}:{signal.step}:{signal.tool_name or ''}"
     reason = signal.evidence
     if signal.kind == FamaFailureKind.SSH_HOST_KEY_VERIFICATION and signal.next_safe_action:

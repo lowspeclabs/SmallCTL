@@ -338,7 +338,9 @@ class TaskBoundaryLifecycleMixin:
             "_last_task_handoff",
             "_task_transaction",
             "_pending_deliverable_paths",
+            "_resolved_followup",
             "_resolved_remote_followup",
+            "_resolved_resteer",
             "_task_boundary_previous_task",
             "_task_sequence",
             "_web_result_index",
@@ -466,8 +468,15 @@ class TaskBoundaryLifecycleMixin:
         self.harness.state.repair_cycle_id = ""
         self.harness.state.stagnation_counters = {}
         self.harness.state.scratchpad.pop("_confabulation_nudged", None)
+        # Preserve an approved plan across same-scope task replacements so that
+        # follow-up approvals like "fix 1 approved, proceed" do not lose the
+        # spec contract required for shell execution.
+        prior_plan = getattr(self.harness.state, "active_plan", None) or getattr(self.harness.state, "draft_plan", None)
+        approved_plan = prior_plan if bool(getattr(prior_plan, "approved", False)) else None
         self.harness.state.draft_plan = None
         self.harness.state.active_plan = None
+        if approved_plan is not None and preserve_memory:
+            self.harness.state.active_plan = approved_plan
         self.harness.state.plan_resolved = False
         self.harness.state.plan_artifact_id = ""
         self.harness.state.planning_mode_enabled = self.harness._configured_planning_mode
@@ -644,7 +653,16 @@ class TaskBoundaryLifecycleMixin:
             turn_type = str(transaction.get("turn_type") or classification.turn_type)
             policy = classification.reset_policy
             preserve_prior_result = bool(policy.keep_prior_result)
-            preserve_recent_tail = preserve_prior_result or session_restored or remote_correction
+            resolved_followup = self.harness.state.scratchpad.get("_resolved_followup")
+            resolved_action_followup = isinstance(resolved_followup, dict) and bool(
+                str(resolved_followup.get("effective_task") or "").strip()
+            )
+            preserve_recent_tail = (
+                preserve_prior_result
+                or session_restored
+                or remote_correction
+                or resolved_action_followup
+            )
             if previous_task:
                 self.store_task_handoff(raw_task=previous_task, effective_task=previous_task)
             if turn_type == "CLARIFICATION":
@@ -683,7 +701,11 @@ class TaskBoundaryLifecycleMixin:
                 preserve_memory=preserve_prior_result,
                 preserve_summaries=preserve_prior_result,
                 preserve_recent_tail=preserve_recent_tail,
-                semantic_recent_tail=turn_type in {"ITERATION", "CORRECTION", "RETRY"} or remote_correction,
+                semantic_recent_tail=(
+                    turn_type in {"ITERATION", "CORRECTION", "RETRY"}
+                    or remote_correction
+                    or resolved_action_followup
+                ),
                 preserve_guard_context=bool(policy.preserve_guard_context),
             )
             if preserve_prior_result:

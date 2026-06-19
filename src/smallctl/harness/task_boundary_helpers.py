@@ -103,6 +103,12 @@ def ordinal_followup_index(task: str) -> int | None:
     text = str(task or "").strip().lower()
     if not text:
         return None
+    bare_hash_match = re.match(r"^\s*#(?P<index>\d+)\b", text)
+    if bare_hash_match:
+        try:
+            return int(bare_hash_match.group("index"))
+        except (TypeError, ValueError):
+            return None
     match = _ORDINAL_FOLLOWUP_RE.search(text)
     if match:
         try:
@@ -122,6 +128,7 @@ def strip_ordinal_prefix(task: str) -> str:
     text = str(task or "").strip()
     if not text:
         return ""
+    text = re.sub(r"^\s*#\d+[.)]?\s*[,;:]?\s*", "", text, count=1)
     text = _ORDINAL_PREFIX_RE.sub("", text, count=1)
     text = _GENERIC_EDIT_LEAD_RE.sub("", text, count=1)
     return text.strip()

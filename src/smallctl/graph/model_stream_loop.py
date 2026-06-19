@@ -52,6 +52,26 @@ _DEGENERATE_REPETITION_WINDOW_CHARS = 400
 _DEGENERATE_REPETITION_MIN_REPEATED_PHRASE_LENGTH = 4
 
 
+def _next_model_call_trace_id(harness: Any) -> str:
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        if state is not None:
+            state.scratchpad = scratchpad
+
+    call_sequence = int(scratchpad.get("_model_call_sequence", 0) or 0) + 1
+    scratchpad["_model_call_sequence"] = call_sequence
+    thread_id = str(
+        getattr(state, "thread_id", "")
+        or getattr(harness, "conversation_id", "")
+        or "run"
+    ).strip()
+    task_id = str(scratchpad.get("_active_task_id") or scratchpad.get("_task_sequence") or "task").strip()
+    step_count = int(getattr(state, "step_count", 0) or 0)
+    return f"{thread_id}:{task_id}:step-{step_count}:call-{call_sequence}"
+
+
 class _ModelOutputDegenerate(Exception):
     """Raised when the model stream is detected to be a degenerate repetition loop."""
 
@@ -258,8 +278,7 @@ async def run_model_stream_loop(
     run_logger = getattr(harness, "run_logger", None)
     set_trace_id = getattr(run_logger, "set_trace_id", None)
     if callable(set_trace_id):
-        thread_id = str(getattr(harness.state, "thread_id", "") or getattr(harness, "conversation_id", "") or "run")
-        set_trace_id(f"{thread_id}:{getattr(harness.state, 'step_count', 0)}")
+        set_trace_id(_next_model_call_trace_id(harness))
 
     chunks: list[dict[str, Any]] = []
     first_token_time: float | None = None

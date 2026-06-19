@@ -167,10 +167,27 @@ def looks_like_write_patch_request(task: str) -> bool:
     text = str(task or "").strip().lower()
     if not text:
         return False
+    if looks_like_numbered_implementation_followup(text):
+        return True
     if re.search(r"\b(?:new|fresh)\s+(?:script|file|module|code)\b", text) and looks_like_write_file_request(text):
         return False
     has_write_action = any(marker in text for marker in WRITE_ACTION_MARKERS)
     return bool(has_write_action and CODE_TARGET_RE.search(text))
+
+
+def looks_like_numbered_implementation_followup(task: str) -> bool:
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    action = r"(?:apply|do|fix|implement|patch|proceed\s+with|start\s+(?:with|on)|use|choose|pick)"
+    subject = r"(?:fix|proposal|option|improvement|change|item|step)"
+    if re.search(rf"\b{action}\b(?:\s+the)?\s+{subject}\s*#?\d+\b", text):
+        return True
+    if re.search(rf"\b{action}\b\s+#\d+\b", text):
+        return True
+    if re.search(rf"\b{subject}\s*#?\d+\b", text) and re.search(r"\b(?:apply|implement|patch|fix|ux|cli|code|script)\b", text):
+        return True
+    return False
 
 
 def looks_like_write_file_request(task: str) -> bool:
@@ -407,6 +424,7 @@ def classify_runtime_intent(
         looks_like_write_patch_request(text)
         or looks_like_write_file_request(text)
         or task_mode in {"local_execute", "remote_execute"}
+        or looks_like_numbered_implementation_followup(text)
         or looks_like_action_request(text)
         or looks_like_shell_request(text)
     ):

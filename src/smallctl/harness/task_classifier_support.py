@@ -9,6 +9,7 @@ from .task_classifier_constants import (
     IP_ADDRESS_PATTERN,
     PLAN_ONLY_PHRASES,
     READONLY_FILE_TARGETS,
+    READONLY_SUGGESTION_MARKERS,
     REMOTE_HINTS_WORD_BOUNDARIES_RE,
 )
 
@@ -260,7 +261,7 @@ def task_is_local_coding_target(task: str) -> bool:
         # Don't let SSH credential instructions in the prompt override a clear coding task
         return True
     # If the task is clearly asking for analysis/suggestions, don't treat as coding
-    if "list improvements" in lowered or "suggest improvements" in lowered:
+    if any(marker in lowered for marker in READONLY_SUGGESTION_MARKERS):
         return False
     # Local-style paths override weak remote hints (e.g. "fake hosts" in task description)
     if has_local_style_path and not has_explicit_remote:

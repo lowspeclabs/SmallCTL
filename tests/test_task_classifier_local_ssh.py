@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from smallctl.context.frame_run_rendering import render_run_brief
-from smallctl.harness.task_classifier import classify_task_mode
+from smallctl.harness.task_classifier import classify_runtime_intent, classify_task_mode
 from smallctl.harness.task_intent import infer_requested_tool_name
 from smallctl.harness.task_classifier_support import (
     task_is_local_ssh_file_target,
@@ -32,6 +32,15 @@ REMOTE_SSH_TASKS = [
 @pytest.mark.parametrize("task", LOCAL_KNOWN_HOSTS_TASKS)
 def test_local_ssh_file_task_classifies_as_local_execute(task: str) -> None:
     assert classify_task_mode(task) == "local_execute"
+
+
+def test_numbered_fix_followup_classifies_as_local_execute() -> None:
+    task = "now apply fix #3 the cli ux improvements"
+
+    assert classify_task_mode(task) == "local_execute"
+    intent = classify_runtime_intent(task, recent_messages=[])
+    assert intent.label == "execute"
+    assert intent.task_mode == "local_execute"
 
 
 @pytest.mark.parametrize("task", LOCAL_KNOWN_HOSTS_TASKS)

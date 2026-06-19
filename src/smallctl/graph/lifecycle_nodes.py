@@ -105,6 +105,63 @@ from .lifecycle_prompt import (
 )
 
 
+def _guard_error_signature(error: Any) -> str:
+    text = " ".join(str(error or "").split())
+    if not text:
+        return "empty_error"
+    if ":" in text:
+        tool_name = text.split(":", 1)[0].strip()
+        if tool_name:
+            detail = text.split(":", 1)[1].strip().split(".", 1)[0].strip()
+            return f"{tool_name}: {detail[:120]}"
+    return text[:160]
+
+
+def _log_guard_trip_diagnosis(
+    harness: Any, graph_state: GraphRunState, guard_error: str
+) -> None:
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+    recent_errors = [
+        str(item) for item in (getattr(harness.state, "recent_errors", []) or [])
+    ]
+    grouped: dict[str, dict[str, Any]] = {}
+    for index, error in enumerate(recent_errors):
+        signature = _guard_error_signature(error)
+        row = grouped.setdefault(
+            signature,
+            {
+                "signature": signature,
+                "count": 0,
+                "first_index": index,
+                "last_index": index,
+            },
+        )
+        row["count"] = int(row.get("count", 0) or 0) + 1
+        row["last_index"] = index
+    active_sessions = scratchpad.get("_active_ssh_interactive_sessions")
+    harness._runlog(
+        "guard_trip_diagnosis",
+        "guard tripped with diagnostic state snapshot",
+        guard_error=guard_error,
+        step_count=getattr(harness.state, "step_count", 0),
+        current_phase=getattr(harness.state, "current_phase", ""),
+        task_id=getattr(harness.state, "current_task_id", ""),
+        run_mode=getattr(graph_state, "run_mode", ""),
+        recent_error_count=len(recent_errors),
+        grouped_errors=list(grouped.values()),
+        last_errors=recent_errors[-8:],
+        tool_history_tail=list((getattr(harness.state, "tool_history", []) or [])[-8:]),
+        pending_tool_count=len(getattr(graph_state, "pending_tool_calls", []) or []),
+        active_mitigations=list(scratchpad.get("_fama_active_mitigations", []) or []),
+        continued_after_guard=bool(scratchpad.get("_continued_after_guard_trip")),
+        active_ssh_sessions=json_safe_value(
+            active_sessions if isinstance(active_sessions, dict) else {}
+        ),
+    )
+
+
 async def initialize_loop_run(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
@@ -315,6 +372,30 @@ async def resume_loop_run(
             f"{next_section_hint}{staged_hint}"
         )
     if continue_like:
+        scratchpad = getattr(harness.state, "scratchpad", {})
+        if not isinstance(scratchpad, dict):
+            scratchpad = {}
+        harness._runlog(
+            "continuation_state_carryover",
+            "continuing task with retained recovery and guard state snapshot",
+            old_step_count=harness.state.step_count,
+            recent_error_count=len(getattr(harness.state, "recent_errors", []) or []),
+            recent_errors=list((getattr(harness.state, "recent_errors", []) or [])[-8:]),
+            tool_history_tail=list(
+                (getattr(harness.state, "tool_history", []) or [])[-8:]
+            ),
+            current_phase=getattr(harness.state, "current_phase", ""),
+            task_mode=getattr(harness.state, "task_mode", ""),
+            active_tool_profiles=list(getattr(harness.state, "active_tool_profiles", []) or []),
+            last_failure_class=getattr(harness.state, "last_failure_class", ""),
+            guard_context=bool(
+                scratchpad.get("_guard_trip_recovery_capsule")
+                or scratchpad.get("_continued_after_guard_trip")
+            ),
+            active_ssh_sessions=json_safe_value(
+                scratchpad.get("_active_ssh_interactive_sessions") or {}
+            ),
+        )
         harness._runlog("step_count_reset", "resetting step count for continuation", old_count=harness.state.step_count)
         harness.state.step_count = 0
         harness.state.inactive_steps = 0
@@ -743,6 +824,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     if guard_error:
         harness.state.recent_errors.append(guard_error)
+        _log_guard_trip_diagnosis(harness, graph_state, guard_error)
         log_kv(
             harness.log,
             logging.WARNING,

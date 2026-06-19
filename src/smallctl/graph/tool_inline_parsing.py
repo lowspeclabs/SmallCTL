@@ -223,6 +223,34 @@ def _extract_inline_tool_calls(
                 )
         return None
 
+    def _parse_direct_xml_tool_tag(block_text: str) -> PendingToolCall | None:
+        # Direct self-closing XML tool tag: <tool_name key="value" />
+        # Emitted by some Gemma models instead of <call:tool_name ... />.
+        match = re.match(
+            r"^\s*<([\w_-]+)\s+([^>]*)/?>\s*$",
+            block_text,
+            re.DOTALL,
+        )
+        if not match:
+            return None
+        tool_name = match.group(1).strip()
+        if allowed_raw_function_names is not None and tool_name not in allowed_raw_function_names:
+            return None
+        attr_text = match.group(2).strip()
+        params: dict[str, str] = {}
+        for key, _quote, value in re.findall(
+            r'([\w_-]+)\s*=\s*(["\'])(.*?)\2',
+            attr_text,
+        ):
+            params[key] = value
+        if not params:
+            return None
+        return PendingToolCall(
+            tool_name=tool_name,
+            args=params,
+            raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
+        )
+
     def _try_parse_data(data: Any) -> PendingToolCall | None:
         if not isinstance(data, dict):
             return None
@@ -358,6 +386,23 @@ def _extract_inline_tool_calls(
             start, end = match.span()
             cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
             offset += end - start
+
+    # Direct self-closing XML tool tags: <tool_name key="value" />
+    # Some Gemma variants emit the tool name directly as the tag name.
+    if allowed_raw_function_names:
+        direct_tag_pattern = re.compile(
+            rf"<({'|'.join(re.escape(name) for name in sorted(allowed_raw_function_names))})\b[^>]*?/>",
+            re.DOTALL,
+        )
+        direct_matches = list(direct_tag_pattern.finditer(cleaned_text))
+        offset = 0
+        for match in direct_matches:
+            pending = _parse_direct_xml_tool_tag(match.group(0))
+            if pending is not None:
+                results.append(pending)
+                start, end = match.span()
+                cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
+                offset += end - start
 
     bracket_tool_pattern = r"\[\s*([A-Za-z0-9_-]+)\s*\]\s*(\{.*?\})"
     bracket_matches = list(re.finditer(bracket_tool_pattern, cleaned_text, re.DOTALL))

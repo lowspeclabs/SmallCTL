@@ -2621,6 +2621,55 @@ def test_gemma_call_tag_with_multiple_attributes() -> None:
     }
 
 
+def test_gemma_direct_xml_terminal_tag_is_parsed() -> None:
+    text = '<task_complete message="Hello! I am ready to assist you." />'
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        allowed_raw_function_names={"task_complete", "task_fail"},
+    )
+    assert cleaned == ""
+    assert len(calls) == 1
+    assert calls[0].tool_name == "task_complete"
+    assert calls[0].args == {"message": "Hello! I am ready to assist you."}
+
+
+def test_gemma_direct_xml_tag_ignores_unknown_tool_names() -> None:
+    text = '<unknown_tool message="Hello" />'
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        allowed_raw_function_names={"task_complete"},
+    )
+    assert cleaned == text
+    assert calls == []
+
+
+def test_gemma_direct_xml_tag_parsed_from_mixed_assistant_text() -> None:
+    text = (
+        "Hello! How can I help you today?\n\n"
+        '<task_complete message="Hello! I am ready to assist you." />'
+    )
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        allowed_raw_function_names={"task_complete", "task_fail"},
+    )
+    assert cleaned.strip() == "Hello! How can I help you today?"
+    assert len(calls) == 1
+    assert calls[0].tool_name == "task_complete"
+    assert calls[0].args == {"message": "Hello! I am ready to assist you."}
+
+
+def test_gemma_direct_xml_task_fail_tag_is_parsed() -> None:
+    text = '<task_fail message="I cannot help with that." />'
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        allowed_raw_function_names={"task_complete", "task_fail"},
+    )
+    assert cleaned == ""
+    assert len(calls) == 1
+    assert calls[0].tool_name == "task_fail"
+    assert calls[0].args == {"message": "I cannot help with that."}
+
+
 def test_streaming_gemma_channel_marker_ends_thinking_block() -> None:
     events: list[object] = []
     runlog: list[tuple[str, str, dict[str, object]]] = []

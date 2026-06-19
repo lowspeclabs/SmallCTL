@@ -27,6 +27,14 @@ class PlanApprovalDecision:
         return self.choice == "yes"
 
 
+@dataclass(frozen=True)
+class InterruptDecision:
+    choice: str
+
+    def __bool__(self) -> bool:
+        return self.choice == "yes"
+
+
 class ApprovePromptScreen(ModalScreen[ShellApprovalDecision]):
     BINDINGS = [
         ("left", "focus_previous", "Previous"),
@@ -261,6 +269,66 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalDecision]):
             "Use left/right to choose, then Enter.",
             "Y approves, N declines, R requests revision.",
         ]
+        return "\n".join(parts)
+
+
+class InterruptPromptScreen(ModalScreen[InterruptDecision]):
+    BINDINGS = [
+        ("y", "approve", "Yes"),
+        ("n", "deny", "No"),
+        ("escape", "deny", "No"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        question: str,
+        details: str = "",
+    ) -> None:
+        super().__init__()
+        self.title = title
+        self.question = question
+        self.details = details
+
+    def compose(self) -> ComposeResult:
+        with Container(id="approve-prompt-overlay"):
+            with Container(id="approve-prompt-plan"):
+                with Vertical(id="approve-prompt"):
+                    yield Static(self.title or "Input required", id="approve-prompt-title")
+                    yield Static(self._build_body(), id="approve-prompt-body", markup=False)
+                    with Horizontal(id="approve-prompt-buttons"):
+                        yield Button("Yes", id="interrupt-yes", variant="success")
+                        yield Button("No", id="interrupt-no", variant="error")
+
+    async def on_mount(self) -> None:
+        self.query_one("#interrupt-yes", Button).focus()
+
+    def action_approve(self) -> None:
+        self.dismiss(InterruptDecision("yes"))
+
+    def action_deny(self) -> None:
+        self.dismiss(InterruptDecision("no"))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "interrupt-yes":
+            self.dismiss(InterruptDecision("yes"))
+            return
+        if event.button.id == "interrupt-no":
+            self.dismiss(InterruptDecision("no"))
+
+    def _build_body(self) -> str:
+        parts = [
+            self.question or "The harness needs your input to continue.",
+            "",
+        ]
+        if self.details:
+            parts.append(self.details)
+            parts.append("")
+        parts.extend([
+            "Use left/right to choose, then Enter.",
+            "Y approves, N denies.",
+        ])
         return "\n".join(parts)
 
 

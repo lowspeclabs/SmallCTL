@@ -3513,12 +3513,17 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     assert "acceptance: 1/2" in text
     assert "verdict: pass | pytest | exit 0" in text
     assert "Recovery: verifier loop (2 rejects)" in text
+    assert "cumulative:" in text
+    assert "context:" in text
+    assert "█" not in text
 
     bar.__dict__["_vertical"] = True
     vertical_text = StatusBar._build_status_text(bar)
     assert "[bold #93c5fd]Model[/]" in vertical_text
     assert "[bold #93c5fd]Run[/]" in vertical_text
     assert "[bold #93c5fd]Usage[/]" in vertical_text
+    assert "context:" in vertical_text
+    assert "█" not in vertical_text
     assert "\n" in vertical_text
 
 
@@ -5751,6 +5756,8 @@ def test_interpret_planning_output_tags_plan_set_nudge_as_recovery_message() -> 
     assert state.recent_messages[-1].metadata["is_recovery_nudge"] is True
     assert state.recent_messages[-1].metadata["recovery_kind"] == "planning_mode_requires_plan_set"
     assert state.recent_messages[-1].metadata["planner_nudge"] is True
+    assert state.recent_messages[-1].metadata["plan_set_available"] is False
+    assert "plan_set" not in str(state.recent_messages[-1].content or "")
 
 
 def test_interpret_chat_output_backfills_missing_write_session_metadata_for_active_target() -> None:

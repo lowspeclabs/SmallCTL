@@ -113,6 +113,8 @@ def _text_contains_tool_protocol_markers(text: str) -> bool:
         "</function>",
         "<parameter=",
         "<parameter ",
+        "<task_complete",
+        "<task_fail",
     )
     return any(marker in lowered for marker in markers)
 
@@ -125,6 +127,18 @@ def _strip_orphan_tool_protocol_markers(text: str) -> str:
         "",
         str(text),
         flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<task_complete\b[^>]*?/>|</task_complete>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped = re.sub(
+        r"<task_fail\b[^>]*?/>|</task_fail>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     return stripped.strip()
 
@@ -167,6 +181,18 @@ def _strip_tool_protocol_payloads(text: str) -> str:
         "",
         stripped,
         flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<task_complete\b[^>]*?/>|</task_complete>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped = re.sub(
+        r"<task_fail\b[^>]*?/>|</task_fail>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     stripped = re.sub(r"\n{3,}", "\n\n", stripped)
     return stripped.strip()

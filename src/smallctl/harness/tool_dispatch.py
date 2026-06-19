@@ -116,6 +116,18 @@ def _chat_write_tools_allowed(harness: Any, task: str) -> bool:
         or looks_like_implementation_followup(task)
     ):
         return True
+    # Fallback: if the user task resolves to a numbered proposal reference,
+    # treat it as a write task even if the raw text was abbreviated/typo-prone.
+    resolved = _scratchpad(harness).get("_resolved_followup")
+    if isinstance(resolved, dict):
+        effective = str(resolved.get("effective_task") or "").strip()
+        if effective and (
+            looks_like_write_patch_request(effective)
+            or looks_like_write_file_request(effective)
+            or looks_like_author_write_request(effective)
+            or looks_like_implementation_followup(effective)
+        ):
+            return True
     client = getattr(harness, "client", None)
     return should_enable_complex_write_chat_draft(
         task,
@@ -306,22 +318,35 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
             )
             return terminal_tools
         if not chat_mode_requires_tools(harness, task_for_intent):
-            terminal_tools = _chat_terminal_tools(harness)
-            _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
-            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "non_lookup_chat_terminal_only"
-            harness._runlog(
-                "chat_tool_selection",
-                "chat tool exposure reduced to terminal tools",
-                task=task,
-                reason="non_lookup_chat_terminal_only",
-                tool_names=[
-                    str(entry["function"]["name"])
-                    for entry in terminal_tools
-                    if isinstance(entry, dict) and isinstance(entry.get("function"), dict)
-                ],
-                runtime_intent=runtime_intent_label,
-            )
-            return terminal_tools
+            # Safety valve: if the task looks like an implementation follow-up,
+            # do not reduce the model to terminal-only tools. Let it attempt the
+            # work with the normal write/read tool set instead of forcing a
+            # repetition loop.
+            if looks_like_implementation_followup(task_for_intent):
+                harness._runlog(
+                    "chat_tool_selection",
+                    "implementation follow-up kept in chat mode with full tools",
+                    task=task,
+                    reason="implementation_followup_in_chat",
+                    runtime_intent=runtime_intent_label,
+                )
+            else:
+                terminal_tools = _chat_terminal_tools(harness)
+                _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
+                _scratchpad(harness)["_chat_tools_suppressed_reason"] = "non_lookup_chat_terminal_only"
+                harness._runlog(
+                    "chat_tool_selection",
+                    "chat tool exposure reduced to terminal tools",
+                    task=task,
+                    reason="non_lookup_chat_terminal_only",
+                    tool_names=[
+                        str(entry["function"]["name"])
+                        for entry in terminal_tools
+                        if isinstance(entry, dict) and isinstance(entry.get("function"), dict)
+                    ],
+                    runtime_intent=runtime_intent_label,
+                )
+                return terminal_tools
 
         _scratchpad(harness)["_chat_tools_exposed"] = True
         _scratchpad(harness).pop("_chat_tools_suppressed_reason", None)

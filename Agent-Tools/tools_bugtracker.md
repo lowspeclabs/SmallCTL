@@ -25,6 +25,7 @@ moving on.
 |----|------|----------|-------------|-------|--------|
 | BUG-005 | run_diagnose.py | major | Diagnosis over-emphasized model degeneration for run ba7cdbd6 even though the run objective was already blocked by repeated localhost:3456 connection refusals. It should report primary objective blockers separately from secondary harness/model failures. | python3 Agent-Tools/run_diagnose.py ba7cdbd6 --json | open |
 | BUG-006 | run_diagnose.py | major | Classifies a successful run as `model_degeneration` when the session completed and was verified but an earlier `model_output_degenerate_loop_exhausted` error exists. Success with recovered errors should be classified as `success` or `success_with_errors`, not a failure mode. | python3 Agent-Tools/run_diagnose.py 317775e8 --json | open |
+| BUG-008 | run_diagnose.py | major | Classifies run 97e42939 as `model_degeneration` even though the task failed because `file_write` was blocked by patch-first policy and subsequent `file_patch` calls were malformed/no-ops. The primary failure mode is a `policy/write_guard` loop, not model degeneration. | python3 Agent-Tools/run_diagnose.py 97e42939 --json | open |
 
 ## Fixed Bugs
 

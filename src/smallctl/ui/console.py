@@ -135,7 +135,7 @@ class ConsolePane(VerticalScroll):
                 )
                 if nested:
                     return
-            if tool_name in {"shell_exec", "ssh_exec"}:
+            if tool_name in {"shell_exec", "ssh_exec", "file_read", "ssh_file_read"}:
                 return
             self._active_assistant_turn = None
             await self._add_bubble("system", str(event.data.get("display_text") or event.content))

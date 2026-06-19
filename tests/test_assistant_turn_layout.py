@@ -537,3 +537,28 @@ def test_unmatched_shell_tool_result_is_not_rendered_as_system() -> None:
             assert children[0].get_assistant_text() == "Before result.After result."
 
     asyncio.run(_run())
+
+
+def test_unmatched_file_read_result_is_not_rendered_as_system() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before result."))
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "raw file content that should not leak into chat",
+                    data={"tool_name": "file_read", "tool_call_id": "missing"},
+                )
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            children = list(stack.children)
+            assert len(children) == 1
+            assert children[0].get_assistant_text() == "Before result.After result."
+
+    asyncio.run(_run())

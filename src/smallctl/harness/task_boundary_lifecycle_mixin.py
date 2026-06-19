@@ -594,6 +594,9 @@ class TaskBoundaryLifecycleMixin:
         self.harness.state.step_count = 0
         self.harness.state.inactive_steps = 0
         self.harness.state.latest_verdict = None
+        # Reset per-task model call sequence so trace IDs for the new task are
+        # distinct and do not reuse the previous task's call counter.
+        self.harness.state.scratchpad["_model_call_sequence"] = 0
 
         task_boundary_brief = self._generate_task_boundary_brief()
         self.harness.state.scratchpad = preserved_scratchpad

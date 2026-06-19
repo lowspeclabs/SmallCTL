@@ -129,6 +129,13 @@ class SmallctlAppActionsMixin:
             return
         if event.button.id in {"model-bar-toggle", "model-bar-toggle-sidebar"}:
             self.action_toggle_model_bar_layout()
+            return
+        if event.button.id == "goal-bar-toggle":
+            self.action_toggle_goal_bar()
+
+    def action_toggle_goal_bar(self) -> None:
+        self._goal_bar_expanded = not bool(getattr(self, "_goal_bar_expanded", False))
+        self._refresh_goal_bar()
 
     def action_toggle_model_bar_layout(self) -> None:
         self._model_bar_layout = "right" if self._model_bar_layout == "bottom" else "bottom"

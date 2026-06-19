@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 from textual import events
 from textual.app import ScreenStackError
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from ..harness import Harness
 from ..logging_utils import RunLogger
@@ -200,9 +200,8 @@ class SmallctlAppFlowMixin:
             return
 
         if event.data.get("ui_kind") == "subtask_checklist":
-            self._update_sidebar_objective(event.content)
-            if getattr(self, "_model_bar_layout", "bottom") == "right":
-                return
+            self._update_goal_bar(event.content)
+            return
 
         tool_name = str(event.data.get("tool_name") or event.content or "").strip()
         suppress_task_complete = tool_name == "task_complete" and not self._show_system_messages
@@ -246,34 +245,49 @@ class SmallctlAppFlowMixin:
         self._record_ui_transcript_event(event)
         await console.append_event(event)
 
-    def _update_sidebar_objective(self, content: str) -> None:
+    def _update_goal_bar(self, content: str) -> None:
+        goal, tasks = self._parse_goal_bar_content(content)
+        self._goal_bar_goal = goal or "No active goal"
+        self._goal_bar_tasks = tasks
+        self._refresh_goal_bar()
+
+    def _refresh_goal_bar(self) -> None:
         try:
-            objective = self.query_one("#objective-sidebar", Static)
+            toggle = self.query_one("#goal-bar-toggle", Button)
+            details = self.query_one("#goal-bar-details", Static)
         except (NoMatches, ScreenStackError, TypeError):
             return
-        text = self._format_sidebar_objective(content)
-        if text:
-            objective.update(text)
+        expanded = bool(getattr(self, "_goal_bar_expanded", False))
+        goal = str(getattr(self, "_goal_bar_goal", "") or "No active goal").strip()
+        tasks = list(getattr(self, "_goal_bar_tasks", []) or [])
+        short_goal = goal if len(goal) <= 140 else goal[:139].rstrip() + "~"
+        toggle.label = f"{'^' if expanded else 'v'} Goal: {short_goal}"
+        details.set_class(not expanded, "hidden")
+        if not expanded:
+            details.update("")
+            return
+        detail_lines = [f"[bold #93c5fd]Goal[/] {goal}"]
+        if tasks:
+            detail_lines.append("[bold #bfdbfe]Tasks[/]")
+            detail_lines.extend(f"[#94a3b8]{task}[/]" for task in tasks)
+        else:
+            detail_lines.append("[#94a3b8]No active tasks[/]")
+        details.update("\n".join(detail_lines))
 
     @staticmethod
-    def _format_sidebar_objective(content: str) -> str:
+    def _parse_goal_bar_content(content: str) -> tuple[str, list[str]]:
         lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
         if not lines:
-            return ""
+            return "", []
         first = lines[0]
         if first.startswith("Goal Objective: "):
             first = first[16:].strip()
-        clipped = first if len(first) <= 220 else first[:219] + "~"
-        result = [f"[bold #93c5fd]Objective[/]", clipped]
-        task_lines = []
-        for line in lines[1:4]:
+        tasks = []
+        for line in lines[1:]:
             task = line.strip()
             if task:
-                task_lines.append(task if len(task) <= 120 else task[:119] + "~")
-        if task_lines:
-            result.extend(["", "[bold #bfdbfe]Task[/]"])
-            result.extend(f"[#94a3b8]{task}[/]" for task in task_lines)
-        return "\n".join(result)
+                tasks.append(task if len(task) <= 180 else task[:179].rstrip() + "~")
+        return first, tasks
 
     def _on_run_log_row(self, row: dict[str, Any]) -> None:
         self._update_recovery_banner_from_run_log_row(row)

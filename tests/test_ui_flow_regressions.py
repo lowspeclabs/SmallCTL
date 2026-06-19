@@ -889,15 +889,24 @@ def test_right_model_bar_clips_streamed_tool_output(monkeypatch) -> None:
 
     asyncio.run(_run())
 
-def test_subtask_checklist_moves_to_sidebar_in_right_layout() -> None:
+def test_subtask_checklist_updates_goal_bar_in_right_layout() -> None:
     appended: list[UIEvent] = []
 
-    class _Objective:
+    class _Toggle:
+        def __init__(self) -> None:
+            self.label = ""
+
+    class _Details:
         def __init__(self) -> None:
             self.text = ""
+            self.hidden = False
 
         def update(self, text: str) -> None:
             self.text = text
+
+        def set_class(self, value: bool, name: str) -> None:
+            if name == "hidden":
+                self.hidden = value
 
     class _Console:
         async def append_event(self, event: UIEvent) -> None:
@@ -910,12 +919,18 @@ def test_subtask_checklist_moves_to_sidebar_in_right_layout() -> None:
             self._show_system_messages = False
             self._show_tool_calls = True
             self.active_task = None
-            self.objective = _Objective()
+            self._goal_bar_expanded = True
+            self._goal_bar_goal = "No active goal"
+            self._goal_bar_tasks = []
+            self.toggle = _Toggle()
+            self.details = _Details()
             self.console = _Console()
 
-        def query_one(self, selector: str, *_args) -> _Objective:
-            if selector == "#objective-sidebar":
-                return self.objective
+        def query_one(self, selector: str, *_args):
+            if selector == "#goal-bar-toggle":
+                return self.toggle
+            if selector == "#goal-bar-details":
+                return self.details
             raise NoMatches("unexpected query")
 
         def _get_console(self) -> _Console:
@@ -930,19 +945,32 @@ def test_subtask_checklist_moves_to_sidebar_in_right_layout() -> None:
 
     asyncio.run(flow._handle_harness_event(event))
 
-    assert "Objective" in flow.objective.text
-    assert "implement the right sidebar" in flow.objective.text
-    assert "[bold #bfdbfe]Task[/]" in flow.objective.text
-    assert "[#94a3b8]○ wire status[/]" in flow.objective.text
+    assert flow.toggle.label == "^ Goal: implement the right sidebar"
+    assert "[bold #93c5fd]Goal[/] implement the right sidebar" in flow.details.text
+    assert "[bold #bfdbfe]Tasks[/]" in flow.details.text
+    assert "[#94a3b8]○ wire status[/]" in flow.details.text
+    assert flow.details.hidden is False
     assert appended == []
 
 
-def test_subtask_checklist_still_renders_in_bottom_layout() -> None:
+def test_subtask_checklist_updates_goal_bar_in_bottom_layout() -> None:
     appended: list[UIEvent] = []
 
-    class _Objective:
+    class _Toggle:
+        def __init__(self) -> None:
+            self.label = ""
+
+    class _Details:
+        def __init__(self) -> None:
+            self.text = ""
+            self.hidden = False
+
         def update(self, text: str) -> None:
             self.text = text
+
+        def set_class(self, value: bool, name: str) -> None:
+            if name == "hidden":
+                self.hidden = value
 
     class _Console:
         async def append_event(self, event: UIEvent) -> None:
@@ -956,12 +984,18 @@ def test_subtask_checklist_still_renders_in_bottom_layout() -> None:
             self._show_tool_calls = True
             self._verbose = False
             self.active_task = None
-            self.objective = _Objective()
+            self._goal_bar_expanded = False
+            self._goal_bar_goal = "No active goal"
+            self._goal_bar_tasks = []
+            self.toggle = _Toggle()
+            self.details = _Details()
             self.console = _Console()
 
-        def query_one(self, selector: str, *_args) -> _Objective:
-            if selector == "#objective-sidebar":
-                return self.objective
+        def query_one(self, selector: str, *_args):
+            if selector == "#goal-bar-toggle":
+                return self.toggle
+            if selector == "#goal-bar-details":
+                return self.details
             raise NoMatches("unexpected query")
 
         def _get_console(self) -> _Console:
@@ -976,7 +1010,10 @@ def test_subtask_checklist_still_renders_in_bottom_layout() -> None:
 
     asyncio.run(flow._handle_harness_event(event))
 
-    assert appended == [event]
+    assert flow.toggle.label == "v Goal: keep bottom layout behavior"
+    assert flow.details.text == ""
+    assert flow.details.hidden is True
+    assert appended == []
 
 
 def test_status_events_are_coalesced_latest_wins() -> None:

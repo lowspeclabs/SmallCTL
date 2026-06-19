@@ -90,18 +90,22 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._shell_approval_session_default = bool(self.harness_config.shell_approval_session_default)
         self._model_bar_layout = "bottom"
         self._verbose = bool(self.harness_config.verbose)
+        self._goal_bar_expanded = False
+        self._goal_bar_goal = "No active goal"
+        self._goal_bar_tasks: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             with Horizontal(id="main-row"):
                 with Container(id="console-wrap"):
+                    yield Button("v Goal: No active goal", id="goal-bar-toggle")
+                    yield Static("", id="goal-bar-details", classes="hidden")
                     yield ConsolePane(id="console", verbose=self._verbose)
                 with Vertical(id="model-sidebar", classes="hidden"):
                     yield ModelSelectButton("n/a", id="model-button-sidebar")
                     yield ChatSelectButton(id="chat-button-sidebar")
                     yield Button("bar: right", id="model-bar-toggle-sidebar")
                     yield StatusBar(model="n/a", phase="explore", step=0, id="status-sidebar", vertical=True)
-                    yield Static("Objective\nNo active objective\n\nTask\nNo active task", id="objective-sidebar")
                     yield Button("Stop (Ctrl+K)", id="stop-button-sidebar")
             with Horizontal(id="status-row"):
                 yield ModelSelectButton("n/a", id="model-button")

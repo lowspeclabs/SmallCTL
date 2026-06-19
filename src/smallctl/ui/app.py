@@ -72,7 +72,6 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._show_tool_calls = True
         self._status_activity = ""
         self._api_error_count = 0
-        self._token_runaway_alert_emitted = False
         self._latest_status_snapshot: dict[str, Any] | None = None
         self._status_refresh_pending = False
         self._recovery_banner = ""

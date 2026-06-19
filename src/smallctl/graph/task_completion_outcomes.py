@@ -98,6 +98,18 @@ def _maybe_schedule_task_complete_remote_mutation_verifier(
         )
     )
     harness._runlog(
+        "recovery_decision",
+        "selected remote mutation verifier before task completion",
+        status="scheduled",
+        recovery_kind="task_complete_remote_mutation_verifier_autocontinue",
+        tool_name=tool_name,
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        path=str(args.get("path") or ""),
+        command=str(args.get("command") or ""),
+        host=str(args.get("host") or args.get("target") or ""),
+    )
+    harness._runlog(
         "task_complete_remote_mutation_verifier_autocontinue",
         "scheduled automatic remote verifier after remote mutation task completion block",
         tool_call_id=record.tool_call_id,
@@ -255,6 +267,15 @@ def _maybe_schedule_task_complete_verifier_loop_status(
         )
     )
     harness._runlog(
+        "recovery_decision",
+        "selected loop_status recovery after blocked task completion",
+        status="scheduled",
+        recovery_kind="task_complete_verifier_loop_status_autocontinue",
+        tool_name="loop_status",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+    )
+    harness._runlog(
         "task_complete_verifier_loop_status_autocontinue",
         "scheduled automatic loop_status after blocked task completion",
         tool_call_id=record.tool_call_id,
@@ -318,6 +339,16 @@ def _maybe_schedule_task_complete_repair_loop_status(
                 "phase": "repair",
             },
         )
+    )
+    harness._runlog(
+        "recovery_decision",
+        "selected loop_status recovery after repair-phase completion block",
+        status="scheduled",
+        recovery_kind="task_complete_repair_loop_status_autocontinue",
+        tool_name="loop_status",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        phase="repair",
     )
     harness._runlog(
         "task_complete_repair_loop_status_autocontinue",

@@ -63,6 +63,23 @@ def format_acceptance_progress(checklist: list[dict[str, Any]] | None) -> str:
     return f"{satisfied}/{total}"
 
 
+def _format_execution_blocker(state: Any) -> str:
+    blocker = getattr(state, "scratchpad", {}).get("_latest_execution_blocker")
+    if not isinstance(blocker, dict):
+        return ""
+    salient = str(blocker.get("salient_error") or "").strip()
+    command = str(blocker.get("command") or blocker.get("target") or "").strip()
+    blocker_class = str(blocker.get("blocker_class") or "").strip()
+    parts: list[str] = []
+    if blocker_class:
+        parts.append(blocker_class)
+    if salient:
+        parts.append(salient[:200])
+    elif command:
+        parts.append(command[:200])
+    return ": ".join(parts)
+
+
 def compute_activity_for_event(
     event: UIEvent,
     *,
@@ -125,6 +142,7 @@ class UIStatusSnapshot:
     fama_off: bool = False
     fama_mitigation: str = ""
     recovery_banner: str = ""
+    execution_blocker: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -147,6 +165,7 @@ class UIStatusSnapshot:
             "fama_off": self.fama_off,
             "fama_mitigation": self.fama_mitigation,
             "recovery_banner": self.recovery_banner,
+            "execution_blocker": self.execution_blocker,
         }
 
     @classmethod
@@ -242,4 +261,5 @@ class UIStatusSnapshot:
             fama_off=fama_off,
             fama_mitigation=fama_mitigation,
             recovery_banner=recovery_banner,
+            execution_blocker=_format_execution_blocker(harness.state),
         )

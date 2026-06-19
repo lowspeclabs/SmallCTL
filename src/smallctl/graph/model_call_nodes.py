@@ -200,6 +200,17 @@ async def model_call(
         model_name=getattr(harness.client, "model", None),
     )
     graph_state.pending_tool_calls = parse_result.pending_tool_calls
+
+    # If the stream was halted due to a degenerate loop, do not let the
+    # malformed assistant text pollute conversation history or retrieval.
+    # Keep any tool calls that were already emitted, but replace the prose
+    # with a compact placeholder.
+    if halt_reason == "model_output_degenerate_loop":
+        parse_result.final_assistant_text = (
+            "[Previous assistant output was halted because it entered a repetition loop.]"
+        )
+        parse_result.final_thinking_text = ""
+
     conversation_tool_calls = _conversation_tool_calls_from_pending(
         graph_state.pending_tool_calls,
         thread_id=graph_state.thread_id,

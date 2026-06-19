@@ -12,6 +12,7 @@ from .prompt_fragments import (
     _DELIVERABLE_VERIFICATION,
     _DOCKER_INSPECT_HINT,
     _EVIDENCE_ANCHORED_DIAGNOSIS_RULE,
+    _GEMMA_4_STRICT_FORMAT,
     _INSTALLER_TIMEOUT_RECOVERY,
     _LARGE_GEMMA_26B_ANTI_LOOP_RULE,
     _LFM_25_8B_STRICT_FORMAT,
@@ -203,6 +204,8 @@ def build_system_prompt(
                 "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
                 f"Once your objective is met, stop exploring and call task_complete(message='...').",
             ]
+    if gemma_mode:
+        parts.append(_GEMMA_4_STRICT_FORMAT)
     if exact_small_gemma_mode:
         parts.append(_SMALL_GEMMA_STRICT_FORMAT)
     if large_model:

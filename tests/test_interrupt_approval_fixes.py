@@ -295,6 +295,42 @@ class TestInterruptApprovalFixes:
         assert "network" in mock_harness.state.active_tool_profiles
 
     @pytest.mark.asyncio
+    async def test_local_coding_continuation_not_forced_into_chat_by_complex_write_heuristic(self):
+        """A follow-up like 'apply the bugfixes' must stay in loop mode, not chat."""
+        from smallctl.models.conversation import ConversationMessage
+
+        mock_harness = Mock()
+        mock_harness.state = Mock()
+        mock_harness.state.pending_interrupt = None
+        mock_harness.state.planner_interrupt = None
+        mock_harness.state.active_plan = None
+        mock_harness.state.draft_plan = None
+        mock_harness.state.planning_mode_enabled = False
+        mock_harness.state.task_mode = "local_execute"
+        mock_harness.state.active_tool_profiles = ["core"]
+        mock_harness.state.cwd = "/home/stephen/Scripts/Harness-Redo"
+        mock_harness.state.recent_messages = [
+            ConversationMessage(
+                role="assistant",
+                content=(
+                    "I have read and run the script. Proposed improvements include "
+                    "simplifying URL normalization, fixing the redacted token bug, "
+                    "adding a --json output flag, and strengthening error handling."
+                ),
+            ),
+            ConversationMessage(role="user", content="apply the bugfixes and robustness fixes"),
+        ]
+        mock_harness.state.scratchpad = {}
+        mock_harness.client = Mock()
+        mock_harness.client.model = "gemma-4-26b-a4b-it"
+        mock_harness._runlog = Mock()
+        mock_harness._emit = Mock()
+
+        mode = await ModeDecisionService(mock_harness).decide("apply the bugfixes and robustness fixes")
+
+        assert mode == "loop", "execution continuation should not be forced into chat mode"
+
+    @pytest.mark.asyncio
     async def test_original_scenario_prevented(self):
         """Test that the original failure scenario is now prevented."""
         # This test simulates the exact sequence from session f75c1c57

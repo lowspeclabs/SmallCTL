@@ -873,6 +873,46 @@ def test_chunked_write_loop_guard_requires_read_after_checkpoint_revisit(tmp_pat
     assert second["success"] is True
 
 
+def test_chunked_write_loop_guard_allows_checkpoint_extension_with_new_content(tmp_path: Path) -> None:
+    """A model may legitimately extend a checkpointed section with clearly new content."""
+    state = _make_state(tmp_path)
+    target = tmp_path / "guarded.py"
+    _attach_write_session(state, target)
+
+    first = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="# Command Handlers (Stub for implementation)\n# ============================================================================\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="command_handlers",
+            next_section_name="tests",
+        )
+    )
+    assert first["success"] is True
+
+    extension = asyncio.run(
+        fs.file_write(
+            path=str(target),
+            content="# Command Handlers (Stub for implementation)\n# ============================================================================\n\n"
+            "async def handle_tasks(client, config, args):\n    pass\n\n"
+            "async def handle_projects(client, config, args):\n    pass\n",
+            cwd=str(tmp_path),
+            state=state,
+            write_session_id="ws-guard",
+            section_name="command_handlers",
+            next_section_name="tests",
+            replace_strategy="append",
+        )
+    )
+    assert extension["success"] is True
+    assert extension["metadata"]["section_name"] == "command_handlers"
+    staged = Path(state.write_session.write_staging_path).read_text(encoding="utf-8")
+    assert "handle_tasks" in staged
+    assert "handle_projects" in staged
+
+
 def test_partial_file_read_does_not_clear_loop_guard_verification_requirement(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
     target = tmp_path / "guarded_partial.py"
@@ -1173,6 +1213,63 @@ def test_failed_chunked_file_append_loop_guard_schedules_file_read_recovery(tmp_
     assert pending.args == {"path": str(tmp_path / "guarded.py")}
     assert state.recent_messages
     assert state.recent_messages[-1].metadata["recovery_kind"] == "chunked_write_loop_guard"
+
+
+def test_write_overwrite_guard_schedules_patch_or_ast_recovery_read(tmp_path: Path) -> None:
+    state = _make_state(tmp_path)
+    emitted = []
+    runlog_events = []
+
+    async def _emit(_handler, event) -> None:
+        emitted.append(event)
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _emit=_emit,
+    )
+    deps = SimpleNamespace(event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-overwrite-guard",
+        run_mode="execute",
+    )
+    target = str(tmp_path / "guarded.py")
+    record = ToolExecutionRecord(
+        operation_id="op-overwrite-guard",
+        tool_name="file_write",
+        args={"path": target, "write_session_id": "ws-guard"},
+        tool_call_id="tool-overwrite-guard",
+        result=ToolEnvelope(
+            success=False,
+            error="Refusing to overwrite the entire staged file for a new chunk section after prior sections were recorded.",
+            metadata={
+                "path": target,
+                "write_session_id": "ws-guard",
+                "error_kind": "chunked_write_overwrite_new_section_after_progress",
+                "write_sections_completed": ["imports", "helpers"],
+            },
+        ),
+    )
+
+    asyncio.run(
+        handle_failed_file_write_outcome(
+            graph_state=graph_state,
+            harness=harness,
+            deps=deps,
+            record=record,
+        )
+    )
+
+    assert len(graph_state.pending_tool_calls) == 1
+    pending = graph_state.pending_tool_calls[0]
+    assert pending.tool_name == "file_read"
+    assert pending.args == {"path": target}
+    assert state.recent_messages[-1].metadata["recovery_kind"] == "write_overwrite_guard_read_autocontinue"
+    assert "file_patch" in state.recent_messages[-1].content
+    assert "ast_patch" in state.recent_messages[-1].content
+    assert emitted[-1].data["ui_kind"] == "write_overwrite_guard_read_autocontinue"
+    assert any(event == "write_overwrite_guard_read_autocontinue" for event, _message, _data in runlog_events)
 
 
 def test_terminal_write_session_reuse_emits_one_recovery_nudge(tmp_path: Path) -> None:

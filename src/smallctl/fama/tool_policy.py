@@ -105,6 +105,50 @@ def fama_hidden_tools_for_exposure(
     return hidden_tools
 
 
+def fama_hidden_tool_reasons_for_exposure(
+    schemas: list[dict[str, Any]],
+    *,
+    state: Any,
+    mode: str,
+    config: Any = None,
+) -> dict[str, list[str]]:
+    hidden_tools = fama_hidden_tools_for_exposure(schemas, state=state, mode=mode, config=config)
+    if not hidden_tools:
+        return {}
+    active = active_mitigation_names(state)
+    exported = {_tool_name(schema) for schema in schemas}
+    reasons: dict[str, list[str]] = {tool: [] for tool in hidden_tools}
+    if "done_gate" in active:
+        if "task_complete" in hidden_tools:
+            reasons["task_complete"].append("done_gate_requires_verified_acceptance")
+        if "task_fail" in hidden_tools:
+            reasons["task_fail"].append("done_gate_preserves_repair_path")
+    if "remote_tool_exposure_guard" in active:
+        for tool in sorted(hidden_tools & _LOCAL_MUTATING_TOOLS):
+            reasons[tool].append("remote_tool_exposure_guard_hides_local_mutation")
+    if "tool_exposure_narrowing" in active:
+        repeated_tool = _latest_loop_repeated_tool(state)
+        if repeated_tool in hidden_tools:
+            reasons[repeated_tool].append("tool_exposure_narrowing_repeated_tool")
+    state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+    stagnation = getattr(state, "stagnation_counters", None)
+    if state_phase == "repair" and isinstance(stagnation, dict):
+        no_progress = int(stagnation.get("no_actionable_progress") or 0)
+        if no_progress >= 2:
+            for tool in sorted(hidden_tools & (_READ_LOOP_TOOLS | {"artifact_grep", "artifact_print", "log_note"})):
+                reasons[tool].append("repair_read_only_loop_breaker")
+    if not _interactive_ssh_tools_exposed(state):
+        for tool in sorted(hidden_tools & _INTERACTIVE_SSH_TOOLS):
+            reasons[tool].append("interactive_ssh_tools_not_exposed")
+    for tool in sorted(hidden_tools):
+        if not reasons[tool]:
+            if tool not in exported:
+                reasons[tool].append("not_exported")
+            else:
+                reasons[tool].append("fama_policy")
+    return reasons
+
+
 def _has_pending_ssh_auth_recovery(state: Any) -> bool:
     scratchpad = getattr(state, "scratchpad", None)
     if not isinstance(scratchpad, dict):

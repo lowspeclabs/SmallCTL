@@ -275,9 +275,18 @@ def _has_conflicting_paths(*, harness: Any, assistant_text: str, chosen_path: st
     approved_outputs = approved_plan_output_paths_from_harness(harness)
     chosen_is_approved_output = any(_same_path(output, chosen_path, cwd) for output in approved_outputs)
 
+    # If the chosen path is the active write-session target, the intent is
+    # unambiguous; do not let prose references to other files block recovery.
+    active_session = getattr(getattr(harness, "state", None), "write_session", None)
+    active_session_target = str(getattr(active_session, "write_target_path", "") or "").strip()
+    chosen_is_session_target = bool(active_session_target) and _same_path(active_session_target, chosen_path, cwd)
+
     task_candidates = task_target_paths_from_harness(harness)
     inline_candidates = _extract_inline_tool_paths(str(assistant_text or ""))
-    candidates = _ordered_unique(([] if chosen_is_approved_output else task_candidates) + inline_candidates)
+    candidates = _ordered_unique(
+        ([] if chosen_is_approved_output else task_candidates)
+        + ([] if chosen_is_session_target else inline_candidates)
+    )
     if not candidates:
         return False
     for candidate in candidates:

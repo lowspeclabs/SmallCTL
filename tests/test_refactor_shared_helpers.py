@@ -33,6 +33,7 @@ from smallctl.graph.model_stream_fallback_recovery import (
     _is_sub4b_write_timeout,
 )
 from smallctl.client import OpenAICompatClient, StreamResult
+from smallctl.client.chunk_parser import sanitize_assistant_content_for_history
 from smallctl.graph.model_stream_loop_recovery import handle_model_stream_chunk_error
 from smallctl.harness import Harness
 from smallctl.harness.task_intent import (
@@ -55,8 +56,10 @@ from smallctl.harness.task_classifier import (
     looks_like_capability_query,
     looks_like_action_request,
     looks_like_execution_followup,
+    looks_like_implementation_followup,
     looks_like_readonly_chat_request,
     looks_like_shell_request,
+    looks_like_numbered_implementation_followup,
     looks_like_write_patch_request,
     needs_loop_for_content_lookup,
     needs_memory_persistence,
@@ -76,6 +79,33 @@ def test_task_classifier_helpers_cover_core_run_mode_signals() -> None:
     assert looks_like_shell_request("run a shell command")
     assert looks_like_shell_request("install nginx on 10.0.0.5")
     assert looks_like_readonly_chat_request("what files are in this repo")
+
+
+def test_numbered_implementation_followup_recognizes_plural_forms() -> None:
+    assert looks_like_numbered_implementation_followup("implement fixes #1")
+    assert looks_like_numbered_implementation_followup("fixes #1")
+    assert looks_like_numbered_implementation_followup("apply the improvements #2")
+    assert looks_like_numbered_implementation_followup("do option #3")
+    assert looks_like_numbered_implementation_followup("start with proposal 4")
+    assert not looks_like_numbered_implementation_followup("describe option 1")
+    assert not looks_like_numbered_implementation_followup("list the fixes")
+    assert not looks_like_numbered_implementation_followup("")
+
+
+def test_unnumbered_implementation_followup_routes_to_write_capable_execution() -> None:
+    assert looks_like_implementation_followup("apply the user experience fixes")
+    assert looks_like_implementation_followup("apply the improvements")
+    assert not looks_like_implementation_followup("list the fixes")
+
+    intent = classify_runtime_intent("apply the user experience fixes", recent_messages=[])
+    assert intent.label == "author_write"
+    assert intent.task_mode == "local_execute"
+
+
+def test_channel_protocol_wrappers_do_not_become_assistant_text() -> None:
+    assistant, thinking = sanitize_assistant_content_for_history("<|channel>thought\n<channel|>")
+    assert assistant == ""
+    assert thinking == ""
 
 
 def test_write_patch_requests_outrank_shell_script_markers() -> None:

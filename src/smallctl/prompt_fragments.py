@@ -85,6 +85,15 @@ _SMALL_GEMMA_STRICT_FORMAT = (
     "describe intent only; do not copy that literal syntax into the response. "
 )
 
+_GEMMA_4_STRICT_FORMAT = (
+    "GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
+    "`<channel|>`, `<|channel>`, `<thought>`, `<thinking>`, angle-bracket function wrappers like "
+    "`<task_complete(...)>`, or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
+    "Reasoning must stay inside a single `<think>...</think>` block. "
+    "If a tool is needed, end reasoning cleanly and emit exactly one JSON object on its own line. "
+    "Do not repeat `<think>` or channel markers once the reasoning block has closed. "
+)
+
 _LFM_25_8B_STRICT_FORMAT = (
     "LFM2.5-8B STRICT FORMAT: Do not write JSON planning objects into chat. "
     "Never output top-level fields like `plan`, `next_actions`, `status_required`, or `next_step` as assistant text. "

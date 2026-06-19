@@ -32,6 +32,8 @@ _DEFAULT_LOOP_GUARD_CONFIG: dict[str, Any] = {
     "cumulative_write_gate": True,
     "checkpoint_gate": True,
     "diff_gate": True,
+    "checkpoint_extend_similarity_threshold": 0.85,
+    "checkpoint_extend_min_new_chars": 50,
 }
 
 

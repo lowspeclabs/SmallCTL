@@ -75,6 +75,10 @@ def _try_synthesize_from_stream_text(
     if intent is None or not can_safely_synthesize(intent, harness=harness):
         return None
     synthetic_call = build_synthetic_file_write_call(intent)
+    stream.tool_calls.append(synthetic_call)
+    stream.assistant_text = (
+        "[Recovered file_write from streamed assistant text after empty payload.]"
+    )
     harness._runlog(
         "stream_text_synthesized_from_assistant_text",
         "synthesized file_write directly from streamed assistant text",
@@ -254,6 +258,7 @@ async def resolve_model_stream_result(
         # repeated phrase again and makes the recovery nudge actionable.
         recovery_content_parts = [
             "Your previous response degenerated into a loop.",
+            "Do not emit `<think>`, `</think>`, `<|channel>`, `<channel|>`, `<thought>`, or any other angle-bracket control tags in your next response.",
             "Stop repeating and emit ONE concrete next action as a tool call.",
         ]
         user_task = ""
@@ -267,12 +272,51 @@ async def resolve_model_stream_result(
             recovery_content_parts.append(f"Current goal: {user_task}")
         try:
             from ..harness.tool_dispatch import chat_mode_tools
+            from ..harness.task_classifier import (
+                looks_like_author_write_request,
+                looks_like_implementation_followup,
+                looks_like_write_file_request,
+                looks_like_write_patch_request,
+            )
             allowed_tools = chat_mode_tools(harness)
             allowed_names = [
                 str(entry["function"]["name"])
                 for entry in allowed_tools
-                if isinstance(entry, dict) and isinstance(entry.get("function"), dict) and "name" in entry["function"]
+                if isinstance(entry, dict)
+                and isinstance(entry.get("function"), dict)
+                and "name" in entry["function"]
             ]
+            terminal_only = set(allowed_names).issubset({"task_complete", "task_fail"})
+            write_like_goal = bool(
+                user_task
+                and (
+                    looks_like_implementation_followup(user_task)
+                    or looks_like_write_patch_request(user_task)
+                    or looks_like_write_file_request(user_task)
+                    or looks_like_author_write_request(user_task)
+                )
+            )
+            if terminal_only and write_like_goal:
+                exported_tools = harness.registry.export_openai_tools(
+                    phase=harness.state.current_phase,
+                    mode="chat",
+                    profiles=set(harness.state.active_tool_profiles),
+                )
+                broader_names = [
+                    str(entry["function"]["name"])
+                    for entry in exported_tools
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("function"), dict)
+                    and "name" in entry["function"]
+                ]
+                if broader_names:
+                    allowed_names = broader_names
+                    harness._runlog(
+                        "degenerate_recovery_tool_list_broadened",
+                        "broadened degenerate-loop recovery tool list for write-like goal",
+                        goal=user_task,
+                        tool_names=allowed_names[:24],
+                    )
             if allowed_names:
                 shown = ", ".join(allowed_names[:8])
                 recovery_content_parts.append(f"Available tools now: {shown}")

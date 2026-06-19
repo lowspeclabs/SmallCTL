@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag
+from ..retrieval_safety import build_retrieval_safe_text, format_failure_tag, sanitize_retrieval_text
 from ..state import LoopState, MemoryEntry, memory_entry_is_stale, normalize_intent_label
 
 
@@ -128,7 +128,9 @@ def build_retrieval_query(state: LoopState, *, retriever_cls: Any) -> str:
         if not _is_recovery_nudge_message(message)
     ]):
         parts.append(content)
-    return "\n".join(part for part in parts if part)
+    return "\n".join(
+        sanitize_retrieval_text(part) for part in parts if part
+    )
 
 
 def build_refined_retrieval_query(
@@ -213,7 +215,9 @@ def build_refined_retrieval_query(
         )
         if last_user:
             parts.append(f"Latest user context: {last_user[:240]}")
-    return "\n".join(part for part in parts if part)
+    return "\n".join(
+        sanitize_retrieval_text(part) for part in parts if part
+    )
 
 
 def _visible_memory_texts(

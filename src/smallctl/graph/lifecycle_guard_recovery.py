@@ -25,6 +25,16 @@ def _dispatch_stagnation_recovery(harness: Any, guard_error: str) -> None:
         )
     else:
         repair_directive = " Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
+    harness._runlog(
+        "recovery_decision",
+        "selected stagnation recovery nudge",
+        status="scheduled",
+        recovery_kind="stagnation",
+        guard_error=guard_error,
+        step=getattr(harness.state, "step_count", 0),
+        current_phase=getattr(harness.state, "current_phase", ""),
+        active_intent=getattr(harness.state, "active_intent", ""),
+    )
     harness.state.append_message(
         ConversationMessage(
             role="system",
@@ -63,6 +73,17 @@ def _dispatch_artifact_read_recovery(harness: Any, graph_state: Any, recovery_hi
     artifact_id, query = recovery_hint
     from .tool_call_parser import _clear_artifact_read_guard_state
     _clear_artifact_read_guard_state(harness, artifact_id)
+    harness._runlog(
+        "recovery_decision",
+        "selected direct artifact_read recovery dispatch",
+        status="scheduled",
+        recovery_kind="artifact_read",
+        recovery_mode="direct_dispatch",
+        tool_name="artifact_grep",
+        artifact_id=artifact_id,
+        query=query,
+        step=getattr(harness.state, "step_count", 0),
+    )
     graph_state.pending_tool_calls = [
         PendingToolCall(
             tool_name="artifact_grep",
@@ -103,6 +124,17 @@ def _inject_artifact_read_recovery_nudge(harness: Any, recovery_hint: tuple[str,
     recovery_armed = harness.state.scratchpad.get("_artifact_read_recovery_nudged")
     if recovery_armed == artifact_id:
         return
+    harness._runlog(
+        "recovery_decision",
+        "selected artifact_read recovery nudge",
+        status="scheduled",
+        recovery_kind="artifact_read",
+        recovery_mode="chat_nudge",
+        tool_name="artifact_grep",
+        artifact_id=artifact_id,
+        query=query,
+        step=getattr(harness.state, "step_count", 0),
+    )
     msg = (
         f"You are repeating `artifact_read` on artifact {artifact_id}. "
         f"Use `artifact_grep` with query `{query}` instead of reading the same artifact again."

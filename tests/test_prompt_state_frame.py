@@ -89,6 +89,32 @@ def test_prompt_assembler_builds_prompt_state_frame_and_spine_fields() -> None:
     assert "Working memory:" in assembly.messages[0]["content"]
 
 
+def test_prompt_assembler_drops_blank_recent_messages_but_keeps_tool_call_carriers() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Patch the file"
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "file_read", "arguments": '{"path":"a.py"}'},
+    }
+    state.recent_messages = [
+        ConversationMessage(role="assistant", content="\n"),
+        ConversationMessage(role="assistant", content=None, tool_calls=[tool_call]),
+        ConversationMessage(role="tool", content="read ok", name="file_read", tool_call_id="call-1"),
+        ConversationMessage(role="user", content="continue"),
+    ]
+
+    assembly = PromptAssembler(ContextPolicy(max_prompt_tokens=2048, recent_message_limit=8)).build_messages(
+        state=state,
+        system_prompt="SYSTEM PROMPT",
+    )
+
+    assistant_messages = [message for message in assembly.messages if message["role"] == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].get("tool_calls") == [tool_call]
+    assert not any(message.get("content") == "\n" for message in assembly.messages)
+
+
 def test_prompt_assembler_renders_active_artifact_read_ledger() -> None:
     state = LoopState(cwd="/tmp")
     state.run_brief.original_task = "Summarize cron jobs"

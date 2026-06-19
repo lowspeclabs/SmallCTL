@@ -919,6 +919,11 @@ async def handle_failed_file_write_outcome(
         harness,
         record,
     )
+    scheduled_overwrite_guard_read = _write_session_outcomes._maybe_schedule_write_overwrite_guard_read_recovery(
+        graph_state,
+        harness,
+        record,
+    )
     scheduled_patch_read = _write_session_outcomes._maybe_schedule_file_patch_read_recovery(
         graph_state,
         harness,
@@ -931,6 +936,18 @@ async def handle_failed_file_write_outcome(
                 event_type=UIEventType.ALERT,
                 content="Auto-continuing recovery by reading the current staged content.",
                 data={"status_activity": "auto-continuing staged read"},
+            ),
+        )
+    elif scheduled_overwrite_guard_read:
+        await harness._emit(
+            deps.event_handler,
+            UIEvent(
+                event_type=UIEventType.ALERT,
+                content="Auto-continuing write-session recovery by reading the current staged content before patching.",
+                data={
+                    "status_activity": "auto-continuing overwrite-guard read",
+                    "ui_kind": "write_overwrite_guard_read_autocontinue",
+                },
             ),
         )
     elif _maybe_schedule_chunked_write_loop_guard_read(graph_state, harness, record):

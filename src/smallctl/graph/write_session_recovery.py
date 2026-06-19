@@ -79,6 +79,15 @@ def _maybe_schedule_write_recovery_readback(
         )
     )
     harness._runlog(
+        "recovery_decision",
+        "selected write recovery read-back verification",
+        status="scheduled",
+        recovery_kind="write_recovery_readback",
+        tool_name="file_read",
+        tool_call_id=tool_call_id,
+        path=path,
+    )
+    harness._runlog(
         "write_recovery_readback_scheduled",
         "scheduled mandatory read-back after synthesized write success",
         tool_call_id=tool_call_id,
@@ -259,5 +268,6 @@ _maybe_emit_patch_existing_first_choice_nudge = _write_session_patch_recovery._m
 _recover_patch_existing_recovery_session = _write_session_patch_recovery._recover_patch_existing_recovery_session
 _maybe_schedule_patch_existing_stage_read_recovery = _write_session_patch_recovery._maybe_schedule_patch_existing_stage_read_recovery
 _maybe_schedule_file_patch_read_recovery = _write_session_patch_recovery._maybe_schedule_file_patch_read_recovery
+_maybe_schedule_write_overwrite_guard_read_recovery = _write_session_patch_recovery._maybe_schedule_write_overwrite_guard_read_recovery
 _maybe_emit_write_session_target_path_redirect_nudge = _write_session_patch_recovery._maybe_emit_write_session_target_path_redirect_nudge
 _clear_patch_existing_stage_read_autocontinue_count_after_success = _write_session_patch_recovery._clear_patch_existing_stage_read_autocontinue_count_after_success

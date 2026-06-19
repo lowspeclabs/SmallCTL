@@ -1164,6 +1164,45 @@ def test_render_restored_chat_shows_recovery_system_messages() -> None:
     assert rendered == [(UIEventType.SYSTEM, "Auto-continuing patch recovery for `x.py`.")]
 
 
+def test_render_restored_chat_hides_internal_recovery_prompts() -> None:
+    rendered: list[tuple[UIEventType, str]] = []
+
+    class _Console:
+        async def clear_bubbles(self) -> None:
+            return None
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append((event.event_type, event.content))
+
+    class _Flow(SmallctlAppActionsMixin):
+        def __init__(self) -> None:
+            self.harness = None
+            self.console = _Console()
+
+        def _get_console(self) -> _Console:
+            return self.console
+
+    flow = _Flow()
+
+    asyncio.run(
+        flow._render_restored_chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "The human answered affirmatively to the clarification request.",
+                    "metadata": {
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "ask_human_affirmative_resume",
+                        "hidden_from_ui": True,
+                    },
+                },
+            ]
+        )
+    )
+
+    assert rendered == []
+
+
 def test_render_restored_chat_shows_ui_transcript_system_messages() -> None:
     rendered: list[tuple[UIEventType, str]] = []
 

@@ -208,17 +208,6 @@ def test_build_backend_rca_strip_empty_when_no_data() -> None:
     assert rca == ""
 
 
-def test_format_run_log_row_verifier_path_false_negative() -> None:
-    row = {
-        "channel": "harness",
-        "event": "verifier_path_false_negative_guard",
-        "data": {"target": "/tmp/pihole-install.sh", "command": "bash /tmp/pihole-install.sh"},
-    }
-    formatted = format_run_log_row(row)
-    assert "verifier path-failure overridden" in formatted
-    assert "⚠️" in formatted
-
-
 def test_format_run_log_row_timeout_override() -> None:
     row = {
         "channel": "harness",
@@ -426,23 +415,6 @@ def test_format_recovery_banner_ssh_host_key_recovery_required() -> None:
     assert "ssh-keygen -R" in banner
 
 
-def test_format_recovery_banner_long_running_remote_timeout_write_guard() -> None:
-    data = {"tool_name": "ssh_file_write"}
-    banner = format_recovery_banner("long_running_remote_timeout_write_guard", data)
-    assert "ssh_file_write" in banner
-    assert "blocked" in banner.lower()
-    assert "larger timeout_sec" in banner
-
-
-def test_should_render_event_shows_blocked_write_guard_alert() -> None:
-    event = UIEvent(
-        event_type=UIEventType.ALERT,
-        content="Blocked file-write repair after a long-running remote SSH command timed out.",
-        data={"event": "long_running_remote_timeout_write_guard", "tool_name": "ssh_file_write"},
-    )
-    assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
-
-
 def test_should_render_event_shows_partial_tool_call_cancelled_when_system_hidden() -> None:
     event = UIEvent(
         event_type=UIEventType.SYSTEM,
@@ -459,6 +431,136 @@ def test_format_run_log_row_partial_tool_call_cancelled() -> None:
         "data": {"tool_name": "file_write", "argument_chars": 4096},
     }
     assert "Partial tool call cancelled before dispatch: file_write (4096 argument chars received)" in format_run_log_row(row)
+
+
+def test_format_run_log_row_file_patch_fresh_read_required() -> None:
+    row = {
+        "channel": "harness",
+        "event": "file_patch_fresh_read_required",
+        "data": {"target_path": "temp/example.py", "recovery_count": 2, "error_kind": "patch_target_not_found"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "fresh read required" in formatted.lower()
+    assert "temp/example.py" in formatted
+
+
+def test_format_run_log_row_file_patch_blocked_pending_fresh_read() -> None:
+    row = {
+        "channel": "harness",
+        "event": "file_patch_blocked_pending_fresh_read",
+        "data": {"target_path": "temp/example.py"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "blocked" in formatted.lower()
+    assert "temp/example.py" in formatted
+
+
+def test_format_run_log_row_file_patch_fresh_read_satisfied() -> None:
+    row = {
+        "channel": "harness",
+        "event": "file_patch_fresh_read_satisfied",
+        "data": {"target_path": "temp/example.py", "read_path": "temp/example.py"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "fresh read satisfied" in formatted.lower()
+    assert "temp/example.py" in formatted
+
+
+def test_format_run_log_row_near_budget_verifier_scheduled() -> None:
+    row = {
+        "channel": "harness",
+        "event": "near_budget_verifier_scheduled",
+        "data": {"command": "python3 ./temp/example.py info"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "verification reserved" in formatted.lower()
+    assert "python3 ./temp/example.py info" in formatted
+
+
+def test_format_run_log_row_repair_stall_recovery() -> None:
+    row = {
+        "channel": "harness",
+        "event": "repair_stall_recovery",
+        "data": {"tool_name": "file_patch", "failure_class": "patch_target_not_found"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "repair stall" in formatted.lower()
+    assert "file_patch" in formatted
+
+
+def test_format_run_log_row_stagnation_recovery() -> None:
+    row = {
+        "channel": "harness",
+        "event": "stagnation_recovery",
+        "data": {},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "stagnation recovery" in formatted.lower()
+
+
+def test_format_run_log_row_guard_trip_diagnosis() -> None:
+    row = {
+        "channel": "harness",
+        "event": "guard_trip_diagnosis",
+        "data": {"guard_error": "max_steps exceeded", "recent_error_count": 5},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "guard diagnosis" in formatted.lower()
+    assert "max_steps exceeded" in formatted
+
+
+def test_format_run_log_row_write_overwrite_guard_read_autocontinue() -> None:
+    row = {
+        "channel": "harness",
+        "event": "write_overwrite_guard_read_autocontinue",
+        "data": {"target_path": "temp/example.py", "session_id": "ws-1"},
+    }
+    assert should_render_run_log_row(row) is True
+    formatted = format_run_log_row(row)
+    assert "write recovery" in formatted.lower()
+    assert "temp/example.py" in formatted
+    assert "file_patch" in formatted
+    assert "ast_patch" in formatted
+
+
+def test_critical_events_rendered_when_system_messages_hidden() -> None:
+    for ui_kind in (
+        "file_patch_fresh_read_required",
+        "file_patch_blocked_pending_fresh_read",
+        "file_patch_fresh_read_satisfied",
+        "near_budget_verifier_scheduled",
+        "repair_stall_recovery",
+        "stagnation_recovery",
+        "guard_trip_diagnosis",
+        "write_overwrite_guard_read_autocontinue",
+    ):
+        event = UIEvent(
+            event_type=UIEventType.SYSTEM,
+            data={"ui_kind": ui_kind, "message": "recovery event"},
+        )
+        assert should_render_event(event, show_system_messages=False, show_tool_calls=False) is True
+
+
+def test_format_recovery_banner_fresh_read_before_patch() -> None:
+    banner = format_recovery_banner("file_patch_fresh_read_required", {})
+    assert "fresh file read" in banner.lower()
+    assert "patch" in banner.lower()
+
+    banner = format_recovery_banner("file_patch_blocked_pending_fresh_read", {})
+    assert "fresh file read" in banner.lower()
+    assert "patch" in banner.lower()
+
+
+def test_format_recovery_banner_near_budget_verifier() -> None:
+    banner = format_recovery_banner("near_budget_verifier_scheduled", {})
+    assert "verification reserved" in banner.lower()
 
 
 def test_should_render_event_shows_tool_dispatch_cancelled_when_system_hidden() -> None:

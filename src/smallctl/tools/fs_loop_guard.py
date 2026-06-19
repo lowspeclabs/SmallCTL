@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from ..state import LoopState
 from .fs_loop_guard_actions import outline_handoff_question
 from .fs_loop_guard_status import loop_guard_status_payload
-from .fs_loop_guard_utils import content_hash, count_added_lines, resolve_path, tail_excerpt as _tail_excerpt
+from .fs_loop_guard_utils import content_hash, count_added_lines, is_substantially_new_content, resolve_path, tail_excerpt as _tail_excerpt
 from .fs_sessions import _write_session_can_finalize
 from .type_coerce import as_bool, as_float, as_int
 from .fs_loop_guard_support import (
@@ -28,6 +28,16 @@ from .fs_loop_guard_support import (
     _path_state,
     loop_guard_config,
 )
+
+
+def _existing_section_content(session: Any, section_name: str, staged_content: str) -> str:
+    ranges = getattr(session, "write_section_ranges", None) or {}
+    section_range = ranges.get(section_name)
+    if not isinstance(section_range, dict):
+        return ""
+    start = int(section_range.get("start", 0))
+    end = int(section_range.get("end", start))
+    return str(staged_content or "")[start:end]
 
 
 def maybe_block_chunked_write(
@@ -225,7 +235,15 @@ def maybe_block_chunked_write(
         and section_name
         and section_name in checkpoints
     ):
-        if prior_level >= 2 or int(path_state.get("blocked_attempts", 0) or 0) >= 1:
+        existing_section = _existing_section_content(session, section_name, staged_content)
+        if replace_strategy != "overwrite" and is_substantially_new_content(
+            content,
+            existing_section,
+            similarity_threshold=float(config.get("checkpoint_extend_similarity_threshold", 0.85)),
+            min_new_chars=int(config.get("checkpoint_extend_min_new_chars", 50)),
+        ):
+            pass
+        elif prior_level >= 2 or int(path_state.get("blocked_attempts", 0) or 0) >= 1:
             return _hard_abort_chunked_write(
                 state=state,
                 path_state=path_state,
@@ -238,24 +256,27 @@ def maybe_block_chunked_write(
                 tail_excerpt=tail_excerpt,
                 trigger_kind="checkpoint_revisit",
             )
-        return _emit_block(
-            state,
-            path_state,
-            LoopGuardDecision(
-                action="block",
-                message=f"LoopGuard: section `{section_name}` was already checkpointed for `{path}`. "
-                "Read the current staged content and advance to the next section instead of rewriting it.",
-                error_kind="chunked_write_checkpoint_revisit",
-            ),
-            resolved_path=resolved_path,
-            session_id=session_id,
-            section_name=section_name,
-            next_section_name=next_section_name,
-            score=score,
-            signals=signals,
-            tail_excerpt=tail_excerpt,
-            level=1,
-        )
+        else:
+            return _emit_block(
+                state,
+                path_state,
+                LoopGuardDecision(
+                    action="block",
+                    message=f"LoopGuard: section `{section_name}` was already checkpointed for `{path}`. "
+                    "Read the current staged content and advance to the next section instead of rewriting it. "
+                    "If you are adding a new subsection, use a different `section_name` or extend the staged file "
+                    "with `replace_strategy='append'` and content that is clearly different from the checkpointed section.",
+                    error_kind="chunked_write_checkpoint_revisit",
+                ),
+                resolved_path=resolved_path,
+                session_id=session_id,
+                section_name=section_name,
+                next_section_name=next_section_name,
+                score=score,
+                signals=signals,
+                tail_excerpt=tail_excerpt,
+                level=1,
+            )
 
     if (
         bool(config.get("cumulative_write_gate", True))

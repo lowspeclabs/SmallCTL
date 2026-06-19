@@ -136,6 +136,17 @@ class RuntimeGraphBuilder:
             except Exception as exc:
                 elapsed = time.monotonic() - started
                 touch_graph_activity(harness)
+                if type(exc).__name__ == "GraphInterrupt":
+                    runlog(
+                        harness,
+                        f"{node_name}_pause",
+                        "graph node paused for interrupt",
+                        node=node_name,
+                        elapsed_sec=round(elapsed, 3),
+                        interrupt_type=type(exc).__name__,
+                        interrupt_message=str(exc),
+                    )
+                    raise
                 runlog(
                     harness,
                     f"{node_name}_error",

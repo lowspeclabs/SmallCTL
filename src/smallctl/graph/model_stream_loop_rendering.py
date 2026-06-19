@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 import time
 from typing import Any, Literal
 
@@ -39,6 +40,8 @@ def _stream_wrapper_pairs(
         (start_tag, end_tag, "thinking"),
         ("<analysis>", "</analysis>", "thinking"),
         ("<plan>", "</plan>", "thinking"),
+        ("<|channel>", "<channel|>", "thinking"),
+        ("<|channel|>", "</|channel|>", "thinking"),
         ("<response>", "</response>", "assistant"),
         ("<execution>", "</execution>", "assistant"),
     ]
@@ -80,6 +83,15 @@ async def _emit_stream_text(
 ) -> None:
     if not text:
         return
+    if kind == "thinking":
+        text = re.sub(
+            r"^(?:thought|thinking|analysis|reasoning)\b\s*",
+            "",
+            str(text),
+            flags=re.IGNORECASE,
+        )
+        if not text:
+            return
     if kind == "assistant" and echo_to_stdout:
         harness._stream_print(text)
     if kind == "thinking" and suppress_duplicate_thinking:

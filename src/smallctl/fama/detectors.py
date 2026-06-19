@@ -14,7 +14,6 @@ from .detector_classifiers import (
     _READ_LOOP_TOOLS,
     _REMOTE_CONFUSION_REASONS,
     _TEST_FAILURE_MARKERS,
-    _ZERO_TEST_MARKERS,
     _is_patch_target_miss,
     _looks_like_test_failure_output,
     _looks_like_zero_tests,
@@ -604,7 +603,7 @@ def detect_tool_output_misread(
         )
     ):
         return None
-    evidence = f"task_complete contradicted or misread tool output"
+    evidence = "task_complete contradicted or misread tool output"
     if reason:
         evidence += f"; reason={reason}"
     return FamaSignal(
@@ -620,6 +619,35 @@ def detect_tool_output_misread(
     )
 
 
+def detect_model_output_degenerate_loop(state: Any) -> FamaSignal | None:
+    """Fire immediately when the most recent stream halt was a degenerate loop.
+
+    Unlike the generic backend_stream_halt detector, this does not wait for a
+    repeat count: a model emitting unrecoverable control-tag repetition is a
+    severe failure mode that warrants an immediate mitigation capsule.
+    """
+    scratchpad = getattr(state, "scratchpad", None)
+    scratchpad = scratchpad if isinstance(scratchpad, dict) else {}
+    halt_reason = str(scratchpad.get("_last_stream_halt_reason") or "").strip()
+    if halt_reason != "model_output_degenerate_loop":
+        return None
+    halt_details = scratchpad.get("_last_stream_halt_details")
+    halt_details = halt_details if isinstance(halt_details, dict) else {}
+    repeated_phrase = str(halt_details.get("repeated_phrase") or "").strip()
+    evidence = "model output degenerated into a repetition loop"
+    if repeated_phrase:
+        evidence += f"; repeated_phrase={repeated_phrase[:120]}"
+    return FamaSignal(
+        kind=FamaFailureKind.BACKEND_STREAM_HALT,
+        severity=3,
+        source="backend_recovery",
+        evidence=evidence,
+        step=current_step(state),
+        failure_class="backend_stream_failure",
+        next_safe_action="Emit exactly one concrete next action; do not repeat reasoning tags or re-derive context from scratch.",
+    )
+
+
 def detect_backend_stream_halt(state: Any, *, threshold: int = 2) -> FamaSignal | None:
     scratchpad = getattr(state, "scratchpad", None)
     scratchpad = scratchpad if isinstance(scratchpad, dict) else {}
@@ -632,6 +660,9 @@ def detect_backend_stream_halt(state: Any, *, threshold: int = 2) -> FamaSignal 
         or recovery.get("status")
         or ""
     ).strip()
+    # Degenerate loops are handled by the dedicated detector above.
+    if recovery_reason == "model_output_degenerate_loop":
+        return None
     recovery_text = " ".join(str(value).lower() for value in recovery.values())
     streamish_recovery = any(marker in recovery_text for marker in ("stream", "first_token", "timeout", "halt"))
     if not halted and not streamish_recovery:

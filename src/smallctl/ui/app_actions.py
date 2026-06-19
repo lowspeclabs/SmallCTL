@@ -345,6 +345,8 @@ class SmallctlAppActionsMixin:
             if not isinstance(metadata, dict):
                 data = message.get("data")
                 metadata = data if isinstance(data, dict) else {}
+            if metadata.get("hidden_from_ui") or metadata.get("ui_hidden"):
+                continue
             speaker_data = _restored_speaker_data(metadata)
             if role == "user":
                 if content.strip():

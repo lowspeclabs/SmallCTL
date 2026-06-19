@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""runscan — batch health check over recent SmallCTL runs.
+
+Useful when you have many logs and want to know which recent runs failed,
+what failure patterns are trending, and which runs deserve closer inspection.
+
+Examples:
+  python3 Agent-Tools/runscan.py
+  python3 Agent-Tools/runscan.py --last 50
+  python3 Agent-Tools/runscan.py --last 100 --failures-only
+  python3 Agent-Tools/runscan.py --last 20 --json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from agent_tools_lib import (
+    Colors,
+    colorize,
+    discover_runs,
+    error_records,
+    event_counter,
+    format_duration,
+    iter_records,
+    load_summaries,
+    load_task_summaries,
+    run_duration_seconds,
+    warning_records,
+)
+
+
+FAILURE_CLASS_LABELS = {
+    "success": "success",
+    "success_with_errors": "success_with_errors",
+    "model_degeneration": "model_degeneration",
+    "model_tool_loop_stall": "model_tool_loop_stall",
+    "file_patch_target_not_found_loop": "file_patch_target_not_found_loop",
+    "runtime_exception": "runtime_exception",
+    "policy_block": "policy_block",
+    "fama_block": "fama_block",
+    "chat_failure": "chat_failure",
+    "write_session_overwrite_guard_loop": "write_session_overwrite_guard_loop",
+    "ask_human_resume_terminal_tool_stall": "ask_human_resume_terminal_tool_stall",
+    "recovery_failure": "recovery_failure",
+    "incomplete_unverified": "incomplete_unverified",
+}
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Scan recent SmallCTL runs for failures.")
+    parser.add_argument("--last", type=int, default=30, help="Number of recent runs to scan (default: 30)")
+    parser.add_argument("--logs-dir", help="Custom logs directory")
+    parser.add_argument("--failures-only", action="store_true", help="Only show runs with errors or incomplete status")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    return parser.parse_args()
+
+
+def _has_write_overwrite_guard_failures(failed_dispatches: list[dict[str, Any]]) -> bool:
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        text = json.dumps(data, default=str, ensure_ascii=False)
+        if "chunked_write_overwrite_new_section_after_progress" in text:
+            return True
+        if "Refusing to overwrite the entire staged file for a new chunk section" in text:
+            return True
+    return False
+
+
+
+def _file_patch_target_loop_count(failed_dispatches: list[dict[str, Any]]) -> int:
+    count = 0
+    needles = (
+        "patch_target_not_found",
+        "target text not found",
+        "target_text_not_found",
+        "exact text",
+        "repair_cycle_read_required",
+        "fresh_file_read_required_before_patch",
+        "reading the target file before patching",
+        "old target text is gone",
+        "patch already landed",
+        "already matches",
+        "no changes needed",
+        "repeat_sensitive_patch_already_applied",
+    )
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        if str(data.get("tool_name") or "").strip() != "file_patch":
+            continue
+        text = json.dumps(data, default=str, ensure_ascii=False).lower()
+        if any(needle in text for needle in needles):
+            count += 1
+    return count
+
+
+def _has_ask_human_resume_terminal_stall(records: list[dict[str, Any]]) -> bool:
+    saw_interrupt_resume = False
+    saw_terminal_only_after_resume = False
+    saw_stall_after_resume = False
+    for rec in records:
+        event = str(rec.get("event") or "")
+        data = rec.get("data") or {}
+        if event == "interrupt_resume":
+            saw_interrupt_resume = True
+            continue
+        if not saw_interrupt_resume:
+            continue
+        if event == "chat_tool_selection" and isinstance(data, dict):
+            reason = str(data.get("reason") or "").strip()
+            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
+                saw_terminal_only_after_resume = True
+        if event in {"action_stall", "model_output_degenerate_loop_exhausted"}:
+            saw_stall_after_resume = True
+    return saw_interrupt_resume and saw_terminal_only_after_resume and saw_stall_after_resume
+
+
+def _classify_run(
+    events: Counter[str],
+    errors: list[dict[str, Any]],
+    session: dict[str, Any],
+    task_summary: dict[str, Any],
+    failed_dispatches: list[dict[str, Any]],
+    harness_records: list[dict[str, Any]],
+) -> str:
+    overall = session.get("overall_objective_status")
+    final = task_summary.get("final_task_status")
+    deliverable_verified = session.get("deliverable_verified")
+    completed = overall in {"complete", "completed", "chat_completed", "chat_success"}
+    incomplete_ids = session.get("incomplete_task_ids")
+    has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
+
+    if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
+        return "success"
+    if overall in {"complete", "completed"} and deliverable_verified is True and errors:
+        return "success_with_errors"
+    if overall in {"chat_completed", "chat_success"} and not errors:
+        return "success"
+    if completed and not has_incomplete_tasks:
+        return "success_with_errors" if errors else "success"
+    if final in {"chat_failed", "chat_action_blocked"}:
+        return "chat_failure"
+    if _has_write_overwrite_guard_failures(failed_dispatches):
+        return "write_session_overwrite_guard_loop"
+    if _file_patch_target_loop_count(failed_dispatches) >= 3:
+        return "file_patch_target_not_found_loop"
+    if _has_ask_human_resume_terminal_stall(harness_records):
+        return "ask_human_resume_terminal_tool_stall"
+    if events.get("model_output_degenerate_loop_exhausted"):
+        return "model_degeneration"
+    if events.get("action_stall") or events.get("no_tool_recovery"):
+        return "model_tool_loop_stall"
+    if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
+        return "runtime_exception"
+    if events.get("tool_blocked_not_exposed"):
+        return "policy_block"
+    if events.get("fama_tool_call_blocked"):
+        return "fama_block"
+    if events.get("recovery_failure_event_recorded"):
+        return "recovery_failure"
+    if overall == "incomplete" and session.get("deliverable_verified") is False:
+        return "incomplete_unverified"
+    return "unknown"
+
+
+def _summarize_run(run_dir: Path) -> dict[str, Any]:
+    summaries = load_summaries(run_dir)
+    session = summaries.get("session_summary", {})
+    task_summary = summaries.get("task_summary", {})
+    task_summaries = load_task_summaries(run_dir)
+
+    harness_records = list(iter_records(run_dir, "harness"))
+    tools_records = list(iter_records(run_dir, "tools"))
+    events = event_counter(harness_records)
+    errors = error_records(harness_records)
+    warnings = warning_records(harness_records)
+
+    dispatch_starts = [r for r in tools_records if r.get("event") == "dispatch_start"]
+    failed_dispatches = [r for r in tools_records if r.get("event") == "dispatch_complete" and (r.get("data") or {}).get("success") is False]
+
+    return {
+        "run_dir": str(run_dir),
+        "run_name": run_dir.name,
+        "duration_seconds": run_duration_seconds(harness_records),
+        "overall_objective_status": session.get("overall_objective_status"),
+        "final_task_status": task_summary.get("final_task_status"),
+        "deliverable_verified": session.get("deliverable_verified"),
+        "task_count": len(task_summaries),
+        "incomplete_task_count": len(session.get("incomplete_task_ids", [])),
+        "dispatch_count": len(dispatch_starts),
+        "failed_dispatch_count": len(failed_dispatches),
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "classification": _classify_run(events, errors, session, task_summary, failed_dispatches, harness_records),
+        "top_events": dict(events.most_common(5)),
+    }
+
+
+def _status_color(status: str | None) -> str:
+    if status == "success":
+        return Colors.GREEN
+    if status == "success_with_errors":
+        return Colors.YELLOW
+    if status in {"model_degeneration", "runtime_exception", "policy_block", "fama_block", "recovery_failure", "chat_failure", "write_session_overwrite_guard_loop", "file_patch_target_not_found_loop", "ask_human_resume_terminal_tool_stall"}:
+        return Colors.RED
+    if status in {"model_tool_loop_stall", "incomplete_unverified", "unknown"}:
+        return Colors.YELLOW
+    return Colors.RESET
+
+
+def main() -> int:
+    args = _parse_args()
+    logs_dir = Path(args.logs_dir) if args.logs_dir else None
+    try:
+        base = logs_dir or Path(__file__).resolve().parent.parent / "logs"
+        runs = discover_runs(base)[: args.last]
+    except (FileNotFoundError, ValueError) as exc:
+        print(colorize(str(exc), Colors.RED), file=sys.stderr)
+        return 1
+
+    if not runs:
+        print(colorize("No runs found.", Colors.YELLOW), file=sys.stderr)
+        return 1
+
+    summaries = [_summarize_run(r) for r in runs]
+    if args.failures_only:
+        summaries = [s for s in summaries if s["classification"] != "success" or s["error_count"] > 0]
+
+    if args.json:
+        print(json.dumps(summaries, indent=2, default=str))
+        return 0
+
+    lines: list[str] = []
+    lines.append(colorize(f"Recent runs ({len(summaries)} of {args.last})", Colors.BOLD + Colors.CYAN))
+    lines.append("")
+
+    # Header
+    header = f"{'run':<18} {'class':<22} {'status':<12} {'dur':<8} {'tasks':>5} {'errs':>5} {'warns':>5} {'disp':>5} {'faildisp':>8}"
+    lines.append(colorize(header, Colors.BOLD))
+    lines.append("-" * len(header))
+
+    for s in summaries:
+        name = s["run_name"].split("-")[0]
+        cls = s["classification"]
+        status = s["final_task_status"] or s["overall_objective_status"] or "n/a"
+        row = (
+            f"{name:<18} "
+            f"{cls:<22} "
+            f"{str(status):<12} "
+            f"{format_duration(s['duration_seconds']):<8} "
+            f"{s['task_count']:>5} "
+            f"{s['error_count']:>5} "
+            f"{s['warning_count']:>5} "
+            f"{s['dispatch_count']:>5} "
+            f"{s['failed_dispatch_count']:>8}"
+        )
+        lines.append(colorize(row, _status_color(cls)))
+
+    # Failure pattern summary
+    class_counter = Counter(s["classification"] for s in summaries)
+    lines.append("")
+    lines.append(colorize("Failure pattern counts", Colors.BOLD + Colors.BLUE))
+    for cls, count in class_counter.most_common():
+        lines.append(f"  {count:>4}  {cls}")
+
+    lines.append("")
+    lines.append(colorize("Next steps", Colors.BOLD + Colors.GREEN))
+    lines.append("  - Inspect a run: python3 Agent-Tools/logwatch.py <run_id>")
+    lines.append("  - Diagnose a run: python3 Agent-Tools/run_diagnose.py <run_id>")
+    lines.append("  - Trace the latest error: python3 Agent-Tools/trace_call.py --last-error")
+
+    print("\n".join(lines))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

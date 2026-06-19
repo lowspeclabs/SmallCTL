@@ -161,3 +161,174 @@ async def test_session_audit_and_counters():
     finally:
         smallctl.graph.model_stream.run_model_stream_loop = orig_loop
         smallctl.graph.model_stream.resolve_model_stream_result = orig_resolve
+
+
+
+def test_fama_tool_exposure_logs_hidden_reasons():
+    from smallctl.fama.tool_policy import fama_hidden_tool_reasons_for_exposure
+
+    state = SimpleNamespace(
+        current_phase="execute",
+        scratchpad={"_fama_config": {"enabled": True}},
+        stagnation_counters={},
+        repair_cycle_id="",
+    )
+    state.scratchpad["_expose_interactive_session_tools"] = False
+    schemas = [{"function": {"name": "ssh_session_start"}}]
+
+    reasons = fama_hidden_tool_reasons_for_exposure(
+        schemas,
+        state=state,
+        mode="loop",
+        config=SimpleNamespace(fama_enabled=True),
+    )
+
+    assert reasons["ssh_session_start"] == ["interactive_ssh_tools_not_exposed"]
+
+
+def test_schema_repair_decision_logs_parse_failure_and_repair_decision():
+    from smallctl.graph.node_support import schema_validation_repair_decision
+    from smallctl.graph.state import PendingToolCall
+
+    state = SimpleNamespace(step_count=3, scratchpad={})
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(schema_validation_retry_budget=2),
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    pending = PendingToolCall(
+        tool_name="file_patch",
+        args={},
+        tool_call_id="call-1",
+        raw_arguments="{bad",
+        parser_metadata={
+            "arguments_parse_error": {"kind": "malformed_json_arguments", "message": "bad json"}
+        },
+    )
+
+    decision = schema_validation_repair_decision(
+        harness,
+        pending,
+        "Tool call missing required fields",
+        {"required_fields": ["replacement_text"]},
+        target_path="src/app.py",
+    )
+
+    assert decision.status == "repair"
+    event_names = [event for event, _message, _data in events]
+    assert "tool_call_parse_failure" in event_names
+    assert "schema_validation_repair_decision" in event_names
+    repair_event = next(data for event, _message, data in events if event == "schema_validation_repair_decision")
+    assert repair_event["status"] == "repair"
+    assert repair_event["target_path"] == "src/app.py"
+    assert repair_event["required_fields"] == ["replacement_text"]
+
+
+def test_write_recovery_readback_logs_recovery_decision():
+    from smallctl.graph.state import GraphRunState, ToolExecutionRecord
+    from smallctl.graph.write_session_recovery import _maybe_schedule_write_recovery_readback
+    from smallctl.models.tool_result import ToolEnvelope
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad = {}
+    graph_state = GraphRunState(loop_state=state, thread_id="t", run_mode="loop")
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(enforce_write_recovery_readback=True),
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-1",
+        tool_name="file_write",
+        args={"path": "app.py"},
+        tool_call_id="write_recovery_call-1",
+        result=ToolEnvelope(success=True),
+    )
+
+    assert _maybe_schedule_write_recovery_readback(graph_state, harness, record) is True
+    decision = next(data for event, _message, data in events if event == "recovery_decision")
+    assert decision["recovery_kind"] == "write_recovery_readback"
+    assert decision["tool_name"] == "file_read"
+    assert decision["path"] == "app.py"
+
+
+def test_task_completion_remote_verifier_logs_recovery_decision():
+    from smallctl.graph.state import GraphRunState, ToolExecutionRecord
+    from smallctl.graph.task_completion_outcomes import _maybe_schedule_task_complete_remote_mutation_verifier
+    from smallctl.models.tool_result import ToolEnvelope
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad = {}
+    graph_state = GraphRunState(loop_state=state, thread_id="t", run_mode="loop")
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-1",
+        tool_name="task_complete",
+        args={"message": "done"},
+        tool_call_id="call-1",
+        result=ToolEnvelope(
+            success=False,
+            error="needs verification",
+            metadata={
+                "reason": "remote_mutation_requires_verification",
+                "next_required_action": {
+                    "tool_names": ["ssh_file_read"],
+                    "required_arguments": {
+                        "host": "192.0.2.1",
+                        "user": "root",
+                        "path": "/etc/app.conf",
+                    },
+                },
+            },
+        ),
+    )
+
+    assert _maybe_schedule_task_complete_remote_mutation_verifier(graph_state, harness, record) is True
+    decision = next(data for event, _message, data in events if event == "recovery_decision")
+    assert decision["recovery_kind"] == "task_complete_remote_mutation_verifier_autocontinue"
+    assert decision["tool_name"] == "ssh_file_read"
+    assert decision["path"] == "/etc/app.conf"
+
+
+def test_finalize_writes_run_summary(tmp_path):
+    from smallctl.harness.core_facade import _finalize
+    from smallctl.logging_utils import RunLogger
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad = {}
+    state.step_count = 2
+    state.inactive_steps = 0
+    state.token_usage = 0
+    logger = RunLogger(tmp_path / "run")
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        run_logger=logger,
+        checkpoint_on_exit=False,
+        _pending_task_shutdown_reason="",
+        _finalize_task_scope=lambda **kwargs: {
+            "task_id": "task-0001",
+            "summary_path": str(tmp_path / "run" / "tasks" / "task-0001" / "task_summary.json"),
+            "status": kwargs.get("status"),
+        },
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+        _record_terminal_experience=lambda result: None,
+        _rewrite_active_plan_export=lambda: None,
+        _persist_checkpoint=lambda result: None,
+        _schedule_background_persistence=None,
+    )
+
+    result = _finalize(harness, {"status": "completed", "message": "done"})
+
+    assert result["status"] == "completed"
+    run_summary = tmp_path / "run" / "run_summary.json"
+    assert run_summary.exists()
+    payload = __import__("json").loads(run_summary.read_text(encoding="utf-8"))
+    assert payload["summary_kind"] == "run"
+    assert payload["latest_task_id"] == "task-0001"

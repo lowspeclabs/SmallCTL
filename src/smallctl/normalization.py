@@ -159,11 +159,35 @@ def tokenize(text: str | None) -> set[str]:
         return set()
     return {token for token in re.findall(r"[a-z0-9_.:/\\-]+", text.lower()) if len(token) > 1}
 
+
+def _normalize_for_dedupe(text: str) -> str:
+    """Normalize text for fuzzy duplicate detection.
+
+    Strips common framing words and collapses whitespace so that semantically
+    identical memory entries (e.g. "The user wants to implement fix #3." vs
+    "The user has requested to 'implement fix #3'.") are treated as duplicates.
+    """
+    normalized = str(text or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9\s#-]", " ", normalized)
+    normalized = re.sub(
+        r"\b(?:the|user|wants|wants to|has requested|requested to|to|implement|fix|#|now|a|an|is|are|has|have|this|that|these|those)\b",
+        " ",
+        normalized,
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 def dedupe_keep_tail(items: list[str], *, limit: int) -> list[str]:
     """Remove duplicates from a list of strings while preserving the order and keeping the tail."""
     deduped: list[str] = []
+    seen: set[str] = set()
     for item in items:
         normalized = str(item).strip()
-        if normalized and normalized not in deduped:
+        if not normalized:
+            continue
+        fuzzy = _normalize_for_dedupe(normalized)
+        if fuzzy and fuzzy not in seen:
+            seen.add(fuzzy)
             deduped.append(normalized)
     return deduped[-limit:] if limit > 0 else []

@@ -1198,6 +1198,9 @@ class PromptAssembler:
     def _normalize_recent_message(self, message: ConversationMessage) -> ConversationMessage | None:
         if message.metadata.get("hidden_from_prompt") is True:
             return None
+        has_tool_calls = isinstance(message.tool_calls, list) and bool(message.tool_calls)
+        if not str(message.content or "").strip() and not has_tool_calls:
+            return None
         if (
             message.metadata.get("is_recovery_nudge") is True
             and str(message.content or "").lstrip().startswith("### SYSTEM ALERT")

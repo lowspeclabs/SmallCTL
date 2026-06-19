@@ -10,7 +10,44 @@ _REASONING_WRAPPER_TAGS = ("analysis", "plan")
 _ASSISTANT_WRAPPER_TAGS = ("execution", "response")
 _THINKING_START_TAG_ALIASES = ("<thinking>", "<thought>", "<|thought|>")
 _THINKING_END_TAG_ALIASES = ("</thinking>", "</thought>", "</|thought|>")
-_PROTOCOL_CONTROL_MARKERS = ("<channel|>", "<|channel|>")
+_PROTOCOL_CONTROL_MARKERS = ("<|channel>", "<channel|>", "<|channel|>")
+
+
+def _clean_channel_protocol_body(text: str) -> str:
+    cleaned = str(text or "").strip()
+    stripped = re.sub(
+        r"^(?:thought|thinking|analysis|reasoning)\b\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    if not stripped:
+        return ""
+    return cleaned
+
+
+def _extract_channel_protocol_blocks(text: str) -> tuple[str, str]:
+    normalized = str(text or "")
+    thinking_parts: list[str] = []
+
+    def _capture(match: re.Match[str]) -> str:
+        body = _clean_channel_protocol_body(match.group("body"))
+        if body:
+            thinking_parts.append(body)
+        return ""
+
+    for pattern in (
+        r"<\|channel>(?P<body>.*?)<channel\|>",
+        r"<\|channel\|>(?P<body>.*?)</\|channel\|>",
+        r"<channel\|>(?P<body>.*?)</channel\|>",
+    ):
+        normalized = re.sub(
+            pattern,
+            _capture,
+            normalized,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    return normalized, "".join(thinking_parts)
 
 
 def _normalize_thinking_tag_aliases(
@@ -145,9 +182,13 @@ def extract_thinking_from_tags(
         thinking_start_tag=thinking_start_tag,
         thinking_end_tag=thinking_end_tag,
     )
+    normalized, channel_thinking = _extract_channel_protocol_blocks(normalized)
     normalized, wrapped_reasoning = _extract_reasoning_wrapper_blocks(normalized)
     if not normalized or thinking_start_tag not in normalized:
-        return strip_protocol_control_markers(normalized), wrapped_reasoning
+        return strip_protocol_control_markers(normalized), merge_reasoning_text(
+            wrapped_reasoning,
+            channel_thinking,
+        )
 
     assistant_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -179,7 +220,11 @@ def extract_thinking_from_tags(
         thinking_parts.append(normalized[content_start:end])
         cursor = end + len(thinking_end_tag)
 
-    return strip_protocol_control_markers("".join(assistant_parts)), merge_reasoning_text(wrapped_reasoning, "".join(thinking_parts))
+    return strip_protocol_control_markers("".join(assistant_parts)), merge_reasoning_text(
+        wrapped_reasoning,
+        channel_thinking,
+        "".join(thinking_parts),
+    )
 
 
 def sanitize_assistant_content_for_history(
@@ -207,20 +252,10 @@ def sanitize_assistant_content_for_history(
         return ""
 
     # Extract channel protocol wrappers before the protocol-marker strip pass
-    # would delete the markers and leave reasoning content in assistant text.
-    # Models emit asymmetric markers like <|channel>...<channel|> as well as
-    # the symmetric <|channel|>...</|channel|> form.
-    for pattern in (
-        r"<\|channel>(?P<body>.*?)<channel\|>",
-        r"<\|channel\|>(?P<body>.*?)</\|channel\|>",
-        r"<channel\|>(?P<body>.*?)</channel\|>",
-    ):
-        assistant_text = re.sub(
-            pattern,
-            _capture_reasoning,
-            assistant_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+    # would delete the markers and leave reasoning labels in assistant text.
+    assistant_text, channel_thinking = _extract_channel_protocol_blocks(assistant_text)
+    if channel_thinking:
+        thinking_parts.append(channel_thinking)
 
     # Extract <reasoning>...</reasoning> wrappers.
     assistant_text = re.sub(

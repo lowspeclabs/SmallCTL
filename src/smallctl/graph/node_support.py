@@ -183,6 +183,13 @@ def record_tool_call_parse_failure_trace(
     traces.append(trace)
     if len(traces) > 20:
         del traces[:-20]
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "tool_call_parse_failure",
+            "recorded tool-call argument parse failure",
+            **trace,
+        )
 
 
 @dataclass(frozen=True)
@@ -253,6 +260,18 @@ def schema_validation_repair_decision(
     details["raw_arguments_preview"] = raw_preview
     error_data = {"error_type": "schema_validation_error", **details, "raw_arguments_preview": raw_preview}
     if retry_count >= schema_validation_retry_budget(harness):
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "schema_validation_repair_decision",
+                "schema validation repair budget exhausted",
+                status="fail",
+                retry_count=retry_count,
+                retry_budget=schema_validation_retry_budget(harness),
+                signature=signature,
+                target_path=resolved_target_path,
+                **base_runlog_data,
+            )
         return SchemaValidationRepairDecision(
             status="fail",
             repair_message=err_msg,
@@ -304,6 +323,18 @@ def schema_validation_repair_decision(
     if isinstance(parse_error, dict):
         alert_data["arguments_parse_error"] = parse_error
         alert_data["arguments_malformed"] = True
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "schema_validation_repair_decision",
+            "schema validation repair nudge scheduled",
+            status="repair",
+            retry_count=updated_retry_count,
+            retry_budget=schema_validation_retry_budget(harness),
+            signature=signature,
+            target_path=resolved_target_path,
+            **base_runlog_data,
+        )
     return SchemaValidationRepairDecision(
         status="repair",
         repair_message=repair_message,

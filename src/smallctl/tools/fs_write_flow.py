@@ -211,11 +211,30 @@ def handle_file_write_session(
     session.write_last_attempt_sections = previous_sections
     session.write_last_attempt_ranges = previous_ranges
 
+    from .fs_loop_guard_utils import is_substantially_new_content
+
     current_range = previous_ranges.get(normalized_section_name)
     full_staged_overwrite_requested = (
         strategy == "overwrite" and _section_name_allows_full_file_finalization(normalized_section_name)
     )
-    already_checkpointed_rewrite = normalized_section_name in previous_sections and not full_staged_overwrite_requested
+    existing_section_content = ""
+    if current_range:
+        existing_section_content = staged_content[
+            int(current_range.get("start", 0)) : int(current_range.get("end", 0))
+        ]
+    already_checkpointed_rewrite = (
+        normalized_section_name in previous_sections
+        and not full_staged_overwrite_requested
+        and not (
+            strategy in {"auto", "append"}
+            and is_substantially_new_content(
+                content,
+                existing_section_content,
+                similarity_threshold=0.85,
+                min_new_chars=50,
+            )
+        )
+    )
     if current_range:
         updated_content, updated_ranges = _replace_known_section(
             staged_content,

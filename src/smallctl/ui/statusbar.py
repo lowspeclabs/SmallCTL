@@ -135,8 +135,6 @@ class StatusBar(Static):
         fama_mitigation = getattr(self, "_fama_mitigation", "")
         if fama_mitigation:
             parts.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
-        if self._token_total >= 100000:
-            parts.append("[bold red]TOKEN RUNAWAY[/]")
 
         parts.append(f"cumulative: {self._token_total:,}")
         parts.append(self._context_usage_text())
@@ -173,8 +171,6 @@ class StatusBar(Static):
         fama_mitigation = getattr(self, "_fama_mitigation", "")
         if fama_mitigation:
             lines.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
-        if self._token_total >= 100000:
-            lines.append("[bold red]TOKEN RUNAWAY[/]")
 
         lines.extend(
             [

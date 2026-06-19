@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, TYPE_CHECKING
@@ -26,6 +28,7 @@ from ..chat_sessions import (
     persist_chat_session_ui_transcript,
     record_chat_session_prompt,
 )
+from ..client.chunk_parser import sanitize_assistant_content_for_history
 from .app_approvals import handle_approval_prompt
 from .app_approvals import handle_sudo_password_prompt
 from .app_approvals import maybe_handle_plan_approval_result
@@ -236,6 +239,9 @@ class SmallctlAppFlowMixin:
             if suppress_task_complete:
                 return
 
+        event = self._sanitize_visible_text_event(event)
+        if event is None:
+            return
         if not self._should_render_event(event):
             return
 
@@ -403,24 +409,6 @@ class SmallctlAppFlowMixin:
         self._latest_status_snapshot = state.__dict__.copy()
         self._status_activity = state.activity
         self._api_error_count = state.api_errors
-        if state.token_total >= 1000000 and not getattr(self, "_token_runaway_alert_emitted", False):
-            self._token_runaway_alert_emitted = True
-            asyncio.create_task(
-                self._append_system_line(
-                    "ALERT: Cumulative token usage exceeds 1M. Session may be in a runaway loop.",
-                    kind="alert",
-                    force=True,
-                )
-            )
-            self.post_message(
-                HarnessEvent(
-                    UIEvent(
-                        event_type=UIEventType.ALERT,
-                        content="Cumulative token usage exceeded 1M. Consider reviewing the session for runaway behavior.",
-                        data={"token_total": state.token_total, "threshold": 1000000},
-                    )
-                )
-            )
         try:
             is_busy = self.active_task is not None and not self.active_task.done()
             query = getattr(self, "query", None)
@@ -717,18 +705,68 @@ class SmallctlAppFlowMixin:
     def _format_restore_status(status: dict[str, Any]) -> str:
         return format_restore_status(status)
 
+    def _sanitize_visible_text_event(self, event: UIEvent) -> UIEvent | None:
+        if event.event_type not in {UIEventType.ASSISTANT, UIEventType.THINKING}:
+            return event
+        cleaned, extracted = sanitize_assistant_content_for_history(str(event.content or ""))
+        if event.event_type == UIEventType.ASSISTANT:
+            if not cleaned and extracted:
+                return None
+            if re.fullmatch(
+                r"\s*(?:thought|thinking|analysis|reasoning)\s*",
+                cleaned,
+                flags=re.IGNORECASE,
+            ):
+                return None
+            return UIEvent(
+                event_type=event.event_type,
+                content=cleaned,
+                data=dict(event.data),
+                timestamp=event.timestamp,
+            )
+        if not str(event.content or "").strip():
+            return None
+        return event
+
     def _record_ui_transcript_event(self, event: UIEvent) -> None:
         if event.event_type == UIEventType.STATUS:
             return
         if event.event_type == UIEventType.SHELL_STREAM:
             return
+        event = self._sanitize_visible_text_event(event)
+        if event is None:
+            return
         transcript = getattr(self, "_ui_transcript", None)
         if not isinstance(transcript, list):
             transcript = []
             self._ui_transcript = transcript
-        transcript.append(event.to_dict())
+        event_dict = event.to_dict()
+        fingerprint = self._ui_transcript_fingerprint(event_dict)
+        recent_fingerprints = getattr(self, "_ui_transcript_recent_fingerprints", None)
+        if not isinstance(recent_fingerprints, list):
+            recent_fingerprints = []
+            self._ui_transcript_recent_fingerprints = recent_fingerprints
+        if fingerprint in recent_fingerprints:
+            return
+        recent_fingerprints.append(fingerprint)
+        del recent_fingerprints[:-80]
+        transcript.append(event_dict)
         del transcript[:-500]
         self._schedule_ui_transcript_persist()
+
+    @staticmethod
+    def _ui_transcript_fingerprint(event: dict[str, Any]) -> str:
+        data = event.get("data") if isinstance(event, dict) else {}
+        payload = data.get("event_payload") if isinstance(data, dict) else None
+        key = {
+            "event_type": event.get("event_type"),
+            "content": event.get("content"),
+            "ui_kind": data.get("ui_kind") if isinstance(data, dict) else "",
+            "tool_call_id": data.get("tool_call_id") if isinstance(data, dict) else "",
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+        raw = json.dumps(key, sort_keys=True, default=str, ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _schedule_ui_transcript_persist(self) -> None:
         delay = getattr(self, "_ui_transcript_debounce_seconds", None)

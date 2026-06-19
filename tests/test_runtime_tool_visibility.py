@@ -200,6 +200,31 @@ def test_chat_local_execute_exposes_finalize_for_ready_write_session(tmp_path) -
     assert "finalize_write_session" in names
 
 
+def test_chat_mode_tools_keep_write_tools_after_ask_human_affirmative_resume(tmp_path) -> None:
+    harness = _real_registry_harness(
+        tmp_path,
+        task="yes",
+        model="gemma-4-26b-a4b-it",
+    )
+    harness.state.scratchpad["_ask_human_affirmative_resume"] = {
+        "original_task": "apply the error handling fix",
+        "question": "Which fix should I apply?",
+        "response": "yes",
+    }
+    harness.state.scratchpad["_resolved_followup"] = {
+        "raw_task": "yes",
+        "effective_task": "apply the error handling fix",
+        "target_inheritance": "ask_human_affirmative_resume",
+    }
+
+    names = set(_tool_names(chat_mode_tools(harness)))
+
+    assert "file_read" in names
+    assert "file_patch" in names
+    assert "ast_patch" in names
+    assert "file_write" in names
+
+
 def test_chat_repair_exposes_finalize_for_ready_write_session(tmp_path) -> None:
     harness = _real_registry_harness(
         tmp_path,

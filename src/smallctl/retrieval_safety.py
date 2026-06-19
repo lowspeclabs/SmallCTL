@@ -6,6 +6,24 @@ from typing import Any
 from .memory.taxonomy import SCHEMA_VALIDATION_ERROR, normalize_failure_mode
 
 
+# Control-tag fragments that can leak from model streams and pollute retrieval queries.
+_RETRIEVAL_CONTROL_TAG_RE = re.compile(
+    r"</?(?:think|thinking|thought|analysis|plan|channel|\|channel|channel\|)[^>]*>|"
+    r"<\|channel\|>|</\|channel\|>",
+    flags=re.IGNORECASE,
+)
+
+
+def sanitize_retrieval_text(text: str) -> str:
+    """Strip model protocol control markers and unclosed tag fragments from retrieval text."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = _RETRIEVAL_CONTROL_TAG_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def raw_schema_error_present(text: str) -> bool:
     lowered = str(text or "").lower()
     return "missing required field" in lowered or "expected type" in lowered
@@ -72,5 +90,5 @@ def build_retrieval_safe_text(
         )
 
     if len(normalized_content) > 1024:
-        return normalized_content[:1024]
-    return normalized_content
+        normalized_content = normalized_content[:1024]
+    return sanitize_retrieval_text(normalized_content)

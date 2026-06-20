@@ -256,11 +256,45 @@ async def resolve_model_stream_result(
         # the current user goal and the available tools instead of only asking it
         # to stop repeating. This reduces the chance that the model emits the
         # repeated phrase again and makes the recovery nudge actionable.
+        # Fix for session e9020e29: track consecutive degenerate loops; after
+        # the threshold is reached, switch reasoning_mode to "off" so the model
+        # is no longer instructed or expected to emit thinking/response tags.
+        scratchpad = getattr(harness.state, "scratchpad", {})
+        if isinstance(scratchpad, dict):
+            degenerate_count = int(scratchpad.get("_consecutive_degenerate_loops", 0)) + 1
+            scratchpad["_consecutive_degenerate_loops"] = degenerate_count
+        else:
+            degenerate_count = 1
+        MAX_DEGENERATE_LOOP_RETRIES = 3
+        reasoning_mode_switched = False
+        if degenerate_count >= MAX_DEGENERATE_LOOP_RETRIES:
+            old_reasoning_mode = getattr(harness, "reasoning_mode", "tags")
+            if old_reasoning_mode != "off":
+                harness.reasoning_mode = "off"
+                if isinstance(scratchpad, dict):
+                    scratchpad["_thinking_tags_disabled"] = True
+                reasoning_mode_switched = True
+                harness._runlog(
+                    "degenerate_loop_reasoning_mode_disabled",
+                    "switched reasoning_mode to off after consecutive degenerate loops",
+                    consecutive_loops=degenerate_count,
+                    old_mode=old_reasoning_mode,
+                )
         recovery_content_parts = [
             "Your previous response degenerated into a loop.",
-            "Do not emit `<think>`, `</think>`, `<|channel>`, `<channel|>`, `<thought>`, or any other angle-bracket control tags in your next response.",
-            "Stop repeating and emit ONE concrete next action as a tool call.",
         ]
+        if reasoning_mode_switched:
+            recovery_content_parts.append(
+                "Thinking markers have been disabled. Do NOT start your response with ` thinking`, "
+                "` response`, or any angle-bracket control tag. Respond directly and emit "
+                "the next tool call as a JSON object."
+            )
+        else:
+            recovery_content_parts.append(
+                "Do not emit ` thinking`, ` response`, `<|channel>`, `<channel|>`, `<thought>`, "
+                "or any other angle-bracket control tags in your next response."
+            )
+        recovery_content_parts.append("Stop repeating and emit ONE concrete next action as a tool call.")
         user_task = ""
         run_brief = getattr(getattr(harness, "state", None), "run_brief", None)
         if run_brief is not None:

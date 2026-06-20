@@ -258,6 +258,9 @@ async def model_call(
             harness.state.scratchpad["_consecutive_idle"] = int(harness.state.scratchpad.get("_consecutive_idle", 0)) + 1
     else:
         harness.state.scratchpad["_consecutive_idle"] = 0
+        # A successful tool call indicates the model has escaped the
+        # thinking/response loop; reset the degenerate loop counter.
+        harness.state.scratchpad["_consecutive_degenerate_loops"] = 0
 
     if int(harness.state.scratchpad.get("_consecutive_idle", 0)) >= 2:
         nudge = (

@@ -74,13 +74,18 @@ def build_system_prompt(
     scratchpad = getattr(state, "scratchpad", {})
     if isinstance(scratchpad, dict):
         model_name = str(scratchpad.get("_model_name") or "").strip()
+    thinking_tags_disabled = bool(
+        isinstance(scratchpad, dict) and scratchpad.get("_thinking_tags_disabled")
+    )
     gemma_mode = is_gemma_model_name(model_name)
     exact_small_gemma_mode = is_exact_small_gemma_4_it_model_name(model_name)
     exact_large_gemma_26b_mode = is_exact_large_gemma_4_26b_a4b_it_model_name(model_name)
     lfm25_8b_mode = is_lfm25_8b_a1b_model_name(model_name)
     small_model = is_seven_b_or_under_model_name(model_name)
     large_model = is_over_twenty_b_model_name(model_name)
-    if gemma_mode:
+    if thinking_tags_disabled:
+        response_structure = ""
+    elif gemma_mode:
         response_structure = _RESPONSE_STRUCTURE_GEMMA
         if exact_small_gemma_mode:
             response_structure += _RESPONSE_STRUCTURE_SMALL_GEMMA
@@ -207,9 +212,9 @@ def build_system_prompt(
                 "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
                 f"Once your objective is met, stop exploring and call task_complete(message='...').",
             ]
-    if gemma_mode:
+    if gemma_mode and not thinking_tags_disabled:
         parts.append(_GEMMA_4_STRICT_FORMAT)
-    if exact_small_gemma_mode:
+    if exact_small_gemma_mode and not thinking_tags_disabled:
         parts.append(_SMALL_GEMMA_STRICT_FORMAT)
     if large_model:
         parts.append(_LARGE_MODEL_STRUCTURED_REASONING)

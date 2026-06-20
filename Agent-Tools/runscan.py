@@ -23,10 +23,19 @@ from typing import Any
 from agent_tools_lib import (
     Colors,
     colorize,
+    detect_primary_blockers,
     discover_runs,
     error_records,
     event_counter,
+    file_patch_target_loop_count,
     format_duration,
+    get_run_objective,
+    has_ask_human_resume_terminal_stall,
+    has_chat_terminal_repetition_stall,
+    has_patch_first_policy_loop,
+    has_stderr_signature_circuit_breaker,
+    has_strong_environment_blocker,
+    has_write_overwrite_guard_failures,
     iter_records,
     load_summaries,
     load_task_summaries,
@@ -38,13 +47,17 @@ from agent_tools_lib import (
 FAILURE_CLASS_LABELS = {
     "success": "success",
     "success_with_errors": "success_with_errors",
+    "environment_blocker": "environment_blocker",
+    "harness_circuit_breaker_false_positive": "harness_circuit_breaker_false_positive",
     "model_degeneration": "model_degeneration",
     "model_tool_loop_stall": "model_tool_loop_stall",
     "file_patch_target_not_found_loop": "file_patch_target_not_found_loop",
+    "patch_first_policy_loop": "patch_first_policy_loop",
     "runtime_exception": "runtime_exception",
     "policy_block": "policy_block",
     "fama_block": "fama_block",
     "chat_failure": "chat_failure",
+    "chat_terminal_repetition_stall": "chat_terminal_repetition_stall",
     "write_session_overwrite_guard_loop": "write_session_overwrite_guard_loop",
     "ask_human_resume_terminal_tool_stall": "ask_human_resume_terminal_tool_stall",
     "recovery_failure": "recovery_failure",
@@ -57,71 +70,30 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--last", type=int, default=30, help="Number of recent runs to scan (default: 30)")
     parser.add_argument("--logs-dir", help="Custom logs directory")
     parser.add_argument("--failures-only", action="store_true", help="Only show runs with errors or incomplete status")
+    parser.add_argument("--same-objective", dest="same_objective", help="Only include runs whose objective contains TEXT")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser.parse_args()
 
 
 def _has_write_overwrite_guard_failures(failed_dispatches: list[dict[str, Any]]) -> bool:
-    for rec in failed_dispatches:
-        data = rec.get("data") or {}
-        if not isinstance(data, dict):
-            continue
-        text = json.dumps(data, default=str, ensure_ascii=False)
-        if "chunked_write_overwrite_new_section_after_progress" in text:
-            return True
-        if "Refusing to overwrite the entire staged file for a new chunk section" in text:
-            return True
-    return False
+    return has_write_overwrite_guard_failures(failed_dispatches)
 
 
 
 def _file_patch_target_loop_count(failed_dispatches: list[dict[str, Any]]) -> int:
-    count = 0
-    needles = (
-        "patch_target_not_found",
-        "target text not found",
-        "target_text_not_found",
-        "exact text",
-        "repair_cycle_read_required",
-        "fresh_file_read_required_before_patch",
-        "reading the target file before patching",
-        "old target text is gone",
-        "patch already landed",
-        "already matches",
-        "no changes needed",
-        "repeat_sensitive_patch_already_applied",
-    )
-    for rec in failed_dispatches:
-        data = rec.get("data") or {}
-        if not isinstance(data, dict):
-            continue
-        if str(data.get("tool_name") or "").strip() != "file_patch":
-            continue
-        text = json.dumps(data, default=str, ensure_ascii=False).lower()
-        if any(needle in text for needle in needles):
-            count += 1
-    return count
+    return file_patch_target_loop_count(failed_dispatches)
 
 
 def _has_ask_human_resume_terminal_stall(records: list[dict[str, Any]]) -> bool:
-    saw_interrupt_resume = False
-    saw_terminal_only_after_resume = False
-    saw_stall_after_resume = False
-    for rec in records:
-        event = str(rec.get("event") or "")
-        data = rec.get("data") or {}
-        if event == "interrupt_resume":
-            saw_interrupt_resume = True
-            continue
-        if not saw_interrupt_resume:
-            continue
-        if event == "chat_tool_selection" and isinstance(data, dict):
-            reason = str(data.get("reason") or "").strip()
-            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
-                saw_terminal_only_after_resume = True
-        if event in {"action_stall", "model_output_degenerate_loop_exhausted"}:
-            saw_stall_after_resume = True
-    return saw_interrupt_resume and saw_terminal_only_after_resume and saw_stall_after_resume
+    return has_ask_human_resume_terminal_stall(records)
+
+
+def _has_chat_terminal_repetition_stall(records: list[dict[str, Any]], session: dict[str, Any]) -> bool:
+    return has_chat_terminal_repetition_stall(records, session)
+
+
+def _has_patch_first_policy_loop(failed_dispatches: list[dict[str, Any]]) -> bool:
+    return has_patch_first_policy_loop(failed_dispatches)
 
 
 def _classify_run(
@@ -138,6 +110,7 @@ def _classify_run(
     completed = overall in {"complete", "completed", "chat_completed", "chat_success"}
     incomplete_ids = session.get("incomplete_task_ids")
     has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
+    primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
 
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
@@ -149,12 +122,20 @@ def _classify_run(
         return "success_with_errors" if errors else "success"
     if final in {"chat_failed", "chat_action_blocked"}:
         return "chat_failure"
+    if _has_chat_terminal_repetition_stall(harness_records, session):
+        return "chat_terminal_repetition_stall"
     if _has_write_overwrite_guard_failures(failed_dispatches):
         return "write_session_overwrite_guard_loop"
+    if _has_patch_first_policy_loop(failed_dispatches):
+        return "patch_first_policy_loop"
     if _file_patch_target_loop_count(failed_dispatches) >= 3:
         return "file_patch_target_not_found_loop"
     if _has_ask_human_resume_terminal_stall(harness_records):
         return "ask_human_resume_terminal_tool_stall"
+    if has_strong_environment_blocker(primary_blockers):
+        return "environment_blocker"
+    if has_stderr_signature_circuit_breaker(harness_records):
+        return "harness_circuit_breaker_false_positive"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
     if events.get("action_stall") or events.get("no_tool_recovery"):
@@ -191,6 +172,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "run_dir": str(run_dir),
         "run_name": run_dir.name,
         "duration_seconds": run_duration_seconds(harness_records),
+        "objective": get_run_objective(session, task_summary, task_summaries),
         "overall_objective_status": session.get("overall_objective_status"),
         "final_task_status": task_summary.get("final_task_status"),
         "deliverable_verified": session.get("deliverable_verified"),
@@ -210,7 +192,21 @@ def _status_color(status: str | None) -> str:
         return Colors.GREEN
     if status == "success_with_errors":
         return Colors.YELLOW
-    if status in {"model_degeneration", "runtime_exception", "policy_block", "fama_block", "recovery_failure", "chat_failure", "write_session_overwrite_guard_loop", "file_patch_target_not_found_loop", "ask_human_resume_terminal_tool_stall"}:
+    if status in {
+        "model_degeneration",
+        "runtime_exception",
+        "policy_block",
+        "fama_block",
+        "recovery_failure",
+        "chat_failure",
+        "chat_terminal_repetition_stall",
+        "write_session_overwrite_guard_loop",
+        "file_patch_target_not_found_loop",
+        "patch_first_policy_loop",
+        "ask_human_resume_terminal_tool_stall",
+        "environment_blocker",
+        "harness_circuit_breaker_false_positive",
+    }:
         return Colors.RED
     if status in {"model_tool_loop_stall", "incomplete_unverified", "unknown"}:
         return Colors.YELLOW
@@ -232,6 +228,9 @@ def main() -> int:
         return 1
 
     summaries = [_summarize_run(r) for r in runs]
+    if args.same_objective:
+        query = args.same_objective.lower()
+        summaries = [s for s in summaries if query in (s.get("objective") or "").lower()]
     if args.failures_only:
         summaries = [s for s in summaries if s["classification"] != "success" or s["error_count"] > 0]
 
@@ -271,6 +270,10 @@ def main() -> int:
     lines.append(colorize("Failure pattern counts", Colors.BOLD + Colors.BLUE))
     for cls, count in class_counter.most_common():
         lines.append(f"  {count:>4}  {cls}")
+
+    if args.same_objective:
+        lines.append("")
+        lines.append(colorize(f"Filtered to objective containing: {args.same_objective}", Colors.YELLOW))
 
     lines.append("")
     lines.append(colorize("Next steps", Colors.BOLD + Colors.GREEN))

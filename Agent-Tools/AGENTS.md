@@ -45,6 +45,11 @@ python3 Agent-Tools/logwatch.py latest --save        # write logwatch-summary.js
 Use this first when you need to know whether a run succeeded, why it failed,
 and how many error/FAMA/recovery events occurred.
 
+The summary now includes a **Primary blockers** section that surfaces
+environmental blockers such as `connection refused` separately from harness/model
+symptoms, and it warns when `deliverable_verified=True` looks weak (no code
+changes, verifier ran before the last change, or a trivial verifier command).
+
 **Error vs warning records:** Some SmallCTL records such as `fama_signal_detected`,
 `reflexion_created`, and `same_scope_iteration_recorded` carry `failure_class`
 metadata. They are counted as warnings, not errors, so you can distinguish
@@ -62,7 +67,8 @@ python3 Agent-Tools/run_diagnose.py latest --json    # structured JSON output
 ```
 
 Use this when `logwatch.py` shows a non-trivial failure and you need a
-starting hypothesis before opening source files.
+starting hypothesis before opening source files. The report now separates
+environmental primary blockers from model/harness failure modes.
 
 ### `runscan.py` — batch scan recent runs
 
@@ -74,10 +80,12 @@ python3 Agent-Tools/runscan.py
 python3 Agent-Tools/runscan.py --last 50
 python3 Agent-Tools/runscan.py --last 100 --failures-only
 python3 Agent-Tools/runscan.py --last 20 --json
+python3 Agent-Tools/runscan.py --same-objective "vikunja" --last 50
 ```
 
 Use this to spot regressions across a sweep, find runs that need triage, or
-verify that a fix reduced failures over the last N runs.
+verify that a fix reduced failures over the last N runs. The `--same-objective`
+filter makes it easier to compare runs that targeted the same file or task.
 
 ### `trace_call.py` — follow a `trace_id` across channels
 
@@ -97,7 +105,10 @@ python3 Agent-Tools/trace_call.py TRACE_ID --compact # collapse token/chunk reco
 
 Use this when you need to see exactly what the model emitted, which tool it
 called, and what the tool returned for a specific step. The `--compact` flag
-is useful when a trace contains hundreds of `model_token` or `chunk` records.
+is useful when a trace contains hundreds of `model_token` or `chunk` records;
+it also surfaces the repeated phrase when the backend halted for a repetition
+loop. If the resolved run does not match the trace id prefix, the tool prints a
+warning so you do not chase records from the wrong session.
 
 ### `symbolmap.py` — find definitions in source code
 
@@ -157,10 +168,12 @@ python3 Agent-Tools/rundiff.py RUN_A RUN_B
 python3 Agent-Tools/rundiff.py latest-1 latest
 python3 Agent-Tools/rundiff.py 6d6c87f1 57e619aa
 python3 Agent-Tools/rundiff.py latest-1 latest --events action_stall no_tool_recovery
+python3 Agent-Tools/rundiff.py latest-1 latest --same-objective "vikunja"
 ```
 
 Use this after making a code change to verify the failure rate or event
-profile improved.
+profile improved. The `--same-objective` filter ensures both runs targeted the
+same task/file.
 
 ## Shared library
 

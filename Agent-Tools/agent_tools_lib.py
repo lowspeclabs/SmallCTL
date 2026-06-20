@@ -11,7 +11,7 @@ import logging
 import re
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -334,3 +334,237 @@ def format_duration(seconds: float | None) -> str:
 
 def ensure_logs_dir() -> Path:
     return LOGS_DIR
+
+
+ENV_BLOCKER_PATTERNS = (
+    "connection refused",
+    "no route to host",
+    "name or service not known",
+    "could not connect",
+    "service not listening",
+    "connection reset",
+    "network is unreachable",
+    "host is unreachable",
+    "timed out",
+    "timeout",
+    "errno 111",
+    "errno 113",
+)
+
+
+def detect_primary_blockers(
+    harness_records: Iterable[dict[str, Any]],
+    failed_dispatches: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return environmental/objective-level blockers such as connection refused."""
+    counts: Counter[str] = Counter()
+    samples: dict[str, str] = {}
+
+    def _scan(text: str) -> None:
+        lowered = text.lower()
+        for pat in ENV_BLOCKER_PATTERNS:
+            if pat in lowered:
+                counts[pat] += 1
+                if pat not in samples:
+                    samples[pat] = text.strip()[:200]
+
+    for rec in harness_records:
+        if has_error_indicator(rec):
+            _scan(json.dumps(rec, default=str, ensure_ascii=False))
+
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        for key in ("error", "message", "output", "stderr", "stdout", "reason"):
+            val = data.get(key)
+            if val is not None:
+                _scan(str(val))
+        metadata = data.get("metadata") or {}
+        if isinstance(metadata, dict):
+            for key in ("error", "reason", "output"):
+                val = metadata.get(key)
+                if val is not None:
+                    _scan(str(val))
+
+    return [
+        {"type": "environment", "pattern": pat, "count": count, "sample": samples.get(pat, "")}
+        for pat, count in counts.most_common()
+    ]
+
+
+def has_strong_environment_blocker(blockers: list[dict[str, Any]], threshold: int = 2) -> bool:
+    return any(b.get("count", 0) >= threshold for b in blockers)
+
+
+def has_write_overwrite_guard_failures(failed_dispatches: Iterable[dict[str, Any]]) -> bool:
+    """Detect staged write-session overwrite guard failures."""
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        text = json.dumps(data, default=str, ensure_ascii=False)
+        if "chunked_write_overwrite_new_section_after_progress" in text:
+            return True
+        if "Refusing to overwrite the entire staged file for a new chunk section" in text:
+            return True
+    return False
+
+
+def has_patch_first_policy_loop(
+    failed_dispatches: Iterable[dict[str, Any]], threshold: int = 2
+) -> bool:
+    """Detect repeated file_write blocks due to the patch-first policy."""
+    count = 0
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        tool_name = str(data.get("tool_name") or "").strip()
+        if tool_name not in {"file_write", "ssh_file_write"}:
+            continue
+        metadata = data.get("metadata") or {}
+        reason = str(metadata.get("reason") or data.get("reason") or "").strip()
+        error = str(data.get("error") or "").lower()
+        if reason == "patch_first_required" or "patch-first policy" in error:
+            count += 1
+    return count >= threshold
+
+
+def file_patch_target_loop_count(failed_dispatches: Iterable[dict[str, Any]]) -> int:
+    """Count failed file_patch dispatches that look like stale-target loops."""
+    count = 0
+    needles = (
+        "patch_target_not_found",
+        "target text not found",
+        "target_text_not_found",
+        "exact text",
+        "repair_cycle_read_required",
+        "fresh_file_read_required_before_patch",
+        "reading the target file before patching",
+        "old target text is gone",
+        "patch already landed",
+        "already matches",
+        "no changes needed",
+        "repeat_sensitive_patch_already_applied",
+    )
+    for rec in failed_dispatches:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        tool_name = str(data.get("tool_name") or "").strip()
+        if tool_name != "file_patch":
+            continue
+        text = json.dumps(data, default=str, ensure_ascii=False).lower()
+        if any(needle in text for needle in needles):
+            count += 1
+    return count
+
+
+def has_ask_human_resume_terminal_stall(
+    records: Iterable[dict[str, Any]],
+    after_task_id: str | None = None,
+) -> bool:
+    """Detect terminal-only tool exposure/stall after an interrupt resume."""
+    saw_interrupt_resume = False
+    saw_terminal_only_after_resume = False
+    saw_stall_after_resume = False
+    for rec in records:
+        event = str(rec.get("event") or "")
+        data = rec.get("data") or {}
+        if event == "interrupt_resume":
+            saw_interrupt_resume = True
+            saw_terminal_only_after_resume = False
+            saw_stall_after_resume = False
+            continue
+        if not saw_interrupt_resume:
+            continue
+        if after_task_id and extract_trace_id(rec):
+            tid = extract_trace_id(rec) or ""
+            if not (":" + after_task_id + ":" in tid or tid.endswith(":" + after_task_id)):
+                continue
+        if event == "chat_tool_selection" and isinstance(data, dict):
+            tool_names = data.get("tool_names") or []
+            reason = str(data.get("reason") or "").strip()
+            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
+                saw_terminal_only_after_resume = True
+            elif tool_names and set(tool_names).issubset({"task_complete", "task_fail"}):
+                saw_terminal_only_after_resume = True
+        if event in {"action_stall", "model_output_degenerate_loop_exhausted"}:
+            saw_stall_after_resume = True
+    return saw_interrupt_resume and saw_terminal_only_after_resume and saw_stall_after_resume
+
+
+def has_chat_terminal_repetition_stall(
+    records: Iterable[dict[str, Any]],
+    session: dict[str, Any],
+) -> bool:
+    """Detect a chat-mode final task that ended with a degenerate loop and no tools."""
+    last_task_id = str(session.get("latest_task_id") or session.get("current_task_id") or "").strip()
+    if not last_task_id:
+        return False
+
+    saw_terminal_only = False
+    saw_degenerate = False
+    saw_chat_completed = False
+    tool_call_count = 0
+    for rec in records:
+        tid = extract_trace_id(rec) or ""
+        if not (":" + last_task_id + ":" in tid or tid.endswith(":" + last_task_id)):
+            continue
+        event = str(rec.get("event") or "")
+        data = rec.get("data") or {}
+        if event == "chat_tool_selection" and isinstance(data, dict):
+            tool_names = data.get("tool_names") or []
+            reason = str(data.get("reason") or "").strip()
+            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
+                saw_terminal_only = True
+            elif tool_names and set(tool_names).issubset({"task_complete", "task_fail"}):
+                saw_terminal_only = True
+        if event == "model_output_degenerate_loop_exhausted":
+            saw_degenerate = True
+        if event == "dispatch_tools_start":
+            tool_call_count += 1
+        if event == "task_finalize" and isinstance(data, dict):
+            result = data.get("result", {})
+            if str(result.get("status") or "").strip().lower() == "chat_completed":
+                saw_chat_completed = True
+    return saw_terminal_only and saw_degenerate and saw_chat_completed and tool_call_count == 0
+
+
+def get_run_objective(
+    session: dict[str, Any],
+    task_summary: dict[str, Any] | None = None,
+    task_summaries: Iterable[dict[str, Any]] | None = None,
+) -> str:
+    """Return the best available task/objective text for a run."""
+    for source in (session, task_summary or {}):
+        for key in ("objective", "task", "current_task", "user_request", "original_task"):
+            val = source.get(key)
+            if val:
+                return str(val).strip()
+    if task_summaries:
+        for t in task_summaries:
+            for key in ("objective", "task", "task_text", "original_task"):
+                val = t.get(key)
+                if val:
+                    return str(val).strip()
+    return ""
+
+
+def has_stderr_signature_circuit_breaker(records: Iterable[dict[str, Any]]) -> bool:
+    """Detect whether the harness's stderr-signature circuit breaker tripped."""
+    for rec in records:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        if data.get("_stderr_signature_circuit_breaker") or data.get("stderr_signature_circuit_breaker"):
+            return True
+        message = str(rec.get("message") or "")
+        if "stderr_signature_circuit_breaker" in message:
+            return True
+        if isinstance(data.get("recent_errors"), list):
+            for err in data["recent_errors"]:
+                if "stderr_signature_circuit_breaker" in str(err):
+                    return True
+    return False

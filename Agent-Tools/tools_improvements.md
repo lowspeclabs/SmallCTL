@@ -24,11 +24,6 @@ lost.
 
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
-| IMP-001 | trace_call.py | medium | Include a short degenerate-stream sample or repeated phrase in compact traces when the backend halts output for repetition. | Agents can distinguish an actual blank/thinking disappearance from a repetition guard placeholder without opening raw model_output logs. | open |
-| IMP-002 | logwatch.py, run_diagnose.py | high | Add a primary-blocker section that ranks environmental blockers such as connection refused or service not listening separately from model/harness symptoms. | RCA reports should keep run objective blockers separate from secondary harness/model failures. | open |
-| IMP-003 | logwatch.py | medium | Surface whether the final `deliverable_verified=True` was backed by an actual code change or only a weak verifier (e.g. `--help` on an unchanged file). | Prevents false confidence in runs where verification passed but the mutation never happened. | open |
-| IMP-004 | trace_call.py | medium | Show the original blocked `file_write` content preview when a write is rejected by policy, not just the error string. | Helps distinguish a blocked full rewrite from a narrow patch attempt. | open |
-| IMP-005 | runscan.py, rundiff.py | low | Add a `--same-objective` filter to compare runs that targeted the same file/task, making success-factor comparisons easier. | Speeds up identifying which model/config/context differences turn failures into successes. | open |
 
 ## Completed Improvements
 
@@ -36,6 +31,11 @@ Move implemented improvements here and keep the original ID for reference.
 
 | ID | Tool | Summary | Done Date |
 |----|------|---------|-----------|
+| IMP-005 | runscan.py, rundiff.py | Added `--same-objective TEXT` filter to restrict comparisons to runs whose objective contains the given text. | 2026-06-19 |
+| IMP-004 | trace_call.py | Show a preview of blocked `file_write` content when a write dispatch fails. | 2026-06-19 |
+| IMP-003 | logwatch.py | Surface weak/unchecked verification (no code changes, verified before last change, weak verifier command) when `deliverable_verified=True`. | 2026-06-19 |
+| IMP-002 | logwatch.py, run_diagnose.py | Added a primary-blocker section that ranks environmental blockers (connection refused, service not listening, etc.) separately from model/harness symptoms. | 2026-06-19 |
+| IMP-001 | trace_call.py | In compact mode, include the repeated phrase sample from `model_output_degenerate_loop_exhausted` records. | 2026-06-19 |
 
 ## Rejected Ideas
 

@@ -71,10 +71,22 @@ def _resolve_trace_id(run_dir: Path, trace_arg: str | None, last_error: bool) ->
     raise ValueError("Could not infer session/task prefix for trace suffix")
 
 
-def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str, Any]]], compact: bool = False) -> str:
+def _run_matches_trace(run_dir: Path, trace_arg: str | None) -> bool:
+    """Return False when the resolved run directory does not match a full trace id prefix."""
+    if not trace_arg:
+        return True
+    if ":" not in trace_arg or trace_arg.startswith("step-"):
+        return True
+    prefix = trace_arg.split(":", 1)[0]
+    return run_dir.name.startswith(prefix) if prefix else True
+
+
+def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str, Any]]], compact: bool = False, mismatch_warning: str | None = None) -> str:
     lines: list[str] = []
     lines.append(colorize(f"Trace: {trace_id}", Colors.BOLD + Colors.CYAN))
     lines.append(f"Run: {run_dir}")
+    if mismatch_warning:
+        lines.append(colorize(f"Warning: {mismatch_warning}", Colors.YELLOW))
 
     for channel in ("harness", "model_output", "chat", "tools"):
         recs = grouped.get(channel, [])
@@ -99,6 +111,15 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
                         })
                         token_run = []
                     collapsed.append(rec)
+                    if rec.get("event") == "model_output_degenerate_loop_exhausted":
+                        phrase = (rec.get("data") or {}).get("repeated_phrase")
+                        if phrase:
+                            collapsed.append({
+                                "timestamp": rec.get("timestamp"),
+                                "event": "degenerate_sample",
+                                "message": f"repeated phrase ({len(phrase)} chars): {str(phrase)[:120]}{'...' if len(str(phrase)) > 120 else ''}",
+                                "data": {},
+                            })
             if token_run:
                 collapsed.append({
                     "timestamp": token_run[0].get("timestamp"),
@@ -162,6 +183,18 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
                 if len(snippet) > 800:
                     snippet = snippet[:800] + "\n... [truncated]"
                 lines.append(f"  output snippet:\n{snippet}")
+            if tool_start and data.get("success") is False:
+                start_data = tool_start.get("data", {})
+                tool_name = str(start_data.get("tool_name") or "")
+                if tool_name in {"file_write", "ssh_file_write"}:
+                    args = start_data.get("arguments") or {}
+                    content = args.get("content") or args.get("text") or args.get("value") or ""
+                    if content:
+                        preview = str(content)
+                        if len(preview) > 400:
+                            preview = preview[:400] + "\n... [truncated]"
+                        lines.append(colorize("  blocked content preview:", Colors.YELLOW))
+                        lines.append(preview)
 
     return "\n".join(lines)
 
@@ -177,11 +210,23 @@ def main() -> int:
         print(colorize(str(exc), Colors.RED), file=sys.stderr)
         return 1
 
+    mismatch_warning = None
+    if not _run_matches_trace(run_dir, args.trace):
+        prefix = args.trace.split(":", 1)[0] if args.trace else ""
+        mismatch_warning = (
+            f"resolved run {run_dir.name} does not match trace prefix {prefix}; "
+            "records may be from a different session"
+        )
+        print(colorize(f"Warning: {mismatch_warning}", Colors.YELLOW), file=sys.stderr)
+
     if args.json:
-        print(json.dumps({"trace_id": trace_id, "channels": grouped}, indent=2, default=str))
+        payload = {"trace_id": trace_id, "channels": grouped}
+        if mismatch_warning:
+            payload["warning"] = mismatch_warning
+        print(json.dumps(payload, indent=2, default=str))
         return 0
 
-    print(_render_text(run_dir, trace_id, grouped, compact=args.compact))
+    print(_render_text(run_dir, trace_id, grouped, compact=args.compact, mismatch_warning=mismatch_warning))
     return 0
 
 

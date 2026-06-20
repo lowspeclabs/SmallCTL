@@ -23,10 +23,6 @@ moving on.
 
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
-| BUG-005 | run_diagnose.py | major | Diagnosis over-emphasized model degeneration for run ba7cdbd6 even though the run objective was already blocked by repeated localhost:3456 connection refusals. It should report primary objective blockers separately from secondary harness/model failures. | python3 Agent-Tools/run_diagnose.py ba7cdbd6 --json | open |
-| BUG-008 | run_diagnose.py | major | Classifies run 97e42939 as `model_degeneration` even though the task failed because `file_write` was blocked by patch-first policy and subsequent `file_patch` calls were malformed/no-ops. The primary failure mode is a `policy/write_guard` loop, not model degeneration. | python3 Agent-Tools/run_diagnose.py 97e42939 --json | open |
-| BUG-009 | run_diagnose.py | critical | Classifies session ed697136 as `ask_human_resume_terminal_tool_stall` even though the session actually ended with a chat-mode repetition-loop halt (`chat_completed`, 0 tokens, no tool calls). The terminal task-5 failure was caused by the classifier routing an implementation follow-up to chat and exposing only `task_complete`/`task_fail`, not by a terminal-only tool stall. Diagnosis should distinguish chat-mode repetition loops from loop-mode terminal tool stalls and should not let recovered prior tasks mask the final task failure. | python3 Agent-Tools/run_diagnose.py ed697136 --json | open |
-| BUG-010 | trace_call.py | minor | When `--run latest` points at a different run than the full trace id prefix, the tool prints the requested trace id and the resolved run path without warning that they do not match. It should warn or reject mismatched run/trace prefixes. | python3 Agent-Tools/trace_call.py --run latest aa8192e8:task-0001:step-21:call-20 --compact | open |
 
 ## Fixed Bugs
 
@@ -34,6 +30,11 @@ Move resolved bugs here and keep the original ID for reference.
 
 | ID | Tool | Fix Summary | Fixed Date |
 |----|------|-------------|------------|
+| BUG-011 | run_diagnose.py | Detect `stderr_signature_circuit_breaker` trips and classify as `harness_circuit_breaker_false_positive` instead of `model_degeneration`. | 2026-06-19 |
+| BUG-010 | trace_call.py | Warn when the resolved run directory does not match a full trace id prefix. | 2026-06-19 |
+| BUG-009 | run_diagnose.py | Distinguish chat-mode terminal-only repetition loops from ask_human resume terminal stalls by focusing on the final task and terminal-only tool exposure. | 2026-06-19 |
+| BUG-008 | run_diagnose.py | Classify repeated patch-first `file_write` blocks as `patch_first_policy_loop` before falling back to `model_degeneration`. | 2026-06-19 |
+| BUG-005 | run_diagnose.py | Report environmental objective blockers (e.g. connection refused) as `environment_blocker` and surface them in a dedicated primary-blockers section. | 2026-06-19 |
 | BUG-007 | trace_call.py | Expanded `step-N:call-M` suffixes even though they contain a colon. | 2026-06-19 |
 | BUG-006 | run_diagnose.py, runscan.py | Classify completed sessions with no incomplete tasks as `success`/`success_with_errors` before unrecovered failure-mode labels. | 2026-06-19 |
 | BUG-002 | run_diagnose.py, runscan.py | Added `write_session_overwrite_guard_loop` classification from failed dispatch payloads. | 2026-06-19 |

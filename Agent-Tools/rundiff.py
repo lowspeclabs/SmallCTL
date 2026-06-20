@@ -24,6 +24,7 @@ from agent_tools_lib import (
     discover_runs,
     error_records,
     event_counter,
+    get_run_objective,
     iter_records,
     load_summaries,
     load_task_summaries,
@@ -37,6 +38,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("right", help="Right run dir, run id, or 'latest-N'")
     parser.add_argument("--logs-dir", help="Custom logs directory")
     parser.add_argument("--events", nargs="+", help="Specific events to compare")
+    parser.add_argument("--same-objective", dest="same_objective", help="Only compare runs whose objective contains TEXT")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     return parser.parse_args()
 
@@ -70,6 +72,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
     return {
         "run_dir": str(run_dir),
         "run_name": run_dir.name,
+        "objective": get_run_objective(session, task_summary, task_summaries),
         "session_summary": session,
         "task_summary": task_summary,
         "task_count": len(task_summaries),
@@ -92,11 +95,13 @@ def _diff_number(left: Any, right: Any, label: str) -> str:
     return f"  {label}: {left} -> {right}"
 
 
-def _render_text(left: dict[str, Any], right: dict[str, Any], left_events: Counter[str], right_events: Counter[str]) -> str:
+def _render_text(left: dict[str, Any], right: dict[str, Any], left_events: Counter[str], right_events: Counter[str], same_objective: str | None = None) -> str:
     lines: list[str] = []
     lines.append(colorize("Run diff", Colors.BOLD + Colors.CYAN))
     lines.append(f"  left:  {left['run_name']}  ({left['run_dir']})")
     lines.append(f"  right: {right['run_name']}  ({right['run_dir']})")
+    if same_objective:
+        lines.append(colorize(f"  objective filter: {same_objective}", Colors.YELLOW))
     lines.append("")
     lines.append(colorize("Outcomes", Colors.BOLD + Colors.BLUE))
     lines.append(_diff_number(left["overall_objective_status"], right["overall_objective_status"], "overall status"))
@@ -142,6 +147,21 @@ def main() -> int:
 
     left = _summarize_run(left_dir)
     right = _summarize_run(right_dir)
+
+    if args.same_objective:
+        query = args.same_objective.lower()
+        if query not in (left.get("objective") or "").lower() or query not in (right.get("objective") or "").lower():
+            print(
+                colorize(
+                    f"Both runs must have an objective containing '{args.same_objective}'.\n"
+                    f"  left:  {left.get('objective') or 'n/a'}\n"
+                    f"  right: {right.get('objective') or 'n/a'}",
+                    Colors.RED,
+                ),
+                file=sys.stderr,
+            )
+            return 1
+
     left_events = Counter(left["event_counts"])
     right_events = Counter(right["event_counts"])
 
@@ -153,7 +173,7 @@ def main() -> int:
         print(json.dumps({"left": left, "right": right}, indent=2, default=str))
         return 0
 
-    print(_render_text(left, right, left_events, right_events))
+    print(_render_text(left, right, left_events, right_events, same_objective=args.same_objective))
     return 0
 
 

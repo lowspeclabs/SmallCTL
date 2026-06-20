@@ -148,3 +148,104 @@ def test_diagnose_recommends_last_verifier_for_unverified_changes() -> None:
 
     assert any("not verified" in step for step in steps)
     assert any("python3 ./temp/vikunja-9b.py info" in step for step in steps)
+
+
+def _make_failed_write(tool_name: str = "file_write", reason: str = "patch_first_required", error: str = "") -> dict:
+    return {
+        "event": "dispatch_complete",
+        "data": {
+            "tool_name": tool_name,
+            "success": False,
+            "error": error,
+            "metadata": {"reason": reason},
+        },
+    }
+
+
+def test_diagnose_classifies_patch_first_policy_loop() -> None:
+    dispatches = [
+        _make_failed_write("file_write", "patch_first_required"),
+        _make_failed_write("file_write", "patch_first_required"),
+    ]
+    events: Counter[str] = Counter({"model_output_degenerate_loop_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "patch_first_policy_loop"
+
+
+def test_runscan_classifies_patch_first_policy_loop() -> None:
+    dispatches = [
+        _make_failed_write("file_write", "patch_first_required"),
+        _make_failed_write("file_write", "patch_first_required"),
+    ]
+    events: Counter[str] = Counter({"model_output_degenerate_loop_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    task_summary: dict = {}
+    harness_records: list[dict] = []
+
+    classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
+
+    assert classification == "patch_first_policy_loop"
+
+
+def test_diagnose_classifies_environment_blocker_before_model_degeneration() -> None:
+    dispatches = [
+        {
+            "event": "dispatch_complete",
+            "data": {
+                "tool_name": "shell_exec",
+                "success": False,
+                "error": "curl: (7) Failed to connect to localhost port 3456: Connection refused",
+            },
+        },
+        {
+            "event": "dispatch_complete",
+            "data": {
+                "tool_name": "shell_exec",
+                "success": False,
+                "error": "curl: (7) Failed to connect to localhost port 3456: Connection refused",
+            },
+        },
+    ]
+    events: Counter[str] = Counter({"model_output_degenerate_loop_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "environment_blocker"
+
+
+def test_diagnose_classifies_circuit_breaker_before_model_degeneration() -> None:
+    events: Counter[str] = Counter({"model_output_degenerate_loop_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = [
+        {
+            "event": "dispatch_complete",
+            "data": {"_stderr_signature_circuit_breaker": {"signature": "% Total % Received"}},
+        }
+    ]
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "harness_circuit_breaker_false_positive"
+
+
+def test_diagnose_classifies_chat_terminal_repetition_stall() -> None:
+    session = {"latest_task_id": "task-0005", "overall_objective_status": "incomplete"}
+    harness_records: list[dict] = [
+        {"trace_id": "abc:task-0005:step-1:call-1", "event": "chat_tool_selection", "data": {"reason": "non_lookup_chat_terminal_only", "tool_names": ["task_complete", "task_fail"]}},
+        {"trace_id": "abc:task-0005:step-1:call-1", "event": "model_output_degenerate_loop_exhausted", "data": {"repeated_phrase": "I understand"}},
+        {"trace_id": "abc:task-0005:step-1:call-1", "event": "task_finalize", "data": {"result": {"status": "chat_completed"}}},
+    ]
+    classification = _classify_failure(Counter(), [], session, [], harness_records)
+
+    assert classification == "chat_terminal_repetition_stall"

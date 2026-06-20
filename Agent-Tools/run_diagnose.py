@@ -22,11 +22,20 @@ from typing import Any
 from agent_tools_lib import (
     Colors,
     colorize,
+    detect_primary_blockers,
     error_records,
     event_counter,
     extract_trace_id,
+    file_patch_target_loop_count,
     format_duration,
     format_record_summary,
+    get_run_objective,
+    has_ask_human_resume_terminal_stall,
+    has_chat_terminal_repetition_stall,
+    has_patch_first_policy_loop,
+    has_stderr_signature_circuit_breaker,
+    has_strong_environment_blocker,
+    has_write_overwrite_guard_failures,
     iter_records,
     load_summaries,
     load_task_summaries,
@@ -46,104 +55,23 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _has_write_overwrite_guard_failures(failed_dispatches: list[dict[str, Any]]) -> bool:
-    for rec in failed_dispatches:
-        data = rec.get("data") or {}
-        if not isinstance(data, dict):
-            continue
-        text = json.dumps(data, default=str, ensure_ascii=False)
-        if "chunked_write_overwrite_new_section_after_progress" in text:
-            return True
-        if "Refusing to overwrite the entire staged file for a new chunk section" in text:
-            return True
-    return False
-
+    return has_write_overwrite_guard_failures(failed_dispatches)
 
 
 def _file_patch_target_loop_count(failed_dispatches: list[dict[str, Any]]) -> int:
-    count = 0
-    needles = (
-        "patch_target_not_found",
-        "target text not found",
-        "target_text_not_found",
-        "exact text",
-        "repair_cycle_read_required",
-        "fresh_file_read_required_before_patch",
-        "reading the target file before patching",
-        "old target text is gone",
-        "patch already landed",
-        "already matches",
-        "no changes needed",
-        "repeat_sensitive_patch_already_applied",
-    )
-    for rec in failed_dispatches:
-        data = rec.get("data") or {}
-        if not isinstance(data, dict):
-            continue
-        tool_name = str(data.get("tool_name") or "").strip()
-        if tool_name != "file_patch":
-            continue
-        text = json.dumps(data, default=str, ensure_ascii=False).lower()
-        if any(needle in text for needle in needles):
-            count += 1
-    return count
+    return file_patch_target_loop_count(failed_dispatches)
 
 
 def _has_chat_terminal_repetition_stall(records: list[dict[str, Any]], session: dict[str, Any]) -> bool:
-    """Detect a chat-mode task that ended with a degenerate loop and no tools.
-
-    This is distinct from loop-mode terminal tool stalls and from general
-    model degeneration, because the root cause is usually that the runtime
-    exposed only terminal tools (task_complete/task_fail) for an implementation
-    task, leaving the model unable to make progress.
-    """
-    last_task_id = str(session.get("latest_task_id") or "").strip()
-    if not last_task_id:
-        return False
-    saw_terminal_only = False
-    saw_degenerate = False
-    saw_chat_completed = False
-    tool_call_count = 0
-    for rec in records:
-        tid = extract_trace_id(rec) or ""
-        if not (":" + last_task_id + ":" in tid):
-            continue
-        event = str(rec.get("event") or "")
-        data = rec.get("data") or {}
-        if event == "chat_tool_selection" and isinstance(data, dict):
-            reason = str(data.get("reason") or "").strip()
-            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
-                saw_terminal_only = True
-        if event == "model_output_degenerate_loop_exhausted":
-            saw_degenerate = True
-        if event == "dispatch_tools_start":
-            tool_call_count += 1
-        if event == "task_finalize":
-            if isinstance(data, dict):
-                result = data.get("result", {})
-                if str(result.get("status") or "").strip().lower() == "chat_completed":
-                    saw_chat_completed = True
-    return saw_terminal_only and saw_degenerate and saw_chat_completed and tool_call_count == 0
+    return has_chat_terminal_repetition_stall(records, session)
 
 
 def _has_ask_human_resume_terminal_stall(records: list[dict[str, Any]]) -> bool:
-    saw_interrupt_resume = False
-    saw_terminal_only_after_resume = False
-    saw_stall_after_resume = False
-    for rec in records:
-        event = str(rec.get("event") or "")
-        data = rec.get("data") or {}
-        if event == "interrupt_resume":
-            saw_interrupt_resume = True
-            continue
-        if not saw_interrupt_resume:
-            continue
-        if event == "chat_tool_selection" and isinstance(data, dict):
-            reason = str(data.get("reason") or "").strip()
-            if reason in {"non_lookup_chat_terminal_only", "smalltalk_terminal_only"}:
-                saw_terminal_only_after_resume = True
-        if event in {"action_stall", "model_output_degenerate_loop_exhausted"}:
-            saw_stall_after_resume = True
-    return saw_interrupt_resume and saw_terminal_only_after_resume and saw_stall_after_resume
+    return has_ask_human_resume_terminal_stall(records)
+
+
+def _has_patch_first_policy_loop(failed_dispatches: list[dict[str, Any]]) -> bool:
+    return has_patch_first_policy_loop(failed_dispatches)
 
 
 def _classify_failure(
@@ -154,11 +82,13 @@ def _classify_failure(
     harness_records: list[dict[str, Any]],
 ) -> str:
     overall = session.get("overall_objective_status")
-    final = session.get("final_task_status")
     deliverable_verified = session.get("deliverable_verified")
     completed = overall in {"complete", "completed", "chat_completed", "chat_success"}
     incomplete_ids = session.get("incomplete_task_ids")
     has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
+
+    primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
     if overall in {"complete", "completed"} and deliverable_verified is True and errors:
@@ -169,10 +99,16 @@ def _classify_failure(
         return "chat_terminal_repetition_stall"
     if _has_write_overwrite_guard_failures(failed_dispatches):
         return "write_session_overwrite_guard_loop"
+    if _has_patch_first_policy_loop(failed_dispatches):
+        return "patch_first_policy_loop"
     if _file_patch_target_loop_count(failed_dispatches) >= 3:
         return "file_patch_target_not_found_loop"
     if _has_ask_human_resume_terminal_stall(harness_records):
         return "ask_human_resume_terminal_tool_stall"
+    if has_strong_environment_blocker(primary_blockers):
+        return "environment_blocker"
+    if has_stderr_signature_circuit_breaker(harness_records):
+        return "harness_circuit_breaker_false_positive"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
     if events.get("action_stall") or events.get("no_tool_recovery"):
@@ -210,14 +146,17 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         tool_failures_by_name[name] += 1
 
     last_error_trace_ids = [extract_trace_id(e) for e in errors[-5:]]
+    primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
 
     diagnosis = {
         "run_dir": str(run_dir),
         "run_name": run_dir.name,
         "duration_seconds": run_duration_seconds(harness_records),
+        "objective": get_run_objective(session, task_summary, task_summaries),
         "session_summary": session,
         "task_summary": task_summary,
         "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records),
+        "primary_blockers": primary_blockers,
         "event_counts": dict(events),
         "error_record_count": len(errors),
         "warning_record_count": len(warnings),
@@ -240,12 +179,23 @@ def _recommend_next_steps(
     harness_records: list[dict[str, Any]],
 ) -> list[str]:
     steps: list[str] = []
+    primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    if primary_blockers:
+        top = primary_blockers[0]
+        steps.append(
+            f"Primary objective blocker: {top['pattern']} ({top['count']}x). "
+            "Resolve the environmental dependency before treating this as a model/harness failure."
+        )
     if errors and (tid := extract_trace_id(errors[-1])):
         steps.append(f"Trace the most recent error: python3 Agent-Tools/trace_call.py --run <run> {tid}")
     if events.get("model_output_degenerate_loop_exhausted"):
         steps.append("Investigate model stream degeneration; check model_output.log for repeated phrases.")
+    if has_stderr_signature_circuit_breaker(harness_records):
+        steps.append("Harness stderr-signature circuit breaker tripped on repeated identical stderr; use a different repair strategy instead of retrying the same command.")
     if _has_write_overwrite_guard_failures(failed_dispatches):
         steps.append("Write-session overwrite guard loop detected; trace failed file_write calls and force a current file_read followed by file_patch/ast_patch or same-section repair.")
+    if _has_patch_first_policy_loop(failed_dispatches):
+        steps.append("Patch-first policy repeatedly blocked full rewrites; use file_patch/ast_patch or pass replace_strategy='overwrite' for an intentional full rewrite.")
     patch_loop_count = _file_patch_target_loop_count(failed_dispatches)
     if patch_loop_count >= 3:
         steps.append(f"Repeated file_patch target mismatch loop detected ({patch_loop_count} failures); force a non-cached file_read of the target before allowing another patch and verify using exact live text.")
@@ -279,6 +229,9 @@ def _render_text(diagnosis: dict[str, Any]) -> str:
     lines.append(colorize(f"Diagnosis for {diagnosis['run_name']}", Colors.BOLD + Colors.CYAN))
     lines.append(f"Run directory: {diagnosis['run_dir']}")
     lines.append(f"Duration: {format_duration(diagnosis.get('duration_seconds'))}")
+    objective = diagnosis.get("objective")
+    if objective:
+        lines.append(f"Objective: {objective}")
     lines.append("")
     lines.append(colorize("Failure classification", Colors.BOLD + Colors.BLUE))
     lines.append(f"  {diagnosis['failure_classification']}")
@@ -290,6 +243,15 @@ def _render_text(diagnosis: dict[str, Any]) -> str:
     lines.append(f"  overall_objective_status: {session.get('overall_objective_status', 'n/a')}")
     lines.append(f"  final_task_status: {task_summary.get('final_task_status', 'n/a')}")
     lines.append(f"  deliverable_verified: {session.get('deliverable_verified', 'n/a')}")
+
+    blockers = diagnosis.get("primary_blockers") or []
+    lines.append("")
+    lines.append(colorize("Primary blockers", Colors.BOLD + Colors.BLUE))
+    if blockers:
+        for b in blockers:
+            lines.append(f"  {b['pattern']}: {b['count']}x  sample: {b['sample'][:120]}")
+    else:
+        lines.append("  none detected")
 
     lines.append("")
     lines.append(colorize("Tasks", Colors.BOLD + Colors.BLUE))

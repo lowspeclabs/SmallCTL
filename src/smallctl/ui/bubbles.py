@@ -203,17 +203,24 @@ class TextBlockWidget(Static):
         self.render_markdown = render_markdown
         self._markdown_finalized = False
         self._rendered_content: object | None = None
+        self._plain_text_renderable = Text(text)
         self.text = text
         self._refresh_content()
 
     def set_text(self, value: str) -> None:
+        if value == self.text:
+            return
         self.text = value
         self._markdown_finalized = False
+        self._plain_text_renderable = Text(value)
         self._refresh_content()
 
     def append_text(self, value: str) -> None:
+        if not value:
+            return
         self.text += value
         self._markdown_finalized = False
+        self._plain_text_renderable.append(value)
         self._refresh_content()
 
     def finalize_markdown_render(self) -> None:
@@ -224,14 +231,17 @@ class TextBlockWidget(Static):
 
     def _refresh_content(self) -> None:
         if self.render_markdown and self._markdown_finalized and _markdown_render_ready(self.text):
-            self._rendered_content = RichMarkdown(self.text)
+            if not isinstance(self._rendered_content, RichMarkdown):
+                self._rendered_content = RichMarkdown(self.text)
+            else:
+                self._rendered_content = RichMarkdown(self.text)
             self.update(self._rendered_content)
             return
         # Use a plain Text object to avoid Rich markup parsing on arbitrary model output.
         # Model responses may contain brackets like [task_complete(...)] that Rich
         # would try to parse as markup tags, causing 'Expected markup value' crashes.
-        self._rendered_content = Text(self.text)
-        self.update(self._rendered_content)
+        self._rendered_content = self._plain_text_renderable
+        self.update(self._plain_text_renderable)
 
     def get_selection(self, selection: Any) -> Any:
         try:

@@ -306,70 +306,42 @@ async def resolve_model_stream_result(
         if user_task:
             recovery_content_parts.append(f"Current goal: {user_task}")
         try:
-            from ..harness.run_mode import has_active_remote_handoff
-            from ..harness.tool_dispatch import chat_mode_tools
-            from ..harness.task_classifier import (
-                looks_like_author_write_request,
-                looks_like_implementation_followup,
-                looks_like_write_file_request,
-                looks_like_write_patch_request,
+            # Show the model the exact tools that will be exposed on the next
+            # request. Using the exported registry list (current phase, mode and
+            # active profiles) keeps the recovery nudge consistent with the
+            # actual request payload; chat_mode_tools can over-narrow the list
+            # and mislead the model about available capabilities such as ssh_exec.
+            exported_tools = harness.registry.export_openai_tools(
+                phase=harness.state.current_phase,
+                mode="chat",
+                profiles=set(harness.state.active_tool_profiles),
             )
-            allowed_tools = chat_mode_tools(harness)
             allowed_names = [
                 str(entry["function"]["name"])
-                for entry in allowed_tools
+                for entry in exported_tools
                 if isinstance(entry, dict)
                 and isinstance(entry.get("function"), dict)
                 and "name" in entry["function"]
             ]
-            terminal_only = set(allowed_names).issubset({"task_complete", "task_fail"})
-            write_like_goal = bool(
-                user_task
-                and (
-                    looks_like_implementation_followup(user_task)
-                    or looks_like_write_patch_request(user_task)
-                    or looks_like_write_file_request(user_task)
-                    or looks_like_author_write_request(user_task)
-                )
-            )
-            remote_like_goal = bool(
-                user_task
-                and (
-                    has_active_remote_handoff(harness)
-                    or any(
-                        marker in user_task.lower()
-                        for marker in ("ssh ", "ssh_exec", "root@", "remote host", "over ssh", "over remote")
-                    )
-                )
-            )
-            if terminal_only and (write_like_goal or remote_like_goal):
-                exported_tools = harness.registry.export_openai_tools(
-                    phase=harness.state.current_phase,
-                    mode="chat",
-                    profiles=set(harness.state.active_tool_profiles),
-                )
-                broader_names = [
+        except Exception:
+            allowed_names = []
+        if not allowed_names:
+            try:
+                from ..harness.tool_dispatch import chat_mode_tools
+                allowed_tools = chat_mode_tools(harness)
+                allowed_names = [
                     str(entry["function"]["name"])
-                    for entry in exported_tools
+                    for entry in allowed_tools
                     if isinstance(entry, dict)
                     and isinstance(entry.get("function"), dict)
                     and "name" in entry["function"]
                 ]
-                if broader_names:
-                    allowed_names = broader_names
-                    goal_kind = "remote-like goal" if remote_like_goal else "write-like goal"
-                    harness._runlog(
-                        "degenerate_recovery_tool_list_broadened",
-                        f"broadened degenerate-loop recovery tool list for {goal_kind}",
-                        goal=user_task,
-                        tool_names=allowed_names[:24],
-                    )
-            if allowed_names:
-                shown = ", ".join(allowed_names[:8])
-                recovery_content_parts.append(f"Available tools now: {shown}")
-        except Exception:
-            allowed_names = []
-        if not allowed_names:
+            except Exception:
+                allowed_names = []
+        if allowed_names:
+            shown = ", ".join(allowed_names[:8])
+            recovery_content_parts.append(f"Available tools now: {shown}")
+        else:
             recovery_content_parts.append("If you do not know what to do next, ask a focused clarification or call task_fail.")
         harness.state.append_message(
             ConversationMessage(

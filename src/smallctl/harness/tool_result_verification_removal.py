@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from .tool_result_verification_constants import (
+    _DOCKER_NO_SUCH_CONTAINER_RE,
     _FOG_RESOURCE_RE,
     _LS_NO_SUCH_FILE_RE,
     _REMOVAL_ABSENCE_PIPE_RE,
@@ -77,6 +78,7 @@ def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
         or "pgrep" in lowered
         or re.search(r"(?:^|[;&|]\s*)ps(?:\s|$)", lowered) is not None
         or ("systemctl" in lowered and _REMOVAL_ABSENCE_PIPE_RE.search(cmd) is not None)
+        or re.search(r"(?:^|[;&|]\s*)docker(?:\s+container)?\s+rm\b", lowered) is not None
     )
     if not has_absence_tool_shape:
         return False
@@ -167,6 +169,14 @@ def _classify_removal_absence_probe(
             "absence_confirmed": True,
             "found_resources": False,
             "reason": "ls reported deleted resource is absent",
+        }
+
+    if _DOCKER_NO_SUCH_CONTAINER_RE.search(err) or _DOCKER_NO_SUCH_CONTAINER_RE.search(out):
+        return {
+            "is_absence_probe": True,
+            "absence_confirmed": True,
+            "found_resources": False,
+            "reason": "docker reports container already absent",
         }
 
     lowered_cmd = cmd.lower()

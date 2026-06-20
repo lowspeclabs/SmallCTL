@@ -86,6 +86,32 @@ def test_removal_ls_no_such_file_is_verifier_pass() -> None:
     assert "ls reported" in verdict["absence_probe_reason"]
 
 
+def test_removal_docker_no_such_container_is_verifier_pass() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "remove the vikunja container from the remote host"
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "Error response from daemon: No such container: vikunja\n",
+        },
+        error="Error response from daemon: No such container: vikunja",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.89", "command": "docker stop vikunja && docker rm vikunja"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict["verifier_kind"] == "removal_absence_probe"
+    assert "docker reports container already absent" in verdict["absence_probe_reason"]
+
+
 def test_removal_find_matches_are_verifier_failure() -> None:
     state = _cleanup_state()
     result = ToolEnvelope(

@@ -21,7 +21,7 @@ _BINARY_PROBE_RE = re.compile(
     re.IGNORECASE,
 )
 _REMOVAL_ABSENCE_PROBE_RE = re.compile(
-    r"\b(?:grep|egrep|fgrep|find|ls|systemctl|pgrep|ps)\b",
+    r"\b(?:grep|egrep|fgrep|find|ls|systemctl|pgrep|ps|docker)\b",
     re.IGNORECASE,
 )
 _REMOVAL_ABSENCE_PIPE_RE = re.compile(
@@ -31,6 +31,10 @@ _REMOVAL_ABSENCE_PIPE_RE = re.compile(
 _LS_NO_SUCH_FILE_RE = re.compile(
     r"\bls:\s+cannot\s+access\b.*\b(?:no such file|not found)\b",
     re.IGNORECASE | re.DOTALL,
+)
+_DOCKER_NO_SUCH_CONTAINER_RE = re.compile(
+    r"\bError response from daemon:\s*No such container\b",
+    re.IGNORECASE,
 )
 _FOG_RESOURCE_RE = re.compile(
     r"\bfog(?:project|server|\.service|[_-]?(?:nfs|scheduler|multicast|snapin|replicator|image|web|php|worker))?\b",
@@ -45,7 +49,7 @@ _REMOVAL_TASK_KEYWORDS = frozenset([
 ])
 
 # Strings in stderr/stdout that confirm exit-127 means "not found".
-_NOT_FOUND_MARKERS = ("command not found", "not found", "no such file", "permission denied", "could not be found")
+_NOT_FOUND_MARKERS = ("command not found", "not found", "no such file", "no such container", "permission denied", "could not be found")
 _SSH_AUTH_RECOVERY_KEY = "_ssh_auth_recovery_state"
 _REMOTE_MUTATING_COMMAND_RE = re.compile(
     r"\bsed\s+-i\b"

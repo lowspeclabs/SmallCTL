@@ -12,6 +12,21 @@ _THINKING_START_TAG_ALIASES = ("<thinking>", "<thought>", "<|thought|>")
 _THINKING_END_TAG_ALIASES = ("</thinking>", "</thought>", "</|thought|>")
 _PROTOCOL_CONTROL_MARKERS = ("<|channel>", "<channel|>", "<|channel|>")
 
+# SentencePiece tokenizers (used by Gemma and others) represent inter-word
+# spaces with U+2581 (lower one eighth block). Backends that return partially
+# detokenized text leave these markers in the content, which breaks markdown
+# rendering and makes words run together.
+_SENTENCEPIECE_WHITESPACE_MARKER = "\u2581"
+
+
+def normalize_sentencepiece_whitespace(text: str) -> str:
+    """Convert SentencePiece whitespace markers into regular spaces."""
+    if not text:
+        return text
+    if _SENTENCEPIECE_WHITESPACE_MARKER not in text:
+        return text
+    return text.replace(_SENTENCEPIECE_WHITESPACE_MARKER, " ")
+
 
 def _clean_channel_protocol_body(text: str) -> str:
     cleaned = str(text or "").strip()
@@ -242,11 +257,11 @@ def sanitize_assistant_content_for_history(
     if not text or not str(text).strip():
         return str(text or ""), ""
 
-    assistant_text = str(text)
+    assistant_text = normalize_sentencepiece_whitespace(str(text))
     thinking_parts: list[str] = []
 
     def _capture_reasoning(match: re.Match[str]) -> str:
-        body = match.group("body")
+        body = normalize_sentencepiece_whitespace(match.group("body"))
         if body:
             thinking_parts.append(body)
         return ""
@@ -255,7 +270,7 @@ def sanitize_assistant_content_for_history(
     # would delete the markers and leave reasoning labels in assistant text.
     assistant_text, channel_thinking = _extract_channel_protocol_blocks(assistant_text)
     if channel_thinking:
-        thinking_parts.append(channel_thinking)
+        thinking_parts.append(normalize_sentencepiece_whitespace(channel_thinking))
 
     # Extract <reasoning>...</reasoning> wrappers.
     assistant_text = re.sub(
@@ -273,9 +288,9 @@ def sanitize_assistant_content_for_history(
         thinking_end_tag=thinking_end_tag,
     )
     if extracted_thinking:
-        thinking_parts.append(extracted_thinking)
+        thinking_parts.append(normalize_sentencepiece_whitespace(extracted_thinking))
 
-    return assistant_text.strip(), "".join(thinking_parts).strip()
+    return assistant_text.strip(), normalize_sentencepiece_whitespace("".join(thinking_parts)).strip()
 
 
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:
@@ -351,6 +366,7 @@ def _append_content_fragment(
     text: str,
 ) -> None:
     """Append a content fragment, avoiding exact duplicates."""
+    text = normalize_sentencepiece_whitespace(text)
     if not text:
         return
     if fragments and fragments[-1] == (kind, text):

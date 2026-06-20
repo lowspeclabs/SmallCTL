@@ -6,7 +6,7 @@ import time
 from typing import Any, Literal
 
 from ..models.events import UIEvent, UIEventType
-from ..client.chunk_parser import find_protocol_control_marker
+from ..client.chunk_parser import find_protocol_control_marker, normalize_sentencepiece_whitespace
 from .model_stream_fallback_recovery import _with_speaker
 
 
@@ -81,13 +81,14 @@ async def _emit_stream_text(
     stream_state: StreamTagState,
     suppress_duplicate_thinking: bool = False,
 ) -> None:
+    text = normalize_sentencepiece_whitespace(str(text or ""))
     if not text:
         return
     if kind == "thinking":
         text = re.sub(
             r"^(?:thought|thinking|analysis|reasoning)\b\s*",
             "",
-            str(text),
+            text,
             flags=re.IGNORECASE,
         )
         if not text:

@@ -13,6 +13,7 @@ from .chunk_parser import (
     max_thinking_tag_alias_length,
     maybe_parse_tool_args,
     merge_reasoning_text,
+    normalize_sentencepiece_whitespace,
     normalize_thinking_tag_aliases,
     strip_protocol_control_markers,
 )
@@ -84,6 +85,9 @@ def collect_stream(
         next_usage = data.get("usage")
         if isinstance(next_usage, dict):
             usage = next_usage
+        backend_model = data.get("model")
+        if isinstance(backend_model, str) and backend_model.strip():
+            usage["_backend_model_name"] = backend_model.strip()
         choices = data.get("choices") or []
         if not choices:
             continue
@@ -125,9 +129,9 @@ def collect_stream(
             if "id" in tc:
                 existing["id"] = tc["id"]
             if "name" in fn and isinstance(fn["name"], str):
-                existing["function"]["name"] += fn["name"]
+                existing["function"]["name"] += normalize_sentencepiece_whitespace(fn["name"])
             if "arguments" in fn and isinstance(fn["arguments"], str):
-                existing["function"]["arguments"] += fn["arguments"]
+                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(fn["arguments"])
 
     assistant_text = "".join(text_parts)
     tag_assistant, tag_thinking = extract_thinking_from_tags(
@@ -240,9 +244,9 @@ class _TimelineCollector:
             if "id" in tc:
                 existing["id"] = tc["id"]
             if "name" in fn and isinstance(fn["name"], str):
-                existing["function"]["name"] += fn["name"]
+                existing["function"]["name"] += normalize_sentencepiece_whitespace(fn["name"])
             if "arguments" in fn and isinstance(fn["arguments"], str):
-                existing["function"]["arguments"] += fn["arguments"]
+                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(fn["arguments"])
             self._upsert_tool_call_entry(idx)
 
     def finalize(self) -> list[TimelineEntry]:

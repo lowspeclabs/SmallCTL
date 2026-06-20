@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from ..state_support import json_safe_value
+from ..client.chunk_parser import normalize_sentencepiece_whitespace
 from .config import llm_judge_enabled, llm_judge_min_severity
 from .detectors import _has_human_gate
 from .signals import FamaFailureKind, FamaSignal, current_step
@@ -140,7 +141,7 @@ def _collect_text(chunks: list[dict[str, Any]]) -> str:
         if isinstance(delta, dict):
             content = delta.get("content")
             if isinstance(content, str):
-                parts.append(content)
+                parts.append(normalize_sentencepiece_whitespace(content))
     return "".join(parts)
 
 

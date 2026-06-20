@@ -10,7 +10,7 @@ import time
 from typing import Any, Iterable
 
 from ..client import StreamResult
-from ..client.chunk_parser import chunk_contains_tool_call_delta
+from ..client.chunk_parser import chunk_contains_tool_call_delta, normalize_sentencepiece_whitespace
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -739,7 +739,7 @@ async def run_model_stream_loop(
                     delta = _chunk_delta(event)
                     content = delta.get("content")
                     if isinstance(content, str):
-                        assistant_text_buffer += content
+                        assistant_text_buffer += normalize_sentencepiece_whitespace(content)
                         repetition = _detect_degenerate_repetition(assistant_text_buffer)
                         if repetition is not None:
                             phrase, count, window = repetition

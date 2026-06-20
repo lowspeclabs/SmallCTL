@@ -62,6 +62,13 @@ from .declared_file_read import (
     _consume_reasoning_fallback_flag,
     _maybe_synthesize_declared_file_read,
 )
+from .lifecycle_tool_validation import (
+    _apply_tool_call_schema_repair,
+    _record_tool_call_schema_repair,
+    _schema_validation_repair_failure,
+    _tool_call_repair_enabled,
+    _tool_call_repair_log_only,
+)
 from .hidden_tool_helpers import (
     _build_hidden_tool_block_message,
     _format_allowed_tool_summary,
@@ -409,7 +416,18 @@ async def interpret_model_output(
                             evidence=intent.evidence,
                             recovery_kind=write_recovery_kind(intent),
                         )
-            missing_args = _nodes._detect_placeholder_tool_call(harness, pending)
+            repair_result = None
+            if _tool_call_repair_enabled(harness):
+                repair_result = _apply_tool_call_schema_repair(harness, pending)
+                if (
+                    repair_result is not None
+                    and repair_result.repaired
+                    and not _tool_call_repair_log_only(harness)
+                ):
+                    _record_tool_call_schema_repair(harness, pending, repair_result)
+            missing_args = _schema_validation_repair_failure(pending, repair_result)
+            if missing_args is None:
+                missing_args = _nodes._detect_placeholder_tool_call(harness, pending)
             if missing_args is None:
                 missing_args = _nodes._detect_empty_file_write_payload(harness, pending)
             if missing_args is not None and pending.tool_name in {"file_write", "file_append"}:

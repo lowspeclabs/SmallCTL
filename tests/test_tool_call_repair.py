@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from types import SimpleNamespace
 
 import pytest
 
+from smallctl.graph.deps import GraphRuntimeDeps
+from smallctl.graph.interpret_nodes import interpret_model_output
 from smallctl.graph.lifecycle_tool_validation import _validate_pending_tool_calls
-from smallctl.graph.state import PendingToolCall
+from smallctl.graph.routing import LoopRoute
+from smallctl.graph.state import GraphRunState, PendingToolCall
+from smallctl.graph.tool_execution_nodes import dispatch_tools
+from smallctl.models.tool_result import ToolEnvelope
+from smallctl.state import LoopState
 from smallctl.tools.base import ToolSpec, build_tool_schema
 from smallctl.tools.registry import ToolRegistry
 from smallctl.tools.tool_call_repair import repair_tool_call_args, validate_tool_args
@@ -159,6 +166,10 @@ class _State:
         self.cwd = None
         self.step_count = 0
         self.recent_errors: list[str] = []
+        self.strategy = {}
+        self.active_tool_profiles = ["core"]
+        self.run_brief = SimpleNamespace(original_task="read a file")
+        self.current_phase = "execute"
 
     def append_message(self, message: Any) -> None:
         self.messages.append(message)
@@ -332,3 +343,120 @@ async def test_lifecycle_validation_max_actions_blocks_repair_mutation() -> None
     assert graph_state.pending_tool_calls == []
     assert harness.state.messages[-1].metadata["recovery_kind"] == "schema_validation"
     assert "tool_call_repair_failed" in {event for event, _message, _data in harness.runlogs}
+
+
+class _InterpretHarness(_Harness):
+    def __init__(self, registry: ToolRegistry) -> None:
+        self.registry = registry
+        self.state = LoopState(cwd="/tmp")
+        self.state.current_phase = "execute"
+        self.state.active_tool_profiles = ["core"]
+        self.config = SimpleNamespace(
+            schema_validation_max_repair_attempts=2,
+            tool_call_repair_enabled=True,
+            tool_call_repair_log_only=False,
+            tool_call_repair_max_actions_per_call=4,
+            min_exploration_steps=0,
+        )
+        self.runlogs: list[tuple[str, str, dict[str, Any]]] = []
+        self.summarizer = None
+        self.summarizer_client = None
+        self.log = logging.getLogger("test")
+
+    def _extract_planning_request(self, task: str) -> Any:
+        return None
+
+    def _record_experience(self, **kwargs: Any) -> None:
+        return None
+
+
+async def _noop_emit(*args: Any, **kwargs: Any) -> None:
+    return None
+
+
+def _make_interpret_harness(registry: ToolRegistry) -> _InterpretHarness:
+    harness = _InterpretHarness(registry)
+    harness._emit = _noop_emit
+    return harness
+
+
+@pytest.mark.asyncio
+async def test_interpret_model_output_repairs_malformed_pending_call() -> None:
+    spec = _spec("file_read", {"path": {"type": "string"}, "start_line": {"type": "integer"}}, ["path"])
+    harness = _make_interpret_harness(_registry_with(spec))
+    harness.registry.export_openai_tools = lambda **kwargs: [{"type": "function", "function": {"name": name}} for name in harness.registry.names()]
+    pending = PendingToolCall(
+        tool_name="file_read",
+        args={"path": "[src/app.py](src/app.py)", "start_line": None},
+        tool_call_id="tc1",
+        source="model",
+    )
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="thread-repair",
+        run_mode="loop",
+        pending_tool_calls=[pending],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = await interpret_model_output(graph_state, deps)
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    assert pending.args == {"path": "src/app.py"}
+    assert pending.parser_metadata.get("tool_call_repaired") is True
+    assert harness.state.recent_messages[-1].metadata["recovery_kind"] == "tool_call_repair"
+
+
+@pytest.mark.asyncio
+async def test_interpret_model_output_defers_failed_repair_when_valid_sibling_exists() -> None:
+    spec = _spec("file_read", {"path": {"type": "string"}, "start_line": {"type": "integer"}}, ["path"])
+    harness = _make_interpret_harness(_registry_with(spec))
+    harness.registry.export_openai_tools = lambda **kwargs: [{"type": "function", "function": {"name": name}} for name in harness.registry.names()]
+    valid = PendingToolCall(tool_name="file_read", args={"path": "a.py"}, tool_call_id="tc1", source="model")
+    invalid = PendingToolCall(tool_name="file_read", args={"path": "a.py", "start_line": "not-an-int"}, tool_call_id="tc2", source="model")
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="thread-defer",
+        run_mode="loop",
+        pending_tool_calls=[valid, invalid],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    route = await interpret_model_output(graph_state, deps)
+
+    assert route == LoopRoute.DISPATCH_TOOLS
+    assert [p.tool_name for p in graph_state.pending_tool_calls] == ["file_read"]
+    assert isinstance(harness.state.scratchpad.get("_deferred_schema_validation_repair_messages"), list)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tools_defense_in_depth_repairs_system_call() -> None:
+    spec = _spec("file_read", {"path": {"type": "string"}, "start_line": {"type": "integer"}}, ["path"])
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _MockHarness(_InterpretHarness):
+        async def _dispatch_tool_call(self, tool_name: str, args: dict[str, Any]) -> Any:
+            calls.append((tool_name, args))
+            return ToolEnvelope(success=True, output="ok")
+
+    harness = _MockHarness(_registry_with(spec))
+    harness._emit = _noop_emit
+    harness.registry.export_openai_tools = lambda **kwargs: [{"type": "function", "function": {"name": name}} for name in harness.registry.names()]
+    pending = PendingToolCall(
+        tool_name="file_read",
+        args={"path": "a.py", "start_line": None},
+        tool_call_id="tc1",
+        source="system",
+    )
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="thread-system-repair",
+        run_mode="loop",
+        pending_tool_calls=[pending],
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    await dispatch_tools(graph_state, deps)
+
+    assert calls == [("file_read", {"path": "a.py"})]
+    assert pending.parser_metadata.get("tool_call_repaired") is True

@@ -447,18 +447,6 @@ def _build_schema_repair_message(
             return message.rstrip() + "\n\n" + schema_hint
         return message
 
-    if (
-        pending.tool_name in {"file_patch", "ssh_file_patch"}
-        and "replacement_text" in field_names
-        and "replacement_text" in (pending.args or {})
-        and not str((pending.args or {}).get("replacement_text") or "").strip()
-    ):
-        return _with_schema_hint(
-            f"Tool call '{pending.tool_name}' included empty `replacement_text`. "
-            "Empty replacement_text is not allowed; provide the intended replacement text, "
-            "or use `file_write` if you intend to replace/create the full file."
-        )
-
     if pending.tool_name in {"file_patch", "ast_patch"}:
         target_path = str(pending.args.get("path") or primary_task_target_path(harness) or "").strip()
         target_hint = f" Target path for this task: `{target_path}`." if target_path else ""

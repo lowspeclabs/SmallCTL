@@ -6,6 +6,7 @@ from typing import Any
 from ..context.messages import _request_has_full_artifact_intent, render_dir_list_result
 from ..context.rendering import render_shell_output
 from ..state import clip_text_value, json_safe_value
+from ..tool_output_formatting import structured_plain_text
 
 _UI_TOOL_RESULT_PREVIEW_LIMIT = 1200
 _UI_ARTIFACT_READ_PREVIEW_LIMIT = 900
@@ -143,7 +144,18 @@ def format_tool_result_display(
         if "stdout" in output or "stderr" in output:
             return format_shell_output_display(output=output)
 
-        # 2. Generic message-based output
+        # 2. Structured outputs with dedicated, actionable renderers.
+        structured_rendered = structured_plain_text(output)
+        if structured_rendered:
+            preview, clipped = clip_text_value(
+                structured_rendered,
+                limit=_UI_TOOL_RESULT_PREVIEW_LIMIT,
+            )
+            if clipped:
+                return f"{preview}\n... output truncated"
+            return preview
+
+        # 3. Generic message-based output
         msg = output.get("message") or output.get("output") or output.get("text") or output.get("question")
         if isinstance(msg, str) and msg.strip():
             rendered = msg.strip()

@@ -30,7 +30,6 @@ from .detectors import (
     detect_patch_target_not_found,
     detect_stale_success_claim,
     detect_tool_output_misread,
-    detect_repeated_failure_pattern,
     detect_repeated_remote_installer_failure,
     detect_repeated_tool_loop,
     detect_remote_local_confusion,
@@ -40,10 +39,8 @@ from .detectors import (
     detect_tool_plan_hard_route,
     detect_upstream_install_source_invalid,
     detect_verifier_failure_from_result,
-    detect_weak_verifier_logic,
     detect_wrong_path,
     detect_write_session_stall,
-    looks_like_empty_write,
     record_bad_tool_arg_failure,
 )
 from .judge import maybe_run_llm_judge
@@ -314,13 +311,17 @@ async def observe_tool_result(
         if host_key_failure is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=host_key_failure, dedupe=True)
     except Exception as exc:
-        logger.warning("FAMA observe failed: %s", exc)
+        logger.warning("FAMA observe failed: %s", exc, exc_info=True)
+        import traceback
         _runlog(
             harness,
             "fama_observe_error",
             "FAMA observation failed",
             exception_type=type(exc).__name__,
+            exception_message=str(exc),
+            traceback=traceback.format_exc(limit=8),
             source="observe_tool_result",
+            tool_name=tool_name,
         )
 
 

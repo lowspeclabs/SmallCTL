@@ -158,11 +158,31 @@ def _verifier_targets_last_changed_paths(progress: Any, command: str) -> bool:
     return any(path.lower() in normalized for path in paths)
 
 
+def _extract_target_package_names(task: str) -> list[str]:
+    """Extract likely package/binary names from an install/setup task.
+
+    Looks for the first noun-like word after install/setup markers and
+    common service/binary names that appear in the task text.
+    """
+    install_markers_re = re.compile(
+        r"(?:install|setup|deploy|configure|get)\s+(?:\S+\s+){0,4}?"
+        r"(?P<name>[A-Za-z][A-Za-z0-9._+-]{1,30})",
+        re.IGNORECASE,
+    )
+    names: list[str] = []
+    for match in install_markers_re.finditer(task):
+        name = match.group("name").lower().strip(".,;:!?\"'")
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _verifier_matches_user_objective(state: Any, command: str) -> bool:
     """Return True if the verifier command matches the user objective.
 
     For install/setup tasks, weak file-existence verifiers do not count as
-    objective-matching verification.
+    objective-matching verification. Additionally, the command must reference
+    the target software being installed (e.g. mention the package name).
     """
     task = str(
         getattr(getattr(state, "run_brief", None), "original_task", "")
@@ -182,7 +202,73 @@ def _verifier_matches_user_objective(state: Any, command: str) -> bool:
     for pattern, _check_type in weak_patterns:
         if re.search(pattern, normalized):
             return False
+
+    # For install tasks, the verifier must reference the target software.
+    # Commands like `lsb_release -a` check the OS, not the installed software.
+    if not _verifier_references_target_software(task, normalized):
+        return False
+
     return True
+
+
+def _verifier_references_target_software(task: str, command: str) -> bool:
+    """Check if the verifier command references the target software name.
+
+    Accepts commands that:
+    - Mention the target package name
+    - Use package managers to check installed packages (dpkg, rpm, apk)
+    - Check system services (systemctl, service)
+    - Probe network endpoints (curl, wget against localhost)
+    """
+    target_names = _extract_target_package_names(task)
+    if not target_names:
+        return True
+
+    # Also match hyphen-normalized variants (e.g. "pihole" matches "pi-hole")
+    target_name_variants: list[str] = []
+    for name in target_names:
+        target_name_variants.append(name)
+        no_hyphen = name.replace("-", "")
+        if no_hyphen != name:
+            target_name_variants.append(no_hyphen)
+
+    # Accept package-manager probes that inherently check the target
+    pkg_probe_re = re.compile(
+        r"\b(?:dpkg\s+-l|dpkg\s+--list|rpm\s+-q|apk\s+info|"
+        r"apt\s+(?:list|show)|which\s+|whereis\s+|type\s+)"
+        r"\s*\S+",
+        re.IGNORECASE,
+    )
+    if pkg_probe_re.search(command):
+        return True
+
+    # Accept service-check patterns
+    service_probe_re = re.compile(
+        r"\b(?:systemctl\s+(?:status|is-active|is-enabled)\s+|"
+        r"service\s+\S+\s+status|rc-service\s+\S+\s+status)\b",
+        re.IGNORECASE,
+    )
+    if service_probe_re.search(command):
+        return True
+
+    # Accept local connectivity checks (curl/wget against localhost/127.0.0.1)
+    local_probe_re = re.compile(
+        r"\b(?:curl|wget)\s+(?:-k\s+)?(?:https?://)?(?:localhost|127\.0\.0\.1)\b",
+        re.IGNORECASE,
+    )
+    if local_probe_re.search(command):
+        return True
+
+    # Accept commands that directly reference a target name or variant
+    escaped_variants = [re.escape(v) for v in target_name_variants]
+    name_in_command = re.compile(
+        r"\b" + r"\b|\b".join(escaped_variants) + r"\b",
+        re.IGNORECASE,
+    )
+    if name_in_command.search(command):
+        return True
+
+    return False
 
 
 def _write_session_deadline_block(state: Any, *, tool_name: str) -> ToolEnvelope | None:

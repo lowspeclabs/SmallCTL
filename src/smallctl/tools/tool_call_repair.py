@@ -94,7 +94,7 @@ def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepai
 
     _repair_optional_nulls(spec.schema, repaired_args, actions)
     _repair_markdown_paths_recursive(spec.schema, repaired_args, (), actions)
-    _repair_paired_range(spec.name, repaired_args, actions)
+    _repair_paired_range(getattr(spec, "name", ""), repaired_args, actions)
 
     after_shape_issues = validate_tool_args(spec.schema, repaired_args) + _catalog_shape_issues(spec, repaired_args)
     if _only_extra_field_issues(after_shape_issues):
@@ -159,7 +159,7 @@ def _validate_schema(schema: dict[str, Any], value: Any, path: tuple[PathPart, .
 
     if isinstance(value, dict) and "object" in (expected_types or ["object"]):
         properties = schema.get("properties") or {}
-        required = set(schema.get("required") or [])
+        required = schema.get("required") or []
         for key in required:
             if key not in value or value[key] is None:
                 issues.append(ToolCallValidationIssue(path=path + (key,), kind="required", message=f"missing required field {key}"))
@@ -183,7 +183,7 @@ def _catalog_shape_issues(spec: ToolSpec, args: dict[str, Any]) -> list[ToolCall
     issues: list[ToolCallValidationIssue] = []
     _collect_optional_null_issues(spec.schema, args, (), issues)
     _collect_markdown_path_issues(spec.schema, args, (), issues)
-    pair = _PAIRED_RANGE_FIELDS.get(spec.name)
+    pair = _PAIRED_RANGE_FIELDS.get(getattr(spec, "name", ""))
     if pair:
         start_path, end_path = pair
         start = _get_path(args, start_path)
@@ -277,7 +277,7 @@ def _repair_wrong_object_wrapper(spec: ToolSpec, args: dict[str, Any]) -> tuple[
     if len(args) != 1:
         return None
     key, value = next(iter(args.items()))
-    if key not in (_WRAPPER_KEYS | {spec.name}) or not isinstance(value, dict):
+    if key not in (_WRAPPER_KEYS | {getattr(spec, "name", "")}) or not isinstance(value, dict):
         return None
     result = repair_tool_call_args(spec, value)
     if result.valid_after_repair:

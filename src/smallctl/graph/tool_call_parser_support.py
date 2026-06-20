@@ -124,6 +124,12 @@ def _detect_missing_required_tool_arguments(harness: Any, pending: PendingToolCa
             missing_fields.append(field)
             continue
         if isinstance(value, str) and not value.strip():
+            if field == "replacement_text" and pending.tool_name in {
+                "file_patch",
+                "ssh_file_patch",
+                "ssh_file_replace_between",
+            }:
+                continue
             missing_fields.append(field)
 
     if not missing_fields:

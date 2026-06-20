@@ -50,7 +50,12 @@ def evidence_has_failure_semantics(evidence: Any) -> bool:
     tool_name = str(getattr(evidence, "tool_name", "") or "").strip().lower()
     if tool_name in {"shell_exec", "ssh_exec"}:
         command = str(metadata.get("command") or "").lower()
-        if any(marker in command for marker in _READ_COMMAND_MARKERS):
+        exit_code = metadata.get("exit_code")
+        if (
+            any(marker in command for marker in _READ_COMMAND_MARKERS)
+            and exit_code is not None
+            and int(exit_code) != 0
+        ):
             return True
     return False
 
@@ -76,6 +81,11 @@ def artifact_has_failure_semantics(artifact: Any) -> bool:
     tool_name = str(getattr(artifact, "tool_name", "") or "").strip().lower()
     if tool_name in {"shell_exec", "ssh_exec"}:
         command = str(metadata.get("command") or "").lower()
-        if any(marker in command for marker in _READ_COMMAND_MARKERS):
+        exit_code = metadata.get("exit_code")
+        if (
+            any(marker in command for marker in _READ_COMMAND_MARKERS)
+            and exit_code is not None
+            and int(exit_code) != 0
+        ):
             return True
     return False

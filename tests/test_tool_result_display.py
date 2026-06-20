@@ -105,6 +105,35 @@ def test_structured_web_search_output_includes_result_ids() -> None:
     assert "URL: https://example.com/article" in rendered
 
 
+def test_format_tool_result_display_uses_web_search_renderer() -> None:
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "query": "docker image for webmin",
+            "provider": "duckduckgo",
+            "results": [
+                {
+                    "result_id": "webres-ca3491ef8439",
+                    "fetch_id": "r1",
+                    "title": "coderitter/webmin - Docker Image",
+                    "url": "https://hub.docker.com/r/coderitter/webmin",
+                    "domain": "hub.docker.com",
+                    "snippet": "Discover the Webmin container image on Docker Hub.",
+                }
+            ],
+        },
+    )
+
+    rendered = format_tool_result_display(tool_name="web_search", result=result)
+
+    assert "Query: docker image for webmin" in rendered
+    assert "Provider: duckduckgo" in rendered
+    assert "Fetch ID: r1" in rendered
+    assert "Result ID: webres-ca3491ef8439" in rendered
+    assert "Use with: web_fetch(result_id='r1')" in rendered
+    assert "{\n" not in rendered
+    assert "\"results\"" not in rendered
+
 def test_structured_web_fetch_output_includes_exact_artifact_read_hint() -> None:
     rendered = structured_plain_text(
         {

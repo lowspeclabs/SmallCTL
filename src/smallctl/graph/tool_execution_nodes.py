@@ -27,6 +27,12 @@ from .display import format_tool_result_display
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
 from . import nodes as _nodes
 from .autocontinue import clear_durable_autocontinue_for_pending
+from .lifecycle_tool_validation import (
+    _apply_tool_call_schema_repair,
+    _record_tool_call_schema_repair,
+    _tool_call_repair_enabled,
+    _tool_call_repair_log_only,
+)
 from .tool_call_parser import (
     _artifact_read_synthesis_hint,
     _detect_timeout_recovered_incomplete_tool_call,
@@ -138,6 +144,15 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         graph_state.last_tool_results = []
         graph_state.pending_tool_calls = graph_state.pending_tool_calls[:1]
     for pending in graph_state.pending_tool_calls:
+        pending_source = str(getattr(pending, "source", "model") or "model").strip().lower()
+        if pending_source != "model" and _tool_call_repair_enabled(harness):
+            repair_result = _apply_tool_call_schema_repair(harness, pending)
+            if (
+                repair_result is not None
+                and repair_result.repaired
+                and not _tool_call_repair_log_only(harness)
+            ):
+                _record_tool_call_schema_repair(harness, pending, repair_result)
         registry = getattr(harness, "registry", None)
         if registry is not None:
             normalized_tool_name, normalized_args, intercepted_result, normalization_metadata = normalize_tool_request(
@@ -675,10 +690,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     "tool_call_id": pending.tool_call_id,
                     "success": result.success,
                     "replayed": replayed,
-                        "display_text": format_tool_result_display(
-                            tool_name=pending.tool_name,
-                            result=result,
-                            request_text=harness.state.run_brief.original_task,
+                    "output": json_safe_value(result.output),
+                    "error": result.error,
+                    "display_text": format_tool_result_display(
+                        tool_name=pending.tool_name,
+                        result=result,
+                        request_text=harness.state.run_brief.original_task,
                     ),
                 },
             ),

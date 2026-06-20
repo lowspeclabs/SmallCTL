@@ -251,6 +251,9 @@ def _schema_validation_repair_failure(
     return message, {
         "tool_name": pending.tool_name,
         "validation_error": "schema_validation",
+        "required_fields": [
+            str(issue.path[-1]) for issue in result.issues if issue.kind == "required" and issue.path
+        ],
         "validation_issues": [
             {
                 "path": [str(part) for part in issue.path],

@@ -106,7 +106,7 @@ def register_filesystem_tools(
                     "properties": {
                         "path": {"type": "string", "description": "Path to file."},
                         "target_text": {"type": "string", "description": "Exact text to replace, including whitespace."},
-                        "replacement_text": {"type": "string", "description": "Text to insert in place of the target text."},
+                        "replacement_text": {"type": "string", "description": "Text to insert in place of the target text. Use an empty string to delete the target text."},
                         "expected_occurrences": {"type": "integer", "description": "Expected number of exact matches. Defaults to 1."},
                         "occurrence_index": {"type": "integer", "description": "Optional one-based occurrence to replace after validating expected_occurrences against all matches."},
                         "regex": {"type": "boolean", "description": "Treat target_text as a Python regular expression instead of exact text."},

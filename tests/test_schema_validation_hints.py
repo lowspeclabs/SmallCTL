@@ -4,12 +4,14 @@ from types import SimpleNamespace
 
 from smallctl.graph.node_support import schema_validation_repair_decision
 from smallctl.graph.state import PendingToolCall
+from smallctl.graph.tool_call_parser_support import _detect_missing_required_tool_arguments
 from smallctl.state import LoopState
 
 
 class _Spec:
     def __init__(self, schema: dict[str, object]) -> None:
         self._schema = schema
+        self.schema = schema
 
     def openai_schema(self) -> dict[str, object]:
         return self._schema
@@ -150,3 +152,82 @@ def test_schema_validation_repair_reports_malformed_arguments_as_system_nudge() 
             "replayable": False,
         }
     ]
+
+
+def test_empty_replacement_text_allowed_for_patch_tools() -> None:
+    patch_schemas = {
+        "file_patch": {
+            "type": "object",
+            "required": ["path", "target_text", "replacement_text"],
+            "properties": {
+                "path": {"type": "string"},
+                "target_text": {"type": "string"},
+                "replacement_text": {"type": "string"},
+            },
+        },
+        "ssh_file_patch": {
+            "type": "object",
+            "required": ["path", "target_text", "replacement_text"],
+            "properties": {
+                "path": {"type": "string"},
+                "target_text": {"type": "string"},
+                "replacement_text": {"type": "string"},
+            },
+        },
+        "ssh_file_replace_between": {
+            "type": "object",
+            "required": ["path", "start_text", "end_text", "replacement_text"],
+            "properties": {
+                "path": {"type": "string"},
+                "start_text": {"type": "string"},
+                "end_text": {"type": "string"},
+                "replacement_text": {"type": "string"},
+            },
+        },
+    }
+
+    for tool_name, schema in patch_schemas.items():
+        harness = SimpleNamespace(
+            state=LoopState(step_count=5),
+            registry=_Registry({tool_name: schema}),
+        )
+        args: dict[str, object] = {
+            "path": "/tmp/webmin-compose.yml",
+            "replacement_text": "",
+        }
+        if tool_name == "ssh_file_replace_between":
+            args["start_text"] = "version: '3'"
+            args["end_text"] = "services:"
+        else:
+            args["target_text"] = "version: '3'"
+
+        pending = PendingToolCall(tool_name=tool_name, args=args)
+        assert _detect_missing_required_tool_arguments(harness, pending) is None, (
+            f"empty replacement_text should be allowed for {tool_name}"
+        )
+
+
+def test_empty_non_replacement_text_still_reported_missing() -> None:
+    schema = {
+        "type": "object",
+        "required": ["path", "target_text", "replacement_text"],
+        "properties": {
+            "path": {"type": "string"},
+            "target_text": {"type": "string"},
+            "replacement_text": {"type": "string"},
+        },
+    }
+    harness = SimpleNamespace(
+        state=LoopState(step_count=5),
+        registry=_Registry({"file_patch": schema}),
+    )
+    pending = PendingToolCall(
+        tool_name="file_patch",
+        args={"path": "/tmp/webmin-compose.yml", "target_text": "", "replacement_text": ""},
+    )
+    result = _detect_missing_required_tool_arguments(harness, pending)
+    assert result is not None
+    message, details = result
+    assert "target_text" in details["required_fields"]
+    assert "replacement_text" not in details["required_fields"]
+    assert "missing required fields" in message.lower()

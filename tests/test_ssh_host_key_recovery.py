@@ -76,15 +76,16 @@ def test_file_write_blocks_known_hosts_overwrite(tmp_path) -> None:
     assert known_hosts.read_text(encoding="utf-8") == "192.168.1.161 ssh-ed25519 AAAAold\n"
 
 
-def test_schema_repair_message_names_empty_replacement_text() -> None:
+def test_schema_repair_message_allows_empty_replacement_text() -> None:
     pending = PendingToolCall(tool_name="file_patch", args={"path": "a.txt", "replacement_text": ""})
     harness = SimpleNamespace(registry=None, state=LoopState(cwd="/tmp"))
 
     message = _build_schema_repair_message(harness, pending, ["target_text", "replacement_text"])
 
-    assert "empty `replacement_text`" in message
-    assert "not allowed" in message
-    assert "Missing required fields" not in message
+    assert "Tool call 'file_patch' is missing required fields" in message
+    assert "target_text" in message
+    assert "empty `replacement_text`" not in message
+    assert "not allowed" not in message
 
 
 def test_ssh_host_key_failure_causal_chain_mentions_blocked_recovery() -> None:

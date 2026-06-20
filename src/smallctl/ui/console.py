@@ -229,6 +229,12 @@ class ConsolePane(VerticalScroll):
         if speaker:
             turn.set_speaker(speaker)
         turn.replace_assistant_text(text)
+        # If the turn was hidden because all content was blanked (e.g. degenerate
+        # loop placeholder), drop the reference so the next model call creates a
+        # fresh turn instead of appending to a hidden one.
+        if not turn.display:
+            if self._active_assistant_turn is turn:
+                self._active_assistant_turn = None
 
     def _latest_assistant_turn(self) -> AssistantTurnWidget | None:
         try:

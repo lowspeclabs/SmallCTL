@@ -883,6 +883,22 @@ class AssistantTurnWidget(Vertical):
             return None
         return None
 
+    def has_visible_content(self) -> bool:
+        """Return True if this turn has any user-facing content to display."""
+        try:
+            for child in self._content_body().children:
+                if not getattr(child, "display", True):
+                    continue
+                if isinstance(child, TextBlockWidget) and child.has_content():
+                    return True
+                if isinstance(child, (AssistantDetailWidget, ToolCallsContainerWidget,
+                                      ArtifactBubbleWidget, LiveOutputContainerWidget,
+                                      TaskChecklistWidget)):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def replace_assistant_text(self, text: str) -> None:
         """Overwrite the streamed assistant text with cleaned content.
         Called after the stream finishes to remove any inline tool call JSON."""
@@ -898,6 +914,9 @@ class AssistantTurnWidget(Vertical):
             if block is self._last_assistant_block:
                 self._last_assistant_block = None
             self._content_widget.refresh(layout=True)
+            # Hide the entire turn if nothing visible remains after blanking.
+            if not self.has_visible_content():
+                self.display = False
             return
         block.display = True
         block.set_text(cleaned)

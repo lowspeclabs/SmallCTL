@@ -843,3 +843,50 @@ def test_assistant_turn_has_dark_grey_left_border() -> None:
             assert assistant_turn.styles.border_left == ("thick", Color(75, 85, 99))
 
     asyncio.run(_run())
+
+
+def test_degenerate_loop_hides_empty_turns() -> None:
+    """A replace event with the degenerate loop placeholder should hide empty turns and clear the active turn reference."""
+
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            # Start streaming assistant text
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Entering repetitive state..."))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            # Ensure we have an active assistant turn and it is visible
+            turn1 = console._active_assistant_turn
+            assert turn1 is not None
+            assert turn1.display is True
+
+            # Emit the degenerate loop placeholder replace event
+            await console.append_event(
+                UIEvent(
+                    UIEventType.ASSISTANT,
+                    "[Previous assistant output was halted because it entered a repetition loop.]",
+                    data={"kind": "replace"},
+                )
+            )
+            await pilot.pause()
+
+            # The turn should now be hidden and the active turn cleared
+            assert turn1.display is False
+            assert console._active_assistant_turn is None
+
+            # The next assistant message should create a new turn
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Recovered text content."))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn2 = console._active_assistant_turn
+            assert turn2 is not None
+            assert turn2 is not turn1
+            assert turn2.display is True
+            assert turn2.get_assistant_text() == "Recovered text content."
+
+    asyncio.run(_run())
+

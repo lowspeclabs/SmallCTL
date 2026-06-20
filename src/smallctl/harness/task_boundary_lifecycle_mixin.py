@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from time import time
 from typing import Any
 
 from ..interrupt_replies import is_interrupt_response, is_plan_approval_reply
-from ..remote_scope import handoff_supports_remote_continuation, task_matches_remote_continuation
 from ..models.conversation import ConversationMessage
 from ..recovery_metrics import record_failure_event_metric
 from ..state import (
     ContextBrief,
-    EpisodicSummary,
     PromptBudgetSnapshot,
     RunBrief,
     WorkingMemory,
@@ -22,63 +18,14 @@ from ..state import (
 )
 from ..recovery_schema import FailureEvent
 from ..task_targets import extract_task_target_paths
-from ..normalization import dedupe_keep_tail
 from ..state_memory import trim_recent_messages
-from ..state_support import clip_text_value
-from .followup_signals import (
-    assistant_message_proposes_concrete_implementation,
-    is_affirmative_followup,
-    recent_assistant_requested_action_confirmation,
-)
-from .task_boundary_followups import (
-    has_plan_execution_approval_context as _has_plan_execution_approval_context,
-    is_continue_like_followup as _is_continue_like_followup,
-)
-from .task_classifier import (
-    classify_task_mode,
-    looks_like_write_file_request,
-    looks_like_write_patch_request,
-)
-from .task_intent import derive_task_contract, next_action_for_task
-from .task_transactions import (
-    FollowupClassification,
-    FollowupSignals,
-    classify_followup_transaction,
-)
-from .task_boundary_summary import (
-    clip_task_summary_text,
-    extract_task_terminal_message,
-    task_duration_seconds,
+from .task_boundary_constants import (
+    _SEMANTIC_RECENT_TAIL_TOKEN_CAP,
+    _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS,
 )
 from .task_boundary_support import (
-    base_task_from_task_chain,
-    blocks_inherited_target,
-    canonicalize_inline_task_wrapper,
-    clean_option_title,
     collapse_task_chain,
-    coerce_remote_target,
-    extract_action_options_from_text,
-    format_remote_target,
-    is_remote_followup_wrapper,
-    merge_action_options,
-    merge_remote_targets,
-    normalize_remote_host,
     normalize_task_text,
-    parse_inline_task_wrapper,
-)
-from .task_boundary_helpers import (
-    extract_remote_absolute_paths,
-    guard_trip_preserves_artifact,
-    guard_trip_repeated_tool,
-    normalize_target_path,
-    ordinal_followup_index,
-    remote_target_matches_known_target,
-    strip_ordinal_prefix,
-    target_paths_overlap,
-)
-from .task_boundary_semantic_tail import (
-    message_is_semantic_tail_candidate,
-    semantic_recent_tail_messages,
 )
 
 
@@ -240,61 +187,6 @@ def _next_action_hint_for_boundary(
     if next_actions:
         return str(next_actions[-1])
     return ""
-
-
-from .task_boundary_constants import (
-    _ACTION_CONFIRMATION_PROMPTS,
-    _AFFIRMATIVE_REMOTE_CONTINUATION_TEXT,
-    _CONTEXTUAL_REFERENCE_RE,
-    _CONTINUATION_ACTION_LEAD_RE,
-    _CONTINUE_DIRECTIVE_RE,
-    _CORRECTIVE_RESTEER_RE,
-    _CORRECTIVE_TOOL_NAMES,
-    _FOLLOWUP_ACTION_RE,
-    _FOLLOWUP_FILLERS,
-    _GENERIC_EDIT_LEAD_RE,
-    _GENERIC_TARGET_RE,
-    _GUARD_FAILURE_RE,
-    _GUARD_RECOVERY_NUDGE_RE,
-    _INLINE_NUMBERED_OPTION_RE,
-    _INLINE_USER_WRAP_MARKER_RE,
-    _IPV4_HOST_RE,
-    _MARKDOWN_OPTION_RE,
-    _NUMBERED_OPTION_RE,
-    _ORDINAL_FOLLOWUP_RE,
-    _ORDINAL_PREFIX_RE,
-    _ORDINAL_WORDS,
-    _ORDINAL_WORD_FOLLOWUP_RE,
-    _OPTION_ACTION_WORDS,
-    _QUALITY_FOLLOWUP_RE,
-    _QUALITY_TARGET_RE,
-    _REMOTE_ABSOLUTE_PATH_RE,
-    _REMOTE_CLARIFICATION_PHRASES,
-    _REMOTE_CORRECTIVE_CLEANUP_PHRASES,
-    _REMOTE_DEPLOYMENT_CONTEXT_TARGETS,
-    _REMOTE_DIAGNOSTIC_HINTS,
-    _REMOTE_DIAGNOSTIC_QUESTION_RE,
-    _REMOTE_DIAGNOSTIC_TARGETS,
-    _REMOTE_LIVE_CORRECTION_HINTS,
-    _REMOTE_LIVE_CORRECTION_PHRASES,
-    _REMOTE_OPERATIONAL_TARGETS,
-    _REMOTE_OPERATIONAL_VERBS,
-    _REMOTE_PERMISSION_FOLLOWUP_RE,
-    _REMOTE_RESIDUE_MARKERS,
-    _REMOTE_SCRIPT_HINT_RE,
-    _REMOTE_SITE_MUTATION_ACTION_RE,
-    _REMOTE_SITE_MUTATION_TARGET_RE,
-    _RESEARCH_CONTEXT_RE,
-    _RETRY_FOLLOWUP_RE,
-    _SEMANTIC_RECENT_TAIL_TOKEN_CAP,
-    _SEQUENTIAL_REMOTE_FOLLOWUP_RE,
-    _TARGET_LANGUAGE_RE,
-    _TARGET_NEGATION_RE,
-    _TARGET_REPLACEMENT_RE,
-    _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS,
-    _USER_AT_HOST_RE,
-    _WEB_RESEARCH_DIRECTIVE_RE,
-)
 
 
 class TaskBoundaryLifecycleMixin:
@@ -718,12 +610,10 @@ class TaskBoundaryLifecycleMixin:
         if not getattr(state, "recent_messages", None):
             return None
         brief_id = f"B{len(state.context_briefs) + 1:04d}"
-        from ..context.summarizer import ContextSummarizer
         from ..context.policy import ContextPolicy
         policy = getattr(self.harness, "context_policy", None)
         if policy is None:
             policy = ContextPolicy()
-        summarizer = ContextSummarizer(policy)
         key_discoveries = []
         if state.working_memory.known_facts:
             key_discoveries.extend(state.working_memory.known_facts[-4:])

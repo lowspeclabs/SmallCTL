@@ -86,7 +86,33 @@ def test_removal_ls_no_such_file_is_verifier_pass() -> None:
     assert "ls reported" in verdict["absence_probe_reason"]
 
 
-def test_removal_docker_no_such_container_is_verifier_pass() -> None:
+def test_removal_docker_probe_no_matches_is_verifier_pass() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "remove the vikunja container from the remote host"
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "",
+        },
+        error="",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.89", "command": "docker ps -a | grep vikunja"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict["verifier_kind"] == "removal_absence_probe"
+    assert "grep absence probe returned no matches" in verdict["absence_probe_reason"]
+
+
+def test_removal_docker_rm_failure_is_not_verifier_pass() -> None:
     state = LoopState()
     state.run_brief.original_task = "remove the vikunja container from the remote host"
     result = ToolEnvelope(
@@ -107,9 +133,9 @@ def test_removal_docker_no_such_container_is_verifier_pass() -> None:
     )
 
     assert verdict is not None
-    assert verdict["verdict"] == "pass"
-    assert verdict["verifier_kind"] == "removal_absence_probe"
-    assert "docker reports container already absent" in verdict["absence_probe_reason"]
+    assert verdict["verdict"] == "fail"
+    assert verdict.get("verifier_kind") != "removal_absence_probe"
+    assert verdict.get("failure_mode") != "removal_residue"
 
 
 def test_removal_find_matches_are_verifier_failure() -> None:
@@ -301,6 +327,7 @@ def test_mutating_docker_failure_with_stdout_still_fails() -> None:
 
     assert verdict is not None
     assert verdict["verdict"] == "fail"
+    assert verdict.get("verifier_kind") != "removal_absence_probe"
     assert verdict.get("partial_diagnostic") is not True
 
 

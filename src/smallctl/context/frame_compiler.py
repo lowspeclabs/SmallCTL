@@ -343,7 +343,6 @@ class PromptStateFrameCompiler:
         logger = logging.getLogger("smallctl.context")
         if not logger.isEnabledFor(logging.DEBUG):
             return
-        from ..logging_utils import synthetic_trace_id
         trace_id = synthetic_trace_id(state, suffix="ctx")
         drops = [
             {

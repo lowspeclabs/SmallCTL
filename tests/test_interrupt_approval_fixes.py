@@ -7,7 +7,6 @@ but the system misclassified it as a new chat task, causing catastrophic context
 """
 
 import pytest
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -761,7 +760,7 @@ class TestInterruptApprovalFixes:
         mock_harness._runlog = Mock()
         mock_harness._emit = Mock()
 
-        mode = await ModeDecisionService(mock_harness).decide("approve")
+        await ModeDecisionService(mock_harness).decide("approve")
 
         assert _has_plan_execution_approval_context(mock_harness) is False
         assert not any(

@@ -77,8 +77,19 @@ def _command_is_removal_absence_probe(command: str, state: Any) -> bool:
         or "grep" in lowered
         or "pgrep" in lowered
         or re.search(r"(?:^|[;&|]\s*)ps(?:\s|$)", lowered) is not None
-        or ("systemctl" in lowered and _REMOVAL_ABSENCE_PIPE_RE.search(cmd) is not None)
-        or re.search(r"(?:^|[;&|]\s*)docker(?:\s+container)?\s+rm\b", lowered) is not None
+        or (
+            "systemctl" in lowered
+            and _REMOVAL_ABSENCE_PIPE_RE.search(cmd) is not None
+            and re.search(
+                r"\bsystemctl\s+(?:status|is-active|is-enabled|list-units|list-unit-files)\b",
+                lowered,
+            )
+            is not None
+        )
+        or re.search(
+            r"(?:^|[;&|]\s*)docker(?:\s+(?:container|volume|network|image))?\s+(?:ls|list|ps|inspect)\b",
+            lowered,
+        ) is not None
     )
     if not has_absence_tool_shape:
         return False

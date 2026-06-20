@@ -415,6 +415,19 @@ async def resume_loop_run(
     if str(pending.get("kind") or "").strip() == "apt_deb822_validator_approval":
         action = interrupt_response_action(pending, human_input)
         if action == "approve":
+            # Clear apt_deb822_preflight errors so the guard does not trip
+            # before the approved validator can run.
+            recent_errors: list[str] = list(
+                getattr(harness.state, "recent_errors", []) or []
+            )
+            cleaned = [
+                e
+                for e in recent_errors
+                if "apt_deb822_preflight_required" not in e
+                and "blocked apt package operation" not in e
+            ]
+            if len(cleaned) != len(recent_errors):
+                harness.state.recent_errors = cleaned
             tool_name = str(pending.get("tool_name") or "ssh_exec").strip() or "ssh_exec"
             arguments = pending.get("arguments")
             if isinstance(arguments, dict) and arguments:

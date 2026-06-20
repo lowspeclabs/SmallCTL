@@ -787,9 +787,15 @@ class AssistantTurnWidget(Vertical):
             return
 
         if tool_name in {"shell_exec", "ssh_exec"}:
-            self._last_shell_stream = None
             self._last_assistant_block = None
             self._last_thinking_detail = None
+            if self._last_shell_stream is None:
+                self._last_shell_stream = LiveOutputBubbleWidget(text="")
+                self._last_shell_stream.add_class("assistant-detail-nested")
+            self._last_shell_stream.append_text(text)
+            if self._current_tool_calls_container is not None:
+                self._current_tool_calls_container.finalize()
+                self._current_tool_calls_container = None
             return
 
         if self._live_output_container is None:

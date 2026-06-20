@@ -1001,3 +1001,82 @@ def test_select_planning_tools_and_exposure_share_the_same_filtered_names(tmp_pa
     exposure = resolve_turn_tool_exposure(harness, "planning")
     assert exposure["schemas"] == tools
     assert exposure["names"] == ["file_read"]
+
+
+def test_remote_only_continue_under_pressure_reduces_tool_exposure(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.run_brief.original_task = "continue the remote ssh setup"
+    state.active_tool_profiles = ["core", "network"]
+    state.scratchpad["_session_ssh_targets"] = {"host1": {"host": "example.com"}}
+    schemas = [
+        _tool_schema("file_read"),
+        _tool_schema("file_write"),
+        _tool_schema("shell_exec"),
+        _tool_schema("ssh_exec"),
+        _tool_schema("ssh_file_read"),
+        _tool_schema("web_fetch"),
+        _tool_schema("task_complete"),
+        _tool_schema("task_fail"),
+        _tool_schema("loop_status"),
+        _tool_schema("ask_human"),
+    ]
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="qwen2.5-7b-instruct"),
+        state=state,
+        _current_user_task=lambda: state.run_brief.original_task,
+        _runlog=lambda *args, **kwargs: None,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+        config=None,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: list(schemas),
+            get=lambda name: None,
+        ),
+        context_policy=SimpleNamespace(max_prompt_tokens=12000),
+        server_context_limit=None,
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+    names = set(exposure["names"])
+
+    assert "ssh_exec" in names
+    assert "ssh_file_read" in names
+    assert "task_complete" in names
+    assert "file_read" not in names
+    assert "file_write" not in names
+    assert "shell_exec" not in names
+    assert "web_fetch" not in names
+
+
+def test_remote_only_continue_keeps_full_tools_without_pressure(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.run_brief.original_task = "continue the remote ssh setup"
+    state.active_tool_profiles = ["core", "network"]
+    schemas = [
+        _tool_schema("file_read"),
+        _tool_schema("shell_exec"),
+        _tool_schema("ssh_exec"),
+        _tool_schema("task_complete"),
+    ]
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="qwen2.5-7b-instruct"),
+        state=state,
+        _current_user_task=lambda: state.run_brief.original_task,
+        _runlog=lambda *args, **kwargs: None,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+        config=None,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: list(schemas),
+            get=lambda name: None,
+        ),
+        context_policy=SimpleNamespace(max_prompt_tokens=32768),
+        server_context_limit=None,
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+    names = set(exposure["names"])
+
+    assert "ssh_exec" in names
+    assert "file_read" in names
+    assert "shell_exec" in names

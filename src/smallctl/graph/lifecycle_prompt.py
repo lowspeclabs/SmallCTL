@@ -87,6 +87,48 @@ def select_staged_tools(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> l
     return selected
 
 
+def _last_verifier_passed(state: Any) -> bool:
+    verdict = getattr(state, "last_verifier_verdict", None) or {}
+    if isinstance(verdict, dict):
+        return str(verdict.get("verdict") or "").strip().lower() == "pass"
+    return str(verdict).strip().lower() == "pass"
+
+
+def _overflow_with_passed_verdict_to_success(
+    graph_state: GraphRunState,
+    harness: Any,
+    exc: RuntimeError,
+) -> bool:
+    """If the last verifier passed, treat a prompt-budget overflow as success.
+
+    This prevents a harness that has already accomplished the objective from
+    failing just because assembling the next turn's prompt exceeded the token
+    budget.
+    """
+    if not _last_verifier_passed(harness.state):
+        return False
+    message = "Task objective verified; prompt budget exceeded on next turn."
+    graph_state.final_result = {
+        "status": "completed",
+        "message": {"status": "complete", "message": message},
+        "assistant": str(graph_state.last_assistant_text or "").strip() or message,
+        "thinking": graph_state.last_thinking_text,
+        "usage": graph_state.last_usage,
+        "error": None,
+    }
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "task_complete_prompt_overflow_after_passed_verifier",
+            "auto-completed task after prompt-budget overflow because last verifier passed",
+            verifier=str(
+                getattr(harness.state, "last_verifier_verdict", {}).get("verdict") or "pass"
+            ),
+            overflow_message=str(exc),
+        )
+    return True
+
+
 async def prepare_prompt(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> list[dict[str, Any]] | None:
     harness = deps.harness
     system_prompt = build_system_prompt(
@@ -100,6 +142,8 @@ async def prepare_prompt(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> 
     try:
         return await harness._build_prompt_messages(system_prompt, event_handler=deps.event_handler)
     except RuntimeError as exc:
+        if _overflow_with_passed_verdict_to_success(graph_state, harness, exc):
+            return None
         await harness._emit(
             deps.event_handler,
             UIEvent(event_type=UIEventType.ERROR, content=str(exc)),
@@ -160,6 +204,8 @@ async def prepare_chat_prompt(graph_state: GraphRunState, deps: GraphRuntimeDeps
     try:
         return await harness._build_prompt_messages(system_prompt, event_handler=deps.event_handler)
     except RuntimeError as exc:
+        if _overflow_with_passed_verdict_to_success(graph_state, harness, exc):
+            return None
         await harness._emit(
             deps.event_handler,
             UIEvent(event_type=UIEventType.ERROR, content=str(exc)),
@@ -190,6 +236,8 @@ async def prepare_planning_prompt(graph_state: GraphRunState, deps: GraphRuntime
         )
         return await harness._build_prompt_messages(system_prompt, event_handler=deps.event_handler)
     except RuntimeError as exc:
+        if _overflow_with_passed_verdict_to_success(graph_state, harness, exc):
+            return None
         await harness._emit(
             deps.event_handler,
             UIEvent(event_type=UIEventType.ERROR, content=str(exc)),

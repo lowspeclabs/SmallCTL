@@ -175,6 +175,7 @@ def test_emit_records_lightweight_ui_event_ledger() -> None:
         harness = SimpleNamespace(
             state=state,
             build_status_snapshot=lambda activity="": {"activity": activity},
+            run_logger=SimpleNamespace(info=lambda *args, **kwargs: None),
         )
 
         async def handler(event: UIEvent) -> None:

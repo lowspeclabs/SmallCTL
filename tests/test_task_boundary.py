@@ -1441,3 +1441,40 @@ def test_local_ssh_file_followup_preserves_working_memory() -> None:
     assert "known_hosts path is /home/stephen/.ssh/known_hosts" in state.working_memory.known_facts
     tx = state.scratchpad.get("_task_transaction", {})
     assert tx.get("turn_type") in {"ITERATION", "CONTINUATION"}
+
+
+def test_continue_task_reset_clears_warm_context() -> None:
+    from smallctl.graph.lifecycle_nodes_support import _apply_continue_task_state_reset
+    from smallctl.state import WorkingMemory
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "continue the remote deployment"
+    state.working_memory = WorkingMemory(
+        current_goal="deploy vikunja remotely",
+        known_facts=["docker pull succeeded"],
+        decisions=["use ssh_exec for remote commands"],
+    )
+    state.context_briefs = [{"brief_id": "B0001", "key_discoveries": ["old"]}]
+    state.episodic_summaries = [{"summary_id": "S0001", "text": "old summary"}]
+    state.warm_experiences = [{"memory_id": "E0001"}]
+    state.scratchpad["_fresh_tool_outputs"] = [{"tool_name": "ssh_exec", "content": "old output"}]
+    state.recent_messages = [
+        ConversationMessage(role="user", content="start deployment"),
+        ConversationMessage(role="assistant", content="ok"),
+        ConversationMessage(role="tool", content="done"),
+    ]
+
+    harness = _make_harness(state)
+
+    _apply_continue_task_state_reset(
+        harness, task="continue", resolved_task="continue the remote deployment"
+    )
+
+    assert state.working_memory.current_goal == "deploy vikunja remotely"
+    assert state.working_memory.known_facts == []
+    assert state.working_memory.decisions == []
+    assert state.context_briefs == []
+    assert state.episodic_summaries == []
+    assert state.warm_experiences == []
+    assert state.scratchpad.get("_fresh_tool_outputs") is None
+    assert len(state.recent_messages) == 2

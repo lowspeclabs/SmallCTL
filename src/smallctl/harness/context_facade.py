@@ -54,6 +54,24 @@ async def _ensure_context_limit(self: Any) -> None:
 
 def _apply_usage(self: Any, usage: dict[str, Any]) -> None:
     _apply_usage_metrics(self, usage)
+    backend_model = usage.get("_backend_model_name") if isinstance(usage, dict) else None
+    if backend_model and getattr(self, "client", None) is not None:
+        context_limit = getattr(self, "server_context_limit", None) or getattr(
+            getattr(self, "context_policy", None), "max_prompt_tokens", None
+        )
+        normalized = self.client.apply_backend_model_profile(backend_model, context_limit)
+        if normalized and getattr(self, "context_policy", None) is not None:
+            self.context_policy.apply_model_profile(normalized)
+            scaling_context = context_limit or self.context_policy.max_prompt_tokens
+            if scaling_context:
+                self.context_policy.recalculate_quotas(scaling_context)
+            self._runlog(
+                "backend_model_profile_applied",
+                "applied backend-reported model profile for small context window",
+                backend_model=backend_model,
+                normalized_model=normalized,
+                context_limit=context_limit,
+            )
 
 
 async def _record_tool_result(

@@ -4,6 +4,7 @@ from typing import Any
 
 from ..guards import is_seven_b_or_under_model_name
 from ..models.events import UIEvent, UIEventType
+from ..state import WorkingMemory
 from ..write_session_fsm import archive_terminal_write_session
 
 
@@ -71,6 +72,21 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
     harness.state.reasoning_graph.evidence_records = []
     harness.state.context_briefs = []
     harness.state.episodic_summaries = []
+
+    # Discard persisted warm context that otherwise bloats the prompt budget on
+    # a fresh continuation. The task goal is preserved in the run_brief.
+    harness.state.scratchpad.pop("_fresh_tool_outputs", None)
+    harness.state.warm_experiences = []
+    current_goal = str(
+        getattr(harness.state, "working_memory", None) and harness.state.working_memory.current_goal or ""
+    ).strip()
+    harness.state.working_memory = WorkingMemory(current_goal=current_goal)
+    harness._runlog(
+        "task_continue_warm_context_cleared",
+        "cleared persisted warm context on continue-like follow-up",
+        raw_task=task,
+        resolved_task=resolved_task[:80] if resolved_task else "",
+    )
 
 
 def _resolve_followup_task(harness: Any, task: str) -> tuple[str, bool]:

@@ -1230,3 +1230,41 @@ def test_detect_degenerate_repetition_density_catches_true_repetitions() -> None
     phrase, count, window = result
     assert phrase.strip() == "dagu"
     assert count >= 6
+
+
+def test_overflow_with_passed_verdict_auto_completes() -> None:
+    from smallctl.graph.lifecycle_prompt import _overflow_with_passed_verdict_to_success
+    from smallctl.state import LoopState
+
+    state = LoopState(cwd="/tmp")
+    state.last_verifier_verdict = {"verdict": "pass", "tool_name": "ssh_exec"}
+    harness = _Harness(state)
+    harness._runlog = lambda *args, **kwargs: harness.runlog_events.append((args, kwargs))
+    graph_state = GraphRunState(loop_state=state, thread_id="test", run_mode="loop")
+    graph_state.last_assistant_text = "Remote deployment verified."
+
+    result = _overflow_with_passed_verdict_to_success(
+        graph_state, harness, RuntimeError("PROMPT BUDGET OVERFLOW")
+    )
+
+    assert result is True
+    assert graph_state.final_result is not None
+    assert graph_state.final_result["status"] == "completed"
+    assert "verified" in graph_state.final_result["message"]["message"].lower()
+
+
+def test_overflow_without_passed_verdict_remains_failure() -> None:
+    from smallctl.graph.lifecycle_prompt import _overflow_with_passed_verdict_to_success
+    from smallctl.state import LoopState
+
+    state = LoopState(cwd="/tmp")
+    state.last_verifier_verdict = {"verdict": "fail", "tool_name": "ssh_exec"}
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="test", run_mode="loop")
+
+    result = _overflow_with_passed_verdict_to_success(
+        graph_state, harness, RuntimeError("PROMPT BUDGET OVERFLOW")
+    )
+
+    assert result is False
+    assert graph_state.final_result is None

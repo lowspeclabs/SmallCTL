@@ -632,7 +632,9 @@ def test_auto_runtime_capability_query_routes_without_mode_model_fallback(tmp_pa
     assert "Available tools can be inspected" in json.dumps(result)
     assert len(stream_calls) == 1
     assert any(
-        event == "mode_decision" and data.get("mode") == "loop" and data.get("intent") == "capability_query"
+        event == "mode_decision"
+        and data.get("selected_mode") == "loop"
+        and data.get("intent") == "capability_query"
         for event, data in runlog
     )
 

@@ -15,7 +15,6 @@ from ..guards import is_four_b_or_under_model_name
 from ..provider_profiles import resolve_provider_profile
 from .provider_adapters import get_provider_adapter
 from .stream_collectors import StreamResult, TimelineEntry, collect_stream, collect_timeline
-from .usage import extract_context_limit, extract_runtime_context_limit
 from .client_transport import _DEFAULT_MAX_COMPLETION_TOKENS
 from .client_transport import fetch_model_context_limit, stream_chat
 from .request_budget import (
@@ -356,3 +355,83 @@ class OpenAICompatClient:
             thinking_start_tag=thinking_start_tag,
             thinking_end_tag=thinking_end_tag,
         )
+
+    @staticmethod
+    def normalize_backend_model_name(backend_name: str | None) -> str | None:
+        """Return a canonical model name suitable for profile classification.
+
+        Strips provider prefixes and quantization/instruction suffixes that
+        otherwise hide the model size from the small-model classifiers.
+        """
+        normalized = str(backend_name or "").strip()
+        if not normalized:
+            return None
+        normalized = normalized.lower()
+        prefixes = (
+            "openrouter/",
+            "google/",
+            "anthropic/",
+            "meta/",
+            "mistralai/",
+            "microsoft/",
+            "huggingface/",
+            "local/",
+        )
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefixes:
+                if normalized.startswith(prefix):
+                    normalized = normalized[len(prefix):]
+                    changed = True
+                    break
+        suffixes = (
+            "-it",
+            "-instruct",
+            "-chat",
+            "-q4_k_m",
+            "-q8_0",
+            "-fp16",
+            "-awq",
+            "-gptq",
+            "@q4_k_m",
+            "@q8_0",
+            "@fp16",
+        )
+        changed = True
+        while changed:
+            changed = False
+            for suffix in suffixes:
+                if normalized.endswith(suffix):
+                    normalized = normalized[:-len(suffix)]
+                    changed = True
+                    break
+        normalized = normalized.strip("-_@")
+        # Canonicalize Gemma-4 small quantized variants so the size classifier
+        # sees "4b" even when backends report the bare "gemma-4-e4b" slug.
+        if normalized.startswith("gemma-4-") and ("-e4b" in normalized or "-e2b" in normalized):
+            normalized = "gemma-4b"
+        if not normalized:
+            return None
+        return normalized
+
+    def apply_backend_model_profile(self, backend_name: str | None, context_limit: int | None) -> str | None:
+        """Re-derive small-model context pressure from the backend-reported name.
+
+        Only applied when the discovered context window is below 32k tokens,
+        because small local backends often report an ambiguous model slug while
+        the context limit is the reliable signal that we are on a small model.
+        Returns the normalized name if a profile was applied, otherwise None.
+        """
+        if not context_limit or int(context_limit) >= 32768:
+            return None
+        normalized = self.normalize_backend_model_name(backend_name)
+        if not normalized:
+            return None
+        from ..guards import is_four_b_or_under_model_name
+        if not is_four_b_or_under_model_name(normalized):
+            return None
+        # Do not mutate the API-facing model name; only update the runtime flag
+        # used for timeout/tool-count heuristics.
+        self.is_small_model = True
+        return normalized

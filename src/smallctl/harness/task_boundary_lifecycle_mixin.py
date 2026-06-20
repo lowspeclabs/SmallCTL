@@ -528,6 +528,9 @@ class TaskBoundaryLifecycleMixin:
         # Always clear _tool_attempt_history across task boundaries so guard
         # thresholds are evaluated within the current task only.
         preserved_scratchpad.pop("_tool_attempt_history", None)
+        # Fresh tool outputs are hot-history duplicates; do not carry them across
+        # task boundaries where they would bloat the prompt budget.
+        preserved_scratchpad.pop("_fresh_tool_outputs", None)
         if preserved_previous_task:
             preserved_scratchpad["_task_boundary_previous_task"] = preserved_previous_task
             pending_paths = extract_task_target_paths(preserved_previous_task)

@@ -39,12 +39,25 @@ def tail_excerpt(text: str, *, tail_lines: int) -> str:
 
 def content_similarity(left: str, right: str) -> float:
     """Return a 0-1 similarity ratio between two text blocks."""
-    return difflib.SequenceMatcher(
-        None,
-        str(left or ""),
-        str(right or ""),
-        autojunk=False,
-    ).ratio()
+    left = str(left or "")
+    right = str(right or "")
+    if left == right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    if len(left) + len(right) > 20000:
+        # Fast line-based Jaccard approximation for large inputs; avoids the
+        # quadratic cost of SequenceMatcher on long files while still catching
+        # identical or near-identical rewrites.
+        left_lines = left.splitlines()
+        right_lines = right.splitlines()
+        set_left = set(left_lines)
+        set_right = set(right_lines)
+        union = set_left | set_right
+        if not union:
+            return 1.0
+        return len(set_left & set_right) / len(union)
+    return difflib.SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
 def is_substantially_new_content(

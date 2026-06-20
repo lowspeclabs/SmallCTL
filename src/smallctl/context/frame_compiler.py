@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 import logging
 from typing import Iterable, Any
@@ -94,7 +95,7 @@ from .frame import (
     PromptStateSpine,
 )
 from .observations import build_observation_packets
-from .policy import ContextPolicy
+from .policy import ContextPolicy, estimate_text_tokens
 
 class PromptStateFrameCompiler:
     def __init__(self, policy: ContextPolicy | None = None) -> None:
@@ -361,7 +362,7 @@ class PromptStateFrameCompiler:
             "experiences": len(frame.experience_packet.memories),
             "artifact_snippets": len(frame.artifact_packet.snippets),
         }
-        spine_text = " ".join(str(v) for v in frame.spine.__dict__.values() if isinstance(v, (str, list)))
+        spine_text = " ".join(str(v) for v in dataclasses.asdict(frame.spine).values() if isinstance(v, (str, list)))
         estimated = estimate_text_tokens(spine_text)
         log_kv(
             logger,

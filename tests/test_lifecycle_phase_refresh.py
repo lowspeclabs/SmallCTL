@@ -25,6 +25,7 @@ def _make_harness(state: LoopState) -> SimpleNamespace:
         dispatcher=SimpleNamespace(phase="explore"),
         memory=SimpleNamespace(prime_write_policy=lambda _task: None),
         guards=GuardConfig(),
+        registry=SimpleNamespace(names=lambda: []),
     )
     return harness
 

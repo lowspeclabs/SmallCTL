@@ -76,11 +76,17 @@ class TestInterruptApprovalFixes:
         # Should return "loop" mode, not "chat"
         assert result == "loop"
         # Should log the interrupt-based decision
+        from unittest.mock import ANY
         mock_harness._runlog.assert_called_with(
             "mode_decision",
             "selected run mode",
-            mode="loop",
-            raw="pending_interrupt_response",
+            level="debug",
+            subsystem="graph",
+            selected_mode="loop",
+            heuristic_matched="pending_interrupt_response",
+            task_preview=ANY,
+            model_decision_raw=None,
+            confidence="n/a",
             interrupt_kind="plan_execute_approval",
             raw_task="yes",
         )

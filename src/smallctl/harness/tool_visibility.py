@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from ..remote_scope import remote_scope_is_active
 from ..state import json_safe_value
-from ..tools.fs_sessions import _write_session_can_finalize
+from .run_mode import has_active_remote_handoff
 from .tool_visibility_support import (
     _LOOPISH_TOOL_MODES,
     _has_artifacts,
@@ -58,6 +57,14 @@ _RETRYABLE_HIDDEN_TOOL_NAMES = {
     "finalize_write_session",
     "task_fail",
     "web_fetch",
+}
+_REMOTE_ONLY_CONTINUE_ESSENTIAL_TOOLS = {
+    "ask_human",
+    "loop_status",
+    "ssh_exec",
+    "ssh_file_read",
+    "task_complete",
+    "task_fail",
 }
 
 
@@ -438,6 +445,7 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         state=harness.state,
         mode=normalized_mode,
     )
+    schemas = _filter_remote_only_continue_tools(harness, schemas, mode=normalized_mode)
     if _has_recent_tool_evidence(harness.state):
         existing_names = set(_tool_names(schemas))
         for terminal_tool in ("task_complete", "task_fail"):
@@ -506,6 +514,71 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         "schemas": schemas,
         "names": _tool_names(schemas),
     }
+
+
+def _is_remote_only_continue_task(harness: Any) -> bool:
+    task = str(getattr(harness.state.run_brief, "original_task", "") or "").strip()
+    task_lower = task.lower()
+    # Bare continue variants, or a continue variant followed by remote scope.
+    continue_variants = {"continue", "keep going", "resume", "proceed", "go on", "carry on"}
+    is_continue = any(
+        task_lower == variant or task_lower.startswith(f"{variant} ")
+        for variant in continue_variants
+    )
+    if not is_continue:
+        return False
+    if not any(k in task_lower for k in ("ssh", "remote", "server", "host")):
+        return False
+    if has_active_remote_handoff(harness):
+        return True
+    scratchpad = getattr(harness.state, "scratchpad", None) or {}
+    session_targets = scratchpad.get("_session_ssh_targets") if isinstance(scratchpad, dict) else None
+    if isinstance(session_targets, dict) and session_targets:
+        return True
+    return False
+
+
+def _prompt_budget_is_tight(harness: Any) -> bool:
+    policy = getattr(harness, "context_policy", None)
+    if policy is None:
+        return False
+    server_limit = getattr(harness, "server_context_limit", None)
+    if server_limit is not None and int(server_limit) < 32768:
+        return True
+    max_prompt = getattr(policy, "max_prompt_tokens", None)
+    if max_prompt is not None and int(max_prompt) < 16384:
+        return True
+    return False
+
+
+def _filter_remote_only_continue_tools(
+    harness: Any,
+    schemas: list[dict[str, Any]],
+    mode: str,
+) -> list[dict[str, Any]]:
+    if mode not in _LOOPISH_TOOL_MODES or not schemas:
+        return schemas
+    if not _is_remote_only_continue_task(harness):
+        return schemas
+    if not _prompt_budget_is_tight(harness):
+        return schemas
+    allowed = set(_REMOTE_ONLY_CONTINUE_ESSENTIAL_TOOLS)
+    # Keep any tool already exposed so monotonicity is preserved downstream.
+    allowed = allowed | set(getattr(harness.state, "task_exposed_tools", set()) or set())
+    filtered = [
+        schema
+        for schema in schemas
+        if _tool_name(schema) in allowed
+    ]
+    if filtered and len(filtered) < len(schemas):
+        harness._runlog(
+            "tool_exposure_reduced_remote_continue",
+            "reduced tool exposure for remote-only continue task under prompt pressure",
+            mode=mode,
+            kept_tools=_tool_names(filtered),
+            dropped_tools=sorted(set(_tool_names(schemas)) - set(_tool_names(filtered))),
+        )
+    return filtered or schemas
 
 
 def _log_fama_tool_exposure(harness: Any, *, hidden_tools: set[str], mode: str) -> None:

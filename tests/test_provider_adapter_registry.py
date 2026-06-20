@@ -102,13 +102,12 @@ def test_lmstudio_sanitizer_merges_system_messages_before_tool_cleanup() -> None
     assert sanitized[3]["tool_call_id"] == "call_1"
 
 
-def test_openrouter_sanitizer_rewrites_orphan_tool_messages() -> None:
+def test_openrouter_sanitizer_drops_orphan_tool_messages() -> None:
     messages = [
         {"role": "tool", "name": "shell_exec", "tool_call_id": "call_1", "content": "ok"},
     ]
     sanitized = sanitize_messages_for_openrouter(messages)
-    assert sanitized[0]["role"] == "user"
-    assert "Orphan tool result" in str(sanitized[0]["content"])
+    assert sanitized == []
 
 
 def test_openrouter_sanitizer_drops_empty_unresolved_assistant_tool_call() -> None:
@@ -211,7 +210,7 @@ def test_openrouter_sanitizer_strips_assistant_content_when_tool_calls_present()
     ]
 
 
-def test_openrouter_sanitizer_rewrites_unavailable_tool_history_as_user_context() -> None:
+def test_openrouter_sanitizer_drops_unavailable_tool_history() -> None:
     messages = [
         {
             "role": "assistant",
@@ -238,13 +237,7 @@ def test_openrouter_sanitizer_rewrites_unavailable_tool_history_as_user_context(
         available_tool_names={"shell_exec"},
     )
 
-    assert sanitized == [
-        {
-            "role": "user",
-            "content": "[OpenRouter compatibility] Orphan tool result from task_complete (tool_call_id=call_1):\ntask complete blocked",
-        },
-        {"role": "user", "content": "keep going"},
-    ]
+    assert sanitized == [{"role": "user", "content": "keep going"}]
 
 
 def test_openrouter_mutate_payload_drops_history_for_unavailable_tools() -> None:
@@ -281,13 +274,7 @@ def test_openrouter_mutate_payload_drops_history_for_unavailable_tools() -> None
 
     mutated = adapter.mutate_payload(payload)
 
-    assert mutated["messages"] == [
-        {
-            "role": "user",
-            "content": "[OpenRouter compatibility] Orphan tool result from task_complete (tool_call_id=call_1):\ntask complete blocked",
-        },
-        {"role": "user", "content": "keep going"},
-    ]
+    assert mutated["messages"] == [{"role": "user", "content": "keep going"}]
 
 
 def test_lmstudio_sanitizer_rewrites_completed_task_complete_pair_before_followup_user() -> None:

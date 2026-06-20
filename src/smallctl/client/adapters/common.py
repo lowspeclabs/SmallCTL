@@ -75,6 +75,7 @@ def sanitize_messages_with_pending_tool_cleanup(
     rewrite_orphan_tool_messages: bool = False,
     available_tool_names: set[str] | None = None,
     strip_assistant_content_when_tool_calls: bool = False,
+    drop_orphan_tool_messages: bool = False,
 ) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     pending_tool_call_ids: set[str] = set()
@@ -154,12 +155,16 @@ def sanitize_messages_with_pending_tool_cleanup(
                     pending_assistant_index = None
             elif tool_call_id and tool_call_id in unavailable_tool_call_ids:
                 unavailable_tool_call_ids.discard(tool_call_id)
-                if rewrite_orphan_tool_messages:
+                if drop_orphan_tool_messages:
+                    pass
+                elif rewrite_orphan_tool_messages:
                     sanitized.append(rewrite_orphan_tool_message_for_openrouter(message))
                 else:
                     sanitized.append(sanitize_message_for_transport(message))
             else:
-                if rewrite_orphan_tool_messages:
+                if drop_orphan_tool_messages:
+                    pass
+                elif rewrite_orphan_tool_messages:
                     sanitized.append(rewrite_orphan_tool_message_for_openrouter(message))
                 else:
                     sanitized.append(sanitize_message_for_transport(message))
@@ -181,9 +186,10 @@ def sanitize_messages_for_openrouter(
 ) -> list[dict[str, Any]]:
     return sanitize_messages_with_pending_tool_cleanup(
         merge_system_messages_for_single_system_providers(messages),
-        rewrite_orphan_tool_messages=True,
+        rewrite_orphan_tool_messages=False,
         available_tool_names=available_tool_names,
         strip_assistant_content_when_tool_calls=True,
+        drop_orphan_tool_messages=True,
     )
 
 

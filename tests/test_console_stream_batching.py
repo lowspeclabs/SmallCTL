@@ -165,3 +165,29 @@ def test_console_unmount_flushes_pending_stream() -> None:
         assert console.calls == [("assistant", "pending", None, None)]
 
     asyncio.run(_run())
+
+
+def test_hidden_system_boundary_flushes_pending_assistant_stream() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        await console.append_event(UIEvent(UIEventType.ASSISTANT, "before"))
+        await console.append_event(
+            UIEvent(
+                UIEventType.SYSTEM,
+                "hidden recovery note",
+                data={"ui_kind": "model_output_degenerate_loop_exhausted"},
+            )
+        )
+
+        assert console.calls == [("assistant", "before", None, None)]
+        assert console._stream_buffer_groups == []
+
+        await console.append_event(UIEvent(UIEventType.ASSISTANT, "after"))
+        await console.flush_stream_buffers()
+
+        assert console.calls == [
+            ("assistant", "before", None, None),
+            ("assistant", "after", None, None),
+        ]
+
+    asyncio.run(_run())

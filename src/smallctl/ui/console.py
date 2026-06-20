@@ -191,9 +191,12 @@ class ConsolePane(VerticalScroll):
             # Suppressed system events should not create a visible bubble, but
             # non-info system events still break the active assistant turn so that
             # subsequent assistant messages render as a new turn rather than
-            # appending to the previous one. Purely informational suppressed
-            # events preserve the active turn to avoid interrupting the flow.
+            # appending to the previous one. Flush any pending stream first;
+            # otherwise the delayed batch can attach pre-boundary text to the
+            # next assistant turn. Purely informational suppressed events preserve
+            # the active turn to avoid interrupting the flow.
             if event.data.get("ui_kind") not in {"info", "status"}:
+                await self.flush_stream_buffers()
                 self._active_assistant_turn = None
                 self._stream_flush_soon_once = True
             self._last_system_message = text

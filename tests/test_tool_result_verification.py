@@ -180,6 +180,104 @@ def test_non_removal_grep_exit_one_still_fails() -> None:
     assert verdict["verdict"] == "fail"
 
 
+def test_docker_inventory_with_non_swarm_stderr_is_partial_diagnostic_pass() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Inspect Docker state on the remote host."
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": (
+                "CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES\n"
+                "abc123         nginx     nginx     1 hour    Up        80/tcp    web\n"
+                "DRIVER    VOLUME NAME\n"
+                "local     portainer_data\n"
+            ),
+            "stderr": (
+                "Error response from daemon: This node is not a swarm manager. "
+                "Use \"docker swarm init\" or \"docker swarm join\" to connect this node to swarm and try again.\n"
+            ),
+        },
+        error="Error response from daemon: This node is not a swarm manager.",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.89",
+            "command": "docker ps -a && docker volume ls && docker config ls",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict["verifier_kind"] == "partial_docker_diagnostic"
+    assert verdict["partial_diagnostic"] is True
+    assert state.repair_cycle_id == ""
+
+
+def test_docker_swarm_status_help_with_inventory_is_partial_diagnostic_pass() -> None:
+    state = LoopState()
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": (
+                "CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES\n"
+                "DRIVER    VOLUME NAME\n"
+                "NETWORK ID     NAME      DRIVER    SCOPE\n"
+                "REPOSITORY     TAG       IMAGE ID  CREATED   SIZE\n"
+            ),
+            "stderr": (
+                "Usage:  docker swarm COMMAND\n\n"
+                "Manage Swarm\n\n"
+                "Run 'docker swarm COMMAND --help' for more information on a command.\n"
+            ),
+        },
+        error="Usage:  docker swarm COMMAND",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={
+            "host": "192.168.1.89",
+            "command": "docker ps -a; docker volume ls; docker network ls; docker image ls; docker swarm status",
+        },
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict["verifier_kind"] == "partial_docker_diagnostic"
+
+
+def test_mutating_docker_failure_with_stdout_still_fails() -> None:
+    state = LoopState()
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 1,
+            "stdout": "CONTAINER ID   IMAGE\nabc123 nginx\n",
+            "stderr": "Error response from daemon: No such container: abc123\n",
+        },
+        error="Error response from daemon: No such container: abc123",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.89", "command": "docker rm abc123 && docker ps -a"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict.get("partial_diagnostic") is not True
+
+
 def test_zero_unittest_cases_is_verifier_failure_even_with_exit_zero() -> None:
     state = LoopState()
     result = ToolEnvelope(

@@ -5,7 +5,6 @@ from typing import Any
 
 from ..challenge_progress import record_verifier_result
 from ..models.tool_result import ToolEnvelope
-from ..shell_utils import strip_benign_shell_redirections as _strip_benign_shell_redirections
 from .tool_result_verification_audit import _is_audit_task
 from .tool_result_verification_blocker import (
     _extract_latest_execution_blocker,
@@ -30,6 +29,7 @@ from .tool_result_verification_repair import (
     _update_repair_cycle_state,
 )
 from .tool_result_verification_semantic import (
+    _docker_diagnostic_has_useful_partial_output,
     _insufficient_verifier_message,
     _install_task_requires_strong_verifier,
     _passing_verifier_is_weaker_than_prior_failure,
@@ -106,6 +106,13 @@ def _store_verifier_verdict(
         verdict = "pass"
     elif result.success and (exit_code in (0, None)):
         verdict = "pass"
+    elif (
+        tool_name == "ssh_exec"
+        and current_verifier_kind == "diagnostic"
+        and _docker_diagnostic_has_useful_partial_output(command=command, stdout=raw_stdout, stderr=raw_stderr)
+    ):
+        verdict = "pass"
+        semantic_failure = "docker diagnostic returned useful inventory with non-swarm diagnostic noise"
     elif (
         exit_code == 127
         and command_is_binary_probe(command)
@@ -240,6 +247,15 @@ def _store_verifier_verdict(
         normalized["verifier_kind"] = current_verifier_kind
     if approval_denied:
         normalized["approval_denied"] = True
+    if (
+        verdict == "pass"
+        and tool_name == "ssh_exec"
+        and current_verifier_kind == "diagnostic"
+        and semantic_failure == "docker diagnostic returned useful inventory with non-swarm diagnostic noise"
+    ):
+        normalized["verifier_kind"] = "partial_docker_diagnostic"
+        normalized["partial_diagnostic"] = True
+        normalized["partial_diagnostic_reason"] = semantic_failure
     if absence_probe["is_absence_probe"]:
         normalized["verifier_kind"] = "removal_absence_probe"
         normalized["absence_probe_reason"] = absence_probe["reason"]

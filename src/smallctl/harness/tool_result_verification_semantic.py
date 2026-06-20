@@ -15,6 +15,79 @@ from .tool_result_verification_constants import (
 from .tool_result_verification_helpers import snip_text as _snip_text, verifier_kind_for_command, verifier_strength
 
 
+_DOCKER_INVENTORY_HEADERS = (
+    "container id",
+    "driver    volume name",
+    "network id",
+    "repository",
+    "docker version",
+    "server version",
+)
+
+_DOCKER_NON_SWARM_DIAGNOSTIC_MARKERS = (
+    "this node is not a swarm manager",
+    "usage:  docker swarm command",
+    "run 'docker swarm command --help'",
+)
+
+
+def _docker_segment_is_readonly_diagnostic(segment: str) -> bool:
+    import shlex
+
+    text = str(segment or "").strip()
+    if not text:
+        return True
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return False
+    while tokens and tokens[0] in {"sudo", "timeout", "env"}:
+        if tokens[0] == "timeout" and len(tokens) >= 2:
+            tokens = tokens[2:]
+        elif tokens[0] == "env":
+            tokens = tokens[1:]
+            while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+                tokens = tokens[1:]
+        else:
+            tokens = tokens[1:]
+    if len(tokens) < 2 or tokens[0] not in {"docker", "podman"}:
+        return False
+    subcommand = tokens[1].lower()
+    if subcommand in {"ps", "info", "version", "inspect", "logs"}:
+        return True
+    if subcommand in {"volume", "network", "image", "config", "container", "service", "stack", "node"}:
+        return len(tokens) >= 3 and tokens[2].lower() in {"ls", "list", "inspect", "show"}
+    if subcommand == "swarm":
+        # Docker has no `swarm status` command, but models often use it as a
+        # read-only diagnostic. Treat only this shape as diagnostic noise.
+        return len(tokens) >= 3 and tokens[2].lower() == "status"
+    return False
+
+
+def _command_is_docker_readonly_diagnostic_chain(command: str) -> bool:
+    normalized = str(command or "").strip()
+    if not normalized:
+        return False
+    if re.search(r"\|\||\|", normalized):
+        return False
+    segments = [part.strip() for part in re.split(r"\s*(?:&&|;)\s*", normalized) if part.strip()]
+    return bool(segments) and all(_docker_segment_is_readonly_diagnostic(segment) for segment in segments)
+
+
+def _docker_diagnostic_has_useful_partial_output(*, command: str, stdout: str, stderr: str) -> bool:
+    if not _command_is_docker_readonly_diagnostic_chain(command):
+        return False
+    out = str(stdout or "").strip().lower()
+    err = str(stderr or "").strip().lower()
+    if not out:
+        return False
+    if not any(header in out for header in _DOCKER_INVENTORY_HEADERS):
+        return False
+    if not err:
+        return True
+    return any(marker in err for marker in _DOCKER_NON_SWARM_DIAGNOSTIC_MARKERS)
+
+
 def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str:
     combined = "\n".join(part for part in (stdout, stderr) if str(part or "").strip())
     if not combined:

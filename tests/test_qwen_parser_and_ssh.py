@@ -230,6 +230,22 @@ def test_plain_json_without_tool_name_is_not_removed_by_inline_parser() -> None:
     assert calls == []
 
 
+def test_truncated_inline_json_tool_call_is_recovered_by_adding_closing_braces() -> None:
+    # Simulates a stream halted by the repetition-loop guard mid-JSON.
+    text = '{"tool_name": "ssh_exec", "arguments": {"command": "which docker && dpkg -l | grep docker'
+
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        model_name="gemma-4-e4b",
+        allowed_raw_function_names={"ssh_exec"},
+    )
+
+    assert len(calls) == 1
+    assert calls[0].tool_name == "ssh_exec"
+    assert calls[0].args == {"command": "which docker && dpkg -l | grep docker"}
+    assert cleaned == ""
+
+
 def test_native_ssh_exec_malformed_arguments_preserve_parse_diagnostic() -> None:
     raw_arguments = '{"command": "cd /opt/qwen-compose-medium && docker compose up -d"{}'
 

@@ -73,5 +73,9 @@ _PLACEHOLDER_ARG_VALUE_TOKENS = {
 _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
     "gemma-4-e2b-it",
     "gemma-4-e4b-it",
+    # Bare quantized suffixes are used by some backends/gguf filenames that
+    # drop the "-it" token even though the checkpoint is instruction-tuned.
+    "gemma-4-e2b",
+    "gemma-4-e4b",
 )
 _INCOMPLETE_TOOL_CALL_SCRATCHPAD_KEY = "_last_incomplete_tool_call"

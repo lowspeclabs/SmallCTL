@@ -36,6 +36,68 @@ def _inline_json_extra_fields(data: dict[str, Any]) -> dict[str, Any]:
     return safe if isinstance(safe, dict) else {}
 
 
+def _try_parse_data(data: Any) -> PendingToolCall | None:
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("function"), dict):
+        pending = PendingToolCall.from_payload(data)
+        if pending is not None:
+            extra_fields = _inline_json_extra_fields(data)
+            if extra_fields:
+                pending.parser_metadata["inline_json_extra_fields"] = extra_fields
+            return pending
+    name = str(data.get("name", data.get("tool_name", data.get("tool", data.get("action", ""))))).strip()
+    if not name:
+        return None
+    args = data.get("arguments", data.get("args", data.get("params", data.get("parameters", {}))))
+    if isinstance(args, dict):
+        raw_arguments = json.dumps(args)
+    elif isinstance(args, str):
+        raw_arguments = args
+    else:
+        raw_arguments = "{}"
+    payload = {
+        "function": {
+            "name": name,
+            "arguments": raw_arguments,
+        }
+    }
+    pending = PendingToolCall.from_payload(payload)
+    if pending is not None:
+        extra_fields = _inline_json_extra_fields(data)
+        if extra_fields:
+            pending.parser_metadata["inline_json_extra_fields"] = extra_fields
+    return pending
+
+
+def _try_recover_truncated_inline_json(text: str, start: int) -> dict[str, Any] | None:
+    """Attempt to recover a truncated inline JSON tool call by adding closing braces.
+
+    Only recovers when the prefix clearly looks like an inline tool call
+    (contains tool/name/action keys and an arguments container) and adding a
+    modest number of closing braces yields valid JSON. This salvages tool calls
+    that were halted mid-stream by a repetition-loop guard.
+    """
+    prefix = text[start:]
+    lowered_prefix = prefix.lower()
+    has_tool_key = any(key in lowered_prefix for key in ('"tool_name"', '"name"', '"action"', '"tool"', '"function"'))
+    has_args_key = any(key in lowered_prefix for key in ('"arguments"', '"args"', '"params"', '"parameters"'))
+    if not has_tool_key or not has_args_key:
+        return None
+    # The model may have been halted inside a string value (e.g. while
+    # repeating a word inside a command), so try closing unclosed quotes too.
+    for extra_quotes in range(3):
+        for extra_braces in range(1, 5):
+            try:
+                candidate = prefix + ('"' * extra_quotes) + ("}" * extra_braces)
+                data = json.loads(candidate)
+            except Exception:
+                continue
+            if _try_parse_data(data):
+                return data
+    return None
+
+
 def _extract_orphan_parameter_payload(text: str) -> dict[str, str]:
     if not text:
         return {}
@@ -251,39 +313,6 @@ def _extract_inline_tool_calls(
             raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
         )
 
-    def _try_parse_data(data: Any) -> PendingToolCall | None:
-        if not isinstance(data, dict):
-            return None
-        if isinstance(data.get("function"), dict):
-            pending = PendingToolCall.from_payload(data)
-            if pending is not None:
-                extra_fields = _inline_json_extra_fields(data)
-                if extra_fields:
-                    pending.parser_metadata["inline_json_extra_fields"] = extra_fields
-                return pending
-        name = str(data.get("name", data.get("tool_name", data.get("tool", data.get("action", ""))))).strip()
-        if not name:
-            return None
-        args = data.get("arguments", data.get("args", data.get("params", data.get("parameters", {}))))
-        if isinstance(args, dict):
-            raw_arguments = json.dumps(args)
-        elif isinstance(args, str):
-            raw_arguments = args
-        else:
-            raw_arguments = "{}"
-        payload = {
-            "function": {
-                "name": name,
-                "arguments": raw_arguments,
-            }
-        }
-        pending = PendingToolCall.from_payload(payload)
-        if pending is not None:
-            extra_fields = _inline_json_extra_fields(data)
-            if extra_fields:
-                pending.parser_metadata["inline_json_extra_fields"] = extra_fields
-        return pending
-
     def _try_parse_lfm_plan_data(data: Any) -> list[PendingToolCall]:
         if not _model_is_lfm25_8b_a1b(model_name) or not isinstance(data, dict):
             return []
@@ -478,6 +507,17 @@ def _extract_inline_tool_calls(
                 except Exception:
                     start = cleaned_text.find("{", start + 1)
             else:
+                # Unbalanced braces: the stream may have been halted mid-tool-call.
+                # Try to recover a truncated inline JSON object that looks like a
+                # tool call before giving up.
+                recovered = _try_recover_truncated_inline_json(cleaned_text, start)
+                if recovered:
+                    pending = _try_parse_data(recovered)
+                    if pending:
+                        results.append(pending)
+                        cleaned_text = cleaned_text[:start]
+                        start = cleaned_text.find("{", start)
+                        continue
                 break
 
     standalone_line_regex = r"(?m)^[ \t]*(?P<body>.+?)[ \t]*$"

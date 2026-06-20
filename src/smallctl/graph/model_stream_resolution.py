@@ -150,7 +150,6 @@ def _maybe_trigger_escalation_for_empty_writes(harness: Any, path: str, count: i
         return False
     seen.append(fingerprint)
     scratchpad["_escalation_auto_empty_write_fingerprints"] = seen[-20:]
-    from ..harness.escalation_service import EscalationService
     harness.state.scratchpad["_tool_loop_suppression"] = {
         "tool_name": "file_write",
         "error": f"Empty file_write payload failed {count} times for {path}.",
@@ -307,6 +306,7 @@ async def resolve_model_stream_result(
         if user_task:
             recovery_content_parts.append(f"Current goal: {user_task}")
         try:
+            from ..harness.run_mode import has_active_remote_handoff
             from ..harness.tool_dispatch import chat_mode_tools
             from ..harness.task_classifier import (
                 looks_like_author_write_request,
@@ -332,7 +332,17 @@ async def resolve_model_stream_result(
                     or looks_like_author_write_request(user_task)
                 )
             )
-            if terminal_only and write_like_goal:
+            remote_like_goal = bool(
+                user_task
+                and (
+                    has_active_remote_handoff(harness)
+                    or any(
+                        marker in user_task.lower()
+                        for marker in ("ssh ", "ssh_exec", "root@", "remote host", "over ssh", "over remote")
+                    )
+                )
+            )
+            if terminal_only and (write_like_goal or remote_like_goal):
                 exported_tools = harness.registry.export_openai_tools(
                     phase=harness.state.current_phase,
                     mode="chat",
@@ -347,9 +357,10 @@ async def resolve_model_stream_result(
                 ]
                 if broader_names:
                     allowed_names = broader_names
+                    goal_kind = "remote-like goal" if remote_like_goal else "write-like goal"
                     harness._runlog(
                         "degenerate_recovery_tool_list_broadened",
-                        "broadened degenerate-loop recovery tool list for write-like goal",
+                        f"broadened degenerate-loop recovery tool list for {goal_kind}",
                         goal=user_task,
                         tool_names=allowed_names[:24],
                     )

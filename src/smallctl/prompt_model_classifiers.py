@@ -10,6 +10,10 @@ _GEMMA_MODEL_MARKERS = (
 _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
     "gemma-4-e2b-it",
     "gemma-4-e4b-it",
+    # Bare quantized suffixes are used by some backends/gguf filenames that
+    # drop the "-it" token even though the checkpoint is instruction-tuned.
+    "gemma-4-e2b",
+    "gemma-4-e4b",
 )
 _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES = (
     "google_gemma-4-26b-a4b-it",

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 _GLM_BOX_MODEL_MARKERS = (
     "zai-org/glm-4.6v-flash",
     "glm-4.6v-flash",
@@ -29,6 +27,10 @@ _EXACT_QWEN_25_7B_INSTRUCT_MODELS = (
 _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
     "gemma-4-e2b-it",
     "gemma-4-e4b-it",
+    # Bare quantized suffixes are used by some backends/gguf filenames that
+    # drop the "-it" token even though the checkpoint is instruction-tuned.
+    "gemma-4-e2b",
+    "gemma-4-e4b",
 )
 _GEMMA_MODEL_MARKERS = (
     "google_gemma-4",

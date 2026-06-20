@@ -53,3 +53,18 @@ def test_harness_preserves_off_reasoning_mode_for_non_gemma() -> None:
         runtime_context_probe=False,
     )
     assert harness.reasoning_mode == "off"
+
+
+def test_harness_recognizes_bare_gemma_4_quantized_suffix_as_tagged() -> None:
+    # Some backends/gguf filenames drop the "-it" suffix even though the
+    # checkpoint is instruction-tuned and emits <think> tags.
+    harness = Harness(
+        endpoint="http://localhost:8080/v1",
+        model="gemma-4-e4b",
+        provider_profile="llamacpp",
+        api_key="test-key",
+        reasoning_mode="auto",
+        runtime_context_probe=False,
+    )
+    assert harness.reasoning_mode == "tags"
+    assert harness.state.scratchpad.get("_thinking_tags_disabled") is None

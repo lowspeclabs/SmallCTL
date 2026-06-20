@@ -254,12 +254,20 @@
   color: #ef4444;
 }
 
+.assistant-detail.tool-status-warning > CollapsibleTitle {
+  color: #eab308;
+}
+
 .assistant-detail.tool-status-success {
   border-left: thick #16a34a;
 }
 
 .assistant-detail.tool-status-error {
   border-left: thick #ef4444;
+}
+
+.assistant-detail.tool-status-warning {
+  border-left: thick #eab308;
 }
 
 .assistant-detail.-collapsed {
@@ -643,6 +651,36 @@
 
 .bubble-liveoutput .assistant-detail-content {
   color: #0891b2;
+}
+
+.bubble-artifact.tool-status-success,
+.bubble-liveoutput.tool-status-success {
+  border-left: thick #16a34a;
+}
+
+.bubble-artifact.tool-status-success > CollapsibleTitle,
+.bubble-liveoutput.tool-status-success > CollapsibleTitle {
+  color: #16a34a;
+}
+
+.bubble-artifact.tool-status-warning,
+.bubble-liveoutput.tool-status-warning {
+  border-left: thick #eab308;
+}
+
+.bubble-artifact.tool-status-warning > CollapsibleTitle,
+.bubble-liveoutput.tool-status-warning > CollapsibleTitle {
+  color: #eab308;
+}
+
+.bubble-artifact.tool-status-error,
+.bubble-liveoutput.tool-status-error {
+  border-left: thick #ef4444;
+}
+
+.bubble-artifact.tool-status-error > CollapsibleTitle,
+.bubble-liveoutput.tool-status-error > CollapsibleTitle {
+  color: #ef4444;
 }
 
 .tool-calls-container {

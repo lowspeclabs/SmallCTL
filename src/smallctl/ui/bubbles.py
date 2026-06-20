@@ -122,9 +122,21 @@ def _build_full_printout_bubble(*, text: str, artifact_id: str | None) -> "Artif
     return ArtifactBubbleWidget(title=title, text=_format_full_printout_text(text))
 
 
-def _set_command_status_class(widget: Widget, success: bool | None) -> None:
-    widget.remove_class("tool-status-success", "tool-status-error")
-    widget.add_class("tool-status-error" if success is False else "tool-status-success")
+def _command_status(success: bool | None, *, command_ran: bool = False) -> str:
+    if success is False and command_ran:
+        return "warning"
+    if success is False:
+        return "error"
+    return "success"
+
+
+def _set_command_status_class(widget: Widget, success: bool | None, *, command_ran: bool = False) -> None:
+    status = _command_status(success, command_ran=command_ran)
+    widget.remove_class("tool-status-success", "tool-status-warning", "tool-status-error")
+    widget.add_class(f"tool-status-{status}")
+    color_map = {"success": "#16a34a", "warning": "#eab308", "error": "#ef4444"}
+    if hasattr(widget, "_title") and widget._title is not None:
+        widget._title.styles.color = color_map[status]
 
 
 class BubbleWidget(Static):
@@ -371,6 +383,7 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         self.command = str(command or "").strip()
         self.tool_name = str(tool_name or "").strip()
         self.success = success
+        self.command_ran = False
         super().__init__(
             title="Live Output",
             text=text,
@@ -379,7 +392,7 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         )
         self._set_content_color()
         self.add_class("bubble-liveoutput")
-        _set_command_status_class(self, self.success)
+        _set_command_status_class(self, self.success, command_ran=self.command_ran)
 
     def set_command(self, command: str | None) -> None:
         if not command:
@@ -387,23 +400,31 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         self.command = str(command).strip()
         self.title = self._build_title()
 
-    def set_success(self, success: bool | None) -> None:
+    def set_success(self, success: bool | None, *, command_ran: bool = False) -> None:
         self.success = success
+        self.command_ran = command_ran
         self._set_content_color()
-        _set_command_status_class(self, self.success)
+        _set_command_status_class(self, self.success, command_ran=self.command_ran)
         self.title = self._build_title()
 
     def _set_content_color(self) -> None:
         self._content_widget.styles.color = "#ef4444" if self.success is False else "#16a34a"
 
     def _build_title(self) -> str:
-        if self.success is False:
+        if self.success is False and self.command_ran:
+            label_color = "#eab308"
+            status_color = "#ef4444"
+            status_suffix = " (failed)"
+        elif self.success is False:
+            label_color = "#ef4444"
             status_color = "#ef4444"
             status_suffix = " (failed)"
         elif self.success is True:
+            label_color = "#16a34a"
             status_color = "#16a34a"
             status_suffix = ""
         else:
+            label_color = "#16a34a"
             status_color = "#16a34a"
             status_suffix = ""
         command = self.command or "Command ran"
@@ -411,8 +432,8 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         if self.tool_name == "ssh_exec":
             if self.command:
                 display_cmd = markup_escape(_trim_title_value(json.dumps(self.command)))
-            return f"[bold #16a34a]command: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
-        return f"[bold #0891b2]Live Output: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
+            return f"[bold {label_color}]command: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
+        return f"[bold {label_color}]Live Output: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
 
 
 class TaskChecklistWidget(Collapsible):
@@ -454,6 +475,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self.tool_call_id = tool_call_id
         self._args: dict[str, Any] = dict(args) if args else {}
         self._success: bool | None = None
+        self._command_ran: bool = False
         self._result_widgets: list[Widget] = []
         self._pending_full_printouts: list[ArtifactBubbleWidget] = []
         self._start_time: float = time.monotonic()
@@ -462,9 +484,9 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         if self.tool_name == "ssh_exec":
             self._text = ""
             self._content_widget.set_text("")
-
+            self._content_widget.display = False
         if self.tool_name in {"shell_exec", "ssh_exec"}:
-            _set_command_status_class(self, self._success)
+            _set_command_status_class(self, self._success, command_ran=self._command_ran)
 
     @property
     def has_result(self) -> bool:
@@ -486,7 +508,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                 if self._success is True:
                     base = f"{self.tool_name} succeeded"
                 elif self._success is False:
-                    color = "#ef4444"
+                    color = "#eab308" if self._command_ran else "#ef4444"
                     base = f"{self.tool_name} failed"
                 else:
                     base = self.tool_name or self.kind.upper()
@@ -523,17 +545,61 @@ class ToolCallDetailWidget(AssistantDetailWidget):
 
     async def add_result(self, text: str, *, tool_name: str | None = None, data: dict[str, Any] | None = None) -> Widget:
         if tool_name in {"shell_exec", "ssh_exec"}:
+            output_dict = None
+            if isinstance(data, dict):
+                output_dict = data.get("output")
+            if not isinstance(output_dict, dict) and isinstance(text, str) and text.strip().startswith("{"):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict) and "output" in parsed:
+                        output_dict = parsed["output"]
+                except Exception:
+                    pass
+
+            exit_code = output_dict.get("exit_code") if isinstance(output_dict, dict) else None
             self._success = bool(data.get("success")) if isinstance(data, dict) else None
-            _set_command_status_class(self, self._success)
+            self._command_ran = self._success is False and exit_code is not None
+            _set_command_status_class(self, self._success, command_ran=self._command_ran)
             command = self._args.get("command") if isinstance(self._args, dict) else None
-            live_bubble = await self.get_or_create_live_output_bubble(command=command, tool_name=tool_name, success=self._success)
-            current = live_bubble.text_content
-            if current and text.startswith(current.rstrip("\n")):
-                suffix = text[len(current.rstrip("\n")):]
-                if suffix:
-                    live_bubble.append_text(suffix)
+            live_bubble = await self.get_or_create_live_output_bubble(
+                command=command,
+                tool_name=tool_name,
+                success=self._success,
+                command_ran=self._command_ran,
+            )
+
+            if isinstance(output_dict, dict):
+                stdout = str(output_dict.get("stdout") or "")
+                stderr = str(output_dict.get("stderr") or "")
+                parts = []
+                if stdout:
+                    parts.append(stdout)
+                if stderr:
+                    parts.append(f"--- [STDERR] ---\n{stderr}")
+                if exit_code is not None:
+                    parts.append(f"--- [EXIT CODE: {exit_code}] ---")
+                final_text = "\n\n".join(parts) or "ok"
+                live_bubble.text_content = final_text
+                live_bubble._refresh_content()
             else:
-                live_bubble.append_text(text)
+                current = live_bubble.text_content
+                clean_text = text
+                if isinstance(text, str) and "--- [PROGRESS] ---" in text:
+                    parts = text.split("\n\n")
+                    non_progress_parts = [p for p in parts if not p.startswith("--- [PROGRESS] ---")]
+                    clean_text = "\n\n".join(non_progress_parts)
+                
+                if current and clean_text.startswith(current.rstrip("\n")):
+                    suffix = clean_text[len(current.rstrip("\n")):]
+                    if suffix:
+                        live_bubble.append_text(suffix)
+                elif not current:
+                    live_bubble.append_text(text)
+                else:
+                    exit_code_match = re.search(r"--- \[EXIT CODE: \d+\] ---", clean_text)
+                    if exit_code_match and "EXIT CODE" not in current:
+                        live_bubble.append_text(f"\n\n{exit_code_match.group(0)}")
+
             self.finalize()
             self._last_shell_stream = None
             self._last_assistant_block = None
@@ -597,6 +663,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         command: str | None = None,
         tool_name: str | None = None,
         success: bool | None = None,
+        command_ran: bool = False,
     ) -> LiveOutputBubbleWidget:
         for w in self._result_widgets:
             if isinstance(w, LiveOutputBubbleWidget):
@@ -606,10 +673,11 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                     w.tool_name = tool_name
                     w.title = w._build_title()
                 if success is not None:
-                    w.set_success(success)
+                    w.set_success(success, command_ran=command_ran)
                 return w
 
         bubble = LiveOutputBubbleWidget(text="", command=command, tool_name=tool_name, success=success)
+        bubble.set_success(success, command_ran=command_ran)
         bubble.add_class("assistant-detail-nested")
         await self.add_child_widget(bubble)
         self._result_widgets.append(bubble)

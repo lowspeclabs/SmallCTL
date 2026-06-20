@@ -122,6 +122,11 @@ def _build_full_printout_bubble(*, text: str, artifact_id: str | None) -> "Artif
     return ArtifactBubbleWidget(title=title, text=_format_full_printout_text(text))
 
 
+def _set_command_status_class(widget: Widget, success: bool | None) -> None:
+    widget.remove_class("tool-status-success", "tool-status-error")
+    widget.add_class("tool-status-error" if success is False else "tool-status-success")
+
+
 class BubbleWidget(Static):
     text: reactive[str] = reactive("")
 
@@ -374,6 +379,7 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         )
         self._set_content_color()
         self.add_class("bubble-liveoutput")
+        _set_command_status_class(self, self.success)
 
     def set_command(self, command: str | None) -> None:
         if not command:
@@ -384,6 +390,7 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
     def set_success(self, success: bool | None) -> None:
         self.success = success
         self._set_content_color()
+        _set_command_status_class(self, self.success)
         self.title = self._build_title()
 
     def _set_content_color(self) -> None:
@@ -456,6 +463,9 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             self._text = ""
             self._content_widget.set_text("")
 
+        if self.tool_name in {"shell_exec", "ssh_exec"}:
+            _set_command_status_class(self, self._success)
+
     @property
     def has_result(self) -> bool:
         return bool(self._result_widgets)
@@ -514,6 +524,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
     async def add_result(self, text: str, *, tool_name: str | None = None, data: dict[str, Any] | None = None) -> Widget:
         if tool_name in {"shell_exec", "ssh_exec"}:
             self._success = bool(data.get("success")) if isinstance(data, dict) else None
+            _set_command_status_class(self, self._success)
             command = self._args.get("command") if isinstance(self._args, dict) else None
             live_bubble = await self.get_or_create_live_output_bubble(command=command, tool_name=tool_name, success=self._success)
             current = live_bubble.text_content

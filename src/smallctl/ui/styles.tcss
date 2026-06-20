@@ -246,6 +246,22 @@
   color: #d1d5db;
 }
 
+.assistant-detail.tool-status-success > CollapsibleTitle {
+  color: #16a34a;
+}
+
+.assistant-detail.tool-status-error > CollapsibleTitle {
+  color: #ef4444;
+}
+
+.assistant-detail.tool-status-success {
+  border-left: thick #16a34a;
+}
+
+.assistant-detail.tool-status-error {
+  border-left: thick #ef4444;
+}
+
 .assistant-detail.-collapsed {
   padding-bottom: 0;
 }

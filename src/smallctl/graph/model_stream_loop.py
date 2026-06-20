@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import re
 import time
 from typing import Any, Iterable
@@ -117,6 +118,25 @@ def _detect_degenerate_repetition(buffer: str) -> tuple[str, int, str] | None:
             start += 1
             end += 1
     return None
+
+
+def _trim_degenerate_suffix(buffer: str, window: str, repeated_phrase: str) -> str:
+    """Return the portion of buffer before the repetitive suffix, if any."""
+    text = str(buffer or "")
+    if not text:
+        return text
+    # Remove the trailing window that contained the loop; this is the most
+    # conservative trim and avoids leaving dangling repeated fragments.
+    if window and text.endswith(window):
+        return text[: -len(window)].rstrip()
+    # Fallback: remove everything from the last occurrence of the phrase.
+    phrase = str(repeated_phrase or "").lower()
+    if phrase:
+        lowered = text.lower()
+        last_idx = lowered.rfind(phrase)
+        if last_idx > 0:
+            return text[:last_idx].rstrip()
+    return text
 
 
 @dataclass(frozen=True)
@@ -353,7 +373,25 @@ async def run_model_stream_loop(
     run_logger = getattr(harness, "run_logger", None)
     set_trace_id = getattr(run_logger, "set_trace_id", None)
     if callable(set_trace_id):
-        set_trace_id(_next_model_call_trace_id(harness))
+        trace_id = _next_model_call_trace_id(harness)
+        set_trace_id(trace_id)
+        if hasattr(run_logger, "set_task_id"):
+            parts = trace_id.split(":")
+            if len(parts) >= 2:
+                run_logger.set_task_id(parts[1])
+        if hasattr(run_logger, "set_step_count"):
+            run_logger.set_step_count(getattr(harness.state, "step_count", 0))
+        if hasattr(run_logger, "set_call_count"):
+            call_part = trace_id.split(":")[-1]
+            if call_part.startswith("call-"):
+                try:
+                    run_logger.set_call_count(int(call_part[5:]))
+                except ValueError:
+                    pass
+
+    if run_logger is not None and hasattr(run_logger, "handle_debug_signal"):
+        signal_path = Path(getattr(harness.state, "cwd", ".") or ".") / ".smallctl" / "debug-signal"
+        run_logger.handle_debug_signal(signal_path)
 
     chunks: list[dict[str, Any]] = []
     first_token_time: float | None = None
@@ -390,6 +428,7 @@ async def run_model_stream_loop(
             saw_assistant_content = False
             saw_tool_call = False
             assistant_text_buffer = ""
+            partial_assistant_text = ""
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
                 if harness._cancel_requested:
                     await _emit_cancelled_partial_tool_calls(
@@ -445,12 +484,13 @@ async def run_model_stream_loop(
                                     "chunks": chunks,
                                     "stream_completed_cleanly": False,
                                     "trigger_early_4b_fallback": _trigger_early_4b_fallback,
-                                    "salvage_partial_stream": salvage_partial_stream,
-                                    "last_chunk_error_details": last_chunk_error_details,
-                                    "stream_ended_without_done": stream_ended_without_done,
-                                    "stream_ended_without_done_details": stream_ended_without_done_details,
-                                    "first_token_time": first_token_time,
-                            }
+                        "salvage_partial_stream": salvage_partial_stream,
+                        "last_chunk_error_details": last_chunk_error_details,
+                        "stream_ended_without_done": stream_ended_without_done,
+                        "stream_ended_without_done_details": stream_ended_without_done_details,
+                        "partial_assistant_text": "",
+                        "first_token_time": first_token_time,
+                    }
                             if replacement_messages:
                                 messages = replacement_messages
                                 _retry_immediately = True
@@ -537,6 +577,7 @@ async def run_model_stream_loop(
                         "last_chunk_error_details": last_chunk_error_details,
                         "stream_ended_without_done": stream_ended_without_done,
                         "stream_ended_without_done_details": stream_ended_without_done_details,
+                        "partial_assistant_text": "",
                         "first_token_time": first_token_time,
                     }
                 if event.get("type") == "stream_ended_without_done":
@@ -733,12 +774,22 @@ async def run_model_stream_loop(
                     },
                 ),
             )
+            # Salvage any assistant text produced before the repetitive suffix so
+            # that a partial inline tool call (e.g. an ssh_exec JSON block that
+            # degenerated while escaping a string) can still be parsed and acted
+            # on instead of being discarded as an empty/action-stall turn.
+            partial_assistant_text = _trim_degenerate_suffix(
+                assistant_text_buffer,
+                exc.window,
+                exc.repeated_phrase,
+            )
             stream_ended_without_done = True
             stream_ended_without_done_details = {
                 "reason": "model_output_degenerate_loop",
                 "repeated_phrase": exc.repeated_phrase,
                 "repeat_count": exc.repeat_count,
                 "buffer_chars": len(assistant_text_buffer),
+                "partial_assistant_text": partial_assistant_text,
             }
             harness.state.scratchpad["_last_stream_halted_without_done"] = True
             harness.state.scratchpad["_last_stream_halt_reason"] = "model_output_degenerate_loop"
@@ -784,6 +835,7 @@ async def run_model_stream_loop(
                 "last_chunk_error_details": last_chunk_error_details,
                 "stream_ended_without_done": stream_ended_without_done,
                 "stream_ended_without_done_details": stream_ended_without_done_details,
+                "partial_assistant_text": "",
                 "first_token_time": first_token_time,
             }
 
@@ -795,6 +847,7 @@ async def run_model_stream_loop(
         "last_chunk_error_details": last_chunk_error_details,
         "stream_ended_without_done": stream_ended_without_done,
         "stream_ended_without_done_details": stream_ended_without_done_details,
+        "partial_assistant_text": partial_assistant_text,
         "first_token_time": first_token_time,
     }
 

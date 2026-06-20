@@ -15,6 +15,28 @@ Use this file as the orientation guide for future agents working in the repo. It
 - Evaluation fixtures and runner live in `evals` and `scripts/tool_plan_eval.py`.
 - The nested `aho` directory is a separate optimizer/evaluation package, not part of the installable `smallctl` package.
 
+## Debug logging
+
+SmallCTL supports granular, structured debug logging:
+
+- `--debug` enables debug logging across all subsystems.
+- `--debug-subsystem SUBSYSTEM` enables debug logging for a specific subsystem. Repeatable.
+  Valid subsystems: `client`, `graph`, `tools`, `context`, `fama`, `ui`, `memory`, `state`.
+- `--debug-tokens` logs every model token; without it, token streams are sampled (first/last 100 + every 20th) to reduce log volume.
+- `--log-max-mb N` sets a per-run log-size cap in megabytes (default: 100). When exceeded, the largest channel file is rotated.
+- `SMALLCTL_DEBUG_SUBSYSTEMS=client,graph` environment variable works the same as the CLI flag.
+- Runtime debug signals: write `escalate:<n>` or `snapshot` to `.smallctl/debug-signal` to escalate logging or dump a recent-event snapshot without restarting.
+- Every run directory contains a `run_header.json` sidecar with the event schema version and channel list. Agent-Tools warn when they encounter an unsupported schema version.
+
+When debugging a failed run, start with the decision events:
+
+- `mode_decision` — why a particular runtime mode was chosen.
+- `phase_transition` — phase changes and blocked/allowed tools.
+- `tool_profile_exposure` / `fama_tool_exposure_applied` — which tools were exposed or hidden.
+- `prompt_state_frame_compiled` / `retrieval_selected` — context-frame drops and retrieval rankings.
+- `risk_policy_decision` — risk/approval decisions.
+- `fama_signal_routed` — FAMA signal → mitigation mapping.
+
 ## Repository Map
 
 ### Root

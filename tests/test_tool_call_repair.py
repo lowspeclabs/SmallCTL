@@ -79,6 +79,87 @@ def test_bare_string_wraps_only_for_allowlisted_array_field() -> None:
     assert repair_tool_call_args(blocked, {"symbols": "Thing"}).valid_after_repair is False
 
 
+def test_patch_argument_aliases_repaired_in_catalog() -> None:
+    spec = _spec(
+        "file_patch",
+        {
+            "path": {"type": "string"},
+            "target_text": {"type": "string"},
+            "replacement_text": {"type": "string"},
+        },
+        ["path", "target_text", "replacement_text"],
+    )
+
+    result = repair_tool_call_args(spec, {"path": "foo.py", "old_text": "before", "new": "after"})
+
+    assert result.valid_after_repair is True
+    assert result.args == {"path": "foo.py", "target_text": "before", "replacement_text": "after"}
+    assert [action.kind for action in result.actions] == ["patch_argument_alias", "patch_argument_alias"]
+
+
+def test_optional_none_sentinel_repaired_in_catalog() -> None:
+    spec = _spec(
+        "file_write",
+        {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "write_session_id": {"type": "string"},
+        },
+        ["path", "content"],
+    )
+
+    result = repair_tool_call_args(spec, {"path": "foo.py", "content": "ok", "write_session_id": "none"})
+
+    assert result.valid_after_repair is True
+    assert "write_session_id" not in result.args
+    assert any(action.kind == "optional_none_sentinel_to_omit" for action in result.actions)
+
+
+def test_ssh_exec_nested_command_unwrap_repaired_in_catalog() -> None:
+    spec = _spec(
+        "ssh_exec",
+        {
+            "host": {"type": "string"},
+            "command": {"type": "string"},
+        },
+        ["host", "command"],
+    )
+
+    result = repair_tool_call_args(
+        spec,
+        {"host": "example.test", "name": "whoami", "arguments": {"arg": "id"}},
+    )
+
+    assert result.valid_after_repair is True
+    assert result.args == {"host": "example.test", "command": "id"}
+    assert {action.kind for action in result.actions} == {
+        "ssh_exec_nested_command_unwrap",
+        "ssh_exec_hallucinated_name_strip",
+    }
+
+
+def test_ssh_exec_nested_command_preserves_explicit_command() -> None:
+    spec = _spec(
+        "ssh_exec",
+        {
+            "host": {"type": "string"},
+            "command": {"type": "string"},
+        },
+        ["host", "command"],
+    )
+
+    result = repair_tool_call_args(
+        spec,
+        {"host": "example.test", "command": "whoami", "name": "ssh_exec", "arguments": {"arg": "id"}},
+    )
+
+    assert result.valid_after_repair is True
+    # The allowed tool name and unused nested arguments are not schema fields,
+    # so they are stripped as extra fields after the nested command is unwrapped.
+    assert result.args == {"host": "example.test", "command": "whoami"}
+    assert [action.kind for action in result.actions] == ["ssh_exec_nested_command_unwrap", "extra_fields_strip_or_warn"]
+
+
 def test_markdown_path_unwraps_only_degenerate_path_links() -> None:
     spec = _spec("file_read", {"path": {"type": "string"}}, ["path"])
 

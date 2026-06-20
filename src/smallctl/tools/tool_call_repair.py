@@ -61,14 +61,63 @@ _PAIRED_RANGE_FIELDS = {
 _DEFAULT_RANGE_WINDOW = 200
 _MARKDOWN_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
 
+_PATCH_ARGUMENT_ALIASES = {
+    "source": "target_text",
+    "old_text": "target_text",
+    "old": "target_text",
+    "dest": "replacement_text",
+    "new_text": "replacement_text",
+    "new": "replacement_text",
+    "replacement": "replacement_text",
+}
+_PATCH_ALIAS_TOOLS = {"file_patch", "ssh_file_patch", "ast_patch"}
+_OPTIONAL_NONE_SENTINELS = {"", "none", "null", "nil", "n/a", "na"}
+_SSH_EXEC_TOOL_NAMES = {
+    "ssh_exec",
+    "shell_exec",
+    "ssh_file_read",
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
+
 
 def validate_tool_args(schema: dict[str, Any], args: Any) -> list[ToolCallValidationIssue]:
     return _validate_schema(schema, args, ())
 
 
 def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepairResult:
-    initial_issues = validate_tool_args(spec.schema, args) + _catalog_shape_issues(spec, args)
-    if not initial_issues:
+    if not isinstance(args, dict):
+        return ToolCallRepairResult(
+            valid_initially=False,
+            valid_after_repair=False,
+            repaired=False,
+            args=args,
+            issues=[
+                ToolCallValidationIssue(
+                    path=(),
+                    kind="type",
+                    expected="object",
+                    actual=_type_name(args),
+                    message="tool arguments must be an object",
+                )
+            ],
+        )
+
+    # Structural repairs are heuristic shape fixes that are always safe when the
+    # corresponding alias/wrapper field is present. They run before issue-driven
+    # repairs so that the rest of the catalog sees normalized field names.
+    repaired_args = copy.deepcopy(args)
+    actions: list[ToolCallRepairAction] = []
+    _repair_patch_argument_aliases(spec, repaired_args, actions)
+    _repair_ssh_exec_malformed_args(spec, repaired_args, actions)
+    wrapper = _repair_wrong_object_wrapper(spec, repaired_args)
+    if wrapper is not None:
+        repaired_args, action = wrapper
+        actions.append(action)
+
+    initial_issues = validate_tool_args(spec.schema, repaired_args) + _catalog_shape_issues(spec, repaired_args)
+    if not initial_issues and not actions:
         return ToolCallRepairResult(
             valid_initially=True,
             valid_after_repair=True,
@@ -77,15 +126,6 @@ def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepai
             issues=[],
         )
 
-    repaired_args = copy.deepcopy(args)
-    actions: list[ToolCallRepairAction] = []
-    stripped: list[str] = []
-
-    wrapper = _repair_wrong_object_wrapper(spec, repaired_args)
-    if wrapper is not None:
-        repaired_args, action = wrapper
-        actions.append(action)
-
     for issue in validate_tool_args(spec.schema, repaired_args):
         if issue.kind == "type" and _path_schema_type(spec.schema, issue.path) == "array":
             _repair_array_field(spec.name, spec.schema, repaired_args, issue.path, actions)
@@ -93,10 +133,12 @@ def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepai
             _repair_markdown_path(spec.schema, repaired_args, issue.path, actions)
 
     _repair_optional_nulls(spec.schema, repaired_args, actions)
+    _repair_optional_none_sentinels(spec.schema, repaired_args, actions)
     _repair_markdown_paths_recursive(spec.schema, repaired_args, (), actions)
     _repair_paired_range(getattr(spec, "name", ""), repaired_args, actions)
 
     after_shape_issues = validate_tool_args(spec.schema, repaired_args) + _catalog_shape_issues(spec, repaired_args)
+    stripped: list[str] = []
     if _only_extra_field_issues(after_shape_issues):
         for issue in after_shape_issues:
             if issue.path and _delete_path(repaired_args, issue.path):
@@ -182,6 +224,7 @@ def _validate_schema(schema: dict[str, Any], value: Any, path: tuple[PathPart, .
 def _catalog_shape_issues(spec: ToolSpec, args: dict[str, Any]) -> list[ToolCallValidationIssue]:
     issues: list[ToolCallValidationIssue] = []
     _collect_optional_null_issues(spec.schema, args, (), issues)
+    _collect_optional_none_sentinel_issues(spec.schema, args, (), issues)
     _collect_markdown_path_issues(spec.schema, args, (), issues)
     pair = _PAIRED_RANGE_FIELDS.get(getattr(spec, "name", ""))
     if pair:
@@ -208,6 +251,37 @@ def _collect_optional_null_issues(schema: dict[str, Any], args: Any, path: tuple
             issues.append(ToolCallValidationIssue(path=child_path, kind="optional_null", expected="omit", actual="null"))
         elif isinstance(args[key], dict):
             _collect_optional_null_issues(child_schema, args[key], child_path, issues)
+
+
+def _collect_optional_none_sentinel_issues(
+    schema: dict[str, Any], args: Any, path: tuple[PathPart, ...], issues: list[ToolCallValidationIssue]
+) -> None:
+    if not isinstance(args, dict):
+        return
+    properties = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    for key, child_schema in properties.items():
+        if key not in args:
+            continue
+        child_path = path + (key,)
+        value = args[key]
+        if (
+            isinstance(value, str)
+            and str(value).strip().lower() in _OPTIONAL_NONE_SENTINELS
+            and key not in required
+            and "null" not in _schema_types(child_schema)
+        ):
+            issues.append(
+                ToolCallValidationIssue(
+                    path=child_path,
+                    kind="optional_none_sentinel",
+                    expected="omit",
+                    actual=repr(value),
+                    message=f"optional field {key} had sentinel value {value!r}",
+                )
+            )
+        elif isinstance(value, dict):
+            _collect_optional_none_sentinel_issues(child_schema, value, child_path, issues)
 
 
 def _collect_markdown_path_issues(schema: dict[str, Any], args: Any, path: tuple[PathPart, ...], issues: list[ToolCallValidationIssue]) -> None:
@@ -330,6 +404,91 @@ def _repair_optional_nulls(schema: dict[str, Any], args: dict[str, Any], actions
             _repair_optional_nulls(child_schema, args[key], actions, child_path)
 
 
+def _repair_optional_none_sentinels(
+    schema: dict[str, Any], args: dict[str, Any], actions: list[ToolCallRepairAction], path: tuple[PathPart, ...] = ()
+) -> None:
+    if not isinstance(args, dict):
+        return
+    properties = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    for key, child_schema in properties.items():
+        if key not in args:
+            continue
+        child_path = path + (key,)
+        value = args[key]
+        if (
+            isinstance(value, str)
+            and str(value).strip().lower() in _OPTIONAL_NONE_SENTINELS
+            and key not in required
+            and "null" not in _schema_types(child_schema)
+        ):
+            del args[key]
+            actions.append(
+                ToolCallRepairAction(
+                    kind="optional_none_sentinel_to_omit",
+                    path=child_path,
+                    before_preview=value,
+                    after_preview="<omitted>",
+                    message=f"optional field {key} had sentinel value {value!r}, so it was omitted",
+                )
+            )
+        elif isinstance(value, dict):
+            _repair_optional_none_sentinels(child_schema, value, actions, child_path)
+
+
+def _repair_patch_argument_aliases(spec: ToolSpec, args: dict[str, Any], actions: list[ToolCallRepairAction]) -> None:
+    if getattr(spec, "name", "") not in _PATCH_ALIAS_TOOLS or not isinstance(args, dict):
+        return
+    for alias, canonical in _PATCH_ARGUMENT_ALIASES.items():
+        if alias in args and canonical not in args:
+            args[canonical] = args.pop(alias)
+            actions.append(
+                ToolCallRepairAction(
+                    kind="patch_argument_alias",
+                    path=(canonical,),
+                    before_preview=f"{alias}=...",
+                    after_preview=f"{canonical}=...",
+                    message=f"patch alias {alias!r} was renamed to {canonical!r}",
+                )
+            )
+
+
+def _repair_ssh_exec_malformed_args(spec: ToolSpec, args: dict[str, Any], actions: list[ToolCallRepairAction]) -> None:
+    if getattr(spec, "name", "") != "ssh_exec" or not isinstance(args, dict):
+        return
+    nested = args.get("arguments")
+    if isinstance(nested, dict):
+        nested_cmd = nested.get("arg") or nested.get("command")
+        if nested_cmd:
+            if not str(args.get("command") or "").strip():
+                args["command"] = str(nested_cmd).strip()
+                after_preview = args["command"]
+            else:
+                after_preview = "<removed nested arguments>"
+            args.pop("arguments", None)
+            actions.append(
+                ToolCallRepairAction(
+                    kind="ssh_exec_nested_command_unwrap",
+                    path=("arguments",),
+                    before_preview="<nested arguments>",
+                    after_preview=after_preview,
+                    message="ssh_exec command was nested under arguments, so it was unwrapped",
+                )
+            )
+    inner_name = args.get("name")
+    if isinstance(inner_name, str) and inner_name.strip() and inner_name.strip() not in _SSH_EXEC_TOOL_NAMES:
+        args.pop("name", None)
+        actions.append(
+            ToolCallRepairAction(
+                kind="ssh_exec_hallucinated_name_strip",
+                path=("name",),
+                before_preview=inner_name,
+                after_preview="<omitted>",
+                message=f"unexpected field name ({inner_name!r}) was removed from ssh_exec arguments",
+            )
+        )
+
+
 def _repair_markdown_paths_recursive(schema: dict[str, Any], args: Any, path: tuple[PathPart, ...], actions: list[ToolCallRepairAction]) -> None:
     if not isinstance(args, dict):
         return
@@ -438,5 +597,7 @@ def _path_equivalent(left: str, right: str) -> bool:
 def _build_hint(actions: list[ToolCallRepairAction]) -> str:
     if not actions:
         return ""
-    first = actions[0]
-    return f"Your tool call was repaired: {first.message}. Next time send arguments in the schema's expected shape."
+    if len(actions) == 1:
+        return f"Your tool call was repaired: {actions[0].message}. Next time send arguments in the schema's expected shape."
+    messages = [f"{i + 1}. {action.message}" for i, action in enumerate(actions)]
+    return "Your tool call was repaired: " + " ".join(messages) + " Next time send arguments in the schema's expected shape."

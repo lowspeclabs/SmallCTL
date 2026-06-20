@@ -226,6 +226,7 @@ def _log_session_write(
     payload = {
         "event": event,
         "thread_id": thread_id,
+        "trace_id": thread_id,
         "path": str(path),
         "payload_bytes": payload_bytes,
         "elapsed_ms": round(elapsed_ms, 2),

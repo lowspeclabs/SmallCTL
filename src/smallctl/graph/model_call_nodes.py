@@ -104,6 +104,59 @@ def _apply_terminal_conclusion_tracking(harness: Any, graph_state: GraphRunState
     return False
 
 
+_DEGENERATE_LOOP_PLACEHOLDER = "[Previous assistant output was halted because it entered a repetition loop.]"
+
+
+def _assistant_text_is_degenerate_loop(text: str, repeated_phrase: str) -> bool:
+    """Return True when the assistant text is itself the degenerate loop.
+
+    Substantive prose that happens to contain the repeated phrase (e.g. a
+    factual summary that repeats a proper noun like 'dagu') should not be
+    treated as degenerate.
+    """
+    if not text or not str(text).strip():
+        return True
+    phrase = str(repeated_phrase or "").lower().strip()
+    if len(phrase) < 4:
+        return False
+    lowered = text.lower()
+    count = lowered.count(phrase)
+    if count < 6:
+        return False
+    words = lowered.split()
+    phrase_word_count = max(1, len(phrase.split()))
+    total_phrase_words = count * phrase_word_count
+    ratio = total_phrase_words / max(len(words), 1)
+    # If the repeated phrase dominates the word count, it's clearly a loop.
+    if ratio >= 0.5:
+        return True
+    # For longer outputs, also flag high phrase density even if there is some
+    # surrounding prose. This catches streams that keep re-emitting the same
+    # term without producing genuinely new content.
+    if len(words) >= 24 and ratio >= 0.35 and count >= 8:
+        return True
+    return False
+
+
+def _strip_trailing_unclosed_markdown_fence(text: str) -> str:
+    """Remove an unclosed markdown code-block fence from the end of text.
+
+    When a stream is halted mid-code-block, the opening fence is left dangling.
+    Stripping it keeps the preceding prose clean while preserving completed
+    blocks that the inline parser already handled.
+    """
+    if not text or "```" not in text:
+        return text
+    # An odd number of fences means the last block was never closed.
+    if text.count("```") % 2 == 0:
+        return text
+    last_fence = text.rfind("```")
+    if last_fence == -1:
+        return text
+    line_start = text.rfind("\n", 0, last_fence) + 1
+    return text[:line_start].rstrip()
+
+
 async def model_call(
     graph_state: GraphRunState,
     deps: Any,
@@ -203,12 +256,17 @@ async def model_call(
 
     # If the stream was halted due to a degenerate loop, do not let the
     # malformed assistant text pollute conversation history or retrieval.
-    # Keep any tool calls that were already emitted, but replace the prose
-    # with a compact placeholder.
+    # Keep any tool calls that were already emitted. If the model produced
+    # substantive prose before the loop, preserve it; otherwise use the
+    # compact placeholder. Strip any dangling markdown fence left by the
+    # halted stream so the preserved prose is clean.
     if halt_reason == "model_output_degenerate_loop":
-        parse_result.final_assistant_text = (
-            "[Previous assistant output was halted because it entered a repetition loop.]"
+        repeated_phrase = str(halt_details.get("repeated_phrase") or "")
+        parse_result.final_assistant_text = _strip_trailing_unclosed_markdown_fence(
+            parse_result.final_assistant_text
         )
+        if _assistant_text_is_degenerate_loop(parse_result.final_assistant_text, repeated_phrase):
+            parse_result.final_assistant_text = _DEGENERATE_LOOP_PLACEHOLDER
         parse_result.final_thinking_text = ""
 
     conversation_tool_calls = _conversation_tool_calls_from_pending(
@@ -221,7 +279,11 @@ async def model_call(
 
     _maybe_inject_file_truncation_hallucination_nudge(harness, parse_result.final_thinking_text)
 
-    if parse_result.final_assistant_text.strip() != result.stream.assistant_text.strip():
+    # After a degenerate loop, the UI transcript prunes trailing assistant events.
+    # Always emit the final assistant/thinking text as a replace event so the
+    # rendered turn reflects what was actually recorded in conversation history.
+    assistant_text_changed = parse_result.final_assistant_text.strip() != result.stream.assistant_text.strip()
+    if assistant_text_changed or halt_reason == "model_output_degenerate_loop":
         await harness._emit(
             deps.event_handler,
             UIEvent(
@@ -233,7 +295,8 @@ async def model_call(
                 ),
             ),
         )
-    if parse_result.final_thinking_text.strip() != result.stream.thinking_text.strip():
+    thinking_text_changed = parse_result.final_thinking_text.strip() != result.stream.thinking_text.strip()
+    if thinking_text_changed or halt_reason == "model_output_degenerate_loop":
         await harness._emit(
             deps.event_handler,
             UIEvent(

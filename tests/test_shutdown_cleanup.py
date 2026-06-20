@@ -282,13 +282,16 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
         task=None,
         log_file=None,
         debug=False,
+        debug_subsystems=[],
+        log_max_mb=100,
+        debug_tokens=False,
         compatibility_warnings=[],
         show_system_messages=True,
     )
 
     monkeypatch.setattr(main_module, "resolve_config", lambda _args: config)
     monkeypatch.setattr(main_module, "setup_logging", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main_module, "create_run_logger", lambda _path: SimpleNamespace(run_dir=Path(".")))
+    monkeypatch.setattr(main_module, "create_run_logger", lambda _path, **kwargs: SimpleNamespace(run_dir=Path(".")))
     monkeypatch.setattr(main_module, "log_kv", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         main_module,

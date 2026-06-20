@@ -9,6 +9,35 @@ from typing import Any, Callable
 from ..models.events import UIEvent
 
 
+def _close_process_transports(proc: Any) -> None:
+    """Best-effort close of an asyncio subprocess transport and its pipes."""
+    if proc is None:
+        return
+    for attr_name in ("stdin", "stdout", "stderr"):
+        pipe = getattr(proc, attr_name, None)
+        if pipe is None:
+            continue
+        close = getattr(pipe, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        for transport_attr in ("transport", "_transport"):
+            transport = getattr(pipe, transport_attr, None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+
 class HarnessBridge:
     def __init__(
         self,
@@ -145,7 +174,11 @@ class HarnessBridge:
         future = asyncio.run_coroutine_threadsafe(self.harness.teardown(), loop)
         await asyncio.wrap_future(future)
         loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=1.0)
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            # The background thread is still cleaning up; do not null out the
+            # handles so a subsequent shutdown attempt can still wait for it.
+            return
         self._loop = None
         self._thread = None
 
@@ -159,15 +192,40 @@ class HarnessBridge:
         try:
             loop.run_forever()
         finally:
-            if self._heartbeat_task is not None:
-                self._heartbeat_task.cancel()
-            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            loop.run_until_complete(asyncio.sleep(0))
+            loop.run_until_complete(self._shutdown_background_loop())
             loop.close()
+
+    async def _shutdown_background_loop(self) -> None:
+        """Cancel remaining tasks, close subprocess transports, and drain callbacks."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        heartbeat = getattr(self, "_heartbeat_task", None)
+        if heartbeat is not None:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        # Close any subprocess transports that are still referenced so their
+        # __del__ methods do not try to schedule work after the loop closes.
+        harness = getattr(self, "harness", None)
+        if harness is not None:
+            active_procs = list(getattr(harness, "_active_processes", set()) or [])
+            getattr(harness, "_active_processes", set()).clear()
+            for proc in active_procs:
+                _close_process_transports(proc)
+        # Allow transport close callbacks and async generators to drain.
+        try:
+            await loop.shutdown_asyncgens()
+        except Exception:
+            pass
+        await asyncio.sleep(0)
 
     async def _heartbeat_loop(self) -> None:
         """Increment a counter every 10 seconds while the bridge is alive."""

@@ -219,7 +219,18 @@ async def interpret_model_output(
                             ))
                             return LoopRoute.NEXT_STEP
                         harness.state.current_phase = "verify"
-                        harness._runlog("phase_transition", "auto-transition to VERIFICATION via premature completion attempt")
+                        harness._runlog(
+                            "phase_transition",
+                            "auto-transition to VERIFICATION via premature completion attempt",
+                            level="debug",
+                            subsystem="graph",
+                            old_phase=current_phase,
+                            new_phase="verify",
+                            trigger="premature_completion_attempt",
+                            blocked_tools=blocked_tools,
+                            allowed_tools=[c.tool_name for c in allowed_calls],
+                            contract_inferred=is_phase_contract_active(strategy),
+                        )
                     else:
                         phase_bits = phase_contract(current_phase)
                         harness.state.append_message(ConversationMessage(

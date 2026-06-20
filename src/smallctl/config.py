@@ -151,6 +151,9 @@ class SmallctlConfig:
     escalation_redact_secrets: bool = True
     log_file: str | None = None
     debug: bool = False
+    debug_subsystems: list[str] | None = None
+    debug_tokens: bool = False
+    log_max_mb: int = 100
     cleanup: bool = False
     tui: bool = False
     task: str | None = None

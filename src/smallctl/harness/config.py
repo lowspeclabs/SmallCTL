@@ -65,6 +65,9 @@ class HarnessConfig:
     summarizer_model: str | None = None
     summarizer_api_key: str | None = None
     run_logger: Any = None
+    debug_subsystems: list[str] | None = None
+    debug_tokens: bool = False
+    log_max_mb: int = 100
     artifact_start_index: int | None = None
     tool_result_inline_token_limit: int = 250
     artifact_read_inline_token_limit: int = 1024

@@ -936,6 +936,21 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
     prior_phase = harness.state.current_phase
     harness.state.current_phase = harness.dispatcher.phase
 
+    if prior_phase != harness.state.current_phase:
+        contract = phase_contract(harness.state.current_phase)
+        harness._runlog(
+            "phase_transition",
+            f"phase transitioned from {prior_phase} to {harness.state.current_phase}",
+            level="debug",
+            subsystem="graph",
+            old_phase=prior_phase,
+            new_phase=harness.state.current_phase,
+            trigger="contract_phase_sync",
+            blocked_tools=list(contract.blocked_tools),
+            allowed_tools=[name for name in harness.registry.names() if name not in contract.blocked_tools][:50],
+            contract_inferred=True,
+        )
+
     # Refresh stale phase prefix in current_phase_objective after contract_phase
     # stabilizes the real phase (e.g. resetting from explore back to execute).
     if prior_phase != harness.state.current_phase:

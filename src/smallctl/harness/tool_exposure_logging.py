@@ -61,8 +61,37 @@ def log_fama_tool_exposure(
     runlog(
         "fama_tool_exposure_applied",
         "FAMA tool exposure policy applied",
+        level="debug",
+        subsystem="fama",
         hidden_tools=sorted(hidden_tools),
         hidden_tool_reasons=hidden_tool_reasons,
         active_mitigations=active,
         mode=mode,
+    )
+
+
+def log_tool_profile_exposure(
+    harness: Any,
+    *,
+    mode: str,
+    phase: str,
+    profiles: set[str],
+    exposed_tools: list[str],
+    hidden_tools: list[str],
+    reasons: dict[str, str],
+) -> None:
+    runlog = getattr(harness, "_runlog", None)
+    if not callable(runlog):
+        return
+    runlog(
+        "tool_profile_exposure",
+        "tool profile exposure resolved",
+        level="debug",
+        subsystem="graph",
+        mode=mode,
+        phase=phase,
+        profile_filter=sorted(profiles),
+        exposed_tools=sorted(exposed_tools)[:50],
+        hidden_tools=sorted(hidden_tools)[:50],
+        reason=reasons,
     )

@@ -96,6 +96,7 @@ async def process_model_stream(
         last_chunk_error_details=loop_result["last_chunk_error_details"],
         stream_ended_without_done=loop_result["stream_ended_without_done"],
         stream_ended_without_done_details=loop_result["stream_ended_without_done_details"],
+        partial_assistant_text=loop_result.get("partial_assistant_text", ""),
         trigger_early_4b_fallback=loop_result["trigger_early_4b_fallback"],
         stream_completed_cleanly=loop_result["stream_completed_cleanly"],
         echo_to_stdout=echo_to_stdout,

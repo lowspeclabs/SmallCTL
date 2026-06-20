@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from ..memory_namespace import (
 from ..normalization import coerce_datetime as _coerce_datetime, tokenize as _tokens
 from ..redaction import redact_sensitive_text
 from ..guards import is_over_twenty_b_model_name, is_seven_b_or_under_model_name
+from ..logging_utils import log_kv, synthetic_trace_id
 from ..state import (
     ArtifactRecord,
     ArtifactSnippet,
@@ -232,7 +234,9 @@ class LexicalRetriever:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
             self._record_retrieved_experience_history(state, first_pass.experiences)
-            return first_pass
+            result = first_pass
+            self._log_retrieval_bundle(state, result)
+            return result
 
         refined_query = self._build_refined_query(state=state, bundle=first_pass)
         if not refined_query or refined_query == base_query:
@@ -256,6 +260,7 @@ class LexicalRetriever:
             )
             if "artifact signal is weak" in reason:
                 self._inject_failure_artifacts(state, bundle)
+            self._log_retrieval_bundle(state, bundle)
             return bundle
 
         second_pass = self._retrieve_pass(
@@ -279,6 +284,7 @@ class LexicalRetriever:
             self._record_retrieved_experience_history(state, second_pass.experiences)
             if "artifact signal is weak" in reason:
                 self._inject_failure_artifacts(state, second_pass)
+            self._log_retrieval_bundle(state, second_pass)
             return second_pass
 
         first_pass.refinement_reason = reason
@@ -288,7 +294,42 @@ class LexicalRetriever:
         self._record_retrieved_experience_history(state, first_pass.experiences)
         if "artifact signal is weak" in reason:
             self._inject_failure_artifacts(state, first_pass)
+        self._log_retrieval_bundle(state, first_pass)
         return first_pass
+
+    def _log_retrieval_bundle(self, state: LoopState, bundle: RetrievalBundle) -> None:
+        """Emit a structured trace of the retrieval ranking decision."""
+        logger = logging.getLogger("smallctl.context")
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        trace_id = synthetic_trace_id(state, suffix="ctx")
+        log_kv(
+            logger,
+            logging.DEBUG,
+            "retrieval_selected",
+            trace_id=trace_id,
+            query=bundle.query,
+            initial_query=bundle.initial_query,
+            refined_query=bundle.refined_query,
+            refined=bundle.refined,
+            refinement_reason=bundle.refinement_reason,
+            selected_ids={
+                "artifacts": [s.artifact_id for s in bundle.artifacts if s.artifact_id],
+                "summaries": [s.summary_id for s in bundle.summaries if s.summary_id],
+                "experiences": [m.memory_id for m in bundle.experiences if m.memory_id],
+            },
+            scores=bundle.best_scores,
+            dropped_ids={
+                lane: list(ids)[:50]
+                for lane, ids in {
+                    "artifacts": [r.get("artifact_id") for r in bundle.ranked_candidates.get("artifacts", [])],
+                    "summaries": [r.get("summary_id") for r in bundle.ranked_candidates.get("summaries", [])],
+                    "experiences": [r.get("memory_id") for r in bundle.ranked_candidates.get("experiences", [])],
+                }.items()
+            },
+            candidate_counts=bundle.candidate_counts,
+            miss_reasons=bundle.miss_reasons,
+        )
 
     def retrieve_artifacts(
         self,

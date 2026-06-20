@@ -1045,7 +1045,7 @@ def test_dispatcher_web_fetch_normalizes_fetch_id_and_result_alias() -> None:
     assert metadata["argument_repair"] == "web_fetch_result_alias_to_search_result"
 
 
-def test_initial_tool_request_normalization_repairs_aliases_and_none_sentinels() -> None:
+def test_initial_tool_request_normalization_repairs_tool_alias_only() -> None:
     tool_name, arguments, metadata = normalize_initial_tool_request(
         "artifact_write",
         {
@@ -1057,22 +1057,29 @@ def test_initial_tool_request_normalization_repairs_aliases_and_none_sentinels()
     )
 
     assert tool_name == "file_write"
-    assert arguments == {"path": "app.py", "content": "print('ok')"}
+    # Argument alias and optional none-sentinel cleanup now live in the schema
+    # repair layer, not in the dispatcher's initial normalization.
+    assert arguments == {
+        "path": "app.py",
+        "content": "print('ok')",
+        "write_session_id": "none",
+        "next_section_name": "null",
+    }
     assert metadata["repaired_tool_alias_from"] == "artifact_write"
     assert metadata["repaired_tool_alias_to"] == "file_write"
     assert metadata["routing_reason"] == "tool_alias_repair"
-    assert metadata["optional_none_sentinel_removed"] == ["next_section_name", "write_session_id"]
+    assert "optional_none_sentinel_removed" not in metadata
 
 
-def test_initial_tool_request_normalization_repairs_patch_aliases() -> None:
+def test_initial_tool_request_normalization_no_longer_repairs_patch_aliases() -> None:
     tool_name, arguments, metadata = normalize_initial_tool_request(
         "file_patch",
         {"path": "app.py", "old": "before", "new_text": "after"},
     )
 
     assert tool_name == "file_patch"
-    assert arguments == {"path": "app.py", "target_text": "before", "replacement_text": "after"}
-    assert metadata["argument_alias_repair"] == {"old": "target_text", "new_text": "replacement_text"}
+    assert arguments == {"path": "app.py", "old": "before", "new_text": "after"}
+    assert "argument_alias_repair" not in metadata
 
 
 def test_repair_ssh_exec_malformed_args_unwraps_nested_command_and_name() -> None:

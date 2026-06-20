@@ -91,6 +91,7 @@ def _normalize_run_mode(value: Any) -> str:
 
 _BOOL_CONFIG_KEYS = {
     "debug",
+    "debug_tokens",
     "thinking_visibility",
     "checkpoint_on_exit",
     "restore_graph_state",
@@ -160,6 +161,7 @@ _INT_CONFIG_KEYS = {
     "max_restarts_per_hour",
     "backend_healthcheck_timeout_sec",
     "backend_restart_grace_sec",
+    "log_max_mb",
     "graph_node_timeout_sec",
     "graph_model_call_timeout_sec",
     "graph_dispatch_tools_timeout_sec",
@@ -228,7 +230,7 @@ _FLOAT_CONFIG_KEYS = {
     "escalation_temperature",
 }
 
-_COMMA_LIST_CONFIG_KEYS = {"test_time_scaling_runtimes", "chunk_mode_supported_models"}
+_COMMA_LIST_CONFIG_KEYS = {"test_time_scaling_runtimes", "chunk_mode_supported_models", "debug_subsystems"}
 
 
 def _apply_typed_config_values(values: dict[str, Any]) -> None:
@@ -372,6 +374,9 @@ def _env_raw_config(env_or_dotenv: Any) -> dict[str, Any]:
         "escalation_redact_secrets": env_or_dotenv(f"{ENV_PREFIX}ESCALATION_REDACT_SECRETS"),
         "log_file": env_or_dotenv(f"{ENV_PREFIX}LOG_FILE"),
         "debug": env_or_dotenv(f"{ENV_PREFIX}DEBUG"),
+        "debug_subsystems": env_or_dotenv(f"{ENV_PREFIX}DEBUG_SUBSYSTEMS"),
+        "debug_tokens": env_or_dotenv(f"{ENV_PREFIX}DEBUG_TOKENS"),
+        "log_max_mb": env_or_dotenv(f"{ENV_PREFIX}LOG_MAX_MB"),
         "config_path": env_or_dotenv(f"{ENV_PREFIX}CONFIG"),
         "preset": env_or_dotenv(f"{ENV_PREFIX}PRESET"),
         "indexer": env_or_dotenv(f"{ENV_PREFIX}INDEXER"),

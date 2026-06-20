@@ -74,6 +74,39 @@ Enable the newer ToolPlan runtime for read-only evidence planning:
 smallctl --run-mode tool_plan --task "Find the risk policy flow"
 ```
 
+## Debug Logging
+
+SmallCTL writes structured per-run logs to `logs/<run>/` and supports granular debug controls:
+
+```bash
+# Enable all debug logging
+smallctl --debug --task "Investigate the failing tests"
+
+# Focus on graph/context decisions without token flood
+smallctl --debug-subsystem graph --debug-subsystem context --task "..."
+
+# Log every model token (default samples for volume)
+smallctl --debug --debug-tokens --task "..."
+
+# Cap total run log size at 50 MB (default 100 MB)
+smallctl --debug --log-max-mb 50 --task "..."
+```
+
+Subsystems: `client`, `graph`, `tools`, `context`, `fama`, `ui`, `memory`, `state`.  
+Environment: `SMALLCTL_DEBUG_SUBSYSTEMS=client,graph` works like the CLI flag.
+
+During a long interactive run, write to `.smallctl/debug-signal` to escalate logging or capture a snapshot without restarting:
+
+```bash
+# Enable DEBUG for the next 3 turns
+echo "escalate:3" > .smallctl/debug-signal
+
+# Dump a compact recent-event summary
+echo "snapshot" > .smallctl/debug-signal
+```
+
+Agent-Tools (`Agent-Tools/logwatch.py`, `Agent-Tools/trace_call.py`) warn when they see an unsupported runlog schema version.
+
 ## Core Features
 
 ### Staged Workflows

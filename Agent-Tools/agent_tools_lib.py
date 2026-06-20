@@ -190,6 +190,28 @@ def iter_records(run_dir: Path, channel: str) -> Iterable[dict[str, Any]]:
             yield record
 
 
+def warn_on_schema_mismatch(run_dir: Path) -> list[str]:
+    """Return warnings if a run's schema version differs from the supported version."""
+    warnings: list[str] = []
+    header_path = run_dir / "run_header.json"
+    if header_path.exists():
+        try:
+            header = json.loads(header_path.read_text(encoding="utf-8"))
+            version = header.get("event_schema_version")
+            if version is not None and version != 1:
+                warnings.append(f"Run schema version {version} may not be fully supported by this tool (expected 1).")
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"Could not parse run_header.json: {exc}")
+    # Also sample the first record from each channel.
+    for channel in ["harness", "tools", "chat", "model_output"]:
+        for record in iter_records(run_dir, channel):
+            version = record.get("event_schema_version")
+            if version is not None and version != 1:
+                warnings.append(f"Channel {channel} uses schema version {version} (expected 1).")
+            break
+    return warnings
+
+
 def _parse_text_log(path: Path) -> Iterable[dict[str, Any]]:
     """Best-effort parse of .log text files into dicts with timestamp/event/message/data."""
     ts_re = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2})\s+(")?')

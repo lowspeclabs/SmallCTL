@@ -432,6 +432,7 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         mode=normalized_mode,
         profiles=profiles,
     )
+    all_exported_names = set(_tool_names(schemas))
     schemas = filter_tools_for_runtime_state(
         schemas,
         state=harness.state,
@@ -467,6 +468,10 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
             if "shell_exec" not in existing_names:
                 schemas = list(schemas) + [shell_schema]
 
+    exposed_names = set(_tool_names(schemas))
+    hidden_names = sorted(all_exported_names - exposed_names)
+    hidden_reasons = {name: hidden_tool_reason(name, state=harness.state, mode=normalized_mode) or "filtered" for name in hidden_names}
+
     if not is_local_coding:
         hidden_tools = fama_hidden_tools_for_exposure(
             schemas,
@@ -482,8 +487,21 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         )
         if hidden_tools:
             _log_fama_tool_exposure(harness, hidden_tools=hidden_tools, mode=normalized_mode)
+        hidden_reasons.update({name: "fama_policy" for name in hidden_tools})
     # Update exposed tools set so future turns preserve monotonicity
     harness.state.task_exposed_tools = harness.state.task_exposed_tools | set(_tool_names(schemas))
+
+    from .tool_exposure_logging import log_tool_profile_exposure
+
+    log_tool_profile_exposure(
+        harness,
+        mode=normalized_mode,
+        phase=harness.state.current_phase,
+        profiles=profiles,
+        exposed_tools=list(_tool_names(schemas)),
+        hidden_tools=hidden_names,
+        reasons=hidden_reasons,
+    )
     return {
         "schemas": schemas,
         "names": _tool_names(schemas),

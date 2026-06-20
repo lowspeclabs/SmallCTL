@@ -377,6 +377,25 @@ class ModeDecisionService:
     def __init__(self, harness: Harness):
         self.harness = harness
 
+    def _log_mode_decision(self, *, mode: str, raw: str, model_decision_raw: str | None = None, confidence: str = "n/a", **extra: Any) -> None:
+        task_preview = str(
+            getattr(getattr(self.harness.state, "run_brief", None), "original_task", "")
+            or getattr(self.harness, "_current_user_task", lambda: "")()
+            or ""
+        )[:200]
+        self.harness._runlog(
+            "mode_decision",
+            "selected run mode",
+            level="debug",
+            subsystem="graph",
+            selected_mode=mode,
+            heuristic_matched=raw,
+            task_preview=task_preview,
+            model_decision_raw=model_decision_raw,
+            confidence=confidence,
+            **extra,
+        )
+
     async def _announce_mode_change(self, *, mode: str, reason: str) -> None:
         if mode != "planning":
             return
@@ -398,32 +417,16 @@ class ModeDecisionService:
         mode_task = resolved_task or raw_task
         scratchpad = getattr(getattr(self.harness, "state", None), "scratchpad", None)
         if isinstance(scratchpad, dict) and scratchpad.pop("_fama_force_tool_plan_next_turn", False):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="tool_plan",
-                raw="fama_hard_route",
-                raw_task=raw_task,
-                effective_task=mode_task,
-            )
+            self._log_mode_decision(mode="tool_plan", raw="fama_hard_route", raw_task=raw_task, effective_task=mode_task)
             return "tool_plan"
         transaction = scratchpad.get("_task_transaction") if isinstance(scratchpad, dict) else None
         if isinstance(transaction, dict) and str(transaction.get("turn_type") or "").strip() == "CLARIFICATION":
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="chat",
-                raw="task_transaction_clarification",
-                raw_task=raw_task,
-                effective_task=mode_task,
-            )
+            self._log_mode_decision(mode="chat", raw="task_transaction_clarification", raw_task=raw_task, effective_task=mode_task)
             return "chat"
 
         pending_interrupt = getattr(getattr(self.harness, "state", None), "pending_interrupt", None)
         if is_interrupt_response(pending_interrupt, raw_task):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode="loop",
                 raw="pending_interrupt_response",
                 interrupt_kind=pending_interrupt.get("kind") if isinstance(pending_interrupt, dict) else "",
@@ -435,22 +438,14 @@ class ModeDecisionService:
         # but the user is clearly replying to a plan approval prompt, force loop mode
         # so the runtime can resume the planning graph.
         if is_plan_approval_reply(raw_task) and _has_plan_execution_approval_context(self.harness):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="loop",
-                raw="plan_approval_fallback",
-                raw_task=raw_task,
-            )
+            self._log_mode_decision(mode="loop", raw="plan_approval_fallback", raw_task=raw_task)
             return "loop"
 
         plan_request = self._extract_planning_request(task)
         if plan_request is not None:
             output_path, output_format = plan_request
             self._set_planning_request(output_path=output_path, output_format=output_format)
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode="planning",
                 raw="planning_intent",
                 output_path=output_path,
@@ -471,9 +466,7 @@ class ModeDecisionService:
             raw_task=raw_task,
             resolved_task=mode_task,
         ):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode="loop",
                 raw="contextual_affirmative_execution_continuation",
                 raw_task=raw_task,
@@ -492,9 +485,7 @@ class ModeDecisionService:
             cwd=getattr(self.harness.state, "cwd", None),
         )
         if sync_mode is not None:
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode=sync_mode,
                 raw="complex_write_sync_heuristic",
                 raw_task=raw_task,
@@ -503,17 +494,12 @@ class ModeDecisionService:
             return sync_mode
 
         if self.harness.state.planning_mode_enabled and not (self.harness.state.active_plan and self.harness.state.active_plan.approved):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
-                mode="planning",
-                raw="planning_mode_enabled",
-            )
+            self._log_mode_decision(mode="planning", raw="planning_mode_enabled")
             await self._announce_mode_change(mode="planning", reason="planning_mode_enabled")
             return "planning"
 
         if is_smalltalk(mode_task):
-            self.harness._runlog("mode_decision", "selected run mode", mode="chat", raw="smalltalk_heuristic")
+            self._log_mode_decision(mode="chat", raw="smalltalk_heuristic")
             return "chat"
 
         # Fix for RCA 8ec35471: follow-ups that implement a previously proposed
@@ -522,9 +508,7 @@ class ModeDecisionService:
         if expanded and not mode_task:
             mode_task = expanded
         if _looks_like_implementation_followup_after_plan(raw_task, self.harness):
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode="loop",
                 raw="implementation_followup_after_plan",
                 raw_task=raw_task,
@@ -554,9 +538,7 @@ class ModeDecisionService:
                 and runtime_intent.label == "execute"
             )
             if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution:
-                self.harness._runlog(
-                    "mode_decision",
-                    "selected run mode",
+                self._log_mode_decision(
                     mode="planning",
                     raw="complex_task_auto_escalation",
                     intent=runtime_intent.label,
@@ -566,9 +548,7 @@ class ModeDecisionService:
                 )
                 await self._announce_mode_change(mode="planning", reason="complex_task_auto_escalation")
                 return "planning"
-            self.harness._runlog(
-                "mode_decision",
-                "selected run mode",
+            self._log_mode_decision(
                 mode=runtime_policy.route_mode,
                 raw="runtime_intent_policy",
                 intent=runtime_intent.label,
@@ -591,7 +571,7 @@ class ModeDecisionService:
             async for event in self.harness.client.stream_chat(messages=messages, tools=[]):
                 chunks.append(event)
         except Exception:
-            self.harness._runlog("mode_decision_fallback", "mode decision failed, using loop")
+            self._log_mode_decision(mode="loop", raw="model_decision_fallback")
             return "loop"
             
         decision_result = OpenAICompatClient.collect_stream(
@@ -605,11 +585,10 @@ class ModeDecisionService:
             decision = decision_result.thinking_text.strip().lower()
         normalized_decision = normalize_mode_decision(decision)
         mode = normalized_decision or "loop"
-        self.harness._runlog(
-            "mode_decision",
-            "selected run mode",
+        self._log_mode_decision(
             mode=mode,
-            raw=decision,
+            raw="model_decision",
+            model_decision_raw=decision,
             normalized=normalized_decision,
             raw_task=raw_task,
             effective_task=mode_task,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from typing import Iterable, Any
 
+from ..logging_utils import log_kv, synthetic_trace_id
 from ..state import (
     ArtifactSnippet,
     ContextBrief,
@@ -331,7 +333,46 @@ class PromptStateFrameCompiler:
                 dropped_count=len(dropped_artifact_ids),
                 dropped_ids=dropped_artifact_ids,
             )
+
+        self._log_frame_compiled(state, frame)
         return frame
+
+    def _log_frame_compiled(self, state: LoopState, frame: PromptStateFrame) -> None:
+        """Emit a structured decision trace for the compiled prompt frame."""
+        logger = logging.getLogger("smallctl.context")
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        from ..logging_utils import synthetic_trace_id
+        trace_id = synthetic_trace_id(state, suffix="ctx")
+        drops = [
+            {
+                "lane": drop.lane,
+                "reason": drop.reason,
+                "dropped_count": drop.dropped_count,
+                "dropped_ids": list(drop.dropped_ids)[:50],
+            }
+            for drop in (frame.drop_log or [])
+        ]
+        kept = {
+            "observations": len(frame.evidence_packet.observations),
+            "turn_bundles": len(frame.evidence_packet.turn_bundles),
+            "context_briefs": len(frame.evidence_packet.context_briefs),
+            "summaries": len(frame.evidence_packet.summaries),
+            "experiences": len(frame.experience_packet.memories),
+            "artifact_snippets": len(frame.artifact_packet.snippets),
+        }
+        spine_text = " ".join(str(v) for v in frame.spine.__dict__.values() if isinstance(v, (str, list)))
+        estimated = estimate_text_tokens(spine_text)
+        log_kv(
+            logger,
+            logging.DEBUG,
+            "prompt_state_frame_compiled",
+            trace_id=trace_id,
+            drops=drops,
+            kept=kept,
+            token_budget=self.policy.max_prompt_tokens,
+            estimated_tokens=estimated,
+        )
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:

@@ -29,6 +29,7 @@ from agent_tools_lib import (
     has_error_indicator,
     iter_records,
     resolve_run_dir,
+    warn_on_schema_mismatch,
 )
 
 
@@ -40,6 +41,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--last-error", action="store_true", help="Trace the most recent error-ish harness record")
     parser.add_argument("--compact", "-c", action="store_true", help="Collapse model_token / chunk records")
     parser.add_argument("--json", action="store_true", help="Output raw JSON instead of formatted text")
+    parser.add_argument("--step", type=int, help="Filter records to a specific step number")
+    parser.add_argument("--task", help="Filter records to a specific task id")
+    parser.add_argument("--event", action="append", default=None, help="Filter to specific event names (repeatable)")
     return parser.parse_args()
 
 
@@ -79,6 +83,52 @@ def _run_matches_trace(run_dir: Path, trace_arg: str | None) -> bool:
         return True
     prefix = trace_arg.split(":", 1)[0]
     return run_dir.name.startswith(prefix) if prefix else True
+
+
+def _trace_step(trace_id: str | None) -> int | None:
+    if not trace_id:
+        return None
+    for part in trace_id.split(":"):
+        if part.startswith("step-"):
+            try:
+                return int(part[5:])
+            except ValueError:
+                return None
+    return None
+
+
+def _trace_task(trace_id: str | None) -> str | None:
+    if not trace_id:
+        return None
+    parts = trace_id.split(":")
+    if len(parts) >= 2:
+        return parts[1]
+    return None
+
+
+def _filter_records(
+    grouped: dict[str, list[dict[str, Any]]],
+    *,
+    trace_id: str,
+    step: int | None,
+    task: str | None,
+    events: set[str] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Apply step/task/event filters to grouped records."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for channel, recs in grouped.items():
+        filtered: list[dict[str, Any]] = []
+        for rec in recs:
+            rec_trace = extract_trace_id(rec) or trace_id
+            if step is not None and _trace_step(rec_trace) != step:
+                continue
+            if task is not None and _trace_task(rec_trace) != task:
+                continue
+            if events is not None and rec.get("event") not in events:
+                continue
+            filtered.append(rec)
+        result[channel] = filtered
+    return result
 
 
 def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str, Any]]], compact: bool = False, mismatch_warning: str | None = None) -> str:
@@ -204,8 +254,18 @@ def main() -> int:
     logs_dir = Path(args.logs_dir) if args.logs_dir else None
     try:
         run_dir = resolve_run_dir(args.run, logs_dir)
+        for warning in warn_on_schema_mismatch(run_dir):
+            print(colorize(f"Warning: {warning}", Colors.YELLOW), file=sys.stderr)
         trace_id = _resolve_trace_id(run_dir, args.trace, args.last_error)
         grouped = find_records_by_trace_id(run_dir, trace_id)
+        event_filter = set(args.event) if args.event else None
+        grouped = _filter_records(
+            grouped,
+            trace_id=trace_id,
+            step=args.step,
+            task=args.task,
+            events=event_filter,
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(colorize(str(exc), Colors.RED), file=sys.stderr)
         return 1

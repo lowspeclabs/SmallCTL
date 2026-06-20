@@ -197,6 +197,9 @@ def build_harness_config_kwargs(
         "subtask_inject_completed_limit": getattr(config, "subtask_inject_completed_limit", 3),
         "sudo_password": getattr(config, "sudo_password", None),
         "verbose": getattr(config, "verbose", False),
+        "debug_subsystems": getattr(config, "debug_subsystems", None),
+        "debug_tokens": getattr(config, "debug_tokens", False),
+        "log_max_mb": getattr(config, "log_max_mb", 100),
         **({"task": task} if task is not None else {}),
     }
 
@@ -395,6 +398,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run in code indexer mode",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--debug-subsystem",
+        dest="debug_subsystems",
+        action="append",
+        default=None,
+        help="Enable debug logging for a subsystem (client, graph, tools, context, fama, ui, memory, state). May be repeated.",
+    )
+    parser.add_argument("--debug-tokens", action="store_true", default=None, help="Log every model token instead of sampling")
+    parser.add_argument("--log-max-mb", type=int, help="Per-run log size cap in megabytes (default: 100)")
     parser.add_argument("--api-key", dest="api_key", help="API key for endpoint")
     parser.add_argument("--context-limit", type=int, help="Context window/token budget override")
     parser.add_argument("--max-prompt-tokens", type=int, help="Per-request prompt token budget")
@@ -481,8 +493,18 @@ def cli(argv: list[str] | None = None) -> int:
 
     config = resolve_config(vars(args))
 
-    setup_logging(config.debug, log_file=config.log_file, stream_to_terminal=not args.tui)
-    run_logger = create_run_logger("logs")
+    setup_logging(
+        config.debug,
+        log_file=config.log_file,
+        stream_to_terminal=not args.tui,
+        debug_subsystems=config.debug_subsystems,
+    )
+    run_logger = create_run_logger(
+        "logs",
+        debug_subsystems=config.debug_subsystems,
+        log_max_mb=config.log_max_mb,
+        debug_tokens=config.debug_tokens,
+    )
 
     def _emit_log_dir_finalized(final_dir: str) -> None:
         print(json.dumps({"status": "log_dir_finalized", "run_log_dir": final_dir}))

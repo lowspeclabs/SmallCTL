@@ -7,27 +7,7 @@ _TOOL_ALIAS_REPAIRS = {
     "use_ssh_exec": "ssh_exec",
     "artifact_write": "file_write",
 }
-_PATCH_ARGUMENT_ALIASES = {
-    "source": "target_text",
-    "old_text": "target_text",
-    "old": "target_text",
-    "dest": "replacement_text",
-    "new_text": "replacement_text",
-    "new": "replacement_text",
-    "replacement": "replacement_text",
-}
 _WRITE_SESSION_PATH_REPAIR_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch"}
-_WRITE_SESSION_OPTIONAL_FIELDS = {
-    "write_session_id",
-    "session_id",
-    "section_name",
-    "section_id",
-    "section_role",
-    "next_section_name",
-    "replace_strategy",
-    "expected_followup_verifier",
-}
-_OPTIONAL_NONE_SENTINELS = {"", "none", "null", "nil", "n/a", "na"}
 
 
 def normalize_initial_tool_request(
@@ -46,55 +26,7 @@ def normalize_initial_tool_request(
             }
         )
 
-    normalized_arguments, patch_alias_metadata = normalize_patch_argument_aliases(repaired_tool_name, arguments)
-    metadata.update(patch_alias_metadata)
-
-    normalized_arguments, none_sentinel_metadata = normalize_optional_none_sentinels(
-        repaired_tool_name,
-        normalized_arguments,
-    )
-    metadata.update(none_sentinel_metadata)
-
-    return repaired_tool_name, normalized_arguments, metadata
-
-
-def normalize_patch_argument_aliases(
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if tool_name not in {"file_patch", "ssh_file_patch", "ast_patch"}:
-        return arguments, {}
-    if not isinstance(arguments, dict):
-        return arguments, {}
-    normalized = dict(arguments)
-    repairs: dict[str, str] = {}
-    for alias, canonical in _PATCH_ARGUMENT_ALIASES.items():
-        if alias in normalized and canonical not in normalized:
-            normalized[canonical] = normalized.pop(alias)
-            repairs[alias] = canonical
-    if repairs:
-        return normalized, {"argument_alias_repair": repairs}
-    return normalized, {}
-
-
-def normalize_optional_none_sentinels(
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if tool_name not in _WRITE_SESSION_PATH_REPAIR_TOOLS or not isinstance(arguments, dict):
-        return arguments, {}
-
-    normalized = dict(arguments)
-    repaired: list[str] = []
-    for field in _WRITE_SESSION_OPTIONAL_FIELDS:
-        value = normalized.get(field)
-        if isinstance(value, str) and value.strip().lower() in _OPTIONAL_NONE_SENTINELS:
-            normalized.pop(field, None)
-            repaired.append(field)
-
-    if not repaired:
-        return arguments, {}
-    return normalized, {"optional_none_sentinel_removed": sorted(repaired)}
+    return repaired_tool_name, arguments, metadata
 
 
 def repair_ssh_exec_malformed_args(

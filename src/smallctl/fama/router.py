@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any
 
 from .config import default_ttl_steps
 from .signals import ActiveMitigation, FamaFailureKind, FamaSignal, current_step
+from ..logging_utils import log_kv, synthetic_trace_id
+
+_LOGGER = logging.getLogger("smallctl.fama.router")
 
 
 _AUTH_FAILURE_EVIDENCE_RE = re.compile(
@@ -85,7 +89,7 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
     reason = signal.evidence
     if signal.kind == FamaFailureKind.SSH_HOST_KEY_VERIFICATION and signal.next_safe_action:
         reason = signal.next_safe_action
-    return [
+    mitigations = [
         ActiveMitigation(
             name=name,
             reason=reason,
@@ -95,3 +99,17 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
         )
         for name in names
     ]
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        trace_id = synthetic_trace_id(state, suffix="fama")
+        log_kv(
+            _LOGGER,
+            logging.DEBUG,
+            "fama_signal_routed",
+            trace_id=trace_id,
+            signal=signal.kind.value,
+            detector=signal.source,
+            mitigations=[m.name for m in mitigations],
+            affected_tools=sorted({str(signal.tool_name or "")}),
+            duration_steps=ttl,
+        )
+    return mitigations

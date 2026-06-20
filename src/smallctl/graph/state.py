@@ -30,27 +30,6 @@ def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> 
     if session_id:
         normalized.pop("session_id", None)
 
-    # Providers sometimes emit Python literals such as `None` for optional
-    # write-session metadata. Treat those as omitted fields instead of letting
-    # schema validation fail after we've already recovered the real content.
-    for key, value in list(normalized.items()):
-        if value is None:
-            normalized.pop(key, None)
-    for key in (
-        "path",
-        "write_session_id",
-        "section_name",
-        "next_section_name",
-        "replace_strategy",
-        "target_text",
-        "replacement_text",
-        "language",
-        "operation",
-    ):
-        value = normalized.get(key)
-        if isinstance(value, str) and value.strip().lower() in {"none", "null"}:
-            normalized.pop(key, None)
-
     return normalized
 
 

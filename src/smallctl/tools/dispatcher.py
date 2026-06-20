@@ -311,14 +311,15 @@ class ToolDispatcher:
                 )
             return intercepted_result
 
-        args, dropped_keys = self._coerce_args(spec.schema, arguments)
-        if dropped_keys and self.run_logger:
+        args, dropped_keys, coerced_entries = self._coerce_args(spec.schema, arguments)
+        if (dropped_keys or coerced_entries) and self.run_logger:
             self.run_logger.log(
                 "tools",
                 "legacy_dispatch_coercion",
-                "legacy dispatcher coercion dropped unknown arguments",
+                "legacy dispatcher coercion adjusted arguments",
                 tool_name=tool_name,
                 dropped_keys=dropped_keys,
+                coerced_entries=coerced_entries,
             )
 
         # Reject empty shell/ssh commands before dispatch
@@ -379,6 +380,8 @@ class ToolDispatcher:
                 missing = [f for f in required if f not in args]
                 if missing:
                     validation_error += f" (Ignored unknown parameters: {', '.join(dropped_keys)})"
+            if coerced_entries:
+                metadata["coerced_arguments"] = coerced_entries
             return ToolEnvelope(
                 success=False,
                 error=validation_error,
@@ -418,7 +421,7 @@ class ToolDispatcher:
             result_metadata = {
                 **dispatch_metadata,
                 **normalization_metadata,
-                **self._legacy_coercion_metadata(dropped_keys),
+                **self._legacy_coercion_metadata(dropped_keys, coerced_entries),
                 **result_metadata,
             }
             result_output = result.get("output")
@@ -455,27 +458,35 @@ class ToolDispatcher:
         return ToolEnvelope(
             success=True,
             output=result,
-            metadata={**dispatch_metadata, **normalization_metadata, **self._legacy_coercion_metadata(dropped_keys)},
+            metadata={**dispatch_metadata, **normalization_metadata, **self._legacy_coercion_metadata(dropped_keys, coerced_entries)},
         )
 
     @staticmethod
-    def _coerce_args(schema: dict[str, Any], arguments: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    def _coerce_args(
+        schema: dict[str, Any], arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
         if not isinstance(arguments, dict):
-            return arguments, []
+            return arguments, [], []
 
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not properties and not required:
-            return {}, []
+            return {}, [], []
         coerced = dict(arguments)
         dropped: list[str] = []
+        coerced_entries: list[dict[str, Any]] = []
         if isinstance(properties, dict):
             dropped = [key for key in coerced if key not in properties]
             coerced = {key: value for key, value in coerced.items() if key in properties}
             for key, value in list(coerced.items()):
                 expected_type = properties.get(key, {}).get("type")
-                coerced[key] = _coerce_value(expected_type, value)
-        return coerced, dropped
+                new_value = _coerce_value(expected_type, value)
+                if new_value is not value:
+                    coerced_entries.append(
+                        {"key": key, "from": json_safe_value(value), "to": json_safe_value(new_value)}
+                    )
+                coerced[key] = new_value
+        return coerced, dropped, coerced_entries
 
     @staticmethod
     def _validate_args(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
@@ -517,13 +528,15 @@ class ToolDispatcher:
         ]
 
     @staticmethod
-    def _legacy_coercion_metadata(dropped_keys: list[str]) -> dict[str, Any]:
-        if not dropped_keys:
+    def _legacy_coercion_metadata(dropped_keys: list[str], coerced_entries: list[dict[str, Any]]) -> dict[str, Any]:
+        if not dropped_keys and not coerced_entries:
             return {}
-        return {
-            "legacy_dispatch_coercion": True,
-            "ignored_arguments": dropped_keys,
-        }
+        metadata: dict[str, Any] = {"legacy_dispatch_coercion": True}
+        if dropped_keys:
+            metadata["ignored_arguments"] = dropped_keys
+        if coerced_entries:
+            metadata["coerced_arguments"] = coerced_entries
+        return metadata
 
 
 class PipelineDispatcher:

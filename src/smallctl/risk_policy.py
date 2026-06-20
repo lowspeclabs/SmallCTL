@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,9 @@ from .reasoning_policy import (
     task_requires_claim_support,
 )
 from .state import LoopState
+from .logging_utils import log_kv, synthetic_trace_id
+
+_LOGGER = logging.getLogger("smallctl.risk_policy")
 
 _READ_ONLY_PHASES = {"explore", "verify"}
 _SHELL_TOOLS = {"shell_exec", "ssh_exec"}
@@ -89,12 +93,28 @@ def evaluate_risk_policy(
         verification=verification,
     )
     if tool_risk in {"low", "network_read"}:
-        return RiskPolicyDecision(
+        decision = RiskPolicyDecision(
             allowed=True,
             proof_bundle=proof_bundle,
             tool_risk=tool_risk,
             task_classification=task_classification,
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            trace_id = synthetic_trace_id(state, suffix="risk")
+            log_kv(
+                _LOGGER,
+                logging.DEBUG,
+                "risk_policy_decision",
+                trace_id=trace_id,
+                tool_name=tool_name,
+                risk_level=tool_risk,
+                approval_required=decision.requires_approval,
+                phase_allowed=decision.allowed,
+                reason="low_risk_allowed",
+                task_classification=task_classification,
+                phase=phase,
+            )
+        return decision
 
     if (
         task_classification == "diagnosis_remediation"
@@ -102,7 +122,7 @@ def evaluate_risk_policy(
         and _is_read_only_evidence_action(action)
     ):
         requires_approval = approval_available and tool_name in _SHELL_TOOLS and tool_risk in {"medium", "high"}
-        return RiskPolicyDecision(
+        decision = RiskPolicyDecision(
             allowed=True,
             requires_approval=requires_approval,
             proof_bundle=proof_bundle,
@@ -110,6 +130,22 @@ def evaluate_risk_policy(
             task_classification=task_classification,
             approval_kind="shell" if tool_name in _SHELL_TOOLS else "",
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            trace_id = synthetic_trace_id(state, suffix="risk")
+            log_kv(
+                _LOGGER,
+                logging.DEBUG,
+                "risk_policy_decision",
+                trace_id=trace_id,
+                tool_name=tool_name,
+                risk_level=tool_risk,
+                approval_required=decision.requires_approval,
+                phase_allowed=decision.allowed,
+                reason="diagnosis_read_only_evidence",
+                task_classification=task_classification,
+                phase=phase,
+            )
+        return decision
 
     if (
         task_classification == "diagnosis_remediation"
@@ -117,7 +153,7 @@ def evaluate_risk_policy(
         and _is_ssh_keygen_known_hosts_removal(action)
     ):
         requires_approval = approval_available and tool_risk in {"medium", "high"}
-        return RiskPolicyDecision(
+        decision = RiskPolicyDecision(
             allowed=True,
             requires_approval=requires_approval,
             proof_bundle=proof_bundle,
@@ -125,6 +161,22 @@ def evaluate_risk_policy(
             task_classification=task_classification,
             approval_kind="shell",
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            trace_id = synthetic_trace_id(state, suffix="risk")
+            log_kv(
+                _LOGGER,
+                logging.DEBUG,
+                "risk_policy_decision",
+                trace_id=trace_id,
+                tool_name=tool_name,
+                risk_level=tool_risk,
+                approval_required=decision.requires_approval,
+                phase_allowed=decision.allowed,
+                reason="ssh_keygen_known_hosts_removal",
+                task_classification=task_classification,
+                phase=phase,
+            )
+        return decision
 
     if (
         task_classification == "diagnosis_remediation"
@@ -133,7 +185,7 @@ def evaluate_risk_policy(
         and _ssh_first_probe_allowed(state)
     ):
         requires_approval = approval_available and tool_risk in {"medium", "high"}
-        return RiskPolicyDecision(
+        decision = RiskPolicyDecision(
             allowed=True,
             requires_approval=requires_approval,
             proof_bundle=proof_bundle,
@@ -141,9 +193,25 @@ def evaluate_risk_policy(
             task_classification=task_classification,
             approval_kind="shell",
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            trace_id = synthetic_trace_id(state, suffix="risk")
+            log_kv(
+                _LOGGER,
+                logging.DEBUG,
+                "risk_policy_decision",
+                trace_id=trace_id,
+                tool_name=tool_name,
+                risk_level=tool_risk,
+                approval_required=decision.requires_approval,
+                phase_allowed=decision.allowed,
+                reason="ssh_first_probe_allowed",
+                task_classification=task_classification,
+                phase=phase,
+            )
+        return decision
 
     if task_classification == "diagnosis_remediation" and not has_supported_claim(state):
-        return RiskPolicyDecision(
+        decision = RiskPolicyDecision(
             allowed=False,
             reason=missing_supported_claim_message(tool_name),
             proof_bundle=proof_bundle,
@@ -151,9 +219,25 @@ def evaluate_risk_policy(
             task_classification=task_classification,
             approval_kind="shell" if tool_name in _SHELL_TOOLS else "generic",
         )
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            trace_id = synthetic_trace_id(state, suffix="risk")
+            log_kv(
+                _LOGGER,
+                logging.DEBUG,
+                "risk_policy_decision",
+                trace_id=trace_id,
+                tool_name=tool_name,
+                risk_level=tool_risk,
+                approval_required=decision.requires_approval,
+                phase_allowed=decision.allowed,
+                reason=decision.reason,
+                task_classification=task_classification,
+                phase=phase,
+            )
+        return decision
 
     requires_approval = approval_available and tool_name in _SHELL_TOOLS and tool_risk in {"medium", "high"}
-    return RiskPolicyDecision(
+    decision = RiskPolicyDecision(
         allowed=True,
         requires_approval=requires_approval,
         proof_bundle=proof_bundle,
@@ -161,6 +245,22 @@ def evaluate_risk_policy(
         task_classification=task_classification,
         approval_kind="shell" if tool_name in _SHELL_TOOLS else "generic" if tool_risk == "high" else "",
     )
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        trace_id = synthetic_trace_id(state, suffix="risk")
+        log_kv(
+            _LOGGER,
+            logging.DEBUG,
+            "risk_policy_decision",
+            trace_id=trace_id,
+            tool_name=tool_name,
+            risk_level=tool_risk,
+            approval_required=decision.requires_approval,
+            phase_allowed=decision.allowed,
+            reason=decision.reason or "policy_allowed",
+            task_classification=task_classification,
+            phase=phase,
+        )
+    return decision
 
 
 

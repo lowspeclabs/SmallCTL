@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..guards import is_small_model_name
-from ..logging_utils import log_kv
+from ..logging_utils import log_kv, synthetic_trace_id
 from ..models.events import UIEvent, UIEventType, UIStatusSnapshot, compute_activity_for_event
 from ..challenge_progress import challenge_progress_report
 from ..remote_scope import (
@@ -102,15 +102,31 @@ async def _emit(
     if handler is None:
         return
     scratchpad = getattr(self.state, "scratchpad", None)
+    thread_id = str(getattr(self.state, "thread_id", "") or "").strip()
+    task_id = str(self.state.scratchpad.get("_active_task_id") or "").strip() if isinstance(scratchpad, dict) else ""
     if isinstance(scratchpad, dict):
         ledger = scratchpad.setdefault("_ui_event_ledger", [])
         if isinstance(ledger, list):
             ledger.append({
                 "event_type": str(getattr(event.event_type, "value", event.event_type)),
                 "content": redact_sensitive_text(str(event.content or "")),
+                "trace_id": thread_id or "",
+                "task_id": task_id,
             })
             if len(ledger) > 80:
                 del ledger[:-80]
+    if self.run_logger and hasattr(self.run_logger, "log"):
+        self.run_logger.log(
+            "harness",
+            "ui_event",
+            "ui event emitted",
+            level="debug",
+            subsystem="ui",
+            event_type=str(getattr(event.event_type, "value", event.event_type)),
+            content=redact_sensitive_text(str(event.content or "")),
+            trace_id=thread_id or (self.run_logger.extra_fields.get("trace_id") or ""),
+            task_id=task_id,
+        )
     if event.data.get("is_api_error"):
         if isinstance(scratchpad, dict):
             scratchpad["_ui_api_error_count"] = int(scratchpad.get("_ui_api_error_count", 0) or 0) + 1
@@ -531,11 +547,13 @@ def _failure(
     }
 
 
-def _runlog(self: Any, event: str, message: str, **data: Any) -> None:
+def _runlog(self: Any, event: str, message: str, *, level: str = "info", subsystem: str | None = None, **data: Any) -> None:
     if self.run_logger:
-        self.run_logger.log("harness", event, message, **data)
+        if not self.run_logger.extra_fields.get("trace_id"):
+            self.run_logger.set_trace_id(synthetic_trace_id(self.state, suffix="harness"))
+        self.run_logger.log("harness", event, message, level=level, subsystem=subsystem, **data)
         if event.startswith("model_"):
-            self.run_logger.log("model_output", event, message, **data)
+            self.run_logger.log("model_output", event, message, level=level, subsystem=subsystem, **data)
 
 
 def _stream_print(text: str) -> None:

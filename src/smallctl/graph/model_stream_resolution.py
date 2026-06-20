@@ -197,6 +197,7 @@ async def resolve_model_stream_result(
     last_chunk_error_details: dict[str, Any] | None,
     stream_ended_without_done: bool,
     stream_ended_without_done_details: dict[str, Any],
+    partial_assistant_text: str = "",
     trigger_early_4b_fallback: bool,
     stream_completed_cleanly: bool,
     echo_to_stdout: bool,
@@ -375,6 +376,14 @@ async def resolve_model_stream_result(
             thinking_start_tag=harness.thinking_start_tag,
             thinking_end_tag=harness.thinking_end_tag,
         )
+        # If the stream degenerated while the model was emitting an inline tool
+        # call, the text collected from chunks may be truncated or empty because
+        # the repetition guard halted mid-token. Append any salvaged prefix so
+        # parse_tool_calls has a chance to recover the partial tool call.
+        partial_text = str(stream_ended_without_done_details.get("partial_assistant_text") or partial_assistant_text or "").strip()
+        if partial_text:
+            existing_text = str(getattr(stream, "assistant_text", "") or "")
+            stream.assistant_text = (existing_text + "\n" + partial_text).strip()
         end_time = time.perf_counter()
         duration = end_time - start_time
         ttft = (first_token_time - start_time) if first_token_time else duration

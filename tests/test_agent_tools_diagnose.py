@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -8,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Agent-Tools"))
 
 from run_diagnose import _classify_failure, _file_patch_target_loop_count
 from runscan import _classify_run
+from agent_tools_lib import warn_on_schema_mismatch
+from trace_call import _filter_records, _trace_step, _trace_task
 
 
 def _make_failed_dispatch(tool_name: str, error_kind: str, error: str = "") -> dict:
@@ -307,18 +310,59 @@ def test_runscan_classifies_guard_misfire_before_model_degeneration() -> None:
     assert classification == "guard_misfire"
 
 
-def test_diagnose_recommends_guard_investigation_for_misfire() -> None:
-    from run_diagnose import _recommend_next_steps
+def test_warn_on_schema_mismatch_detects_version_mismatch(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    header = {"event_schema_version": 2, "channels": ["harness"]}
+    (run_dir / "run_header.json").write_text(json.dumps(header), encoding="utf-8")
+    (run_dir / "harness.jsonl").write_text(
+        json.dumps({"event": "test", "event_schema_version": 2}) + "\n",
+        encoding="utf-8",
+    )
+    warnings = warn_on_schema_mismatch(run_dir)
+    assert any("schema version 2" in w for w in warnings)
 
-    harness_records: list[dict] = [
-        {"event": "apt_deb822_preflight_validator_passed", "trace_id": "abc:task-1:step-1:call-1"},
-        {"event": "apt_deb822_preflight_blocked", "trace_id": "abc:task-1:step-1:call-1"},
-    ]
-    events: Counter[str] = Counter()
-    errors: list[dict] = []
-    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
-    dispatches: list[dict] = []
 
-    steps = _recommend_next_steps(events, errors, session, dispatches, harness_records)
+def test_warn_on_schema_mismatch_silent_for_current_version(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    header = {"event_schema_version": 1, "channels": ["harness"]}
+    (run_dir / "run_header.json").write_text(json.dumps(header), encoding="utf-8")
+    warnings = warn_on_schema_mismatch(run_dir)
+    assert warnings == []
 
-    assert any("apt_deb822" in step and "validator" in step for step in steps)
+
+def test_trace_call_filter_by_step() -> None:
+    grouped = {
+        "harness": [
+            {"event": "mode_decision", "trace_id": "s:t:step-1:call-1"},
+            {"event": "phase_transition", "trace_id": "s:t:step-2:call-1"},
+        ],
+        "tools": [],
+    }
+    filtered = _filter_records(grouped, trace_id="s:t:step-1:call-1", step=1, task=None, events=None)
+    assert [r["event"] for r in filtered["harness"]] == ["mode_decision"]
+
+
+def test_trace_call_filter_by_event() -> None:
+    grouped = {
+        "harness": [
+            {"event": "mode_decision", "trace_id": "s:t:step-1:call-1"},
+            {"event": "phase_transition", "trace_id": "s:t:step-1:call-1"},
+        ],
+        "tools": [],
+    }
+    filtered = _filter_records(grouped, trace_id="s:t:step-1:call-1", step=None, task=None, events={"mode_decision"})
+    assert [r["event"] for r in filtered["harness"]] == ["mode_decision"]
+
+
+def test_trace_step_parsing() -> None:
+    assert _trace_step("abc:task-1:step-5:call-2") == 5
+    assert _trace_step("abc:task-1:step-5:ctx") == 5
+    assert _trace_step("invalid") is None
+
+
+def test_trace_task_parsing() -> None:
+    assert _trace_task("abc:task-1:step-5:call-2") == "task-1"
+    assert _trace_task("invalid") is None
+

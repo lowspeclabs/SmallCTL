@@ -1706,7 +1706,7 @@ def test_normalize_tool_request_backfills_active_write_session_path() -> None:
     assert metadata["repaired_write_session_path"] is True
 
 
-def test_normalize_tool_request_drops_write_session_none_sentinels() -> None:
+def test_normalize_tool_request_no_longer_drops_write_session_none_sentinels() -> None:
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
         "file_write",
@@ -1728,9 +1728,47 @@ def test_normalize_tool_request_drops_write_session_none_sentinels() -> None:
     assert args["content"] == "print('debug')\n"
     assert args["replace_strategy"] == "overwrite"
     assert args["section_name"] == "full_file"
-    assert "write_session_id" not in args
-    assert "next_section_name" not in args
-    assert metadata["optional_none_sentinel_removed"] == ["next_section_name", "write_session_id"]
+    # Optional none-sentinel cleanup now lives in the schema repair layer.
+    assert args["write_session_id"] == "None"
+    assert args["next_section_name"] == "None"
+    assert "optional_none_sentinel_removed" not in metadata
+
+
+def test_tool_call_repair_drops_optional_none_sentinels() -> None:
+    from smallctl.tools.base import ToolSpec, build_tool_schema
+    from smallctl.tools.tool_call_repair import repair_tool_call_args
+
+    spec = ToolSpec(
+        name="file_write",
+        description="test tool",
+        schema=build_tool_schema(
+            properties={
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "write_session_id": {"type": "string"},
+                "next_section_name": {"type": "string"},
+                "replace_strategy": {"type": "string"},
+                "section_name": {"type": "string"},
+            },
+            required=["path", "content"],
+        ),
+        handler=lambda **kwargs: kwargs,
+    )
+
+    result = repair_tool_call_args(
+        spec,
+        {
+            "path": "./temp/leader_election_sim.py",
+            "content": "print('debug')\n",
+            "write_session_id": "None",
+            "next_section_name": "null",
+        },
+    )
+
+    assert result.valid_after_repair is True
+    assert "write_session_id" not in result.args
+    assert "next_section_name" not in result.args
+    assert any(action.kind == "optional_none_sentinel_to_omit" for action in result.actions)
 
 
 def test_normalize_tool_request_does_not_backfill_mismatched_write_session_path() -> None:
@@ -2271,7 +2309,34 @@ def test_build_repair_recovery_message_detects_interactive_ssh_script() -> None:
     assert "Do not retry a single" in message
 
 
-def test_normalize_tool_request_repairs_patch_argument_aliases() -> None:
+def test_tool_call_repair_repairs_patch_argument_aliases() -> None:
+    from smallctl.tools.base import ToolSpec, build_tool_schema
+    from smallctl.tools.tool_call_repair import repair_tool_call_args
+
+    spec = ToolSpec(
+        name="file_patch",
+        description="test tool",
+        schema=build_tool_schema(
+            properties={
+                "path": {"type": "string"},
+                "target_text": {"type": "string"},
+                "replacement_text": {"type": "string"},
+            },
+            required=["path", "target_text", "replacement_text"],
+        ),
+        handler=lambda **kwargs: kwargs,
+    )
+
+    result = repair_tool_call_args(spec, {"path": "foo.py", "source": "old", "dest": "new"})
+
+    assert result.valid_after_repair is True
+    assert result.args == {"path": "foo.py", "target_text": "old", "replacement_text": "new"}
+    assert "source" not in result.args
+    assert "dest" not in result.args
+    assert any(action.kind == "patch_argument_alias" for action in result.actions)
+
+
+def test_normalize_tool_request_no_longer_repairs_patch_argument_aliases() -> None:
     state = LoopState(cwd=".")
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
@@ -2284,11 +2349,11 @@ def test_normalize_tool_request_repairs_patch_argument_aliases() -> None:
 
     assert intercepted is None
     assert tool_name == "file_patch"
-    assert args["target_text"] == "old"
-    assert args["replacement_text"] == "new"
-    assert "source" not in args
-    assert "dest" not in args
-    assert metadata["argument_alias_repair"] == {"source": "target_text", "dest": "replacement_text"}
+    assert args["source"] == "old"
+    assert args["dest"] == "new"
+    assert "target_text" not in args
+    assert "replacement_text" not in args
+    assert "argument_alias_repair" not in metadata
 
 
 def test_normalize_tool_request_does_not_clobber_canonical_patch_args() -> None:
@@ -2344,7 +2409,7 @@ def test_parse_tool_calls_recovers_raw_parameter_tags_for_patch_tools() -> None:
     assert parse_result.pending_tool_calls[0].args["replacement_text"] == "new"
 
 
-def test_tool_dispatcher_coerce_args_returns_dropped_keys() -> None:
+def test_tool_dispatcher_coerce_args_returns_dropped_keys_and_coerced_entries() -> None:
     from smallctl.tools.dispatcher import ToolDispatcher
 
     schema = {
@@ -2352,14 +2417,18 @@ def test_tool_dispatcher_coerce_args_returns_dropped_keys() -> None:
         "properties": {
             "path": {"type": "string"},
             "target_text": {"type": "string"},
+            "count": {"type": "integer"},
         },
         "required": ["path", "target_text"],
         "additionalProperties": False,
     }
-    args, dropped = ToolDispatcher._coerce_args(schema, {"path": "a", "target_text": "b", "source": "c"})
+    args, dropped, coerced = ToolDispatcher._coerce_args(
+        schema, {"path": "a", "target_text": "b", "source": "c", "count": "42"}
+    )
 
-    assert args == {"path": "a", "target_text": "b"}
+    assert args == {"path": "a", "target_text": "b", "count": 42}
     assert dropped == ["source"]
+    assert coerced == [{"key": "count", "from": "42", "to": 42}]
 
 
 def test_tool_dispatcher_validation_includes_dropped_keys_when_required_missing() -> None:

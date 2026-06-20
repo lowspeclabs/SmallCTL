@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import smallctl.graph.model_stream as model_stream_module
 import smallctl.graph.model_stream_loop as model_stream_loop_module
 from smallctl.client import OpenAICompatClient, StreamResult
-from smallctl.graph.model_stream_loop import run_model_stream_loop
+from smallctl.graph.model_stream_loop import run_model_stream_loop, _trim_degenerate_suffix
 from smallctl.graph.model_stream import process_model_stream
 from smallctl.graph.model_stream_resolution import resolve_model_stream_result
 from smallctl.graph.state import GraphRunState
@@ -761,6 +761,69 @@ def test_resolve_model_stream_result_reports_reasoning_only_stall() -> None:
     assert graph_state.error["type"] == "model_stream_stall"
 
 
+def test_resolve_model_stream_result_salvages_partial_tool_call_from_degenerate_loop() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    # Simulate a stream that produced prose plus the start of an inline tool
+    # call JSON block, then degenerated while escaping a string. The collected
+    # chunks contain the prose; the partial prefix carries the JSON payload.
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "I will start by exploring the remote host.\n\n"
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+    partial_text = (
+        '```json\n{"name": "ssh_exec", "arguments": '
+        '{"command": "ls -la /opt/notes", "host": "192.168.1.89", "user": "root"}}\n```'
+    )
+    details = {
+        "reason": "model_output_degenerate_loop",
+        "repeated_phrase": '\": "',
+        "repeat_count": 6,
+        "buffer_chars": 449,
+        "partial_assistant_text": partial_text,
+    }
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=chunks,
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=True,
+            stream_ended_without_done_details=details,
+            partial_assistant_text="",
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=False,
+            echo_to_stdout=False,
+            messages=[{"role": "user", "content": "repair notes.lab.local"}],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.halt_reason == "model_output_degenerate_loop"
+    assert result.stream.assistant_text.startswith("I will start by exploring")
+    assert "ssh_exec" in result.stream.assistant_text
+    # The partial inline JSON block is appended to assistant_text so that the
+    # downstream tool-call parser can recover the action on the next step.
+    assert "ls -la /opt/notes" in result.stream.assistant_text
+
+
 def test_stalled_file_write_stream_uses_no_tools_fallback_without_session() -> None:
     state = LoopState(cwd="/tmp")
     state.scratchpad["_task_target_paths"] = ["temp/logwatch.py"]
@@ -1056,3 +1119,27 @@ def test_tool_calls_finish_without_collected_calls_schedules_recovery_nudge() ->
         message.metadata.get("recovery_kind") == "tool_call_aggregation_failure"
         for message in state.recent_messages
     )
+
+
+def test_trim_degenerate_suffix_removes_repetitive_window() -> None:
+    buffer = (
+        'I will start exploring.\n\n```json\n'
+        '{"name": "ssh_exec", "arguments": {"command": "ls"}}\n'
+        '```\n" : " : " : " : " : " : "'
+    )
+    window = '" : " : " : " : " : " : "'
+    trimmed = _trim_degenerate_suffix(buffer, window, '\": "')
+    assert '" : "' not in trimmed
+    assert '{"name": "ssh_exec"' in trimmed
+
+
+def test_trim_degenerate_suffix_falls_back_to_phrase_trim() -> None:
+    buffer = "some text then dagu dagu dagu dagu"
+    trimmed = _trim_degenerate_suffix(buffer, "", "dagu")
+    assert len(trimmed) < len(buffer)
+    assert "some text then" in trimmed
+
+
+def test_trim_degenerate_suffix_returns_original_when_no_window_or_phrase() -> None:
+    buffer = "plain text without repetition"
+    assert _trim_degenerate_suffix(buffer, "", "") == buffer

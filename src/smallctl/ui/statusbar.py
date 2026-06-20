@@ -148,6 +148,10 @@ class StatusBar(Static):
 
         lines.extend(
             [
+                "[bold #93c5fd]Usage[/]",
+                f"cumulative: {self._token_total:,}",
+                self._context_usage_text(),
+                "",
                 "[bold #93c5fd]Run[/]",
                 f"phase: {self._phase}",
                 f"step: {self._step}",
@@ -172,20 +176,13 @@ class StatusBar(Static):
         if fama_mitigation:
             lines.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
 
-        lines.extend(
-            [
-                "",
-                "[bold #93c5fd]Usage[/]",
-                f"cumulative: {self._token_total:,}",
-                self._context_usage_text(),
-            ]
-        )
         return "\n".join(lines)
 
     def _context_usage_text(self) -> str:
         limit = self._context_window or self._token_limit
         if limit <= 0:
-            return "context: [dim]n/a[/]"
+            used = max(0, self._token_usage)
+            return f"context: [bold #86efac]○ 0%[/] ({used:,}/0)"
         used = min(max(0, self._token_usage), limit)
         ratio = used / limit
         percent = int(round(ratio * 100))

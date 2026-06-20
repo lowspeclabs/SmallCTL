@@ -178,6 +178,66 @@ def test_ui_transcript_does_not_persist_live_shell_stream() -> None:
     assert len(persist_calls) == 1
 
 
+def test_ui_transcript_prunes_partial_assistant_on_model_output_loop() -> None:
+    persist_calls = []
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._ui_transcript = []
+
+        def _persist_ui_transcript(self) -> None:
+            persist_calls.append(list(self._ui_transcript))
+
+    flow = _Flow()
+
+    flow._record_ui_transcript_event(UIEvent(UIEventType.SYSTEM, "ready"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, "| CONTAINER ID | IMAGE |"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, "\n| :--- | :--- |"))
+    flow._record_ui_transcript_event(
+        UIEvent(
+            UIEventType.SYSTEM,
+            "[harness] Context refreshed: dropped experience_memories (context_invalidated)",
+            data={"ui_kind": "context_lane_dropped"},
+        )
+    )
+    flow._record_ui_transcript_event(
+        UIEvent(
+            UIEventType.SYSTEM,
+            "[harness] Model output loop detected repeating `|---`; recovery nudge injected",
+            data={"ui_kind": "model_output_degenerate_loop_exhausted"},
+        )
+    )
+
+    assert [item["event_type"] for item in flow._ui_transcript] == ["system", "system", "system"]
+    assert all("CONTAINER ID" not in item["content"] for item in flow._ui_transcript)
+    assert len(persist_calls) == 5
+
+
+def test_ui_transcript_skips_loop_halt_placeholder() -> None:
+    persist_calls = []
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._ui_transcript = []
+
+        def _persist_ui_transcript(self) -> None:
+            persist_calls.append(list(self._ui_transcript))
+
+    flow = _Flow()
+
+    flow._record_ui_transcript_event(UIEvent(UIEventType.SYSTEM, "ready"))
+    flow._record_ui_transcript_event(
+        UIEvent(
+            UIEventType.ASSISTANT,
+            "[Previous assistant output was halted because it entered a repetition loop.]",
+            data={"kind": "replace"},
+        )
+    )
+
+    assert flow._ui_transcript == [persist_calls[0][0]]
+    assert flow._ui_transcript[0]["event_type"] == "system"
+    assert len(persist_calls) == 1
+
 def test_ui_transcript_persistence_can_be_debounced() -> None:
     persist_calls = []
 

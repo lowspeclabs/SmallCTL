@@ -83,6 +83,7 @@
 }
 
 .bubble-assistant {
+  border-left: thick #4b5563;
   padding-left: 1;
 }
 

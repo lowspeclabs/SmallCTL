@@ -728,10 +728,54 @@ class SmallctlAppFlowMixin:
             return None
         return event
 
+    def _is_loop_halt_placeholder(self, event: UIEvent) -> bool:
+        if event.event_type != UIEventType.ASSISTANT:
+            return False
+        if event.data.get("kind") != "replace":
+            return False
+        return str(event.content or "").strip() == "[Previous assistant output was halted because it entered a repetition loop.]"
+
+    def _is_model_output_loop_event(self, event: UIEvent) -> bool:
+        data = event.data if isinstance(event.data, dict) else {}
+        return (
+            str(data.get("ui_kind") or "") == "model_output_degenerate_loop_exhausted"
+            or str(data.get("event") or "") == "model_output_degenerate_loop_exhausted"
+        )
+
+    def _prune_trailing_assistant_transcript_events(self) -> bool:
+        transcript = getattr(self, "_ui_transcript", None)
+        if not isinstance(transcript, list):
+            return False
+        barrier_types = {
+            UIEventType.USER.value,
+            UIEventType.TOOL_CALL.value,
+            UIEventType.TOOL_RESULT.value,
+        }
+        remove_indexes: list[int] = []
+        for index in range(len(transcript) - 1, -1, -1):
+            item = transcript[index]
+            if not isinstance(item, dict):
+                continue
+            event_type = str(item.get("event_type") or "")
+            if event_type in barrier_types:
+                break
+            if event_type == UIEventType.ASSISTANT.value:
+                remove_indexes.append(index)
+        for index in remove_indexes:
+            del transcript[index]
+        return bool(remove_indexes)
+
     def _record_ui_transcript_event(self, event: UIEvent) -> None:
         if event.event_type == UIEventType.STATUS:
             return
         if event.event_type == UIEventType.SHELL_STREAM:
+            return
+        pruned_for_loop = False
+        if self._is_model_output_loop_event(event):
+            pruned_for_loop = self._prune_trailing_assistant_transcript_events()
+        if self._is_loop_halt_placeholder(event):
+            if pruned_for_loop:
+                self._schedule_ui_transcript_persist()
             return
         event = self._sanitize_visible_text_event(event)
         if event is None:

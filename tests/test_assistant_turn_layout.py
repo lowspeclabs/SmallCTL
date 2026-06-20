@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from textual.color import Color
 from rich.markdown import Markdown as RichMarkdown
@@ -9,8 +10,10 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 
 from smallctl.models.events import UIEvent, UIEventType
+from smallctl.ui import __file__ as ui_module_file
 from smallctl.ui.bubbles import (
     AssistantDetailWidget,
+    AssistantTurnWidget,
     BubbleWidget,
     LiveOutputBubbleWidget,
     TextBlockWidget,
@@ -814,5 +817,29 @@ def test_unmatched_file_read_result_is_not_rendered_as_system() -> None:
             children = list(stack.children)
             assert len(children) == 1
             assert children[0].get_assistant_text() == "Before result.After result."
+
+    asyncio.run(_run())
+
+
+def test_assistant_turn_has_dark_grey_left_border() -> None:
+    """Assistant turns should have a dark grey left border, like user (white) and system (gold)."""
+
+    class _StyledApp(App[None]):
+        CSS_PATH = str(Path(ui_module_file).parent / "styles.tcss")
+
+        def compose(self) -> ComposeResult:
+            yield BubbleWidget(kind="user", text="user")
+            yield BubbleWidget(kind="system", text="system")
+            yield AssistantTurnWidget()
+
+    async def _run() -> None:
+        app = _StyledApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            user_bubble = app.query_one(".bubble-user", BubbleWidget)
+            system_bubble = app.query_one(".bubble-system", BubbleWidget)
+            assistant_turn = app.query_one(AssistantTurnWidget)
+            assert user_bubble.styles.border_left == ("thick", Color(255, 255, 255))
+            assert system_bubble.styles.border_left == ("thick", Color(234, 179, 8))
+            assert assistant_turn.styles.border_left == ("thick", Color(75, 85, 99))
 
     asyncio.run(_run())

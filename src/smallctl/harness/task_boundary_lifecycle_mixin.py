@@ -860,6 +860,19 @@ class TaskBoundaryLifecycleMixin:
                             metadata={"is_clarification_nudge": True, "recovery_kind": "denial_followup"},
                         )
                     )
+            elif turn_type in {"CORRECTION", "ITERATION", "RETRY"}:
+                reset_reason = "task_soft_switch"
+                self.harness.state.append_message(
+                    ConversationMessage(
+                        role="system",
+                        content=(
+                            f"NOTE: The task has been updated. Previous task: {previous_task}. "
+                            f"New task: {new_task}. "
+                            "Acknowledge the updated goal and restate your understanding."
+                        ),
+                        metadata={"is_task_change_nudge": True, "turn_type": turn_type},
+                    )
+                )
             elif preserve_prior_result:
                 reset_reason = "task_soft_switch"
             else:

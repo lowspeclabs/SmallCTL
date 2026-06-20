@@ -130,7 +130,21 @@ _CORRECTIVE_RESTEER_RE = re.compile(
     r"(?:file_patch|ast_patch|file_write|file_append|shell_exec|ssh_exec|task_complete)"
     r"`?\b.*\b(?:use|try|call|prefer|switch\s+to|move\s+to)\s+`?"
     r"(?:file_patch|ast_patch|file_write|file_append|shell_exec|ssh_exec|task_complete)"
-    r"`?\b",
+    r"`?\b"
+    r"|"
+    r"\b(?:"
+    r"no[,.!]\s+|"
+    r"that'?[s]?\s+(?:is\s+)?not\s+(?:what|the)\s+(?:i|we)\s+(?:asked|wanted|meant|said)\b|"
+    r"not\s+what\s+(?:i|we)\s+(?:asked|wanted|meant)\b|"
+    r"actually\s+(?:do|try|use|focus|work)\b|"
+    r"forget\s+(?:about\s+)?(?:that|the|it)\b|"
+    r"instead\s+(?:do|try|use|focus|work)\b|"
+    r"wrong\b(?!\s+(?:tool|approach|dir|file|path))|"
+    r"you\s+misunderstood\b|"
+    r"read\s+enough\b|"
+    r"you'?ve?\s+read\s+enough\b|"
+    r"stop\s+(?:reading|investigating|exploring|researching)\b"
+    r")",
     re.IGNORECASE,
 )
 _TASK_BOUNDARY_GUARD_SCRATCHPAD_KEYS = (

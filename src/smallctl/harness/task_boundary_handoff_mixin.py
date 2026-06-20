@@ -443,10 +443,14 @@ class TaskBoundaryHandoffMixin:
             next_goal = plan_goal
         else:
             next_goal = canonical_task or existing_goal
+        goal_changed = normalize_task_text(existing_goal) != normalize_task_text(next_goal)
         self.harness.state.working_memory.current_goal = next_goal
 
         self.harness.state.scratchpad["_task_target_paths"] = extract_task_target_paths(effective_task)
         self.store_task_handoff(raw_task=source_task, effective_task=effective_task)
+        transaction = self.harness.state.scratchpad.get("_task_transaction")
+        if isinstance(transaction, dict) and goal_changed:
+            transaction["previous_goal"] = str(existing_goal)[:500]
         if self._ordinal_followup_index(source_task) is not None:
             handoff = self.last_task_handoff()
             option = self._selected_action_option(source_task, handoff)

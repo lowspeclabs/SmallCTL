@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from ..guards import check_guards
-from ..interrupt_replies import interrupt_response_action, is_interrupt_affirmative_response
+from ..interrupt_replies import interrupt_response_action, is_interrupt_affirmative_response, is_interrupt_response
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -351,7 +351,8 @@ async def resume_loop_run(
     if isinstance(created_at, (int, float)):
         elapsed = time.time() - created_at
         timeout = getattr(getattr(harness, "config", None), "needs_human_timeout_sec", 600)
-        if elapsed > timeout:
+        reply_matches_interrupt = is_interrupt_response(pending, human_input)
+        if elapsed > timeout and not reply_matches_interrupt:
             postmortem = f"Task timed out after {int(elapsed)}s in paused state awaiting user input."
             graph_state.final_result = harness._failure(
                 postmortem,
@@ -374,6 +375,14 @@ async def resume_loop_run(
                 interrupt_kind=pending.get("kind", "ask_human"),
             )
             return
+        if elapsed > timeout:
+            harness._runlog(
+                "interrupt_late_resume_accepted",
+                "accepted valid human interrupt response after needs_human_timeout",
+                elapsed_sec=elapsed,
+                timeout_sec=timeout,
+                interrupt_kind=pending.get("kind", "ask_human"),
+            )
     harness._runlog(
         "interrupt_resume",
         "resuming loop from interrupt",

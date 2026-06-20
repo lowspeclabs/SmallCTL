@@ -8,6 +8,7 @@ but the system misclassified it as a new chat task, causing catastrophic context
 
 import pytest
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from smallctl.harness.task_classifier import (
@@ -29,8 +30,9 @@ from smallctl.harness.run_mode import (
 from smallctl.harness.task_boundary import TaskBoundaryService
 from smallctl.interrupt_replies import is_interrupt_response, interrupt_response_action
 from smallctl.state_schema import ExecutionPlan
+from smallctl.state import LoopState
 from smallctl.graph.deps import GraphRuntimeDeps
-from smallctl.graph.lifecycle_nodes import resume_planning_run
+from smallctl.graph.lifecycle_nodes import resume_loop_run, resume_planning_run
 from smallctl.graph.state import GraphRunState
 
 
@@ -469,6 +471,89 @@ class TestInterruptApprovalFixes:
         assert persisted == [plan]
 
     @pytest.mark.asyncio
+    async def test_late_apt_validator_approval_still_schedules_validator(self):
+        """A valid late `yes` should resume instead of being discarded by timeout."""
+        state = LoopState()
+        state.pending_interrupt = {
+            "kind": "apt_deb822_validator_approval",
+            "question": "Approve the validator?",
+            "response_mode": "yes/no",
+            "tool_name": "ssh_exec",
+            "arguments": {
+                "command": "python3 -c 'print(\"deb822 OK\")'",
+                "host": "192.168.1.89",
+                "user": "root",
+            },
+            "created_at": 1,
+        }
+        events = []
+
+        harness = Mock()
+        harness.state = state
+        harness.config = SimpleNamespace(needs_human_timeout_sec=1)
+        harness.get_pending_interrupt.return_value = state.pending_interrupt
+        harness._runlog = lambda event, message, **data: events.append((event, data))
+        harness._emit = AsyncMock()
+        harness._log_conversation_state = Mock()
+        harness._failure = lambda message, error_type="", details=None: {
+            "status": "failed",
+            "error": {"message": message, "type": error_type, "details": details or {}},
+        }
+
+        graph_state = GraphRunState(loop_state=state, thread_id="thread-1", run_mode="loop")
+
+        await resume_loop_run(
+            graph_state,
+            GraphRuntimeDeps(harness=harness, event_handler=None),
+            human_input="yes",
+        )
+
+        assert graph_state.final_result is None
+        assert state.pending_interrupt is None
+        assert len(graph_state.pending_tool_calls) == 1
+        assert graph_state.pending_tool_calls[0].tool_name == "ssh_exec"
+        assert graph_state.pending_tool_calls[0].args["command"].startswith("python3 -c")
+        assert any(event == "interrupt_late_resume_accepted" for event, _data in events)
+        assert any(event == "apt_deb822_validator_approved" for event, _data in events)
+
+    @pytest.mark.asyncio
+    async def test_late_non_response_still_times_out(self):
+        """Timeout still protects stale interrupts when the input is not a valid reply."""
+        state = LoopState()
+        state.pending_interrupt = {
+            "kind": "apt_deb822_validator_approval",
+            "question": "Approve the validator?",
+            "response_mode": "yes/no",
+            "tool_name": "ssh_exec",
+            "arguments": {"command": "python3 -c 'print(\"deb822 OK\")'"},
+            "created_at": 1,
+        }
+        events = []
+
+        harness = Mock()
+        harness.state = state
+        harness.config = SimpleNamespace(needs_human_timeout_sec=1)
+        harness.get_pending_interrupt.return_value = state.pending_interrupt
+        harness._runlog = lambda event, message, **data: events.append((event, data))
+        harness._failure = lambda message, error_type="", details=None: {
+            "status": "failed",
+            "error": {"message": message, "type": error_type, "details": details or {}},
+        }
+
+        graph_state = GraphRunState(loop_state=state, thread_id="thread-1", run_mode="loop")
+
+        await resume_loop_run(
+            graph_state,
+            GraphRuntimeDeps(harness=harness, event_handler=None),
+            human_input="write a README instead",
+        )
+
+        assert graph_state.final_result["status"] == "failed"
+        assert graph_state.error["type"] == "guard"
+        assert state.pending_interrupt is None
+        assert any(event == "interrupt_resume_timeout" for event, _data in events)
+
+    @pytest.mark.asyncio
     async def test_facade_does_not_resume_unrelated_reply(self):
         """A new task can still replace a pending interrupt when it is not a valid reply."""
         mock_harness = Mock()
@@ -872,7 +957,8 @@ class TestInterruptApprovalFixes:
         result = _finalize(MockHarness(), {"status": "cancelled", "reason": "cancel_requested"})
 
         assert result["unverified_change_warning"] == (
-            "Task cancelled after modifying files to temp/example.py. Changes were not verified."
+            "Task ended with status cancelled after modifying files to temp/example.py. "
+            "Changes were not verified after the latest edit."
         )
         payload = json.loads((run_dir / "session_summary.json").read_text(encoding="utf-8"))
         assert payload["prior_task_completed"] is True

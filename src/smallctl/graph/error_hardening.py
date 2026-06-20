@@ -308,6 +308,13 @@ _PUBLIC_RESOLVER_RE = re.compile(r"(?:@(?:8\.8\.8\.8|1\.1\.1\.1)|\b8\.8\.8\.8\b|
 _NXDOMAIN_RE = re.compile(r"\bNXDOMAIN\b", re.IGNORECASE)
 _RESOLVE_FAIL_RE = re.compile(r"Could not resolve '?([A-Za-z0-9.-]+)'?", re.IGNORECASE)
 _INSTALL_MARKER_RE = re.compile(r"\b(?:install|setup|deploy|configure|bootstrap|apt-get|apt)\b", re.IGNORECASE)
+_DOCKER_IMAGE_NOT_FOUND_RE = re.compile(
+    r"Unable to find image\s+'([^']+)'\s+locally"
+    r"|manifest for\s+(\S+)\s+not found"
+    r"|pull access denied for\s+(\S+)",
+    re.IGNORECASE,
+)
+_DOCKER_IMAGE_EXTRACT_RE = re.compile(r"^([^/:]+/[^/:]+)", re.IGNORECASE)
 
 
 def _record_command(record: ToolExecutionRecord) -> str:
@@ -399,6 +406,20 @@ def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRec
             return _install_source_invalid_query(harness)
     if record is not None:
         command = _record_command(record).lower()
+        # Docker image pull/manifest failures: extract the image name and search for
+        # current tags/instructions instead of pasting the whole noisy error string.
+        docker_match = _DOCKER_IMAGE_NOT_FOUND_RE.search(error)
+        if docker_match:
+            image = (
+                docker_match.group(1)
+                or docker_match.group(2)
+                or docker_match.group(3)
+                or ""
+            ).strip()
+            image = re.sub(r":\w+$", "", image)
+            if "/" in image:
+                return f"{image} docker hub current tags manifest not found"
+            return f"docker {image} image current tag official"
         if _TERMINAL_UNKNOWN_RE.search(error):
             installer_context = " installer" if _INSTALL_MARKER_RE.search(command) else ""
             return f"Error opening terminal unknown ssh_exec{installer_context} TERM noninteractive"
@@ -820,5 +841,85 @@ def _maybe_nudge_ssh_auth_fallback(
         "nudged model to stop retrying SSH after auth failures",
         host=host,
         count=count,
+    )
+    return True
+
+
+_APT_KEY_DEPRECATION_RE = re.compile(
+    r"\bapt-key:\s+command not found\b",
+    re.IGNORECASE,
+)
+_APT_KEY_DEBIAN_VER_RE = re.compile(
+    r"(?:Debian|Raspbian|Ubuntu)\s+\d+",
+    re.IGNORECASE,
+)
+_APT_KEY_NUDGE_KEY = "_apt_key_deprecation_nudged"
+
+
+def _maybe_emit_apt_key_deprecation_nudge(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    """Detect when `apt-key: command not found` appears on a remote host
+    (Debian 13+/Ubuntu 22.04+ where apt-key is removed) and inject a
+    recovery hint explaining the gpg --dearmor / signed-by pattern.
+
+    https://manpages.debian.org/testing/apt/apt-key.8.en.html
+    """
+    if record.tool_name not in {"ssh_exec", "shell_exec"}:
+        return False
+    if not _record_has_failure_evidence(record):
+        return False
+
+    error = _record_output_text(record)
+    if not error or not _APT_KEY_DEPRECATION_RE.search(error):
+        return False
+
+    scratchpad = getattr(harness.state, "scratchpad", {})
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+    if scratchpad.get(_APT_KEY_NUDGE_KEY):
+        return False
+    scratchpad[_APT_KEY_NUDGE_KEY] = True
+
+    command = str(getattr(record.args, "get", lambda k: None)("command") or "").strip()
+    host = str(getattr(record.args, "get", lambda k: None)("host") or "").strip()
+
+    message = (
+        "APT-KEY DEPRECATION: `apt-key` has been removed in Debian 13 (Trixie) and "
+        "Ubuntu 22.04+. It was deprecated upstream for years. "
+        "The modern approach is:\n"
+        "1. Download the key:  "
+        "`wget -qO- <key-url> | gpg --dearmor -o /usr/share/keyrings/<name>.gpg`\n"
+        "2. Add the repo:  "
+        "`echo \"deb [signed-by=/usr/share/keyrings/<name>.gpg] <repo-url> <dist> <component>\" "
+        "> /etc/apt/sources.list.d/<name>.list`\n"
+        "3. Update:  `apt update`\n"
+        "4. Install:  `apt install <package> -y`\n"
+        "Do NOT retry `apt-key`. Use the gpg --dearmor / signed-by pattern shown above."
+    )
+    if host:
+        message += f"\nApplies to remote host: {host}"
+
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=message,
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "apt_key_deprecation",
+                "tool_name": record.tool_name,
+                "host": host,
+                "command": command[:200],
+            },
+        )
+    )
+    harness._runlog(
+        "apt_key_deprecation_nudge",
+        "injected apt-key deprecation recovery nudge",
+        tool_name=record.tool_name,
+        host=host,
+        command=command[:200],
     )
     return True

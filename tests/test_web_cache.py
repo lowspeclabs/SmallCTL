@@ -9,7 +9,7 @@ from smallctl.search_server.citations import now_iso
 from smallctl.search_server.config import SearchServerConfig
 from smallctl.search_server.fetch import FetchedDocument
 from smallctl.search_server.models import CitationSource, WebFetchRequest, WebFetchResponse, WebSearchRequest, WebSearchResult
-from smallctl.search_server.providers import SearxNGProvider, _normalize_items, _parse_duckduckgo_html, normalize_search_results
+from smallctl.search_server.providers import SearxNGProvider, _normalize_items, _parse_duckduckgo_html, normalize_search_results, search_with_providers
 
 
 def _make_service(tmp_path, **config_overrides) -> SearchServerService:
@@ -247,3 +247,58 @@ def test_normalize_items_fallback_chain_for_snippets() -> None:
     assert results[1].snippet == "snip"
     assert results[2].snippet == "body text"
     assert results[3].snippet == ""
+
+
+def test_search_with_providers_omits_not_configured_warnings_on_success(monkeypatch) -> None:
+    """When a fallback provider succeeds, do not leak 'X is not configured' warnings."""
+
+    async def fake_brave_search(self, request, config):
+        return []
+
+    async def fake_ddg_search(self, request, config):
+        return [
+            WebSearchResult(
+                result_id="webres-ddg-1",
+                title="DDG Result",
+                url="https://example.com/ddg",
+                canonical_url="https://example.com/ddg",
+                domain="example.com",
+                snippet="result",
+                provider="duckduckgo",
+                rank=1,
+            )
+        ]
+
+    monkeypatch.setattr("smallctl.search_server.providers.BraveSearchProvider.search", fake_brave_search)
+    monkeypatch.setattr("smallctl.search_server.providers.DuckDuckGoProvider.search", fake_ddg_search)
+
+    config = SearchServerConfig(providers=["brave", "duckduckgo"])
+    results, warnings, provider, recency_support = asyncio.run(
+        search_with_providers(WebSearchRequest(query="test", limit=5), config=config)
+    )
+
+    assert provider == "duckduckgo"
+    assert len(results) == 1
+    assert "brave is not configured" not in warnings
+    assert warnings == []
+
+
+def test_search_with_providers_keeps_warnings_when_all_providers_fail(monkeypatch) -> None:
+    """When no provider produces results, surface the fallback reasons so the model knows why."""
+
+    async def fake_search(self, request, config):
+        return []
+
+    monkeypatch.setattr("smallctl.search_server.providers.BraveSearchProvider.search", fake_search)
+    monkeypatch.setattr("smallctl.search_server.providers.SearxNGProvider.search", fake_search)
+    monkeypatch.setattr("smallctl.search_server.providers.DuckDuckGoProvider.search", fake_search)
+
+    config = SearchServerConfig(providers=["brave", "searxng", "duckduckgo"])
+    results, warnings, provider, recency_support = asyncio.run(
+        search_with_providers(WebSearchRequest(query="test", limit=5), config=config)
+    )
+
+    assert len(results) == 0
+    assert "brave is not configured" in warnings
+    assert "searxng is not configured" in warnings
+    assert "duckduckgo returned no results" in warnings

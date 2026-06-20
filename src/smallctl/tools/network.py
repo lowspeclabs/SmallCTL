@@ -740,11 +740,21 @@ async def run_ssh_command(
             err_output = output.get("stderr", "")
             if not isinstance(err_output, str):
                 err_output = str(err_output or "")
+            # Exit code 1 with empty/no stderr — benign informational result (e.g.
+            # grep returning "no match", test returning "false"). The remote command
+            # ran successfully; the non-zero status is a normal convention, not a
+            # tool failure. Treating it as ok prevents the harness from entering a
+            # repair loop over a negative probe result.
+            if int(proc.returncode) == 1 and not str(output.get("stderr") or "").strip():
+                if _looks_like_deb822_validator(command):
+                    _mark_deb822_preflight_clean(state, host=host, user=user)
+                _record_ssh_success(state, host, user)
+                return ok(output, metadata={**execution_debug_metadata, **retry_metadata})
             # Diagnostic probes that explicitly report "not found" are informational
-            # successes, not execution failures. Treating them as ok prevents the
-            # harness from entering a repair loop over a negative result.
+            # successes, not execution failures. Covers exit 1 (grep no match with
+            # "not found" in output, command not found) and exit 2 (ls no such file).
             if (
-                int(proc.returncode) == 1
+                int(proc.returncode) in (1, 2)
                 and _ssh_diagnostic_not_found(command, output)
             ):
                 if _looks_like_deb822_validator(command):

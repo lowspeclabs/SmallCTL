@@ -1070,13 +1070,14 @@ def test_model_stream_batches_adjacent_assistant_chunks() -> None:
     assert assistant_events[0].content == "Hello!"
 
 
-def test_ssh_exec_distinguishes_remote_exit_from_transport_failure() -> None:
+def test_ssh_exec_exit1_with_stderr_returns_fail() -> None:
+    """Exit code 1 WITH meaningful stderr still returns fail (real remote error)."""
     state = LoopState(cwd="/tmp")
 
     with patch.object(
         network,
         "create_process",
-        AsyncMock(return_value=_FakeProc(returncode=1)),
+        AsyncMock(return_value=_FakeProc(returncode=1, stderr=b"some error occurred\n")),
     ):
         result = asyncio.run(
             network.ssh_exec(
@@ -1090,7 +1091,7 @@ def test_ssh_exec_distinguishes_remote_exit_from_transport_failure() -> None:
         )
 
     assert result["success"] is False
-    assert result["error"] == "Remote SSH command exited with code 1"
+    assert result["error"] == "some error occurred"
     assert result["metadata"]["failure_kind"] == "remote_command"
     assert result["metadata"]["failure_mode"] == "remote_exit_nonzero"
     assert result["metadata"]["ssh_error_class"] == "remote_exit_nonzero"
@@ -1125,9 +1126,9 @@ def test_ssh_exec_diagnostic_not_found_returns_success() -> None:
     assert result["output"]["exit_code"] == 1
 
 
-def test_ssh_exec_diagnostic_empty_output_still_fails() -> None:
-    """Implicit empty-output probes (e.g. which, grep) still return fail from network.py;
-    the verifier handles them separately."""
+def test_ssh_exec_exit1_empty_stderr_returns_success() -> None:
+    """Exit code 1 with empty/no stderr is informational (grep no match, which not found),
+    not a tool failure. Returns success so the harness does not enter a repair loop."""
     state = LoopState(cwd="/tmp")
 
     with patch.object(
@@ -1146,7 +1147,26 @@ def test_ssh_exec_diagnostic_empty_output_still_fails() -> None:
             )
         )
 
-    assert result["success"] is False
+    assert result["success"] is True
+
+    # Also verify that real grep no-match produces the same behavior
+    with patch.object(
+        network,
+        "create_process",
+        AsyncMock(return_value=_FakeProc(returncode=1)),
+    ):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command="docker ps -a | grep -i dagu",
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
 
 
 def test_ssh_remote_nonzero_memory_label_is_not_unknown_failure() -> None:
@@ -2580,6 +2600,31 @@ def test_normalize_tool_request_blocks_or_rewrites_raw_ssh_family() -> None:
         else:
             assert intercepted is None, command
             assert args.get("host") == "192.168.1.161"
+
+
+def test_normalize_tool_request_blocks_ssh_exec_when_ssh_unavailable() -> None:
+    registry = SimpleNamespace(
+        get=lambda name: SimpleNamespace(
+            phase_allowed=lambda phase: True,
+            profile_allowed=lambda profiles: False,
+        )
+        if name == "ssh_exec"
+        else None
+    )
+    state = LoopState(cwd=".")
+    tool_name, args, intercepted, _metadata = normalize_tool_request(
+        registry,
+        "shell_exec",
+        {"command": "ssh root@192.168.1.161 whoami"},
+        phase="execute",
+        state=state,
+    )
+
+    assert tool_name == "shell_exec"
+    assert intercepted is not None
+    assert intercepted.success is False
+    assert intercepted.metadata["reason"] == "raw_ssh_shell_blocked"
+    assert "canonical SSH tools are not currently available" in intercepted.error
 
 
 def test_normalize_tool_request_host_key_circuit_breaker_suggests_ssh_keygen() -> None:

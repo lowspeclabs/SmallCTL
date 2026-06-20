@@ -194,12 +194,99 @@ def ssh_error_class(*, exit_code: int, stderr: str) -> str:
     return "transport_failure" if ssh_failure_kind(exit_code=exit_code, stderr=stderr) == "transport" else "remote_exit_nonzero"
 
 
+def is_purely_diagnostic(command: str) -> bool:
+    """Return True if the command is purely diagnostic and not mutating."""
+    cmd_lower = str(command or "").lower()
+    
+    # Handle chained commands using ;, &&, || by checking each component
+    if any(chain_token in cmd_lower for chain_token in (";", "&&", "||")):
+        parts = re.split(r'&&|\|\||;', command)
+        return all(is_purely_diagnostic(part.strip()) for part in parts if part.strip())
+        
+    # Exclude redirection to files (which writes/mutates)
+    # Filter out standard error redirections like '2>&1' or '2>/dev/null' or '2>&2'
+    clean_cmd = re.sub(r'2\s*>\s*&\s*1|2\s*>\s*/dev/null|2\s*>\s*&\s*2|2\s*>\s*&\s*-\s*|>\s*/dev/null', '', cmd_lower)
+    if '>' in clean_cmd:
+        return False
+        
+    # Split into words to check for single-word mutating keywords
+    words = set(re.findall(r'\b[a-z0-9_-]+\b', cmd_lower))
+    mutating_single_words = {
+        "chown", "chmod", "rm", "rmdir", "mkdir", "mv", "cp", "touch", 
+        "dd", "tee", "ln", "tar", "unzip", "zip"
+    }
+    if words.intersection(mutating_single_words):
+        return False
+        
+    # For package managers, exclude if they are running a mutating action
+    pkg_mutating_patterns = [
+        r'\b(apt|apt-get|dnf|yum|apk|pacman|zypper)\b.*\b(install|reinstall|remove|autoremove|purge|upgrade|dist-upgrade|full-upgrade|update|clean)\b',
+    ]
+    for pattern in pkg_mutating_patterns:
+        if re.search(pattern, cmd_lower):
+            return False
+
+    # For git, exclude if it runs a mutating subcommand
+    git_mutating_patterns = [
+        r'\bgit\s+(clone|pull|push|checkout|commit|add|reset|merge|rebase|init)\b'
+    ]
+    for pattern in git_mutating_patterns:
+        if re.search(pattern, cmd_lower):
+            return False
+
+    # Multi-word mutating check
+    mutating_multi_patterns = [
+        r'\bdocker\s+(run|rm|restart|stop|start|exec|create|pull|push|build)\b',
+        r'\bsystemctl\s+(start|stop|restart|enable|disable|reload)\b',
+        r'\bservice\s+[a-z0-9_-]+\s+(start|stop|restart|reload)\b',
+    ]
+    for pattern in mutating_multi_patterns:
+        if re.search(pattern, cmd_lower):
+            return False
+            
+    # List of diagnostic command keywords/roots
+    diagnostic_keywords = {
+        "ls", "cat", "grep", "egrep", "fgrep", "stat", "test", "file", "find", 
+        "du", "df", "head", "tail", "wc", "which", "type", "hostname", "whoami", 
+        "id", "uname", "ps", "md5sum", "sha256sum", "apt", "dnf", "yum", "apk", 
+        "pacman", "zypper", "git", "systemctl", "service"
+    }
+    if words.intersection(diagnostic_keywords):
+        return True
+        
+    if "docker" in words:
+        diag_docker_actions = {"ps", "inspect", "images", "logs", "diff"}
+        docker_match = re.search(r'\bdocker\s+([a-z]+)\b', cmd_lower)
+        if docker_match and docker_match.group(1) in diag_docker_actions:
+            return True
+            
+    return False
+
+
 def ssh_diagnostic_not_found(command: str, output: dict[str, Any]) -> bool:
-    """Return True when an exit-1 SSH result is a diagnostic 'not found' probe."""
+    """Return True when an exit-1/2 SSH result is a diagnostic 'not found' probe."""
+    if not is_purely_diagnostic(command):
+        return False
+        
     stderr = str(output.get("stderr") or "").lower()
     stdout = str(output.get("stdout") or "").lower()
     combined = stdout + " " + stderr
-    return any(marker in combined for marker in _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS)
+    
+    if any(marker in combined for marker in _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS):
+        return True
+        
+    try:
+        exit_code = int(output.get("exit_code") or 0)
+    except (TypeError, ValueError):
+        exit_code = 0
+        
+    if exit_code == 1:
+        cmd_lower = command.lower()
+        if any(g in cmd_lower for g in ("grep", "egrep", "fgrep")):
+            if not stdout.strip() and not stderr.strip():
+                return True
+                
+    return False
 
 
 def ssh_semantic_failure(command: str, output: dict[str, Any]) -> str:

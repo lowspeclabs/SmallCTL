@@ -235,7 +235,7 @@ def normalize_tool_request(
         return tool_name, arguments, None, normalization_metadata
 
     rewritten_args = None
-    if ssh_spec_phase_available:
+    if ssh_spec_phase_available and ssh_available:
         try:
             rewritten_args = network.parse_ssh_exec_args_from_shell_command(command)
         except ValueError as exc:

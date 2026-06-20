@@ -90,7 +90,7 @@ def _is_deb822_preflight_clean(state: Any, host: str, user: str) -> bool:
     if isinstance(entry, dict):
         status = str(entry.get("status") or "").strip()
         created = int(entry.get("created_at_step", 0) or 0)
-        if status == "clean" and int(getattr(state, "step_count", 0) or 0) - created <= 8:
+        if status == "clean" and int(getattr(state, "step_count", 0) or 0) - created <= 20:
             return True
     return False
 
@@ -146,8 +146,11 @@ def _apt_deb822_preflight_guard(
     if _is_deb822_preflight_clean(state, host, user):
         return None
 
-    # Only gate on deb822 if a prior apt update actually failed (source-related error).
-    # Do not proactively block all apt operations — most systems have healthy sources.
+    # Only gate on deb822 if a prior apt update actually failed with a
+    # source-format error.  Do not proactively block all apt operations —
+    # most systems have healthy sources.  Critically, GPG/signature errors
+    # (SHA1 rejections, key import failures, sqv errors) are *not*
+    # deb822-format problems and must not trigger the deb822 gate.
     if state is not None:
         scratchpad = getattr(state, "scratchpad", None)
         if isinstance(scratchpad, dict):
@@ -155,6 +158,24 @@ def _apt_deb822_preflight_guard(
             if isinstance(guard_state, dict):
                 update_succeeded = guard_state.get("apt_update_succeeded")
                 if update_succeeded is not False:
+                    return None
+                # If the failure was a GPG / signature issue rather than
+                # a source-file format problem, the deb822 gate is
+                # irrelevant — let the operation through.
+                last_err = str(guard_state.get("last_update_error") or "").lower()
+                _gpg_markers = (
+                    "gpg",
+                    "signature",
+                    "no_pubkey",
+                    "no pubkey",
+                    "keyring",
+                    "jcameron",
+                    "sqv",
+                    "sha1",
+                    "security policy",
+                    "openpgp",
+                )
+                if any(m in last_err for m in _gpg_markers):
                     return None
             else:
                 return None

@@ -41,6 +41,7 @@ from .error_hardening import (
     _maybe_pivot_upstream_install_source_invalid,
     _maybe_emit_ground_truth_diffusion,
     _maybe_emit_nginx_sites_enabled_nudge,
+    _maybe_emit_apt_key_deprecation_nudge,
     _maybe_nudge_repeated_404_remote_url,
     _observe_install_source_diagnosis,
     _maybe_nudge_ssh_auth_fallback,
@@ -95,6 +96,7 @@ async def apply_tool_outcomes(
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
             _maybe_schedule_repair_loop_status_autocontinue(graph_state, harness, record)
             _maybe_emit_nginx_sites_enabled_nudge(harness, record)
+            _maybe_emit_apt_key_deprecation_nudge(graph_state, harness, record)
             _maybe_emit_ground_truth_diffusion(harness, record)
             _maybe_schedule_web_search_for_repeated_error(graph_state, harness, record)
             _maybe_nudge_repeated_404_remote_url(graph_state, harness, record)

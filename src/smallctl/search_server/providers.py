@@ -137,27 +137,32 @@ async def search_with_providers(
     *,
     config: SearchServerConfig,
 ) -> tuple[list[WebSearchResult], list[str], str, str]:
-    warnings: list[str] = []
     collected: list[WebSearchResult] = []
     selected_provider = ""
     selected_recency_support = "unknown"
+    selected_warnings: list[str] = []
+    fallback_reasons: list[str] = []
     for provider in build_provider_chain(config):
         if not provider.is_enabled(config):
-            warnings.append(f"{provider.name} is not configured.")
+            fallback_reasons.append(f"{provider.name} is not configured")
             continue
         try:
             items = await provider.search(request, config)
         except Exception as exc:
-            warnings.append(f"{provider.name} failed: {exc}")
+            fallback_reasons.append(f"{provider.name} failed: {exc}")
             continue
         if items:
             selected_provider = provider.name
             selected_recency_support = provider.recency_support(config)
             collected.extend(items)
             break
-        warnings.append(f"{provider.name} returned no results.")
+        fallback_reasons.append(f"{provider.name} returned no results")
     normalized = normalize_search_results(collected, limit=request.limit, domains=request.domains, sort=request.sort)
-    return normalized, warnings, selected_provider or "duckduckgo", selected_recency_support
+    # Only surface provider warnings when no provider produced results; otherwise the
+    # "not configured" noise from skipped providers distracts the model from the actual results.
+    if not normalized:
+        selected_warnings = fallback_reasons
+    return normalized, selected_warnings, selected_provider or "duckduckgo", selected_recency_support
 
 
 def _normalize_recency_support(value: str | None) -> str:

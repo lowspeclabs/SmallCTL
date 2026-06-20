@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock, PropertyMock
+from unittest.mock import MagicMock
 
 from smallctl.graph.error_hardening import (
     _maybe_emit_ground_truth_diffusion,
     _maybe_emit_nginx_sites_enabled_nudge,
     _maybe_schedule_web_search_for_repeated_error,
 )
-from smallctl.graph.state import GraphRunState, PendingToolCall, ToolExecutionRecord
+from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.harness.tool_results import _store_verifier_verdict
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
@@ -477,3 +477,43 @@ class TestWebSearchOnRepeatedError:
         assert query == "Error opening terminal unknown ssh_exec installer TERM noninteractive"
         assert "Root user check" not in query
         assert ".ccc" not in query
+
+    def test_docker_manifest_unknown_query_extracts_image(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = (
+            "Unable to find image 'coderitter/webmin:latest' locally\n"
+            "docker: Error response from daemon: manifest for coderitter/webmin:latest not found: "
+            "manifest unknown: manifest unknown.\n"
+            "See 'docker run --help'."
+        )
+        record = _make_record("ssh_exec", success=False, error=error, command="docker run coderitter/webmin")
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+
+        query = gs.pending_tool_calls[0].args["query"]
+        assert "coderitter/webmin" in query
+        assert "docker hub" in query
+        assert "manifest not found" in query
+        assert "Unable to find image" not in query
+
+    def test_docker_pull_access_denied_query_extracts_image(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = (
+            "Unable to find image 'webmin/webmin:latest' locally\n"
+            "docker: Error response from daemon: pull access denied for webmin/webmin, "
+            "repository does not exist or may require 'docker login'"
+        )
+        record = _make_record("ssh_exec", success=False, error=error, command="docker run webmin/webmin")
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+
+        query = gs.pending_tool_calls[0].args["query"]
+        assert "webmin/webmin" in query
+        assert "docker" in query
+        assert "pull access denied" not in query

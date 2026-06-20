@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from smallctl.harness.tool_dispatch import dispatch_tool_call
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
+from smallctl.tools.base import ToolSpec, build_tool_schema
+from smallctl.tools.dispatcher import ToolDispatcher
+from smallctl.tools.registry import ToolRegistry
 
 
 def _make_fake_harness(state: LoopState) -> SimpleNamespace:
@@ -175,3 +178,58 @@ async def _async_cached_file_read_does_not_clear_fresh_read_gate() -> None:
 
 def test_cached_file_read_does_not_clear_fresh_read_gate() -> None:
     asyncio.run(_async_cached_file_read_does_not_clear_fresh_read_gate())
+
+
+async def _async_dispatcher_structured_validation_metadata() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="needs_path",
+            description="test",
+            schema=build_tool_schema(properties={"path": {"type": "string"}}, required=["path"]),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    dispatcher = ToolDispatcher(registry, phase="execute")
+
+    result = await dispatcher.dispatch("needs_path", {})
+
+    assert result.success is False
+    assert result.metadata["validation_error"] == "schema_validation"
+    assert result.metadata["validation_issues"] == [
+        {
+            "path": ["path"],
+            "kind": "required",
+            "expected": None,
+            "actual": None,
+            "message": "missing required field path",
+        }
+    ]
+
+
+def test_dispatcher_structured_validation_metadata() -> None:
+    asyncio.run(_async_dispatcher_structured_validation_metadata())
+
+
+async def _async_dispatcher_marks_legacy_coercion_on_success() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="read_path",
+            description="test",
+            schema=build_tool_schema(properties={"path": {"type": "string"}}, required=["path"]),
+            handler=lambda **kwargs: {"success": True, "output": kwargs, "error": None, "metadata": {}},
+        )
+    )
+    dispatcher = ToolDispatcher(registry, phase="execute")
+
+    result = await dispatcher.dispatch("read_path", {"path": "a.py", "extra": "ignored"})
+
+    assert result.success is True
+    assert result.output == {"path": "a.py"}
+    assert result.metadata["legacy_dispatch_coercion"] is True
+    assert result.metadata["ignored_arguments"] == ["extra"]
+
+
+def test_dispatcher_marks_legacy_coercion_on_success() -> None:
+    asyncio.run(_async_dispatcher_marks_legacy_coercion_on_success())

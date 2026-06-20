@@ -27,8 +27,8 @@ from .dispatcher_remote_paths import (
 )
 from .dispatcher_schema_helpers import (
     coerce_value as _coerce_value,
-    type_matches as _type_matches,
 )
+from .tool_call_repair import ToolCallValidationIssue, validate_tool_args
 from .dispatcher_shell_guards import (
     guard_harness_tool_as_ssh_shell_command as _guard_harness_tool_as_ssh_shell_command,
     guard_nested_raw_ssh_in_ssh_exec as _guard_nested_raw_ssh_in_ssh_exec,
@@ -312,6 +312,14 @@ class ToolDispatcher:
             return intercepted_result
 
         args, dropped_keys = self._coerce_args(spec.schema, arguments)
+        if dropped_keys and self.run_logger:
+            self.run_logger.log(
+                "tools",
+                "legacy_dispatch_coercion",
+                "legacy dispatcher coercion dropped unknown arguments",
+                tool_name=tool_name,
+                dropped_keys=dropped_keys,
+            )
 
         # Reject empty shell/ssh commands before dispatch
         if tool_name in {"shell_exec", "ssh_exec"}:
@@ -340,7 +348,8 @@ class ToolDispatcher:
                     metadata={"tool_name": tool_name, "validation_error": "empty_command"},
                 )
 
-        validation_error = self._validate_args(spec.schema, args)
+        validation_issues = self._validate_arg_issues(spec.schema, args)
+        validation_error = self._format_validation_error(validation_issues)
         if validation_error:
             log_kv(
                 self.log,
@@ -357,8 +366,13 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     error=validation_error,
                     arguments_preview=json_safe_value(args),
+                    validation_issues=self._serialize_validation_issues(validation_issues),
                 )
-            metadata = {"tool_name": tool_name}
+            metadata = {
+                "tool_name": tool_name,
+                "validation_error": "schema_validation",
+                "validation_issues": self._serialize_validation_issues(validation_issues),
+            }
             if dropped_keys:
                 metadata["ignored_arguments"] = dropped_keys
                 required = spec.schema.get("required", [])
@@ -401,7 +415,12 @@ class ToolDispatcher:
             result.keys()
         ):
             result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-            result_metadata = {**dispatch_metadata, **normalization_metadata, **result_metadata}
+            result_metadata = {
+                **dispatch_metadata,
+                **normalization_metadata,
+                **self._legacy_coercion_metadata(dropped_keys),
+                **result_metadata,
+            }
             result_output = result.get("output")
             if result_output is None and tool_name in {"shell_exec", "ssh_exec"}:
                 metadata_output = result_metadata.get("output")
@@ -436,7 +455,7 @@ class ToolDispatcher:
         return ToolEnvelope(
             success=True,
             output=result,
-            metadata={**dispatch_metadata, **normalization_metadata},
+            metadata={**dispatch_metadata, **normalization_metadata, **self._legacy_coercion_metadata(dropped_keys)},
         )
 
     @staticmethod
@@ -460,22 +479,51 @@ class ToolDispatcher:
 
     @staticmethod
     def _validate_args(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
-        if not isinstance(arguments, dict):
+        return ToolDispatcher._format_validation_error(ToolDispatcher._validate_arg_issues(schema, arguments))
+
+    @staticmethod
+    def _validate_arg_issues(schema: dict[str, Any], arguments: Any) -> list[ToolCallValidationIssue]:
+        return validate_tool_args(schema, arguments)
+
+    @staticmethod
+    def _format_validation_error(issues: list[ToolCallValidationIssue]) -> str | None:
+        if not issues:
+            return None
+        issue = issues[0]
+        path = ".".join(str(part) for part in issue.path)
+        if issue.kind == "type" and not issue.path:
             return "Tool arguments must be an object."
+        if issue.kind == "required":
+            return f"Missing required field: {path}"
+        if issue.kind == "type":
+            return f"Field '{path}' expected type '{issue.expected}'"
+        if issue.kind == "additional_property":
+            return f"Unknown field: {path}"
+        if issue.kind == "enum":
+            return f"Field '{path}' expected one of {issue.expected}"
+        return issue.message or f"Invalid field: {path}"
 
-        required = schema.get("required", [])
-        for field in required:
-            if field not in arguments:
-                return f"Missing required field: {field}"
+    @staticmethod
+    def _serialize_validation_issues(issues: list[ToolCallValidationIssue]) -> list[dict[str, Any]]:
+        return [
+            {
+                "path": [str(part) for part in issue.path],
+                "kind": issue.kind,
+                "expected": issue.expected,
+                "actual": issue.actual,
+                "message": issue.message,
+            }
+            for issue in issues
+        ]
 
-        properties = schema.get("properties", {})
-        for key, val in arguments.items():
-            if key not in properties:
-                continue
-            expected_type = properties[key].get("type")
-            if expected_type and not _type_matches(expected_type, val):
-                return f"Field '{key}' expected type '{expected_type}'"
-        return None
+    @staticmethod
+    def _legacy_coercion_metadata(dropped_keys: list[str]) -> dict[str, Any]:
+        if not dropped_keys:
+            return {}
+        return {
+            "legacy_dispatch_coercion": True,
+            "ignored_arguments": dropped_keys,
+        }
 
 
 class PipelineDispatcher:
@@ -493,8 +541,6 @@ class PipelineDispatcher:
             return await interceptor(name, args, lambda n, a: _run(idx + 1, n, a))
 
         return await _run(0, tool_name, arguments)
-
-
 
 
 

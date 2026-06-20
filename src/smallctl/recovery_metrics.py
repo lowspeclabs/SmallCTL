@@ -48,6 +48,79 @@ def increment_metric_bucket(state: Any, name: str, bucket: str, amount: int = 1)
         buckets[bucket_key] = int(amount or 0)
 
 
+def tool_call_repair_issue_signature(tool_name: str, issue_kinds: list[str], repair_kinds: list[str]) -> str:
+    issue_part = ",".join(sorted(str(kind) for kind in issue_kinds if str(kind).strip()))
+    repair_part = ",".join(sorted(str(kind) for kind in repair_kinds if str(kind).strip()))
+    return f"{str(tool_name or '').strip()}|issues={issue_part}|repairs={repair_part}"
+
+
+def record_tool_call_repair_metrics(state: Any, *, repair_kinds: list[str], hint_injected: bool = False) -> None:
+    if repair_kinds:
+        increment_metric(state, "tool_call_repairs_total")
+    for kind in repair_kinds:
+        increment_metric_bucket(state, "tool_call_repairs_by_kind", kind)
+    if hint_injected:
+        increment_metric(state, "tool_call_repair_hints_injected_total")
+
+
+def remember_tool_call_repair_hint(
+    state: Any,
+    *,
+    tool_name: str,
+    tool_call_id: str | None,
+    step_count: int,
+    issue_kinds: list[str],
+    repair_kinds: list[str],
+    repaired_args_preview: Any,
+) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    scratchpad["_last_tool_call_repair_hint"] = {
+        "tool_name": tool_name,
+        "tool_call_id": tool_call_id,
+        "step_count": int(step_count or 0),
+        "repair_kinds": list(repair_kinds),
+        "issue_kinds": list(issue_kinds),
+        "issue_signature": tool_call_repair_issue_signature(tool_name, issue_kinds, repair_kinds),
+        "repaired_args_preview": repaired_args_preview,
+    }
+
+
+def record_tool_call_repair_next_call_signal(
+    state: Any,
+    *,
+    tool_name: str,
+    issue_kinds: list[str],
+    repair_kinds: list[str],
+    max_step_window: int = 4,
+) -> str:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return ""
+    pending = scratchpad.get("_last_tool_call_repair_hint")
+    if not isinstance(pending, dict):
+        return ""
+    pending_tool = str(pending.get("tool_name") or "").strip()
+    if pending_tool != str(tool_name or "").strip():
+        return ""
+    current_step = _safe_int(getattr(state, "step_count", 0), default=0)
+    created_step = _safe_int(pending.get("step_count"), default=current_step)
+    if current_step - created_step > max_step_window:
+        scratchpad.pop("_last_tool_call_repair_hint", None)
+        return "expired"
+
+    previous_signature = str(pending.get("issue_signature") or "")
+    current_signature = tool_call_repair_issue_signature(tool_name, issue_kinds, repair_kinds)
+    if previous_signature and current_signature == previous_signature:
+        increment_metric(state, "tool_call_repair_next_call_repeated_total")
+        scratchpad.pop("_last_tool_call_repair_hint", None)
+        return "repeated"
+    increment_metric(state, "tool_call_repair_next_call_improved_total")
+    scratchpad.pop("_last_tool_call_repair_hint", None)
+    return "improved"
+
+
 def record_failure_event_metric(state: Any, event: Any) -> None:
     failure_class = str(getattr(event, "failure_class", "") or "").strip()
     increment_metric(state, "failure_events_total")

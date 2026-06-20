@@ -100,6 +100,7 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
         and not state.last_failure_class
         and state.write_session is None
         and not isinstance(state.scratchpad.get("_last_schema_validation_hint"), dict)
+        and not isinstance(state.scratchpad.get("_last_tool_call_repair_hint"), dict)
         and not isinstance(state.scratchpad.get("_read_loop_recovery_payload"), dict)
         and not isinstance(state.scratchpad.get("_latest_execution_blocker"), dict)
         and not remote_repair_state_lines(state)
@@ -109,6 +110,7 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
     lines: list[str] = []
     lines.extend(remote_repair_state_lines(state))
     lines.extend(fresh_schema_validation_hint_lines(state))
+    lines.extend(fresh_tool_call_repair_hint_lines(state))
     lines.extend(fresh_read_loop_recovery_lines(state))
     latest_execution_blocker = state.scratchpad.get("_latest_execution_blocker")
     if isinstance(latest_execution_blocker, dict):
@@ -230,6 +232,21 @@ def fresh_schema_validation_hint_lines(state: LoopState) -> list[str]:
     if not excerpt:
         return []
     return ["Latest tool schema hint: " + excerpt.replace("\n", " | ")]
+
+
+def fresh_tool_call_repair_hint_lines(state: LoopState) -> list[str]:
+    payload = state.scratchpad.get("_last_tool_call_repair_hint")
+    if not isinstance(payload, dict):
+        return []
+    created = int(payload.get("step_count", 0) or 0)
+    if int(state.step_count or 0) - created > 4:
+        return []
+    tool_name = str(payload.get("tool_name") or "").strip()
+    repair_kinds = [str(kind) for kind in payload.get("repair_kinds", []) if str(kind).strip()]
+    if not tool_name or not repair_kinds:
+        return []
+    repair_text = ", ".join(repair_kinds[:3])
+    return [f"Latest tool-call repair: {tool_name} args repaired via {repair_text}; send that shape directly next time."]
 
 
 def fresh_read_loop_recovery_lines(state: LoopState) -> list[str]:

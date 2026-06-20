@@ -94,6 +94,9 @@ class SmallctlConfig:
     tool_plan_max_steps: int = 6
     tool_plan_max_repair_attempts: int = 1
     schema_validation_max_repair_attempts: int = 2
+    tool_call_repair_enabled: bool = True
+    tool_call_repair_log_only: bool = False
+    tool_call_repair_max_actions_per_call: int = 4
     tool_plan_observation_token_limit: int = 900
     tool_plan_max_observation_chars_per_step: int = 600
     tool_plan_solver_fresh_output_limit: int = 1200

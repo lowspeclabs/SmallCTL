@@ -225,6 +225,23 @@ def test_schema_repair_decision_logs_parse_failure_and_repair_decision():
     assert repair_event["required_fields"] == ["replacement_text"]
 
 
+def test_recovery_guidance_renders_fresh_tool_call_repair_hint():
+    from smallctl.context.frame_recovery_rendering import fresh_tool_call_repair_hint_lines, render_recovery_guidance
+
+    state = LoopState(cwd="/tmp")
+    state.step_count = 3
+    state.scratchpad["_last_tool_call_repair_hint"] = {
+        "tool_name": "file_read",
+        "step_count": 2,
+        "repair_kinds": ["null_optional_to_omit"],
+    }
+
+    assert fresh_tool_call_repair_hint_lines(state) == [
+        "Latest tool-call repair: file_read args repaired via null_optional_to_omit; send that shape directly next time."
+    ]
+    assert render_recovery_guidance(state) == fresh_tool_call_repair_hint_lines(state)
+
+
 def test_write_recovery_readback_logs_recovery_decision():
     from smallctl.graph.state import GraphRunState, ToolExecutionRecord
     from smallctl.graph.write_session_recovery import _maybe_schedule_write_recovery_readback

@@ -54,6 +54,24 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
             if key.startswith("_fama_loop_guard_suppression_count:") or key.startswith("_fama_verifier_suppression_count:"):
                 fama_state.pop(key, None)
 
+    # On a continue/proceed after a terminal outcome, reset enough state that
+    # the prompt does not bloat with stale repair context, exposed tools, and
+    # conversation history. The task goal is preserved in the run_brief.
+    harness.state.current_phase = getattr(harness, "_initial_phase", "explore")
+    harness.state.task_exposed_tools = set()
+    harness.state.recent_errors = []
+    harness.state.tool_history = []
+    harness.state.stagnation_counters = {}
+    harness.state.scratchpad.pop("_tool_attempt_history", None)
+
+    recent_messages = list(getattr(harness.state, "recent_messages", []) or [])
+    if len(recent_messages) > 2:
+        harness.state.recent_messages = recent_messages[-2:]
+
+    harness.state.reasoning_graph.evidence_records = []
+    harness.state.context_briefs = []
+    harness.state.episodic_summaries = []
+
 
 def _resolve_followup_task(harness: Any, task: str) -> tuple[str, bool]:
     resolved_task = task

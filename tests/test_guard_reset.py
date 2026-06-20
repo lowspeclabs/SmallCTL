@@ -89,10 +89,17 @@ def test_tool_attempt_history_reset_on_task_boundary() -> None:
     assert "_tool_attempt_history" not in state.scratchpad
 
 
-def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None:
+def test_continue_after_guard_preserves_capsule_and_clears_bloated_context() -> None:
+    """Continue/proceed after a terminal outcome must reset state that bloats
+    the prompt (repair phase, conversation history, evidence lanes, exposed-tool
+    accumulation) while preserving the guard-trip recovery capsule."""
     state = LoopState(cwd="/tmp")
     state.step_count = 8
     state.inactive_steps = 3
+    state.current_phase = "repair"
+    state.task_mode = "remote_execute"
+    state.active_intent = "requested_ssh_exec"
+    state.task_exposed_tools = {"ssh_exec", "artifact_read"}
     state.recent_errors = [
         "ssh_exec: Unit postgresql.service could not be found.",
         "ssh_exec: Remote SSH command exited with code 1",
@@ -104,9 +111,19 @@ def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None
     state.scratchpad["_tool_attempt_history"] = [
         {"tool_name": "ssh_exec", "fingerprint": "inspect-netbox"},
     ]
+    from smallctl.models.conversation import ConversationMessage
+    state.recent_messages = [
+        ConversationMessage(role="user", content="inspect netbox"),
+        ConversationMessage(role="assistant", content="failed"),
+        ConversationMessage(role="user", content="continue"),
+    ]
+    state.reasoning_graph.evidence_records = [{"tool": "ssh_exec", "result": "fail"}]
+    state.context_briefs = [{"brief_id": "B1", "text": "brief"}]
+    state.episodic_summaries = [{"summary_id": "S1", "text": "summary"}]
     harness = SimpleNamespace(
         state=state,
         _runlog=lambda *args, **kwargs: None,
+        _initial_phase="explore",
     )
 
     _apply_continue_task_state_reset(harness, task="continue", resolved_task="continue install")
@@ -121,3 +138,10 @@ def test_continue_after_guard_preserves_capsule_and_clears_guard_error() -> None
     capsule = state.scratchpad["_guard_trip_recovery_capsule"]
     assert capsule["reason"] == "Guard tripped: max_consecutive_errors (5)"
     assert capsule["continued_after_guard"] is True
+    assert state.current_phase == "explore"
+    assert state.task_exposed_tools == set()
+    assert len(state.recent_messages) == 2
+    assert state.recent_messages[-1].content == "continue"
+    assert state.reasoning_graph.evidence_records == []
+    assert state.context_briefs == []
+    assert state.episodic_summaries == []

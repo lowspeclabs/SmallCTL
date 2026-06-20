@@ -25,6 +25,8 @@ lost.
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
 
+| IMP-008 | run_diagnose.py | medium | Detect "continue/proceed" loops that fail with repeated `prompt_budget` errors and classify them as a harness context-bloat issue rather than only reporting the underlying environmental blocker. | In run `8429ca86`, the agent said "continue" three times after a terminal `task_fail`; each continue created a new task that immediately died with `PROMPT BUDGET OVERFLOW`. Diagnosis focused on the SSH `no route to host` blocker and missed the harness symptom, so the agent had to manually trace the prompt-state frames to find the root cause. | open |
+
 ## Completed Improvements
 
 Move implemented improvements here and keep the original ID for reference.

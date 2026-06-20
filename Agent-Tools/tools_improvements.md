@@ -31,6 +31,8 @@ Move implemented improvements here and keep the original ID for reference.
 
 | ID | Tool | Summary | Done Date |
 |----|------|---------|-----------|
+| IMP-007 | model_output_lint.py | Accepted `latest-N` run references via the shared `agent_tools_lib.resolve_run_dir` resolver; help text already listed `latest-N`. | 2026-06-20 |
+| IMP-006 | run_diagnose.py, runscan.py | Added `detect_apt_deb822_guard_misfire` helper and `guard_misfire` classification; surfaced misfires in diagnosis narrative, JSON, and recommended next steps. | 2026-06-20 |
 | IMP-005 | runscan.py, rundiff.py | Added `--same-objective TEXT` filter to restrict comparisons to runs whose objective contains the given text. | 2026-06-19 |
 | IMP-004 | trace_call.py | Show a preview of blocked `file_write` content when a write dispatch fails. | 2026-06-19 |
 | IMP-003 | logwatch.py | Surface weak/unchecked verification (no code changes, verified before last change, weak verifier command) when `deliverable_verified=True`. | 2026-06-19 |

@@ -22,6 +22,7 @@ from typing import Any
 from agent_tools_lib import (
     Colors,
     colorize,
+    detect_apt_deb822_guard_misfire,
     detect_primary_blockers,
     error_records,
     event_counter,
@@ -109,6 +110,8 @@ def _classify_failure(
         return "environment_blocker"
     if has_stderr_signature_circuit_breaker(harness_records):
         return "harness_circuit_breaker_false_positive"
+    if detect_apt_deb822_guard_misfire(harness_records):
+        return "guard_misfire"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
     if events.get("action_stall") or events.get("no_tool_recovery"):
@@ -147,6 +150,7 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
 
     last_error_trace_ids = [extract_trace_id(e) for e in errors[-5:]]
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    apt_deb822_misfires = detect_apt_deb822_guard_misfire(harness_records)
 
     diagnosis = {
         "run_dir": str(run_dir),
@@ -157,6 +161,7 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "task_summary": task_summary,
         "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records),
         "primary_blockers": primary_blockers,
+        "apt_deb822_guard_misfires": [format_record_summary(r) for r in apt_deb822_misfires],
         "event_counts": dict(events),
         "error_record_count": len(errors),
         "warning_record_count": len(warnings),
@@ -192,6 +197,8 @@ def _recommend_next_steps(
         steps.append("Investigate model stream degeneration; check model_output.log for repeated phrases.")
     if has_stderr_signature_circuit_breaker(harness_records):
         steps.append("Harness stderr-signature circuit breaker tripped on repeated identical stderr; use a different repair strategy instead of retrying the same command.")
+    if detect_apt_deb822_guard_misfire(harness_records):
+        steps.append("apt_deb822 preflight guard blocked after validator already passed; review guard state and whether the block is stale.")
     if _has_write_overwrite_guard_failures(failed_dispatches):
         steps.append("Write-session overwrite guard loop detected; trace failed file_write calls and force a current file_read followed by file_patch/ast_patch or same-section repair.")
     if _has_patch_first_policy_loop(failed_dispatches):
@@ -252,6 +259,13 @@ def _render_text(diagnosis: dict[str, Any]) -> str:
             lines.append(f"  {b['pattern']}: {b['count']}x  sample: {b['sample'][:120]}")
     else:
         lines.append("  none detected")
+
+    apt_misfires = diagnosis.get("apt_deb822_guard_misfires") or []
+    if apt_misfires:
+        lines.append("")
+        lines.append(colorize("apt_deb822 guard misfires", Colors.BOLD + Colors.YELLOW))
+        for m in apt_misfires[:5]:
+            lines.append("  " + colorize(m, Colors.YELLOW))
 
     lines.append("")
     lines.append(colorize("Tasks", Colors.BOLD + Colors.BLUE))

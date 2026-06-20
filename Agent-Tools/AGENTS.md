@@ -175,6 +175,65 @@ Use this after making a code change to verify the failure rate or event
 profile improved. The `--same-objective` filter ensures both runs targeted the
 same task/file.
 
+### `fama_inspector.py` — FAMA activity inspector
+
+```bash
+python3 Agent-Tools/fama_inspector.py latest
+python3 Agent-Tools/fama_inspector.py 4b54c65e --signals
+python3 Agent-Tools/fama_inspector.py 4b54c65e --mitigations --json
+python3 Agent-Tools/fama_inspector.py 4b54c65e --exposure
+```
+
+Inspects FAMA signals, mitigations, and tool-exposure decisions. Use when
+`logwatch.py` shows FAMA warnings and you need to see which detectors fired
+and which mitigations were activated.
+
+### `promptdiff.py` — compare prompt-state frame snapshots
+
+```bash
+python3 Agent-Tools/promptdiff.py latest-1 latest
+python3 Agent-Tools/promptdiff.py 4b54c65e 2e2d6b5f --step 5
+python3 Agent-Tools/promptdiff.py latest-1 latest --lane turn_bundles
+python3 Agent-Tools/promptdiff.py latest --step 3 --step 10
+```
+
+Compares `prompt_state_frame_compiled` records between two runs or steps.
+Catches stale-artifact and context-invalidation regressions.
+
+### `model_output_lint.py` — scan model output for issues
+
+```bash
+python3 Agent-Tools/model_output_lint.py latest
+python3 Agent-Tools/model_output_lint.py 4b54c65e --repeated-phrases
+python3 Agent-Tools/model_output_lint.py latest --json
+```
+
+Counts degenerate loops, thinking-tag leakage, empty outputs, and repeated
+assistant texts.
+
+### `checkpoint_browser.py` — browse and diff checkpoints
+
+```bash
+python3 Agent-Tools/checkpoint_browser.py latest
+python3 Agent-Tools/checkpoint_browser.py latest --diff 0 1
+python3 Agent-Tools/checkpoint_browser.py latest --json
+```
+
+Lists checkpoint records (JSON files or harness records) and diffs two
+snapshots.
+
+### `session_replay.py` — replay tool-call sequence
+
+```bash
+python3 Agent-Tools/session_replay.py latest
+python3 Agent-Tools/session_replay.py 4b54c65e --failures-only
+python3 Agent-Tools/session_replay.py latest --policy-check
+python3 Agent-Tools/session_replay.py latest --json
+```
+
+Pairs `dispatch_start`/`dispatch_complete` by trace_id, annotating each with
+phase, run mode, and profiles. `--failures-only` filters to failed dispatches.
+
 ## Shared library
 
 `agent_tools_lib.py` contains shared parsing helpers. Do not invoke it

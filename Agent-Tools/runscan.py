@@ -23,6 +23,7 @@ from typing import Any
 from agent_tools_lib import (
     Colors,
     colorize,
+    detect_apt_deb822_guard_misfire,
     detect_primary_blockers,
     discover_runs,
     error_records,
@@ -49,6 +50,7 @@ FAILURE_CLASS_LABELS = {
     "success_with_errors": "success_with_errors",
     "environment_blocker": "environment_blocker",
     "harness_circuit_breaker_false_positive": "harness_circuit_breaker_false_positive",
+    "guard_misfire": "guard_misfire",
     "model_degeneration": "model_degeneration",
     "model_tool_loop_stall": "model_tool_loop_stall",
     "file_patch_target_not_found_loop": "file_patch_target_not_found_loop",
@@ -136,6 +138,8 @@ def _classify_run(
         return "environment_blocker"
     if has_stderr_signature_circuit_breaker(harness_records):
         return "harness_circuit_breaker_false_positive"
+    if detect_apt_deb822_guard_misfire(harness_records):
+        return "guard_misfire"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
     if events.get("action_stall") or events.get("no_tool_recovery"):
@@ -206,6 +210,7 @@ def _status_color(status: str | None) -> str:
         "ask_human_resume_terminal_tool_stall",
         "environment_blocker",
         "harness_circuit_breaker_false_positive",
+        "guard_misfire",
     }:
         return Colors.RED
     if status in {"model_tool_loop_stall", "incomplete_unverified", "unknown"}:

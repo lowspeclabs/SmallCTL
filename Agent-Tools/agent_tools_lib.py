@@ -568,3 +568,46 @@ def has_stderr_signature_circuit_breaker(records: Iterable[dict[str, Any]]) -> b
                 if "stderr_signature_circuit_breaker" in str(err):
                     return True
     return False
+
+
+def detect_apt_deb822_guard_misfire(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detect apt_deb822 preflight blocks that occur after the validator already passed.
+
+    A guard misfire happens when the preflight validator approved the environment
+    but a later dispatch still records an apt_deb822_preflight_blocked outcome.
+    These are harness/policy symptoms, not model failures, and should be surfaced
+    separately so agents do not chase them as degeneration.
+    """
+    misfires: list[dict[str, Any]] = []
+    validator_passed_traces: set[str] = set()
+    validator_passed_globally = False
+
+    for rec in records:
+        event = str(rec.get("event") or "")
+        data = rec.get("data") or {}
+        tid = extract_trace_id(rec) or ""
+
+        is_pass = (
+            "apt_deb822_preflight_validator_passed" in event
+            or "apt_deb822_validator_passed" in event
+        )
+        is_block = (
+            "apt_deb822_preflight_blocked" in event
+            or (
+                isinstance(data, dict)
+                and "apt_deb822_preflight_blocked" in str(data.get("reason") or "")
+            )
+        )
+
+        if is_pass:
+            validator_passed_globally = True
+            if tid:
+                validator_passed_traces.add(tid)
+
+        if is_block:
+            if tid and tid in validator_passed_traces:
+                misfires.append(rec)
+            elif validator_passed_globally and not tid:
+                misfires.append(rec)
+
+    return misfires

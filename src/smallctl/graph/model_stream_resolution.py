@@ -286,14 +286,15 @@ async def resolve_model_stream_result(
         ]
         if reasoning_mode_switched:
             recovery_content_parts.append(
-                "Thinking markers have been disabled. Do NOT start your response with ` thinking`, "
-                "` response`, or any angle-bracket control tag. Respond directly and emit "
-                "the next tool call as a JSON object."
+                "Thinking markers have been disabled. Do NOT start your response with a "
+                "`<think>` or `<thinking>` block, and do not emit `<response>`, `<|channel>`, "
+                "`<channel|>`, `<thought>`, or any other angle-bracket control tag. "
+                "Respond directly and emit the next tool call as a JSON object."
             )
         else:
             recovery_content_parts.append(
-                "Do not emit ` thinking`, ` response`, `<|channel>`, `<channel|>`, `<thought>`, "
-                "or any other angle-bracket control tags in your next response."
+                "Do not emit `<think>`, `<thinking>`, `<response>`, `<|channel>`, `<channel|>`, "
+                "`<thought>`, or any other angle-bracket control tag in your next response."
             )
         recovery_content_parts.append("Stop repeating and emit ONE concrete next action as a tool call.")
         user_task = ""

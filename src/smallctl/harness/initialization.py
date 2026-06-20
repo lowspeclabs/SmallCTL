@@ -17,6 +17,7 @@ from ..context import (
 )
 from ..graph.tool_model_rules_model_detection import _model_uses_gemma_rules
 from ..guards import GuardConfig
+from ..prompt_model_classifiers import is_gemma_4_it_model_name, is_exact_small_gemma_4_it_model_name
 from ..phases import normalize_phase
 from ..tools import ToolDispatcher, build_registry
 from .bootstrap_support import (
@@ -92,7 +93,20 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
 
     self.reasoning_mode = config.reasoning_mode
     if _model_uses_gemma_rules(config.model):
-        self.reasoning_mode = "tags"
+        is_known_tagged_gemma = (
+            is_exact_small_gemma_4_it_model_name(config.model)
+            or is_gemma_4_it_model_name(config.model)
+        )
+        if is_known_tagged_gemma:
+            # Known Gemma variants that follow the explicit <think> tag protocol.
+            self.reasoning_mode = "tags"
+        elif config.reasoning_mode == "auto":
+            # Other Gemma-4 models tend to degenerate when prompted for <think> tags.
+            # Default to direct responses and hide the tag instructions from the
+            # system prompt.
+            self.reasoning_mode = "off"
+            self.state.scratchpad["_thinking_tags_disabled"] = True
+
     self.thinking_visibility = config.thinking_visibility
     self.thinking_start_tag = config.thinking_start_tag
     self.thinking_end_tag = config.thinking_end_tag

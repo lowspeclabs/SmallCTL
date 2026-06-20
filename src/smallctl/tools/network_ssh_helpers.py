@@ -280,7 +280,7 @@ def ssh_diagnostic_not_found(command: str, output: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         exit_code = 0
         
-    if exit_code == 1:
+    if exit_code in (1, 2):
         cmd_lower = command.lower()
         if any(g in cmd_lower for g in ("grep", "egrep", "fgrep")):
             if not stdout.strip() and not stderr.strip():

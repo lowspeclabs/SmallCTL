@@ -1169,6 +1169,32 @@ def test_ssh_exec_exit1_empty_stderr_returns_success() -> None:
     assert result["success"] is True
 
 
+def test_ssh_exec_exit2_grep_empty_stderr_returns_success() -> None:
+    """grep -r exits 2 when some search paths are missing, even with stderr
+    redirected to /dev/null. Treat an empty stdout/stderr exit-2 grep as an
+    informational 'not found' result so the harness does not spin into repair."""
+    state = LoopState(cwd="/tmp")
+
+    with patch.object(
+        network,
+        "create_process",
+        AsyncMock(return_value=_FakeProc(returncode=2)),
+    ):
+        result = asyncio.run(
+            network.ssh_exec(
+                host="192.168.1.63",
+                user="root",
+                password="secret",
+                command='grep -r "notes.lab.local" /etc/hosts /etc/nginx /etc/caddy /opt/ 2>/dev/null',
+                state=state,
+                harness=None,
+            )
+        )
+
+    assert result["success"] is True
+    assert result["output"]["exit_code"] == 2
+
+
 def test_ssh_remote_nonzero_memory_label_is_not_unknown_failure() -> None:
     state = LoopState(cwd="/tmp")
     state.thread_id = "thread-ssh-memory"

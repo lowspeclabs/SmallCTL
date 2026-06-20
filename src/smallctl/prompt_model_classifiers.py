@@ -35,6 +35,20 @@ def is_exact_large_gemma_4_26b_a4b_it_model_name(model_name: str) -> bool:
     return any(lowered.endswith(suffix) for suffix in _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES)
 
 
+def is_gemma_4_it_model_name(model_name: str) -> bool:
+    """True for Gemma-4 instruction-tuned variants that emit <think> tags.
+
+    Covers the known small IT suffixes (e2b/e4b), the 26b A4B IT variant, and
+    the 31b IT variant observed on OpenRouter.  Using the broader "gemma-4-"
+    + "-it" heuristic lets the harness treat future Gemma-4 IT checkpoints the
+    same way without waiting for an exact allow-list update.
+    """
+    lowered = str(model_name or "").strip().lower()
+    if "gemma-4-" not in lowered:
+        return False
+    return lowered.endswith("-it")
+
+
 def is_lfm25_8b_a1b_model_name(model_name: str) -> bool:
     lowered = str(model_name or "").strip().lower()
     return lowered in _EXACT_LFM_25_8B_A1B_MODELS

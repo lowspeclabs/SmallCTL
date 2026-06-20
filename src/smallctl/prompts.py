@@ -216,6 +216,8 @@ def build_system_prompt(
         parts.append(_GEMMA_4_STRICT_FORMAT)
     if exact_small_gemma_mode and not thinking_tags_disabled:
         parts.append(_SMALL_GEMMA_STRICT_FORMAT)
+    if gemma_mode and large_model and not exact_large_gemma_26b_mode:
+        parts.append(_LARGE_GEMMA_26B_ANTI_LOOP_RULE)
     if large_model:
         parts.append(_LARGE_MODEL_STRUCTURED_REASONING)
     step_budget_prompt = _graph_step_budget_prompt(scratchpad)

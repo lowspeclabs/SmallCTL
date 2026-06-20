@@ -19,7 +19,7 @@ class _RecordingConsole(ConsolePane):
     async def _append_assistant(self, text: str) -> None:
         self.calls.append(("assistant", text, None, None))
 
-    async def _replace_assistant(self, text: str) -> None:
+    async def _replace_assistant(self, text: str, *, speaker: str | None = None) -> None:
         self.calls.append(("replace_assistant", text, None, None))
 
     async def _append_thinking(self, text: str) -> None:

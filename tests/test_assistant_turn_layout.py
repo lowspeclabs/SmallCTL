@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from textual.color import Color
+from rich.markdown import Markdown as RichMarkdown
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 
@@ -71,6 +73,7 @@ def test_thinking_after_visible_assistant_stays_in_one_turn() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Final user-facing status."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -120,6 +123,7 @@ def test_consecutive_tool_calls_group_between_thinking_statements() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.THINKING, "Second thought."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             turn = console._active_assistant_turn
@@ -158,6 +162,7 @@ def test_assistant_turn_stays_compact_without_stylesheet() -> None:
             await console.begin_assistant_turn()
             await console.append_event(UIEvent(UIEventType.THINKING, "Plan the next step."))
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Visible summary up top."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             turn = console._active_assistant_turn
@@ -175,11 +180,216 @@ def test_assistant_text_drops_leading_blank_lines_after_thinking() -> None:
 
             await console.append_event(UIEvent(UIEventType.THINKING, "Plan the next step."))
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "\n\nVisible summary up top."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             turn = console._active_assistant_turn
             assert turn is not None
             assert turn.get_assistant_text() == "Visible summary up top."
+
+    asyncio.run(_run())
+
+
+def test_complete_assistant_markdown_list_renders_as_markdown() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            markdown = "**Done**\n\n- first\n- second\n\n```python\nprint(\"hi\")\n```"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, markdown))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == markdown
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
+def test_incomplete_assistant_markdown_table_renders_plain_while_streaming() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            partial = "The Docker containers are:\n\n| CONTAINER ID | IMAGE | COMMAND | STATUS | NAMES |\n| :--- | :--- | :--- | :--- | :--- |\n| be793d0eb63a | ghcr.io/dagucloud/dagu:latest |"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, partial))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == partial
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, Text)
+
+    asyncio.run(_run())
+
+
+def test_complete_assistant_markdown_table_renders_as_markdown() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            table = "The Docker containers are:\n\n| CONTAINER ID | IMAGE | COMMAND | STATUS | NAMES |\n| :--- | :--- | :--- | :--- | :--- |\n| be793d0eb63a | ghcr.io/dagucloud/dagu:latest | /usr/local/bin/tini | Exited | dagu |\n| acac144a9b54 | pihole/pihole:latest | start.sh | Up healthy | pihole |"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, table))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == table
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
+def test_scheduled_stream_flush_defers_markdown_render_until_boundary() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            table = (
+                "The Docker containers are:\n\n"
+                "| CONTAINER ID | IMAGE | COMMAND | STATUS | NAMES |\n"
+                "| :--- | :--- | :--- | :--- | :--- |\n"
+                "| be793d0eb63a | ghcr.io/dagucloud/dagu:latest | /usr/local/bin/tini | Exited | dagu |"
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, table))
+            await console.flush_stream_buffers(finalize_assistant=False)
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, Text)
+
+            await console.flush_stream_buffers()
+            await pilot.pause()
+            assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
+def test_assistant_replace_after_alert_cleans_previous_turn() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp(verbose=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            raw = "The following Docker containers are installed:\n\n| Container ID | Image |\n| :--- | :--- |\n| `abc` | `demo` |"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, raw))
+            await console.flush_stream_buffers()
+            await console.append_event(
+                UIEvent(
+                    UIEventType.ALERT,
+                    "Model output entered a repetition loop; halting this turn and requesting recovery.",
+                    data={"ui_kind": "model_output_degenerate_loop_exhausted"},
+                )
+            )
+            assert console._active_assistant_turn is None
+
+            await console.append_event(
+                UIEvent(
+                    UIEventType.ASSISTANT,
+                    "[Previous assistant output was halted because it entered a repetition loop.]",
+                    data={"kind": "replace"},
+                )
+            )
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            turns = [child for child in stack.children if hasattr(child, "get_assistant_text")]
+            assert len(turns) == 1
+            assert turns[0].get_assistant_text() == ""
+            assert "Container ID" not in turns[0].get_assistant_text()
+
+    asyncio.run(_run())
+
+
+def test_late_assistant_replace_after_tool_call_cleans_previous_text_block() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            raw = "Final answer.\n{\"name\": \"task_complete\", \"arguments\": {\"message\": \"done\"}}"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, raw))
+            await console.flush_stream_buffers()
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "task_complete",
+                    data={"display_text": "task_complete(message=\"done\")", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.ASSISTANT,
+                    "Final answer.",
+                    data={"kind": "replace"},
+                )
+            )
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == "Final answer."
+            assert "task_complete" not in turn.get_assistant_text()
+
+    asyncio.run(_run())
+
+
+def test_empty_assistant_replace_hides_raw_tool_json_block() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            raw = "{\"name\": \"task_complete\", \"arguments\": {\"message\": \"done\"}}"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, raw))
+            await console.flush_stream_buffers()
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "task_complete",
+                    data={"display_text": "task_complete(message=\"done\")", "tool_call_id": "tool-1"},
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.ASSISTANT,
+                    "",
+                    data={"kind": "replace"},
+                )
+            )
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == ""
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            text_blocks = [child for child in content.children if isinstance(child, TextBlockWidget)]
+            assert len(text_blocks) == 1
+            assert text_blocks[0].display is False
 
     asyncio.run(_run())
 
@@ -207,7 +417,7 @@ def test_tool_call_after_meta_and_assistant_stays_in_one_turn() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Second step is underway."))
-            await asyncio.sleep(0.2)
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -258,6 +468,7 @@ def test_user_event_breaks_active_assistant_turn() -> None:
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "First response."))
             await console.append_event(UIEvent(UIEventType.USER, "Next request."))
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Second response."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -282,6 +493,7 @@ def test_system_event_breaks_active_assistant_turn() -> None:
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before system."))
             await console.append_event(UIEvent(UIEventType.SYSTEM, "System notice."))
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After system."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -306,6 +518,7 @@ def test_system_event_suppressed_without_verbose_but_breaks_turn() -> None:
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "Before system."))
             await console.append_event(UIEvent(UIEventType.SYSTEM, "System notice."))
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After system."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -498,6 +711,7 @@ def test_unmatched_tool_result_breaks_active_assistant_turn() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -529,6 +743,7 @@ def test_unmatched_shell_tool_result_is_not_rendered_as_system() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)
@@ -592,6 +807,7 @@ def test_unmatched_file_read_result_is_not_rendered_as_system() -> None:
                 )
             )
             await console.append_event(UIEvent(UIEventType.ASSISTANT, "After result."))
+            await console.flush_stream_buffers()
             await pilot.pause()
 
             stack = console.query_one("#bubble-stack", Vertical)

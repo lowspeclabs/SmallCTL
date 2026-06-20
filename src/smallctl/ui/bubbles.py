@@ -4,6 +4,7 @@ import re
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from rich.markup import escape as markup_escape
 from textual.reactive import reactive
@@ -42,6 +43,53 @@ KIND_COLOR = {
     "cancel": "#ef4444",
     "ready": "#eab308",
 }
+
+
+def _looks_like_complete_pipe_table(text: str) -> bool:
+    lines = [line.rstrip() for line in text.splitlines()]
+    for index in range(len(lines) - 2):
+        header = lines[index].strip()
+        separator = lines[index + 1].strip()
+        if "|" not in header or "|" not in separator:
+            continue
+        separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+        if not separator_cells or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells):
+            continue
+        expected_cells = len(separator_cells)
+        body_count = 0
+        for row in lines[index + 2:]:
+            stripped = row.strip()
+            if not stripped:
+                break
+            if "|" not in stripped:
+                return False
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) != expected_cells:
+                return False
+            body_count += 1
+        if body_count > 0:
+            return True
+    return False
+
+
+def _markdown_render_ready(text: str) -> bool:
+    if not text.strip():
+        return False
+    if text.count("```") % 2 == 1:
+        return False
+    if text.count("`") % 2 == 1:
+        return False
+    if _looks_like_complete_pipe_table(text):
+        return True
+    if re.search(r"(?m)^#{1,6}\s+\S", text):
+        return True
+    if re.search(r"(?m)^\s*[-*+]\s+\S", text):
+        return True
+    if re.search(r"(?m)^\s*\d+\.\s+\S", text):
+        return True
+    if "```" in text:
+        return True
+    return False
 
 
 def _format_duration(seconds: float) -> str:
@@ -124,27 +172,49 @@ class BubbleWidget(Static):
 class TextBlockWidget(Static):
     text: reactive[str] = reactive("")
 
-    def __init__(self, text: str = "", id: str | None = None, classes: str | None = None) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        id: str | None = None,
+        classes: str | None = None,
+        *,
+        render_markdown: bool = False,
+    ) -> None:
         super().__init__("", id=id, classes=classes)
         self.styles.width = "100%"
         self.styles.max_width = "100%"
+        self.render_markdown = render_markdown
+        self._markdown_finalized = False
+        self._rendered_content: object | None = None
         self.text = text
         self._refresh_content()
 
     def set_text(self, value: str) -> None:
         self.text = value
+        self._markdown_finalized = False
         self._refresh_content()
 
     def append_text(self, value: str) -> None:
         self.text += value
+        self._markdown_finalized = False
+        self._refresh_content()
+
+    def finalize_markdown_render(self) -> None:
+        if not self.render_markdown:
+            return
+        self._markdown_finalized = True
         self._refresh_content()
 
     def _refresh_content(self) -> None:
+        if self.render_markdown and self._markdown_finalized and _markdown_render_ready(self.text):
+            self._rendered_content = RichMarkdown(self.text)
+            self.update(self._rendered_content)
+            return
         # Use a plain Text object to avoid Rich markup parsing on arbitrary model output.
         # Model responses may contain brackets like [task_complete(...)] that Rich
         # would try to parse as markup tags, causing 'Expected markup value' crashes.
-        # would try to parse as markup tags, causing 'Expected markup value' crashes.
-        self.update(Text(self.text))
+        self._rendered_content = Text(self.text)
+        self.update(self._rendered_content)
 
     def get_selection(self, selection: Any) -> Any:
         try:
@@ -628,13 +698,19 @@ class AssistantTurnWidget(Vertical):
         self._task_checklist_widget: TaskChecklistWidget | None = None
 
     def has_assistant_text(self) -> bool:
-        return self._last_assistant_block is not None and self._last_assistant_block.has_content()
+        try:
+            return any(
+                isinstance(child, TextBlockWidget) and child.display and child.has_content()
+                for child in self._content_body().children
+            )
+        except Exception:
+            return False
 
     def get_assistant_text(self) -> str:
         parts: list[str] = []
         try:
             for child in self._content_body().children:
-                if isinstance(child, TextBlockWidget):
+                if isinstance(child, TextBlockWidget) and child.display:
                     parts.append(child.text)
         except Exception:
             pass
@@ -705,17 +781,49 @@ class AssistantTurnWidget(Vertical):
             text = _trim_leading_blank_lines(text)
             if not text:
                 return
-            self._last_assistant_block = TextBlockWidget(classes="assistant-turn-text")
+            self._last_assistant_block = TextBlockWidget(
+                classes="assistant-turn-text",
+                render_markdown=True,
+            )
             await self._content_body().mount(self._last_assistant_block)
             await self._ensure_checklist_at_bottom()
         self._last_assistant_block.append_text(text)
         self._last_thinking_detail = None
 
+    def finalize_assistant_render(self) -> None:
+        block = self._last_assistant_block or self._latest_assistant_text_block()
+        if block is not None and block.display:
+            block.finalize_markdown_render()
+
+    def _latest_assistant_text_block(self) -> TextBlockWidget | None:
+        try:
+            for child in reversed(self._content_body().children):
+                if isinstance(child, TextBlockWidget):
+                    return child
+        except Exception:
+            return None
+        return None
+
     def replace_assistant_text(self, text: str) -> None:
-        """Overwrite the current assistant text block with cleaned content.
+        """Overwrite the streamed assistant text with cleaned content.
         Called after the stream finishes to remove any inline tool call JSON."""
-        if self._last_assistant_block is not None:
-            self._last_assistant_block.set_text(_trim_leading_blank_lines(text))
+        block = self._last_assistant_block or self._latest_assistant_text_block()
+        if block is None:
+            return
+        cleaned = _trim_leading_blank_lines(text)
+        if cleaned.strip() == "[Previous assistant output was halted because it entered a repetition loop.]":
+            cleaned = ""
+        if not cleaned.strip():
+            block.set_text("")
+            block.display = False
+            if block is self._last_assistant_block:
+                self._last_assistant_block = None
+            self._content_widget.refresh(layout=True)
+            return
+        block.display = True
+        block.set_text(cleaned)
+        block.finalize_markdown_render()
+        self._last_assistant_block = block
 
     async def add_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         target_detail = None

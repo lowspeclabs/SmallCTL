@@ -77,6 +77,10 @@ class ConsolePane(VerticalScroll):
     async def append_event(self, event: UIEvent) -> None:
         speaker = _coerce_speaker(event.data.get("speaker"))
         if event.event_type == UIEventType.ASSISTANT:
+            if event.data.get("kind") == "replace":
+                await self.flush_stream_buffers()
+                await self._replace_assistant(event.content, speaker=speaker)
+                return
             await self._ensure_assistant_turn(speaker=speaker)
             if event.data.get("kind") == "print":
                 await self.flush_stream_buffers()
@@ -84,9 +88,6 @@ class ConsolePane(VerticalScroll):
                     event.content, 
                     artifact_id=event.data.get("artifact_id")
                 )
-            elif event.data.get("kind") == "replace":
-                await self.flush_stream_buffers()
-                await self._replace_assistant(event.content)
             else:
                 self._append_stream_buffer("assistant", event.content)
                 self._schedule_stream_flush()
@@ -216,11 +217,25 @@ class ConsolePane(VerticalScroll):
         turn = await self._ensure_assistant_turn()
         await turn.append_assistant_text(text)
 
-    async def _replace_assistant(self, text: str) -> None:
+    async def _replace_assistant(self, text: str, *, speaker: str | None = None) -> None:
         """Overwrite the streamed assistant text with the cleaned version.
         This is called after _extract_inline_tool_calls strips tool JSON."""
-        if self._active_assistant_turn is not None:
-            self._active_assistant_turn.replace_assistant_text(text)
+        turn = self._active_assistant_turn or self._latest_assistant_turn()
+        if turn is None:
+            return
+        if speaker:
+            turn.set_speaker(speaker)
+        turn.replace_assistant_text(text)
+
+    def _latest_assistant_turn(self) -> AssistantTurnWidget | None:
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+            for child in reversed(stack.children):
+                if isinstance(child, AssistantTurnWidget):
+                    return child
+        except Exception:
+            return None
+        return None
 
     async def _append_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         turn = await self._ensure_assistant_turn()
@@ -302,7 +317,7 @@ class ConsolePane(VerticalScroll):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        callback = lambda: asyncio.create_task(self.flush_stream_buffers())
+        callback = lambda: asyncio.create_task(self.flush_stream_buffers(finalize_assistant=False))
         if self._stream_flush_soon_once:
             self._stream_flush_soon_once = False
             self._stream_flush_handle = loop.call_soon(callback)
@@ -312,7 +327,7 @@ class ConsolePane(VerticalScroll):
                 callback,
             )
 
-    async def flush_stream_buffers(self) -> None:
+    async def flush_stream_buffers(self, *, finalize_assistant: bool = True) -> None:
         started = time.perf_counter()
         self._cancel_stream_flush()
         groups = list(self._stream_buffer_groups)
@@ -334,6 +349,13 @@ class ConsolePane(VerticalScroll):
                     tool_name=item.get("tool_name"),
                     tool_call_id=item.get("tool_call_id"),
                 )
+        if finalize_assistant:
+            turn = self._active_assistant_turn
+            if turn is not None and hasattr(turn, "finalize_assistant_render"):
+                try:
+                    turn.finalize_assistant_render()
+                except Exception:
+                    pass
         if groups:
             logger.debug(
                 "ui_stream_flush %s",

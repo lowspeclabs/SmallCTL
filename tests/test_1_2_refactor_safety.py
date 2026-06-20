@@ -1942,6 +1942,40 @@ def test_stderr_signature_helpers_extract_line_and_key() -> None:
     assert stderr_signature_key(result) is None
 
 
+def test_stderr_signature_ignores_curl_and_apt_noise() -> None:
+    from smallctl.harness.tool_result_stderr_signatures import stderr_signature_line
+
+    # Curl progress meter header and stats should be ignored.
+    curl_stderr = (
+        "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n"
+        "                                 Dload  Upload   Total   Spent    Left  Speed\n"
+        "\r  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\r\n"
+        "\r100  1320  100  1320    0     0   5743      0 --:--:-- --:--:-- --:--:--  5764\r\n"
+        "\n"
+        "Error: The repository is not signed.\n"
+    )
+    result = SimpleNamespace(output={"stderr": curl_stderr}, error="")
+    assert stderr_signature_line(result) == "Error: The repository is not signed."
+
+    # Apt CLI stability warning should be ignored in favor of the real error.
+    apt_stderr = (
+        "\nWARNING: apt does not have a stable CLI interface. Use with caution in scripts.\n"
+        "\n"
+        "Warning: OpenPGP signature verification failed: ...\n"
+        "Error: The repository 'http://example.com sarge Release' is not signed.\n"
+    )
+    result = SimpleNamespace(output={"stderr": apt_stderr}, error="")
+    assert stderr_signature_line(result).startswith("Error: The repository")
+
+    # Pure noise should yield no signature.
+    noise_only = (
+        "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n"
+        "                                 Dload  Upload   Total   Spent    Left  Speed\n"
+    )
+    result = SimpleNamespace(output={"stderr": noise_only}, error="")
+    assert stderr_signature_line(result) is None
+
+
 def test_ssh_files_patch_utils_apply_exact_and_bounded() -> None:
     from smallctl.tools.ssh_files_patch_utils import (
         apply_exact_patch_content,

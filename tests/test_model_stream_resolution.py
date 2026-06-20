@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import smallctl.graph.model_stream as model_stream_module
 import smallctl.graph.model_stream_loop as model_stream_loop_module
 from smallctl.client import OpenAICompatClient, StreamResult
-from smallctl.graph.model_stream_loop import run_model_stream_loop, _trim_degenerate_suffix
+from smallctl.graph.model_stream_loop import (
+    run_model_stream_loop,
+    _trim_degenerate_suffix,
+    _detect_degenerate_repetition,
+    _DEGENERATE_REPETITION_WINDOW_CHARS,
+)
 from smallctl.graph.model_stream import process_model_stream
 from smallctl.graph.model_stream_resolution import resolve_model_stream_result
 from smallctl.graph.state import GraphRunState
@@ -1143,3 +1148,85 @@ def test_trim_degenerate_suffix_falls_back_to_phrase_trim() -> None:
 def test_trim_degenerate_suffix_returns_original_when_no_window_or_phrase() -> None:
     buffer = "plain text without repetition"
     assert _trim_degenerate_suffix(buffer, "", "") == buffer
+
+
+def test_detect_degenerate_repetition_ignores_short_markdown_bullets() -> None:
+    """Legitimate markdown lists can contain repeated backtick-to-bullet transitions.
+
+    Gemma-4-e4b produced a structured container summary where each container name
+    was wrapped in backticks and followed by bullet details. The transition
+    `` `\n    * `` repeated many times and was misclassified as a degenerate loop.
+    Such short, formatting-only patterns should not trigger the guard.
+    """
+    buffer = (
+        "The task was to connect to `root@192.168.1.89` and list all active and exited "
+        "Docker containers. I have successfully executed `docker ps -a` on the host, and "
+        "the output provides the list of containers:\n\n"
+        "`eloquent_williamson`\n"
+        "    * ID: 316eae6be6a5\n"
+        "    * Image: vikunja/vikunja:latest\n"
+        "`dagu`\n"
+        "    * ID: 5122b89d0ff4\n"
+        "    * Image: ghcr.io/dagucloud/dagu:latest\n"
+        "`third`\n"
+        "    * ID: 111111111111\n"
+        "    * Image: example/third:latest\n"
+        "`fourth`\n"
+        "    * ID: 222222222222\n"
+        "    * Image: example/fourth:latest\n"
+    )
+    assert _detect_degenerate_repetition(buffer) is None
+
+
+def test_detect_degenerate_repetition_still_catches_semantic_loops() -> None:
+    """Phrases that carry semantic content should still be detected when repeated."""
+    buffer = "I understand. " * 50
+    result = _detect_degenerate_repetition(buffer)
+    assert result is not None
+    phrase, count, window = result
+    assert "understand" in phrase
+    assert count >= 6
+    assert len(window) <= _DEGENERATE_REPETITION_WINDOW_CHARS
+
+
+def test_detect_degenerate_repetition_density_ignores_spread_words() -> None:
+    """Verify that common terms spread out in normal text do not trigger loop detection."""
+    # "compose" appears 6 times but spread out across 400 characters
+    buffer = (
+        "We need to check the docker-compose.yml file first. Let's see if the compose file "
+        "contains options for notes. `/opt/notes/docker-compose.yml` is the expected path, "
+        "but it might be that compose is located in `/opt/ghost/docker-compose.yml` or "
+        "another location entirely. We should look for any compose stack in `/opt/qwen-compose`."
+        " Finally, if the compose configurations are not there, we will verify general settings."
+    )
+    padding = (
+        "This is a block of non-repetitive text that we are using to fill up the window "
+        "so that the degenerate repetition loop detector does not exit early. It contains "
+        "many unique words and structures, ensuring that there are no loops or repetitive "
+        "patterns within this initial part of the buffer. Let's make it even longer to ensure "
+        "that the total buffer length is well over 400 characters. This is a very standard way "
+        "to test these features and ensure there is no early exit due to length constraints. "
+        "We want to make sure it functions properly under all circumstances."
+    )
+    buffer = padding + "\n" + buffer
+    assert _detect_degenerate_repetition(buffer) is None
+
+
+def test_detect_degenerate_repetition_density_catches_true_repetitions() -> None:
+    """Verify that back-to-back repetitions of the same phrase are still detected."""
+    buffer = "dagu dagu dagu dagu dagu dagu"
+    padding = (
+        "This is a block of non-repetitive text that we are using to fill up the window "
+        "so that the degenerate repetition loop detector does not exit early. It contains "
+        "many unique words and structures, ensuring that there are no loops or repetitive "
+        "patterns within this initial part of the buffer. Let's make it even longer to ensure "
+        "that the total buffer length is well over 400 characters. This is a very standard way "
+        "to test these features and ensure there is no early exit due to length constraints. "
+        "We want to make sure it functions properly under all circumstances."
+    )
+    buffer = padding + "\n" + buffer
+    result = _detect_degenerate_repetition(buffer)
+    assert result is not None
+    phrase, count, window = result
+    assert phrase.strip() == "dagu"
+    assert count >= 6

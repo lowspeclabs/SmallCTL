@@ -9,24 +9,16 @@ import re
 import time
 from typing import Any, Iterable
 
-from ..client import OpenAICompatClient, StreamResult
+from ..client import StreamResult
 from ..client.chunk_parser import chunk_contains_tool_call_delta
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
-from ..state import json_safe_value
 from .deps import GraphRuntimeDeps
 from .state import GraphRunState
-from .tool_call_parser import _detect_empty_file_write_payload
 from .tool_model_rules import _model_is_lfm25_8b_a1b
-from .model_stream_fallback import StreamProcessingResult
 from .model_stream_fallback_support import (
     _classify_model_call_error,
-    _format_partial_tool_calls,
-)
-from .model_stream_fallback_recovery import (
-    _build_incomplete_tool_call_recovery_message,
-    _is_sub4b_write_timeout,
 )
 from .model_stream_loop_rendering import flush_model_stream_buffer
 from .model_stream_loop_rendering import handle_model_stream_chunk
@@ -83,6 +75,19 @@ class _ModelOutputDegenerate(Exception):
         super().__init__(f"Degenerate repetition detected: {repeated_phrase!r} x{repeat_count}")
 
 
+def _phrase_is_semantic_repetition(phrase: str) -> bool:
+    """Return True when a repeated phrase carries enough semantic content to be a loop signal.
+
+    Very short phrases that are pure markdown formatting (e.g. code-fence transitions,
+    bullet markers) can appear many times in legitimate structured output. Require at
+    least one alphanumeric character for short phrases so real list formatting is not
+    misclassified as a degenerate loop.
+    """
+    if len(phrase) >= 16:
+        return True
+    return bool(re.search(r"[a-z0-9]", phrase, re.IGNORECASE))
+
+
 def _detect_degenerate_repetition(buffer: str) -> tuple[str, int, str] | None:
     """Return (phrase, count, window) if buffer contains a repetitive phrase loop."""
     text = str(buffer or "")
@@ -104,16 +109,28 @@ def _detect_degenerate_repetition(buffer: str) -> tuple[str, int, str] | None:
                 start += 1
                 end += 1
                 continue
+            # Skip short pure-formatting phrases that occur in normal markdown lists
+            if not _phrase_is_semantic_repetition(phrase):
+                start += 1
+                end += 1
+                continue
             # Count non-overlapping occurrences in the window
-            count = 0
+            indices = []
             scan = 0
             while True:
                 idx = lowered.find(phrase, scan)
                 if idx == -1:
                     break
-                count += 1
+                indices.append(idx)
                 scan = idx + len(phrase)
-                if count >= _DEGENERATE_REPETITION_MIN_REPEAT:
+            
+            count = len(indices)
+            if count >= _DEGENERATE_REPETITION_MIN_REPEAT:
+                # Require density (total length of occurrences over their total span)
+                # to be high (e.g. >= 0.70) to ensure the repetitions are consecutive
+                # or near-consecutive, preventing false positives on lists or common terms.
+                span = (indices[-1] + len(phrase)) - indices[0]
+                if span > 0 and (count * len(phrase)) / span >= 0.70:
                     return phrase, count, window
             start += 1
             end += 1

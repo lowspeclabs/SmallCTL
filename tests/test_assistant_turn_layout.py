@@ -421,7 +421,7 @@ def test_shell_stream_nests_under_matching_tool_call() -> None:
             assert nested_results[0].command == "journalctl -f"
             assert "journalctl -f" in nested_results[0].title
             assert "line 1\nline 2\n" in nested_results[0]._content_widget.text
-            assert nested_results[0]._content_widget.styles.color == Color(8, 145, 178)
+            assert nested_results[0]._content_widget.styles.color == Color(22, 163, 74)
 
     asyncio.run(_run())
 
@@ -535,6 +535,44 @@ def test_unmatched_shell_tool_result_is_not_rendered_as_system() -> None:
             children = list(stack.children)
             assert len(children) == 1
             assert children[0].get_assistant_text() == "Before result.After result."
+
+    asyncio.run(_run())
+
+
+def test_shell_stream_before_ssh_tool_call_is_reparented_under_command() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.SHELL_STREAM, "early output\n"))
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "ssh_exec",
+                    data={
+                        "display_text": "ssh_exec(command='ls /etc')",
+                        "tool_call_id": "tool-early",
+                        "args": {"command": "ls /etc", "target": "root@192.168.1.89"},
+                    },
+                )
+            )
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            assert len(content.children) == 1
+            tool_group = content.children[0]
+            assert isinstance(tool_group, ToolCallsContainerWidget)
+            detail = tool_group.query_one(".tool-calls-container", Vertical).children[0]
+            assert isinstance(detail, ToolCallDetailWidget)
+            assert len(detail._result_widgets) == 1
+            bubble = detail._result_widgets[0]
+            assert isinstance(bubble, LiveOutputBubbleWidget)
+            assert bubble.command == "ls /etc"
+            assert "command:" in bubble.title
+            assert "early output" in bubble.text_content
 
     asyncio.run(_run())
 

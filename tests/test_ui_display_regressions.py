@@ -9,6 +9,7 @@ from smallctl.models.events import UIEvent, UIEventType
 from smallctl.state import LoopState
 from smallctl.tools import control
 from smallctl.ui.app_flow import _terminal_status_detail
+from smallctl.ui.bubbles import LiveOutputBubbleWidget, ToolCallDetailWidget
 from smallctl.ui.console import ConsolePane
 from smallctl.ui.display import (
     _build_backend_rca_strip,
@@ -44,6 +45,38 @@ def test_tui_formats_phase_change_and_context_invalidation_events() -> None:
     assert "Phase changed: execute -> repair" in format_run_log_row(phase_row)
     assert "Context invalidated: artifacts=2, observations=1, summaries=0" in format_run_log_row(invalidation_row)
     assert "Subtask update: S2 | Escalate to bigger model | active->done" in format_run_log_row(subtask_row)
+
+
+def test_ssh_exec_tool_call_title_shows_only_target() -> None:
+    widget = ToolCallDetailWidget.__new__(ToolCallDetailWidget)
+    widget.kind = "tool_call"
+    widget.tool_name = "ssh_exec"
+    widget._args = {"host": "192.168.1.89", "target": "root@192.168.1.89", "command": "ls /etc"}
+    widget._start_time = 0.0
+    widget._done_time = 1.0
+    widget._success = True
+
+    title = widget._build_title("ssh_exec raw args")
+
+    assert "ssh_exec" in title
+    assert "root@192.168.1.89" in title
+    assert "host" not in title
+
+
+def test_ssh_exec_nested_output_title_and_success_color() -> None:
+    widget = LiveOutputBubbleWidget.__new__(LiveOutputBubbleWidget)
+    widget.command = "ls /etc"
+    widget.tool_name = "ssh_exec"
+    widget.success = True
+    widget._content_widget = SimpleNamespace(styles=SimpleNamespace(color=None))
+
+    title = widget._build_title()
+    widget._set_content_color()
+
+    assert "command:" in title
+    assert '"ls /etc"' in title
+    assert "Live Output" not in title
+    assert widget._content_widget.styles.color == "#16a34a"
 
 
 def test_task_complete_blocks_fake_escalation_completion() -> None:

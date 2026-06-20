@@ -1,3 +1,5 @@
+import json
+import inspect
 import re
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
@@ -50,6 +52,13 @@ def _format_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     secs = seconds % 60
     return f"{minutes}m{secs:.0f}s"
+
+
+def _trim_title_value(value: str, *, limit: int = 80) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _format_full_printout_text(text: str) -> str:
@@ -280,10 +289,12 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         *,
         text: str = "",
         command: str | None = None,
+        tool_name: str | None = None,
         success: bool | None = None,
         id: str | None = None,
     ) -> None:
         self.command = str(command or "").strip()
+        self.tool_name = str(tool_name or "").strip()
         self.success = success
         super().__init__(
             title="Live Output",
@@ -306,7 +317,7 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         self.title = self._build_title()
 
     def _set_content_color(self) -> None:
-        self._content_widget.styles.color = "#ef4444" if self.success is False else "#0891b2"
+        self._content_widget.styles.color = "#ef4444" if self.success is False else "#16a34a"
 
     def _build_title(self) -> str:
         if self.success is False:
@@ -319,10 +330,11 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
             status_color = "#16a34a"
             status_suffix = ""
         command = self.command or "Command ran"
-        display_cmd = command
-        if len(display_cmd) > 80:
-            display_cmd = display_cmd[:77].rstrip() + "..."
-        display_cmd = markup_escape(display_cmd)
+        display_cmd = markup_escape(_trim_title_value(command))
+        if self.tool_name == "ssh_exec":
+            if self.command:
+                display_cmd = markup_escape(_trim_title_value(json.dumps(self.command)))
+            return f"[bold #16a34a]command: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
         return f"[bold #0891b2]Live Output: [/][bold {status_color}]{display_cmd}{status_suffix}[/]"
 
 
@@ -370,6 +382,9 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self._start_time: float = time.monotonic()
         self._done_time: float | None = None
         super().__init__(kind="tool_call", text=text, id=id)
+        if self.tool_name == "ssh_exec":
+            self._text = ""
+            self._content_widget.set_text("")
 
     @property
     def has_result(self) -> bool:
@@ -397,7 +412,13 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                     base = self.tool_name or self.kind.upper()
             else:
                 base = self.tool_name or self.kind.upper()
-            return f"[bold {color}]{base}{duration_str}[/]"
+            target = ""
+            if self.tool_name == "ssh_exec" and isinstance(self._args, dict):
+                target = str(self._args.get("target") or "").strip()
+            title = f"[bold {color}]{base}{duration_str}[/]"
+            if target:
+                title += f" [bold #ca8a04]{markup_escape(_trim_title_value(target))}[/]"
+            return title
 
         preview = " ".join(text.split())
         if len(preview) > self.PREVIEW_LIMIT:
@@ -424,7 +445,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         if tool_name in {"shell_exec", "ssh_exec"}:
             self._success = bool(data.get("success")) if isinstance(data, dict) else None
             command = self._args.get("command") if isinstance(self._args, dict) else None
-            live_bubble = await self.get_or_create_live_output_bubble(command=command, success=self._success)
+            live_bubble = await self.get_or_create_live_output_bubble(command=command, tool_name=tool_name, success=self._success)
             current = live_bubble.text_content
             if current and text.startswith(current.rstrip("\n")):
                 suffix = text[len(current.rstrip("\n")):]
@@ -493,17 +514,21 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self,
         *,
         command: str | None = None,
+        tool_name: str | None = None,
         success: bool | None = None,
     ) -> LiveOutputBubbleWidget:
         for w in self._result_widgets:
             if isinstance(w, LiveOutputBubbleWidget):
                 if command:
                     w.set_command(command)
+                if tool_name:
+                    w.tool_name = tool_name
+                    w.title = w._build_title()
                 if success is not None:
                     w.set_success(success)
                 return w
 
-        bubble = LiveOutputBubbleWidget(text="", command=command, success=success)
+        bubble = LiveOutputBubbleWidget(text="", command=command, tool_name=tool_name, success=success)
         bubble.add_class("assistant-detail-nested")
         await self.add_child_widget(bubble)
         self._result_widgets.append(bubble)
@@ -772,8 +797,7 @@ class AssistantTurnWidget(Vertical):
             await self._content_body().mount(self._live_output_container)
 
         if self._last_shell_stream is None:
-            self._last_shell_stream = ArtifactBubbleWidget(
-                title="Live Output",
+            self._last_shell_stream = LiveOutputBubbleWidget(
                 text="",
             )
             self._last_shell_stream.add_class("assistant-detail-nested")
@@ -804,9 +828,39 @@ class AssistantTurnWidget(Vertical):
             await self._ensure_checklist_at_bottom()
         await container.add_tool_call(detail)
         self._tool_call_details.append(detail)
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            await self._adopt_pending_live_output(detail)
         self._last_assistant_block = None
         self._last_thinking_detail = None
         return detail
+
+    async def _adopt_pending_live_output(self, detail: ToolCallDetailWidget) -> None:
+        bubble = self._last_shell_stream
+        if bubble is None:
+            return
+        if isinstance(bubble, LiveOutputBubbleWidget):
+            command = detail._args.get("command") if isinstance(detail._args, dict) else None
+            bubble.tool_name = detail.tool_name
+            bubble.set_command(command)
+            bubble.title = bubble._build_title()
+        try:
+            result = bubble.remove()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
+        await detail.add_child_widget(bubble)
+        detail._result_widgets.append(bubble)
+        self._last_shell_stream = None
+        container = self._live_output_container
+        if container is not None and not list(container._body_widget.children):
+            try:
+                result = container.remove()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+            self._live_output_container = None
 
     async def add_tool_result(
         self,

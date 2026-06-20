@@ -244,6 +244,13 @@ def run_boundary_lines(state: LoopState) -> list[str]:
     turn_type = str(source.get("turn_type") or "").strip()
     if turn_type:
         lines.append(f"  Current turn type: {turn_type}.")
+
+    # Show previous goal if it changed (from transaction metadata)
+    previous_goal = str(source.get("previous_goal") or "").strip()
+    if previous_goal:
+        clipped_prev, _ = clip_text_value(previous_goal, limit=160)
+        lines.append(f"  Previous goal: {clipped_prev}")
+
     goal = str(
         source.get("user_goal")
         or source.get("current_goal")

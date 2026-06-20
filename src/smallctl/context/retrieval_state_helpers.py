@@ -55,8 +55,10 @@ def effective_current_goal(state: LoopState) -> str:
     if not current_goal:
         return ""
     previous_task = str(state.scratchpad.get("_task_boundary_previous_task") or "").strip()
+    has_task_transaction = bool(state.scratchpad.get("_task_transaction"))
     if previous_task and normalized_goal_text(previous_task) == normalized_goal_text(current_goal):
-        return ""
+        if not has_task_transaction:
+            return ""
     return current_goal
 
 

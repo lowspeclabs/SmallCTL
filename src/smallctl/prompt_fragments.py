@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 _RESPONSE_STRUCTURE_THINK = (
-    "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block for plan and rationale. "
+    "RESPONSE STRUCTURE: You MUST start EVERY response with a <think> block containing your current goal and task plan. "
+    "Begin <think> by restating your current goal and the specific task you are working on. "
+    "Then outline your plan and rationale. "
 )
 
 _RESPONSE_STRUCTURE_GEMMA = (
-    "RESPONSE STRUCTURE: Start EVERY response with a <think> block for plan and rationale. "
+    "RESPONSE STRUCTURE: Start EVERY response with a <think> block containing your current goal and task plan. "
+    "Begin <think> by restating your current goal and the specific task you are working on. "
     "Then continue with tool calls or the final answer as needed. "
 )
 

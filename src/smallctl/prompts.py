@@ -55,6 +55,7 @@ from .prompts_support import (
     _state_has_remote_cleanup_intent,
 )
 from .harness.task_classifier_support import task_has_local_scope_markers
+from .context.retrieval_state_helpers import effective_current_goal
 from .tools.fs_loop_guard import build_loop_guard_prompt
 from .tools.fs_write_sessions import write_session_contract
 
@@ -113,6 +114,7 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "PRIMARY RULE: Solve the current user task only. Keep the task goal in view and avoid side quests. ",
+                "GOAL ACCOUNTABILITY: Start your response by stating your current goal and the specific task you are working on. If the task changed from a previous turn, acknowledge the change. ",
                 _DELIVERABLE_VERIFICATION,
                 _DOCKER_INSPECT_HINT,
                 _INSTALLER_TIMEOUT_RECOVERY,
@@ -142,6 +144,7 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
+                "GOAL ACCOUNTABILITY: Start your response by stating your current goal and the specific task you are working on. If the task changed from a previous turn, acknowledge the change. ",
                 _DELIVERABLE_VERIFICATION,
                 _DOCKER_INSPECT_HINT,
                 _INSTALLER_TIMEOUT_RECOVERY,
@@ -626,6 +629,21 @@ def build_system_prompt(
         parts.append(
             f"\nCONTRACT: {state.run_brief.task_contract}\n"
         )
+    if state.run_brief.original_task or getattr(state.working_memory, "current_goal", ""):
+        _original = str(state.run_brief.original_task or "")
+        _current = getattr(state.working_memory, "current_goal", "") or ""
+        recap_parts = [f"Goal recap: Original task: {_original}"]
+        if _current and _current != _original:
+            recap_parts.append(f"Current goal: {_current}")
+        _transaction = state.scratchpad.get("_task_transaction") if isinstance(getattr(state, "scratchpad", None), dict) else None
+        if isinstance(_transaction, dict):
+            _prev = _transaction.get("previous_goal") or _transaction.get("effective_task") or ""
+            if _prev and _prev != _current and _prev != _original:
+                recap_parts.append(f"Previous goal was: {_prev}")
+            _turn = _transaction.get("turn_type", "")
+            if _turn:
+                recap_parts.append(f"Transition: {_turn}")
+        parts.append("\n" + " | ".join(recap_parts) + "\n")
     if state.working_memory.known_facts:
         facts = "\n".join(f"- {f}" for f in state.working_memory.known_facts)
         parts.append(

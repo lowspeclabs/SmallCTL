@@ -417,6 +417,31 @@ def test_task_complete_blocks_environment_failure_for_mutation_task(tmp_path) ->
     assert "latest verifier verdict is still failing" in result["error"]
 
 
+def test_task_complete_allows_reported_docker_daemon_failure_for_report_task(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    task = "ssh root@192.168.1.89 and report back the docker containers installed on that host"
+    state.run_brief.original_task = task
+    state.working_memory.current_goal = task
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "failure_mode": "logic",
+        "command": "docker ps -a",
+        "key_stderr": "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    }
+    harness = SimpleNamespace(state=state)
+
+    result = asyncio.run(
+        task_complete(
+            "Unable to retrieve Docker containers because the Docker daemon is not running on the remote host 192.168.1.89.",
+            state,
+            harness,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["output"]["status"] == "complete"
+
+
 def test_force_finalize_completion_signal_ignores_missing_required_input(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.scratchpad["_task_complete"] = True

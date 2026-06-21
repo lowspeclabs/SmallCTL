@@ -36,6 +36,9 @@ _ENVIRONMENT_FAILURE_MARKERS = (
     "no route to host",
     "could not resolve hostname",
     "permission denied",
+    "cannot connect",
+    "docker daemon",
+    "daemon is not running",
 )
 
 _RUN_REPORT_TASK_MARKERS = ("run", "execute", "test", "check", "verify")
@@ -117,9 +120,9 @@ def _environment_failure_completion_allowed(
     ):
         return False
     task_text = _state_task_text(state)
-    if not any(marker in task_text for marker in _RUN_REPORT_TASK_MARKERS):
-        return False
-    if not any(marker in task_text for marker in _REPORT_DELIVERABLE_MARKERS):
+    has_run_report_marker = any(marker in task_text for marker in _RUN_REPORT_TASK_MARKERS)
+    has_deliverable_marker = any(marker in task_text for marker in _REPORT_DELIVERABLE_MARKERS)
+    if not has_run_report_marker and not has_deliverable_marker:
         return False
     if "propose" not in task_text and any(marker in task_text for marker in _MUTATION_TASK_MARKERS):
         return False

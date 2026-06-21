@@ -873,6 +873,23 @@ async def interpret_model_output(
                 if text_has_tool_tags or text_has_func_calls:
                     msg = "### FORMAT ERROR: You used text-based tool tags or functional syntax (e.g. <tool_call> or shell_exec()). This is FORBIDDEN. You MUST use the JSON block format."
 
+                model_name = ""
+                client = getattr(harness, "client", None)
+                if client is not None:
+                    model_name = str(getattr(client, "model", "") or "").strip()
+                if not model_name:
+                    scratchpad = getattr(harness.state, "scratchpad", {}) or {}
+                    if isinstance(scratchpad, dict):
+                        model_name = str(scratchpad.get("_model_name") or "").strip()
+                # Import here to avoid circular imports at module load time.
+                from .tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
+                if _model_is_exact_small_gemma_4_it(model_name):
+                    msg += (
+                        "\n\nGEMMA 4 e2b/e4b EXAMPLE: After </think>, output exactly one line like: "
+                        '`{"name":"ssh_exec","arguments":{"host":"192.168.1.89","user":"root","password":"secret","command":"docker ps"}}`. '
+                        "Replace the example values with the ones from the task. Do not add prose before or after the JSON."
+                    )
+
                 harness.state.append_message(ConversationMessage(
                     role="user",
                     content=f"{msg}\n\nDO NOT repeat your earlier findings or analysis. Just generate the JSON block immediately after your reasoning. Do not describe what you are going to do; just DO it.",

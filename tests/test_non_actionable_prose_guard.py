@@ -257,3 +257,44 @@ def test_reasoning_fallback_empty_text_still_gets_blank_message() -> None:
     assert route == LoopRoute.NEXT_STEP
     assert harness.state.recent_messages[-1].metadata["recovery_kind"] == "blank_message"
     assert "_non_actionable_prose_counts" not in harness.state.scratchpad
+
+
+def test_action_stall_nudge_includes_gemma_example_for_small_gemma_4_it() -> None:
+    harness = _make_harness(task="ssh root@192.168.1.89 and list docker containers")
+    harness.state.scratchpad["_model_name"] = "gemma-4-e2b-it"
+    text = "I will use the ssh_exec tool to connect to the remote host."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="thread-gemma-stall",
+        run_mode="loop",
+    )
+    graph_state.last_assistant_text = text
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    nudge = harness.state.recent_messages[-1]
+    assert nudge.metadata["recovery_kind"] == "action_stall"
+    assert "GEMMA 4 e2b/e4b EXAMPLE" in nudge.content
+    assert '"name":"ssh_exec"' in nudge.content
+
+
+def test_action_stall_nudge_generic_for_other_models() -> None:
+    harness = _make_harness(task="ssh root@192.168.1.89 and list docker containers")
+    harness.state.scratchpad["_model_name"] = "qwen3:32b"
+    text = "I will use the ssh_exec tool to connect to the remote host."
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="thread-generic-stall",
+        run_mode="loop",
+    )
+    graph_state.last_assistant_text = text
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.NEXT_STEP
+    nudge = harness.state.recent_messages[-1]
+    assert nudge.metadata["recovery_kind"] == "action_stall"
+    assert "GEMMA 4 e2b/e4b EXAMPLE" not in nudge.content

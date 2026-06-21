@@ -20,6 +20,7 @@ _INLINE_TOOL_SCHEMA_KEYS = {
     "name",
     "tool_name",
     "tool",
+    "tool_call",
     "action",
     "arguments",
     "args",
@@ -48,10 +49,40 @@ def _try_parse_data(data: Any) -> PendingToolCall | None:
             if extra_fields:
                 pending.parser_metadata["inline_json_extra_fields"] = extra_fields
             return pending
-    name = str(data.get("name", data.get("tool_name", data.get("tool", data.get("action", ""))))).strip()
+
+    def _pick_name() -> str:
+        for key in ("name", "tool_name", "tool_call", "tool", "action"):
+            if key in data:
+                return str(data[key]).strip()
+        return ""
+
+    name = _pick_name()
     if not name:
         return None
-    args = data.get("arguments", data.get("args", data.get("params", data.get("parameters", {}))))
+
+    # Determine the arguments container. Some small models emit a flat object
+    # such as {"tool_call": "artifact_read", "artifact_id": "A0001"} where
+    # every non-name key is an argument.
+    explicit_args_keys = ("arguments", "args", "params", "parameters")
+    args: Any = None
+    for key in explicit_args_keys:
+        if key in data:
+            args = data[key]
+            break
+    if (
+        args is None
+        or not isinstance(args, dict)
+        or ("tool_call" in data and not any(k in data for k in explicit_args_keys))
+    ):
+        inferred_args = {
+            str(key): value
+            for key, value in data.items()
+            if str(key) not in _INLINE_TOOL_SCHEMA_KEYS and str(key) != name
+        }
+        if inferred_args:
+            args = inferred_args
+    if args is None:
+        args = {}
     if isinstance(args, dict):
         raw_arguments = json.dumps(args)
     elif isinstance(args, str):
@@ -66,9 +97,15 @@ def _try_parse_data(data: Any) -> PendingToolCall | None:
     }
     pending = PendingToolCall.from_payload(payload)
     if pending is not None:
-        extra_fields = _inline_json_extra_fields(data)
-        if extra_fields:
-            pending.parser_metadata["inline_json_extra_fields"] = extra_fields
+        arg_keys = set(pending.args.keys()) if isinstance(pending.args, dict) else set()
+        extra_fields = {
+            str(key): value
+            for key, value in data.items()
+            if str(key) not in _INLINE_TOOL_SCHEMA_KEYS and str(key) not in arg_keys
+        }
+        safe_extras = json_safe_value(extra_fields)
+        if isinstance(safe_extras, dict) and safe_extras:
+            pending.parser_metadata["inline_json_extra_fields"] = safe_extras
     return pending
 
 
@@ -82,8 +119,14 @@ def _try_recover_truncated_inline_json(text: str, start: int) -> dict[str, Any] 
     """
     prefix = text[start:]
     lowered_prefix = prefix.lower()
-    has_tool_key = any(key in lowered_prefix for key in ('"tool_name"', '"name"', '"action"', '"tool"', '"function"'))
-    has_args_key = any(key in lowered_prefix for key in ('"arguments"', '"args"', '"params"', '"parameters"'))
+    has_tool_key = any(key in lowered_prefix for key in ('"tool_name"', '"name"', '"action"', '"tool"', '"tool_call"', '"function"'))
+    # For flat {"tool_call": "name", ...args} objects, argument keys are not
+    # wrapped in an explicit arguments container. Presence of "tool_call" is
+    # enough to attempt recovery.
+    has_args_key = (
+        any(key in lowered_prefix for key in ('"arguments"', '"args"', '"params"', '"parameters"'))
+        or '"tool_call"' in lowered_prefix
+    )
     if not has_tool_key or not has_args_key:
         return None
     # The model may have been halted inside a string value (e.g. while

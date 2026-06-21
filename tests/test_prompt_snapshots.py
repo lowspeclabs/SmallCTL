@@ -75,7 +75,8 @@ class TestSystemPromptSnapshots:
         state = _make_state("gemma-4-e2b-it")
         prompt = build_system_prompt(state, "execute")
         assert "SMALL GEMMA-4 FORMAT" in prompt
-        assert "end the reasoning cleanly" in prompt
+        assert "Example:" in prompt
+        assert '"name":"ssh_exec"' in prompt
 
     def test_large_gemma_26b_contract(self) -> None:
         state = _make_state("google_gemma-4-26b-a4b-it")

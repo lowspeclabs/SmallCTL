@@ -13,8 +13,10 @@ _RESPONSE_STRUCTURE_GEMMA = (
 )
 
 _RESPONSE_STRUCTURE_SMALL_GEMMA = (
-    "SMALL GEMMA-4 FORMAT: If you include short reasoning before a tool call, end the reasoning cleanly, "
-    "then emit exactly one JSON tool object on its own line with no wrapper tags. "
+    "SMALL GEMMA-4 FORMAT: Put your reasoning inside a single <think>...</think> block, "
+    "then end the reasoning cleanly and emit exactly one JSON tool object on its own line with no wrapper tags. "
+    "Example: `{\"name\":\"ssh_exec\",\"arguments\":{\"host\":\"192.168.1.89\",\"user\":\"root\",\"password\":\"secret\",\"command\":\"docker ps\"}}`. "
+    "Do not stop after describing the plan; the JSON object must follow the reasoning. "
 )
 
 _TOOL_CALL_FORMAT_JSON = (
@@ -86,6 +88,8 @@ _SMALL_GEMMA_STRICT_FORMAT = (
     "or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
     "If tools are needed, emit only the JSON object. The backticked task_complete examples in this prompt "
     "describe intent only; do not copy that literal syntax into the response. "
+    "After `</think>`, the very next non-empty line must be the JSON tool call. "
+    "Do not add prose such as 'I will use' between `</think>` and the JSON object. "
 )
 
 _GEMMA_4_STRICT_FORMAT = (

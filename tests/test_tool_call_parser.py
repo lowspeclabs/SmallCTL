@@ -139,6 +139,57 @@ def test_action_tool_call_does_not_truncate_following_text() -> None:
     assert "Then I will inspect the result." in result.final_assistant_text
 
 
+def test_extract_inline_json_tool_call_with_tool_call_key() -> None:
+    """Small models sometimes emit a flat JSON object keyed by `tool_call`
+    with the remaining top-level fields as arguments."""
+    text = '{"tool_call": "artifact_read", "artifact_id": "A0001"}'
+
+    cleaned, calls = _extract_inline_tool_calls(
+        text,
+        allowed_raw_function_names={"artifact_read", "task_complete"},
+    )
+
+    assert len(calls) == 1
+    assert calls[0].tool_name == "artifact_read"
+    assert calls[0].args == {"artifact_id": "A0001"}
+    assert cleaned == ""
+
+
+def test_parse_tool_calls_recovers_tool_call_key_from_thinking_text() -> None:
+    """When the assistant text is unhelpful prose but the thinking block
+    contains a flat `tool_call` JSON object, the call should be recovered."""
+    stream = SimpleNamespace(
+        assistant_text="A0001",
+        thinking_text=(
+            "<think>My goal is to list the report.\n"
+            "</think>\n"
+            '{"tool_call": "artifact_read", "artifact_id": "A0001"}'
+        ),
+        tool_calls=[],
+    )
+    harness = _Harness()
+    # Register artifact_read so the parser knows it is allowed.
+    harness.registry.register(
+        ToolSpec(
+            name="artifact_read",
+            description="read an artifact",
+            schema=build_tool_schema(
+                properties={"artifact_id": {"type": "string"}},
+                required=["artifact_id"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    deps = SimpleNamespace(harness=harness)
+    graph_state = SimpleNamespace(run_mode="chat")
+
+    result = parse_tool_calls(stream, [], graph_state, deps)
+
+    assert len(result.pending_tool_calls) == 1
+    assert result.pending_tool_calls[0].tool_name == "artifact_read"
+    assert result.pending_tool_calls[0].args["artifact_id"] == "A0001"
+
+
 def test_real_gemma_run_step_assistant_text_is_deduplicated() -> None:
     """Regression guard for the exact step-3 assistant text from the
     4f5e7b89 Gemma-4-e2b-it run that produced double output."""

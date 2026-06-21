@@ -141,6 +141,10 @@ def _text_contains_tool_protocol_markers(text: str) -> bool:
         "<parameter|",
         "<task_complete",
         "<task_fail",
+        # Small models sometimes emit inline JSON objects keyed by `tool_call`
+        # inside thinking text rather than XML tags.
+        '"tool_call"',
+        "'tool_call'",
     )
     return any(marker in lowered for marker in markers)
 

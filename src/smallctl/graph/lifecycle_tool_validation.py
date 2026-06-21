@@ -55,6 +55,9 @@ async def _validate_pending_tool_calls(harness: Any, graph_state: Any, deps: Any
         if missing_args is None:
             missing_args = _detect_placeholder_tool_call(harness, pending)
         if missing_args is None:
+            from .tool_loop_guards import _detect_command_placeholder
+            missing_args = _detect_command_placeholder(harness, pending)
+        if missing_args is None:
             missing_args = _detect_empty_file_write_payload(harness, pending)
         if missing_args is None:
             missing_args = _detect_missing_required_tool_arguments(harness, pending)

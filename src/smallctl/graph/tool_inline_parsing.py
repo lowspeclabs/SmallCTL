@@ -548,20 +548,50 @@ def _extract_inline_tool_calls(
             cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
             offset += end - start
 
-    json_blocks = list(re.finditer(r"```json\s*(.*?)\s*```", cleaned_text, re.DOTALL))
+    json_blocks = list(re.finditer(r"```json\s*(.*?)\s*```", cleaned_text, re.DOTALL | re.IGNORECASE))
     offset = 0
     for match in json_blocks:
         block = match.group(1)
         try:
             data = json.loads(block)
-            pending = _try_parse_data(data)
+        except Exception:
+            continue
+        items = data if isinstance(data, list) else [data]
+        parsed_any = False
+        for item in items:
+            pending = _try_parse_data(item)
             if pending:
                 results.append(pending)
-                start, end = match.span()
-                cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
-                offset += end - start
+                parsed_any = True
+        if parsed_any:
+            start, end = match.span()
+            cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
+            offset += end - start
+
+    # Unlabeled markdown fences that contain JSON objects/arrays are also
+    # emitted by some small models. Only strip them when the contents parse as
+    # a tool call so that ordinary code blocks stay in the assistant text.
+    unlabeled_blocks = list(re.finditer(r"```\s*\n(.*?)\n\s*```", cleaned_text, re.DOTALL))
+    offset = 0
+    for match in unlabeled_blocks:
+        block = match.group(1).strip()
+        if not block or block[0] not in {"{", "["}:
+            continue
+        try:
+            data = json.loads(block)
         except Exception:
-            pass
+            continue
+        items = data if isinstance(data, list) else [data]
+        parsed_any = False
+        for item in items:
+            pending = _try_parse_data(item)
+            if pending:
+                results.append(pending)
+                parsed_any = True
+        if parsed_any:
+            start, end = match.span()
+            cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
+            offset += end - start
 
     if "{" in cleaned_text:
         start = cleaned_text.find("{")

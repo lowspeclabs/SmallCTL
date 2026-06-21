@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 _GLM_BOX_MODEL_MARKERS = (
     "zai-org/glm-4.6v-flash",
     "glm-4.6v-flash",
@@ -55,8 +57,23 @@ def _model_uses_gpt_oss_rules(model_name: str | None) -> bool:
     return bool(normalized and any(marker in normalized for marker in _GPT_OSS_MODEL_MARKERS))
 
 
+def _collapse_model_name(model_name: str | None) -> str:
+    """Collapse provider/path/whitespace separators to dashes for matching.
+
+    Backends and users report the same Gemma checkpoints with wildly different
+    slugs: ``gemma-4-e2b-it``, ``Gemma 4 e2b``, ``google/gemma-4-e2b-it``,
+    ``gemma_4_e2b``, etc. Collapsing every run of non-alphanumeric characters
+    to a single dash makes substring/suffix checks robust across these forms.
+    """
+    text = str(model_name or "").strip().lower()
+    if not text:
+        return ""
+    collapsed = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return collapsed
+
+
 def _model_uses_gemma_rules(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
+    normalized = _collapse_model_name(model_name)
     return bool(normalized and any(marker in normalized for marker in _GEMMA_MODEL_MARKERS))
 
 
@@ -71,14 +88,17 @@ def _model_is_exact_qwen_25_7b_instruct(model_name: str | None) -> bool:
 
 
 def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(
-        normalized
-        and any(
-            normalized == suffix or normalized.endswith(f"/{suffix}")
-            for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES
-        )
-    )
+    normalized = _collapse_model_name(model_name)
+    if not normalized:
+        return False
+    for suffix in _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES:
+        if (
+            normalized == suffix
+            or normalized.startswith(f"{suffix}-")
+            or normalized.endswith(f"-{suffix}")
+        ):
+            return True
+    return False
 
 
 def _model_is_lfm25_8b_a1b(model_name: str | None) -> bool:

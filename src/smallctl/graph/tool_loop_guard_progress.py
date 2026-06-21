@@ -5,20 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .state import PendingToolCall
-
-
-def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
-    return bool(
-        normalized
-        and any(
-            normalized == suffix or normalized.endswith(f"/{suffix}")
-            for suffix in (
-                "gemma-4-e2b-it",
-                "gemma-4-e4b-it",
-            )
-        )
-    )
+from .tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
 
 
 def _tool_attempt_history(harness: Any) -> list[dict[str, str]]:

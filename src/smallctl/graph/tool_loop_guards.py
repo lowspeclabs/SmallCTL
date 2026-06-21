@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from ..docker_retry_normalization import docker_retry_family
@@ -241,6 +242,41 @@ def _detect_placeholder_tool_call(harness: Any, pending: PendingToolCall) -> tup
         "reason": "placeholder_tool_schema",
         "offending_field": "tool_name",
         "placeholder_arguments": json_safe_value(args),
+    }
+
+
+def _detect_command_placeholder(harness: Any, pending: PendingToolCall) -> tuple[str, dict[str, Any]] | None:
+    """Reject shell/SSH commands that still contain angle-bracket placeholders.
+
+    Small models sometimes emit a command like
+    ``docker run ... <original_docker_run_command>`` where the placeholder is
+    meant to be replaced by the user. Executing it produces a cryptic shell
+    syntax error, so treat it as a missing-argument validation failure instead.
+    """
+    tool_name = str(getattr(pending, "tool_name", "") or "").strip()
+    if tool_name not in {"shell_exec", "bash_exec", "ssh_exec"}:
+        return None
+    args = dict(getattr(pending, "args", {}) or {})
+    command = str(args.get("command", "") or "").strip()
+    if not command:
+        return None
+    # Match a single-word placeholder inside angle brackets, e.g.
+    # <original_docker_run_command>, <path>, <container_name>.
+    match = re.search(r"<[A-Za-z_][A-Za-z0-9_-]*>", command)
+    if not match:
+        return None
+    placeholder = match.group(0)
+    message = (
+        f"The `{tool_name}` command still contains a placeholder: `{placeholder}`. "
+        "Replace it with the actual value before running the command."
+    )
+    return message, {
+        "tool_name": tool_name,
+        "tool_call_id": pending.tool_call_id,
+        "reason": "command_contains_placeholder",
+        "offending_field": "command",
+        "placeholder": placeholder,
+        "command": command,
     }
 
 

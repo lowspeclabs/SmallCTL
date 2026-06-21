@@ -254,3 +254,61 @@ def test_standard_tool_call_still_works_after_gemma_fix() -> None:
 
     assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
     assert result.pending_tool_calls[0].args == {"command": "docker pull vikunja/vikunja", "host": "192.168.1.89"}
+
+
+def test_case_insensitive_json_fence_is_parsed() -> None:
+    """Gemma variants sometimes emit uppercase or mixed-case fence labels."""
+    text = '```JSON\n{"name": "task_complete", "arguments": {"message": "ok"}}\n```'
+
+    result = _parse(text)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["task_complete"]
+    assert result.pending_tool_calls[0].args == {"message": "ok"}
+
+
+def test_unlabeled_json_fence_is_parsed() -> None:
+    """Small models may emit a plain triple-backtick fence around a tool JSON blob."""
+    text = '```\n{"name": "task_complete", "arguments": {"message": "ok"}}\n```'
+
+    result = _parse(text)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["task_complete"]
+    assert result.pending_tool_calls[0].args == {"message": "ok"}
+
+
+def test_unlabeled_json_array_fence_parses_multiple_calls() -> None:
+    text = (
+        "```\n"
+        '[{"name": "ssh_exec", "arguments": {"command": "first"}},'
+        ' {"name": "ssh_exec", "arguments": {"command": "second"}}]\n'
+        "```"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}},
+                required=["command"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    result = _parse(text, registry=registry)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec", "ssh_exec"]
+    assert result.pending_tool_calls[0].args == {"command": "first"}
+    assert result.pending_tool_calls[1].args == {"command": "second"}
+
+
+def test_plain_text_fence_is_not_parsed_as_tool_call() -> None:
+    """Ordinary code blocks without JSON tool shapes must stay in assistant text."""
+    text = "```\nhello world\n```"
+
+    result = _parse(text)
+
+    assert result.pending_tool_calls == []
+    assert "hello world" in result.final_assistant_text

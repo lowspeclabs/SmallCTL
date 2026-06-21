@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Awaitable, Callable
+
+log = logging.getLogger("smallctl.tools.process_streams")
 
 
 async def read_stream_chunks(
@@ -23,7 +26,11 @@ async def read_stream_chunks(
                 chunk = await stream.read(chunk_size)
         except asyncio.TimeoutError:
             break
-        except Exception:
+        except (OSError, ValueError, asyncio.CancelledError) as exc:
+            log.debug("read_stream_chunks error: %s", exc)
+            break
+        except Exception as exc:
+            log.warning("read_stream_chunks unexpected error: %s", exc)
             break
         if not chunk:
             break

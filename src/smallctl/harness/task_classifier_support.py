@@ -11,6 +11,7 @@ from .task_classifier_constants import (
     READONLY_FILE_TARGETS,
     READONLY_SUGGESTION_MARKERS,
     REMOTE_HINTS_WORD_BOUNDARIES_RE,
+    WEB_LOOKUP_MARKERS,
 )
 
 
@@ -60,6 +61,88 @@ _REMOTE_EXECUTION_NEGATION_RE = re.compile(
     r"\b(?:no\s+ssh|no\s+ssh_exec)\b",
     re.IGNORECASE,
 )
+
+
+def looks_like_execution_followup(text: str) -> bool:
+    followup_phrases = (
+        "use the command",
+        "use that command",
+        "run it",
+        "run that",
+        "execute it",
+        "execute that",
+        "try again",
+        "use the shell command",
+        "run the shell command",
+        "execute the shell command",
+    )
+    return any(phrase in text for phrase in followup_phrases)
+
+
+def looks_like_readonly_chat_request(task: str) -> bool:
+    text = task.strip().lower()
+    if not text:
+        return False
+    if looks_like_execution_followup(text):
+        return False
+    readonly_markers = (
+        "what",
+        "which",
+        "show",
+        "read",
+        "find",
+        "search",
+        "grep",
+        "list",
+        "current",
+        "status",
+        "where",
+        "how many",
+        "inspect",
+        "check",
+        "look at",
+        "can you see",
+        "tell me",
+        "summarize",
+    )
+    readonly_targets = (
+        "file",
+        "files",
+        "folder",
+        "directory",
+        "repo",
+        "repository",
+        "cwd",
+        "working directory",
+        "log",
+        "logs",
+        "artifact",
+        "artifacts",
+        "process",
+        "cpu",
+        "ram",
+        "memory",
+        "host",
+        "system",
+        "status",
+        "code",
+        "source",
+        "src",
+        "web",
+        "website",
+        "internet",
+        "online",
+        "docs",
+        "documentation",
+        "pricing",
+        "release",
+        "releases",
+        "announcement",
+        "news",
+    )
+    has_readonly_marker = any(marker in text for marker in readonly_markers)
+    has_target = any(target in text for target in readonly_targets)
+    return has_readonly_marker and has_target
 
 
 def _has_explicit_remote_execution_scope(text: str) -> bool:
@@ -178,7 +261,6 @@ def looks_like_analysis_request(task: str) -> bool:
         return False
     if any(marker in text for marker in ANALYSIS_MARKERS):
         return True
-    from .task_classifier import looks_like_readonly_chat_request
     if looks_like_readonly_chat_request(task) and not looks_like_debug_inspection_request(task):
         return True
     from .task_classifier_content_lookup import needs_loop_for_content_lookup

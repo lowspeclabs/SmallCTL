@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from .installer_preflight import run_installer_preflight_probes
@@ -18,9 +19,10 @@ async def _run_remote_installer_preflight_probes(
     harness: Any = None,
 ) -> dict[str, Any]:
     """Run automated SSH probes to discover installer environment state."""
+    password_files: list[str] = []
 
     def _build_probe_command(probe_script: str) -> str:
-        full_cmd, _env_overrides = _build_ssh_command(
+        full_cmd, _env_overrides, password_file_path = _build_ssh_command(
             host=host,
             command=probe_script,
             user=user,
@@ -28,18 +30,27 @@ async def _run_remote_installer_preflight_probes(
             identity_file=identity_file,
             password=password,
         )
+        if password_file_path:
+            password_files.append(password_file_path)
         return full_cmd
 
     from .shell import create_process as _create_process
-    probes = await run_installer_preflight_probes(
-        command=command,
-        state=state,
-        create_process=_create_process,
-        harness=harness,
-        host=host,
-        user=user or "",
-        build_probe_command=_build_probe_command,
-    )
+    try:
+        probes = await run_installer_preflight_probes(
+            command=command,
+            state=state,
+            create_process=_create_process,
+            harness=harness,
+            host=host,
+            user=user or "",
+            build_probe_command=_build_probe_command,
+        )
+    finally:
+        for path in password_files:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
     # SSH-specific wording
     if probes.get("noninteractive_flags"):
         probes["recommended_approach"] = (

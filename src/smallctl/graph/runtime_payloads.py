@@ -132,8 +132,8 @@ def checkpoint_config(harness: Any, *, recursion_limit: int, thread_id: str | No
     }
 
 
-def serialize_runtime_state(graph_state: GraphRunState, *, input_task: str | None = None) -> LoopGraphPayload:
-    payload: LoopGraphPayload = serialize_graph_state(graph_state)
+def serialize_runtime_state(graph_state: GraphRunState, *, input_task: str | None = None, artifact_store: Any = None) -> LoopGraphPayload:
+    payload: LoopGraphPayload = serialize_graph_state(graph_state, artifact_store=artifact_store)
     if input_task is not None:
         payload["input_task"] = input_task
     return payload
@@ -154,6 +154,7 @@ def build_runtime_payload(
             run_mode=run_mode,
         ),
         input_task=input_task,
+        artifact_store=getattr(harness, "artifact_store", None),
     )
 
 

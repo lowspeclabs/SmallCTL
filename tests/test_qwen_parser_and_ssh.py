@@ -1113,7 +1113,7 @@ def test_ssh_exec_exit1_with_stderr_returns_fail() -> None:
     assert result["metadata"]["ssh_error_class"] == "remote_exit_nonzero"
     assert result["metadata"]["ssh_transport_succeeded"] is True
     assert result["metadata"]["ssh_auth_mode"] == "password"
-    assert result["metadata"]["ssh_auth_transport"] == "sshpass_env"
+    assert result["metadata"]["ssh_auth_transport"] == "sshpass_file"
     assert result["metadata"]["ssh_password_provided"] is True
     assert result["metadata"]["output"]["exit_code"] == 1
     assert not any("username/password" in hint.lower() for hint in result["metadata"]["hints"])
@@ -1267,19 +1267,13 @@ def test_ssh_exec_writes_stdin_data_to_remote_command() -> None:
     assert create_process.await_args.kwargs["stdin"] is asyncio.subprocess.PIPE
 
 
-def test_ssh_exec_retries_when_accept_new_is_rejected() -> None:
+def test_ssh_exec_does_not_retry_when_accept_new_is_rejected() -> None:
     state = LoopState(cwd="/tmp")
     create_process = AsyncMock(
-        side_effect=[
-            _FakeProc(
-                returncode=255,
-                stderr=b"command-line line 0: keyword StrictHostKeyChecking extra arguments at end of line\n",
-            ),
-            _FakeProc(
-                returncode=0,
-                stdout=b"ii  guacamole 1.5.0\n",
-            ),
-        ]
+        return_value=_FakeProc(
+            returncode=255,
+            stderr=b"command-line line 0: keyword StrictHostKeyChecking extra arguments at end of line\n",
+        )
     )
 
     with patch.object(network, "create_process", create_process):
@@ -1294,18 +1288,16 @@ def test_ssh_exec_retries_when_accept_new_is_rejected() -> None:
             )
         )
 
-    assert result["success"] is True
-    assert result["output"]["stdout"] == "ii  guacamole 1.5.0\n"
+    assert result["success"] is False
+    assert "keyword StrictHostKeyChecking" in result["error"]
     assert result["metadata"]["ssh_auth_mode"] == "password"
-    assert result["metadata"]["ssh_auth_transport"] == "sshpass_env"
-    assert result["metadata"]["ssh_option_retry"] == "strict_host_key_checking_no"
-    assert result["metadata"]["ssh_option_retry_reason"] == "accept_new_incompatible"
-    assert result["metadata"]["ssh_strict_host_key_checking"] == "no"
-    assert create_process.await_count == 2
-    first_command = create_process.await_args_list[0].kwargs["command"]
-    second_command = create_process.await_args_list[1].kwargs["command"]
-    assert "StrictHostKeyChecking=accept-new" in first_command
-    assert "StrictHostKeyChecking=no" in second_command
+    assert result["metadata"]["ssh_auth_transport"] == "sshpass_file"
+    assert result["metadata"]["ssh_strict_host_key_checking"] == "accept-new"
+    assert "ssh_option_retry" not in result["metadata"]
+    assert create_process.await_count == 1
+    command = create_process.await_args.kwargs["command"]
+    assert "StrictHostKeyChecking=accept-new" in command
+    assert "StrictHostKeyChecking=no" not in command
 
 
 def test_ssh_exec_blocks_likely_foreground_service_command_before_launch() -> None:
@@ -1355,7 +1347,7 @@ def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     assert args["user"] == "root"
     assert metadata["recovered_ssh_user"] == "root"
     assert metadata["ssh_auth_mode"] == "password"
-    assert metadata["ssh_auth_transport"] == "sshpass_env"
+    assert metadata["ssh_auth_transport"] == "sshpass_file"
     assert metadata["ssh_password_origin"] == "explicit"
     assert metadata["ssh_password_recovered"] is False
 
@@ -1441,7 +1433,7 @@ def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
     assert metadata["recovered_ssh_password"] is True
     assert metadata["recovered_ssh_password_source"] == "task_context"
     assert metadata["ssh_auth_mode"] == "password"
-    assert metadata["ssh_auth_transport"] == "sshpass_env"
+    assert metadata["ssh_auth_transport"] == "sshpass_file"
     assert metadata["ssh_password_origin"] == "task_context"
     assert metadata["ssh_password_recovered"] is True
 
@@ -2536,24 +2528,18 @@ def test_remote_scope_guard_allows_shell_exec_after_repeated_ssh_auth_failure() 
     assert intercepted is None
 
 
-def test_ssh_exec_retries_on_host_key_verification_failure() -> None:
+def test_ssh_exec_does_not_retry_on_host_key_verification_failure() -> None:
     state = LoopState(cwd="/tmp")
     create_process = AsyncMock(
-        side_effect=[
-            _FakeProc(
-                returncode=255,
-                stderr=(
-                    b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
-                    b"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
-                    b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
-                    b"Host key verification failed.\n"
-                ),
+        return_value=_FakeProc(
+            returncode=255,
+            stderr=(
+                b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                b"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n"
+                b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n"
+                b"Host key verification failed.\n"
             ),
-            _FakeProc(
-                returncode=0,
-                stdout=b"pihole\n",
-            ),
-        ]
+        )
     )
 
     with patch.object(network, "create_process", create_process):
@@ -2568,11 +2554,11 @@ def test_ssh_exec_retries_on_host_key_verification_failure() -> None:
             )
         )
 
-    assert result["success"] is True
-    assert result["output"]["stdout"] == "pihole\n"
-    assert result["metadata"]["ssh_option_retry"] == "strict_host_key_checking_no"
-    assert result["metadata"]["ssh_option_retry_reason"] == "host_key_verification"
-    assert create_process.await_count == 2
+    assert result["success"] is False
+    assert result["metadata"]["ssh_error_class"] == "host_key_verification"
+    assert "ssh-keygen -R" in " ".join(result["metadata"].get("hints", []))
+    assert "ssh_option_retry" not in result["metadata"]
+    assert create_process.await_count == 1
 
 
 def test_ssh_exec_host_key_circuit_breaker_blocks_third_attempt() -> None:
@@ -2641,7 +2627,7 @@ def test_ssh_exec_records_host_key_failure_for_circuit_breaker() -> None:
     record = recovery_state.get("root@192.168.1.161", {})
     assert record.get("last_error_class") == "host_key_verification"
     assert record.get("consecutive_count") == 1
-    assert record.get("host_key_retry_done") is True
+    assert record.get("host_key_retry_done") is None
 
 
 def _ssh_registry():

@@ -594,6 +594,68 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         error=f"Unknown tool: {pending.tool_name}",
                         metadata={"tool_name": pending.tool_name}
                     )
+            except Exception as exc:
+                elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
+                error_result = ToolEnvelope(
+                    success=False,
+                    error=f"Tool dispatch failed for `{pending.tool_name}`: {exc}",
+                    metadata={
+                        "reason": "tool_dispatch_exception",
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                        "args": json_safe_value(pending.args),
+                        "elapsed_sec": round(elapsed_sec, 3),
+                        "exception_type": exc.__class__.__name__,
+                    },
+                )
+                log_kv(
+                    harness.log,
+                    logging.WARNING,
+                    "tool_dispatch_exception",
+                    tool_name=pending.tool_name,
+                    tool_call_id=pending.tool_call_id,
+                    exception_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+                _store_tool_execution_record(
+                    harness,
+                    operation_id=operation_id,
+                    thread_id=graph_state.thread_id,
+                    step_count=harness.state.step_count,
+                    pending=pending,
+                    result=error_result,
+                )
+                await harness._emit(
+                    deps.event_handler,
+                    UIEvent(
+                        event_type=UIEventType.TOOL_RESULT,
+                        content=json.dumps(json_safe_value(error_result.to_dict()), ensure_ascii=True),
+                        data={
+                            "tool_name": pending.tool_name,
+                            "tool_call_id": pending.tool_call_id,
+                            "success": False,
+                            "replayed": False,
+                            "output": None,
+                            "error": error_result.error,
+                            "display_text": format_tool_result_display(
+                                tool_name=pending.tool_name,
+                                result=error_result,
+                                request_text=harness.state.run_brief.original_task,
+                            ),
+                        },
+                    ),
+                )
+                graph_state.last_tool_results.append(
+                    ToolExecutionRecord(
+                        operation_id=operation_id,
+                        tool_name=pending.tool_name,
+                        args=pending.args,
+                        tool_call_id=pending.tool_call_id,
+                        result=error_result,
+                    )
+                )
+                harness.state.recent_errors.append(str(error_result.error or f"Tool dispatch failed: {pending.tool_name}"))
+                continue
             except asyncio.CancelledError:
                 elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
                 cancelled_result = ToolEnvelope(

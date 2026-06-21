@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from typing import Any
@@ -243,6 +244,12 @@ async def _cleanup_interactive_session(
     else:
         unregister_process(harness, proc)
     await cancel_tasks(list(session.get("tasks", []) or []))
+    password_file_path = session.get("password_file_path")
+    if password_file_path:
+        try:
+            os.unlink(password_file_path)
+        except FileNotFoundError:
+            pass
 
 
 async def ssh_session_start(
@@ -318,8 +325,9 @@ async def ssh_session_start(
             )
 
     proc = None
+    password_file_path: str | None = None
     try:
-        full_cmd, env_overrides = _build_ssh_command(
+        full_cmd, env_overrides, password_file_path = _build_ssh_command(
             host=host,
             command=command,
             user=user,
@@ -343,15 +351,23 @@ async def ssh_session_start(
 
     from .shell import create_process as _create_process
 
-    proc = await _create_process(
-        command=full_cmd,
-        cwd=".",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.PIPE,
-        env_overrides=env_overrides,
-        harness=harness,
-    )
+    try:
+        proc = await _create_process(
+            command=full_cmd,
+            cwd=".",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+            env_overrides=env_overrides,
+            harness=harness,
+        )
+    except Exception:
+        if password_file_path:
+            try:
+                os.unlink(password_file_path)
+            except FileNotFoundError:
+                pass
+        raise
     session_id = f"sshint-{uuid.uuid4().hex[:12]}"
     session: dict[str, Any] = {
         "proc": proc,
@@ -363,6 +379,7 @@ async def ssh_session_start(
         "started_at": time.time(),
         "timeout_sec": max(1, int(timeout_sec or 900)),
         "harness": harness,
+        "password_file_path": password_file_path,
     }
     _SSH_INTERACTIVE_SESSIONS[session_id] = session
     _sync_active_ssh_session_to_state(state, session_id, session, status="running")

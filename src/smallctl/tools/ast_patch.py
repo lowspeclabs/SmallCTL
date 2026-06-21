@@ -244,6 +244,13 @@ async def handle_ast_patch(
     if suspicious_path is not None:
         return suspicious_path
 
+    from .fs_listing import _guard_workspace_containment
+    workspace = cwd or (state.cwd if state is not None else None)
+    if workspace:
+        containment = _guard_workspace_containment(path, workspace, operation="ast_patch")
+        if containment is not None:
+            return containment
+
     normalized_language = str(language or "python").strip().lower() or "python"
     normalized_operation = str(operation or "").strip()
     normalized_target = dict(target or {})

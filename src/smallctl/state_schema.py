@@ -187,7 +187,7 @@ class ExecutionPlan:
         return None
 
     def compact_lines(self) -> list[str]:
-        from .state_records import _compact_plan_step_lines
+        from .state_coercion_helpers import _compact_plan_step_lines
 
         lines = [f"{self.plan_id}: {self.goal}".strip()]
         if self.summary:
@@ -279,6 +279,7 @@ class ReasoningGraph:
     evidence_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     claim_ids: list[str] = field(default_factory=list)
+    max_records_per_lane: int = 5000
 
     def __post_init__(self) -> None:
         self.touch_ids()
@@ -288,18 +289,36 @@ class ReasoningGraph:
         self.decision_ids = [record.decision_id for record in self.decision_records if record.decision_id]
         self.claim_ids = [record.claim_id for record in self.claim_records if record.claim_id]
 
+    def trim_records(self, max_per_lane: int | None = None) -> None:
+        limit = max_per_lane if max_per_lane is not None and max_per_lane > 0 else self.max_records_per_lane
+        if limit <= 0:
+            return
+        if len(self.evidence_records) > limit:
+            self.evidence_records = self.evidence_records[-limit:]
+        if len(self.decision_records) > limit:
+            self.decision_records = self.decision_records[-limit:]
+        if len(self.claim_records) > limit:
+            self.claim_records = self.claim_records[-limit:]
+        self.touch_ids()
+
+    def _derived_ids(self) -> tuple[list[str], list[str], list[str]]:
+        evidence_ids = [record.evidence_id for record in self.evidence_records if record.evidence_id]
+        decision_ids = [record.decision_id for record in self.decision_records if record.decision_id]
+        claim_ids = [record.claim_id for record in self.claim_records if record.claim_id]
+        return evidence_ids, decision_ids, claim_ids
+
     def to_dict(self) -> dict[str, Any]:
         from .state_support import json_safe_value
 
-        self.touch_ids()
+        evidence_ids, decision_ids, claim_ids = self._derived_ids()
         return {
             "graph_version": self.graph_version,
             "evidence_records": [json_safe_value(record) for record in self.evidence_records],
             "decision_records": [json_safe_value(record) for record in self.decision_records],
             "claim_records": [json_safe_value(record) for record in self.claim_records],
-            "evidence_ids": list(self.evidence_ids),
-            "decision_ids": list(self.decision_ids),
-            "claim_ids": list(self.claim_ids),
+            "evidence_ids": evidence_ids,
+            "decision_ids": decision_ids,
+            "claim_ids": claim_ids,
         }
 
 

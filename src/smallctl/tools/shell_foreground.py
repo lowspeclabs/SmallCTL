@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from typing import Any
+
+log = logging.getLogger("smallctl.tools.shell_foreground")
 
 from ..models.events import UIEvent, UIEventType
 from ..risk_policy import evaluate_risk_policy
@@ -17,6 +20,7 @@ from .shell_support import (
     _build_argparse_missing_args_question,
     _build_argparse_unrecognized_args_hint,
     _build_shell_status_update,
+    _command_requires_shell,
     _detect_unsupported_shell_syntax,
     _extract_missing_argparse_arguments,
     _extract_unrecognized_argparse_arguments,
@@ -70,6 +74,87 @@ def _command_may_need_sudo(command: str) -> bool:
     return bool(re.search(r"(^|[\s;&|({\[])sudo([\s-]|$)", lowered))
 
 
+def _process_runs_under_pty(proc: Any) -> bool:
+    """Best-effort check whether a process is attached to a PTY."""
+    explicit = getattr(proc, "is_running_under_pty", None)
+    if explicit is not None:
+        return bool(explicit)
+    stdout = getattr(proc, "stdout", None)
+    if stdout is not None:
+        isatty = getattr(stdout, "isatty", None)
+        if callable(isatty):
+            try:
+                return bool(isatty())
+            except Exception:
+                pass
+        fileno = getattr(stdout, "fileno", None)
+        if callable(fileno):
+            try:
+                import os as _os
+
+                return _os.isatty(fileno())
+            except Exception:
+                pass
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        get_extra = getattr(transport, "get_extra_info", None)
+        if callable(get_extra):
+            try:
+                return bool(get_extra("pty"))
+            except Exception:
+                pass
+    return False
+
+
+def _process_child_command_basename(proc: Any) -> str | None:
+    """Best-effort basename of the actual child process executable."""
+    explicit = getattr(proc, "child_command_basename", None)
+    if explicit:
+        return str(explicit).lower()
+    argv = getattr(proc, "argv", None)
+    if isinstance(argv, (list, tuple)) and argv:
+        return Path(str(argv[0])).name.lower()
+    command = getattr(proc, "command", None)
+    if isinstance(command, str) and command:
+        parts = command.strip().split()
+        if parts:
+            return Path(parts[0]).name.lower()
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0:
+        try:
+            import os as _os
+
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if _os.path.exists(cmdline_path):
+                with open(cmdline_path, "rb") as fh:
+                    data = fh.read()
+                if data:
+                    first = data.split(b"\x00")[0].decode("utf-8", errors="replace")
+                    return Path(first).name.lower()
+        except Exception:
+            pass
+    return None
+
+
+def _verify_sudo_process(proc: Any, command: str) -> bool:
+    """Return True if the receiving process is verified to be sudo.
+
+    Feeding a configured password is allowed when the process is running under
+    a PTY (so the user can see the interactive prompt) or when the actual child
+    executable is sudo.  If process metadata cannot be inspected (e.g. tests or
+    restricted environments), fall back to the leading command token already
+    vetted by :func:`_command_may_need_sudo`.
+    """
+    if _process_runs_under_pty(proc):
+        return True
+    basename = _process_child_command_basename(proc)
+    if basename == "sudo":
+        return True
+    if basename is not None:
+        return False
+    return _command_uses_leading_sudo(command)
+
+
 def _classify_shell_failure(command: str, error: str, output: dict[str, Any]) -> dict[str, Any]:
     lowered_error = str(error or "").lower()
     lowered_command = str(command or "").lower()
@@ -111,15 +196,33 @@ async def _feed_sudo_password_to_process(
     when no password is available.  The caller is responsible for stopping the
     process if this returns a guard envelope.
     """
+    if not _command_may_need_sudo(command):
+        return fail(
+            "Detected a password prompt but the command is not known to use sudo. "
+            "Refusing to feed a password to an unverified process.",
+            metadata={"command": command, "reason": "sudo_prompt_unexpected"},
+        )
+
     password_fn = getattr(harness, "get_sudo_password", None)
     password: str | None = None
     if callable(password_fn):
         password = password_fn(command=command)
+    else:
+        store = getattr(harness, "credential_store", None)
+        if store is not None:
+            password = store.get_sudo_password()
     if not isinstance(password, str) or not password.strip():
         return needs_human(
             f"Command requires sudo/password input: '{command}'. "
             "Set a sudo password in config or configure passwordless sudo.",
             metadata={"command": command, "reason": "sudo_password_required"},
+        )
+
+    if not _verify_sudo_process(proc, command):
+        return fail(
+            "Detected a password prompt but the receiving process is not verified to be sudo. "
+            "Enter the password interactively.",
+            metadata={"command": command, "reason": "sudo_prompt_unexpected"},
         )
 
     stdin = getattr(proc, "stdin", None)
@@ -245,7 +348,7 @@ async def shell_exec_foreground(
 
             stdin_setting = asyncio.subprocess.PIPE if _command_may_need_sudo(command) else asyncio.subprocess.DEVNULL
             proc = await create_process(
-                command=command, cwd=state.cwd, harness=harness, stdin=stdin_setting
+                command=command, cwd=state.cwd, harness=harness, stdin=stdin_setting, shell=_command_requires_shell(command)
             )
 
             stdout_data = []
@@ -297,8 +400,10 @@ async def shell_exec_foreground(
                             if proc and proc.returncode is None:
                                 try:
                                     proc.kill()
-                                except Exception:
-                                    pass
+                                except (OSError, ProcessLookupError) as exc:
+                                    log.debug("failed to kill process for invalid-input loop: %s", exc)
+                                except Exception as exc:
+                                    log.warning("unexpected error killing process: %s", exc)
 
                     await stream_emitter.emit_text(chunk_str)
 
@@ -340,8 +445,10 @@ async def shell_exec_foreground(
                     if timed_out and proc and proc.returncode is None:
                         try:
                             proc.kill()
-                        except Exception:
-                            pass
+                        except (OSError, ProcessLookupError) as exc:
+                            log.debug("failed to kill timed-out process: %s", exc)
+                        except Exception as exc:
+                            log.warning("unexpected error killing timed-out process: %s", exc)
                     await stream_emitter.flush()
                     try:
                         await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task), timeout=1.0)

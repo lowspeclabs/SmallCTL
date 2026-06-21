@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .state_coercion_helpers import _compact_plan_step_lines
 from .state_records import (
     _coerce_artifact_record,
     _coerce_background_process_record,
@@ -28,7 +29,6 @@ from .state_records import (
     _coerce_working_memory,
     _coerce_write_session,
     _coerce_turn_bundle,
-    _compact_plan_step_lines,
     _trim_recent_messages,
     align_memory_entries,
     memory_entry_is_stale,

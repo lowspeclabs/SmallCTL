@@ -4,9 +4,13 @@ from types import SimpleNamespace
 
 from smallctl.context.assembler import PromptAssembler
 from smallctl.context.frame_compiler import PromptStateFrameCompiler
-from smallctl.context.frame_invalidation_filtering import experience_invalidated_with_reason
+from smallctl.context.frame_invalidation_filtering import (
+    experience_invalidated_with_reason,
+    verifier_failure_related_to_text,
+)
 from smallctl.context.frame_working_memory_rendering import _is_low_value_known_fact, render_working_memory
 from smallctl.context.retrieval import LexicalRetriever
+from smallctl.graph.interpret_nodes import _assistant_text_looks_like_shell_command
 from smallctl.harness.tool_result_artifact_updates import _apply_ssh_file_mutation_updates
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.recovery_schema import Subtask, SubtaskLedger
@@ -369,3 +373,33 @@ def test_3a60dd3d_trace_replay_simulated() -> None:
     frame = PromptStateFrameCompiler().compile(state=state)
     wm_text = frame.spine.working_memory_text
     assert "blocked" in wm_text.lower() or "blocker" in wm_text.lower()
+
+
+def test_verifier_failure_without_paths_does_not_invalidate_optimistic_text() -> None:
+    """Path-less verifier failures should not blanket-invalidate optimistic context."""
+    event = {"reason": "verifier_failed", "paths": [], "details": {"command": "systemctl status docker"}}
+    assert verifier_failure_related_to_text("docker service is healthy", event) is False
+
+
+def test_fama_failure_without_paths_still_invalidates_optimistic_text() -> None:
+    """FAMA-detected failures stay broad even without concrete paths."""
+    event = {"reason": "fama_failure_detected", "paths": [], "details": {}}
+    assert verifier_failure_related_to_text("docker service is healthy", event) is True
+
+
+def test_verifier_failure_with_paths_relates_to_matching_text() -> None:
+    event = {
+        "reason": "verifier_failed",
+        "paths": ["/tmp/config.yaml"],
+        "details": {"command": "cat /tmp/config.yaml"},
+    }
+    assert verifier_failure_related_to_text("the config at /tmp/config.yaml is valid", event) is True
+    assert verifier_failure_related_to_text("the config at /etc/other.yaml is valid", event) is False
+
+
+def test_assistant_shell_command_detection() -> None:
+    assert _assistant_text_looks_like_shell_command("docker inspect abc123") is True
+    assert _assistant_text_looks_like_shell_command("systemctl restart docker") is True
+    assert _assistant_text_looks_like_shell_command("`ssh root@host uptime`") is True
+    assert _assistant_text_looks_like_shell_command("The container failed due to memory pressure.") is False
+    assert _assistant_text_looks_like_shell_command("") is False

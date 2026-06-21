@@ -31,6 +31,7 @@ from .approvals import ApprovalService
 from .backend_recovery import BackendRecoveryService
 from .compaction import CompactionService
 from .config import HarnessConfig
+from .credential_store import CredentialStore
 from .factory import SubtaskService
 from .memory import MemoryService
 from .prompt_builder import PromptBuilderService
@@ -122,7 +123,11 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.event_handler = None
     self.allow_interactive_shell_approval = bool(config.allow_interactive_shell_approval)
     self.shell_approval_session_default = bool(config.shell_approval_session_default)
-    self.sudo_password = config.sudo_password
+    self.credential_store = CredentialStore()
+    if config.sudo_password:
+        self.credential_store.set_sudo_password(config.sudo_password)
+    self.sudo_password = None
+    config.sudo_password = None
     self._configured_tool_profiles = list(config.tool_profiles) if config.tool_profiles else None
     self._strategy_prompt = config.strategy_prompt
     self._indexer = config.indexer
@@ -196,6 +201,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         state=self.state,
         phase=normalized_phase,
         run_logger=config.run_logger,
+        harness=self,
     )
     self.configured_max_prompt_tokens: int | None = config.max_prompt_tokens
     self.configured_max_prompt_tokens_explicit = bool(config.max_prompt_tokens_explicit)

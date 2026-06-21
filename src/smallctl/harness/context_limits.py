@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -118,6 +119,20 @@ def apply_server_context_limit(
         provider_profile=getattr(harness, "provider_profile", None),
         model_name=model_name,
     )
+
+    if (
+        configured_budget is not None
+        and configured_budget_explicit
+        and effective_max_prompt_tokens is not None
+        and effective_max_prompt_tokens < configured_budget
+    ):
+        logging.getLogger("smallctl.harness").warning(
+            "Prompt budget reduced from configured %s to effective %s tokens "
+            "(server context limit: %s). Leave more headroom for completion tokens or increase the backend context size.",
+            configured_budget,
+            effective_max_prompt_tokens,
+            harness.server_context_limit,
+        )
 
     if (
         configured_budget is not None

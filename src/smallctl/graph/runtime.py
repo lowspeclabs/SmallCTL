@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END
 from langgraph.types import Command, interrupt
 
@@ -176,14 +177,15 @@ class LoopGraphRuntime(CompiledGraphRuntimeBase):
         payload_value = graph_state.interrupt_payload or graph_state.loop_state.pending_interrupt or {}
         try:
             human_input = interrupt(payload_value)
+        except GraphInterrupt:
+            raise
         except Exception as exc:
-            if "Interrupt" in exc.__class__.__name__ or "Bubble" in exc.__class__.__name__:
-                raise
             log_kv(
                 self.deps.harness.log,
                 logging.ERROR,
                 "interrupt_for_human_fallback",
                 error=str(exc),
+                exception_type=exc.__class__.__name__,
                 detail="langgraph interrupt raised an exception; falling back to ask_human injection",
             )
             # Fallback: inject a system message that forces the model to call ask_human

@@ -49,7 +49,9 @@ def normalize_tool_request(
     *,
     phase: str | None = None,
     state: Any | None = None,
+    harness: Any | None = None,
 ) -> tuple[str, dict[str, Any], ToolEnvelope | None, dict[str, Any]]:
+    credential_store = getattr(harness, "credential_store", None)
     tool_name, arguments, normalization_metadata = _normalize_initial_tool_request(tool_name, arguments)
 
     if tool_name == "artifact_read":
@@ -80,6 +82,7 @@ def normalize_tool_request(
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
             state=state,
+            credential_store=credential_store,
         )
         normalization_metadata.update(pre_metadata)
         try:
@@ -87,6 +90,7 @@ def normalize_tool_request(
             normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
                 normalized_arguments,
                 state=state,
+                credential_store=credential_store,
             )
             for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
                 if _preserve_key in normalization_metadata:
@@ -99,6 +103,7 @@ def normalize_tool_request(
                 normalized_arguments,
                 state=state,
                 normalization_metadata=normalization_metadata,
+                credential_store=credential_store,
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
@@ -123,6 +128,7 @@ def normalize_tool_request(
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
             state=state,
+            credential_store=credential_store,
         )
         normalization_metadata.update(pre_metadata)
         try:
@@ -130,6 +136,7 @@ def normalize_tool_request(
             normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
                 normalized_arguments,
                 state=state,
+                credential_store=credential_store,
             )
             for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
                 if _preserve_key in normalization_metadata:
@@ -142,6 +149,7 @@ def normalize_tool_request(
                 normalized_arguments,
                 state=state,
                 normalization_metadata=normalization_metadata,
+                credential_store=credential_store,
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
@@ -175,6 +183,7 @@ def normalize_tool_request(
         pre_recovered, pre_metadata = _recover_ssh_arguments_from_task_context(
             arguments,
             state=state,
+            credential_store=credential_store,
         )
         normalization_metadata.update(pre_metadata)
         try:
@@ -182,6 +191,7 @@ def normalize_tool_request(
             normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
                 normalized_arguments,
                 state=state,
+                credential_store=credential_store,
             )
             for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
                 if _preserve_key in normalization_metadata:
@@ -194,6 +204,7 @@ def normalize_tool_request(
                 normalized_arguments,
                 state=state,
                 normalization_metadata=normalization_metadata,
+                credential_store=credential_store,
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
@@ -302,6 +313,7 @@ def normalize_tool_request(
     rewritten_args, ssh_metadata = _recover_ssh_arguments_from_task_context(
         rewritten_args,
         state=state,
+        credential_store=credential_store,
     )
     normalization_metadata.update(ssh_metadata)
     auth_recovery_error, auth_recovery_metadata = _guard_ssh_auth_recovery(

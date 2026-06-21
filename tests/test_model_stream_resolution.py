@@ -14,7 +14,10 @@ from smallctl.graph.model_stream_loop import (
     _DEGENERATE_REPETITION_WINDOW_CHARS,
 )
 from smallctl.graph.model_stream import process_model_stream
-from smallctl.graph.model_stream_resolution import resolve_model_stream_result
+from smallctl.graph.model_stream_resolution import (
+    MAX_DEGENERATE_LOOP_RETRIES,
+    resolve_model_stream_result,
+)
 from smallctl.graph.state import GraphRunState
 from smallctl.state import LoopState
 from smallctl.write_session_fsm import new_write_session
@@ -1268,3 +1271,59 @@ def test_overflow_without_passed_verdict_remains_failure() -> None:
 
     assert result is False
     assert graph_state.final_result is None
+
+
+def test_max_degenerate_loop_retries_threshold_is_three() -> None:
+    assert MAX_DEGENERATE_LOOP_RETRIES == 3
+
+
+def test_degenerate_loop_switches_reasoning_mode_off_at_third_iteration() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.reasoning_mode = "tags"
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    details = {
+        "reason": "model_output_degenerate_loop",
+        "repeated_phrase": '": "',
+        "repeat_count": 6,
+        "buffer_chars": 449,
+    }
+
+    async def _run_once():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=[],
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=True,
+            stream_ended_without_done_details=details,
+            partial_assistant_text="",
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=False,
+            echo_to_stdout=False,
+            messages=[{"role": "user", "content": "fix pong.py"}],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    first = asyncio.run(_run_once())
+    assert first is not None
+    assert harness.reasoning_mode == "tags"
+    assert state.scratchpad.get("_consecutive_degenerate_loops") == 1
+
+    second = asyncio.run(_run_once())
+    assert second is not None
+    assert harness.reasoning_mode == "tags"
+    assert state.scratchpad.get("_consecutive_degenerate_loops") == 2
+
+    third = asyncio.run(_run_once())
+    assert third is not None
+    assert harness.reasoning_mode == "off"
+    assert state.scratchpad.get("_thinking_tags_disabled") is True
+    assert state.scratchpad.get("_consecutive_degenerate_loops") == 3
+    assert any(
+        event[0][0] == "degenerate_loop_reasoning_mode_disabled"
+        for event in harness.runlog_events
+    )

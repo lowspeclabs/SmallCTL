@@ -213,13 +213,16 @@ def test_observer_noop_when_no_preflights_in_scratchpad() -> None:
     state = LoopState()
     state.current_phase = "execute"
     service = _FakeService(state)
+    original_scratchpad = dict(state.scratchpad)
 
-    # Should not raise
-    _observe_remote_installer_preflight_check(
+    result = _observe_remote_installer_preflight_check(
         service,
         result=_ssh_result(),
         arguments={"command": "pwd", "host": "192.0.2.10"},
     )
+
+    assert result is None
+    assert state.scratchpad == original_scratchpad
 
 
 def test_observer_idempotent_on_duplicate_checks() -> None:

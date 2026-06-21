@@ -10,6 +10,7 @@ from typing import Any
 
 from .models.conversation import ConversationMessage
 from .recovery_schema import FailureEvent, ReflectionMemory, SubtaskLedger
+from .redaction import redact_sensitive_data
 from .state_flow import LoopStateFlowMixin
 from .state_schema import (
     ArtifactRecord,
@@ -146,6 +147,7 @@ class LoopState(LoopStateFlowMixin):
     warm_experiences: list[ExperienceMemory] = field(default_factory=list)
     retrieved_experience_ids: list[str] = field(default_factory=list)
     tool_execution_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_execution_records_limit: int = 2000
     pending_interrupt: dict[str, Any] | None = None
     background_processes: dict[str, dict[str, Any]] = field(default_factory=dict)
     cwd: str = field(default_factory=lambda: str(Path.cwd()))
@@ -158,6 +160,9 @@ class LoopState(LoopStateFlowMixin):
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
     recent_message_limit: int = 6
+    transcript_message_limit: int = 5000
+    reasoning_graph_max_records_per_lane: int = 5000
+    artifact_limit: int = 5000
     last_completion_tokens: int = 0
     tool_history: list[str] = field(default_factory=list)
     write_session: WriteSession | None = None
@@ -174,6 +179,7 @@ class LoopState(LoopStateFlowMixin):
 
     def append_message(self, message: ConversationMessage) -> None:
         self.transcript_messages.append(message)
+        self.trim_transcript_messages()
         self.recent_messages.append(message)
         self.recent_messages = _trim_recent_messages(
             self.recent_messages,
@@ -187,9 +193,184 @@ class LoopState(LoopStateFlowMixin):
             self.tool_history = self.tool_history[-limit:]
         self.touch()
 
-    def to_dict(self) -> dict[str, Any]:
+    def trim_transcript_messages(self, limit: int | None = None) -> None:
+        limit = limit if limit is not None and limit > 0 else self.transcript_message_limit
+        if limit <= 0:
+            return
+        if len(self.transcript_messages) > limit:
+            self.transcript_messages = self.transcript_messages[-limit:]
+
+    def _protected_artifact_ids(self) -> set[str]:
+        protected: set[str] = set()
+        active_session_ids: set[str] = set()
+        if self.write_session is not None:
+            active_session_ids.add(str(getattr(self.write_session, "write_session_id", "") or ""))
+        for session in (self.active_write_sessions_by_path or {}).values():
+            if session is not None:
+                active_session_ids.add(str(getattr(session, "write_session_id", "") or ""))
+        active_session_ids.discard("")
+        for artifact_id, record in (self.artifacts or {}).items():
+            if str(getattr(record, "session_id", "") or "") in active_session_ids:
+                protected.add(artifact_id)
+        for record in (self.tool_execution_records or {}).values():
+            if not isinstance(record, dict):
+                continue
+            for key in ("artifact_id", "evidence_artifact_id"):
+                value = record.get(key)
+                if isinstance(value, str) and value:
+                    protected.add(value)
+            evidence_record = record.get("evidence_record")
+            if isinstance(evidence_record, dict):
+                value = evidence_record.get("artifact_id")
+                if isinstance(value, str) and value:
+                    protected.add(value)
+            result = record.get("result")
+            if isinstance(result, dict):
+                metadata = result.get("metadata") or {}
+                if isinstance(metadata, dict):
+                    value = metadata.get("artifact_id")
+                    if isinstance(value, str) and value:
+                        protected.add(value)
+        if getattr(self, "plan_artifact_id", ""):
+            protected.add(self.plan_artifact_id)
+        for evidence in (self.step_evidence or {}).values():
+            for artifact_id in getattr(evidence, "artifact_ids", []) or []:
+                if artifact_id:
+                    protected.add(artifact_id)
+        if self.step_verification_result is not None:
+            value = getattr(self.step_verification_result, "evidence_artifact_id", "")
+            if value:
+                protected.add(str(value))
+        for summary in (self.episodic_summaries or []):
+            for artifact_id in getattr(summary, "artifact_ids", []) or []:
+                if artifact_id:
+                    protected.add(artifact_id)
+            full_id = getattr(summary, "full_summary_artifact_id", "")
+            if full_id:
+                protected.add(str(full_id))
+        for brief in (self.context_briefs or []):
+            for artifact_id in getattr(brief, "artifact_ids", []) or []:
+                if artifact_id:
+                    protected.add(artifact_id)
+            full_id = getattr(brief, "full_artifact_id", "")
+            if full_id:
+                protected.add(str(full_id))
+        for bundle in (self.turn_bundles or []):
+            for artifact_id in getattr(bundle, "artifact_ids", []) or []:
+                if artifact_id:
+                    protected.add(artifact_id)
+        for item in (self.retrieval_cache or []):
+            if isinstance(item, str) and item.startswith("A") and item[1:].isdigit():
+                protected.add(item)
+        return protected
+
+    def _protected_tool_execution_record_ids(self) -> set[str]:
+        protected: set[str] = set()
+        protected_artifacts = self._protected_artifact_ids()
+
+        active_plan_ids: set[str] = set()
+        for plan in (self.active_plan, self.draft_plan):
+            plan_id = str(getattr(plan, "plan_id", "") or "").strip()
+            if plan_id:
+                active_plan_ids.add(plan_id)
+
+        recent_evidence_ids: set[str] = set()
+        for evidence in getattr(self.reasoning_graph, "evidence_records", []) or []:
+            evidence_id = str(getattr(evidence, "evidence_id", "") or "").strip()
+            if evidence_id:
+                recent_evidence_ids.add(evidence_id)
+
+        for evidence in (self.step_evidence or {}).values():
+            for operation_id in getattr(evidence, "tool_operation_ids", []) or []:
+                if operation_id:
+                    protected.add(str(operation_id))
+
+        for operation_id, record in (self.tool_execution_records or {}).items():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("plan_id") or "").strip() in active_plan_ids:
+                protected.add(operation_id)
+            if str(record.get("artifact_id") or "").strip() in protected_artifacts:
+                protected.add(operation_id)
+            if str(record.get("evidence_id") or "").strip() in recent_evidence_ids:
+                protected.add(operation_id)
+
+        return protected
+
+    def trim_tool_execution_records(self, limit: int | None = None) -> None:
+        limit = limit if limit is not None and limit > 0 else self.tool_execution_records_limit
+        if limit <= 0:
+            return
+        if len(self.tool_execution_records) <= limit:
+            return
+        protected = self._protected_tool_execution_record_ids()
+
+        def _sort_key(item: tuple[str, Any]) -> tuple[int, str]:
+            operation_id, record = item
+            step_count = 0
+            if isinstance(record, dict):
+                step_count = int(record.get("step_count") or 0)
+            return (step_count, operation_id)
+
+        sorted_items = sorted(self.tool_execution_records.items(), key=_sort_key, reverse=True)
+        kept: dict[str, Any] = {}
+        for operation_id, record in sorted_items:
+            if operation_id in protected or len(kept) < limit:
+                kept[operation_id] = record
+        self.tool_execution_records = kept
+
+    def trim_artifacts(self, limit: int | None = None, artifact_store: Any = None) -> None:
+        limit = limit if limit is not None and limit > 0 else self.artifact_limit
+        if limit <= 0:
+            return
+        if len(self.artifacts) <= limit:
+            return
+        protected = self._protected_artifact_ids()
+
+        def _sort_key(item: tuple[str, Any]) -> tuple[str, str]:
+            artifact_id, record = item
+            created_at = str(getattr(record, "created_at", "") or "")
+            return (created_at, artifact_id)
+
+        sorted_items = sorted(self.artifacts.items(), key=_sort_key, reverse=True)
+        kept: dict[str, Any] = {}
+        dropped_inline: list[tuple[str, Any, Any]] = []
+        for artifact_id, record in sorted_items:
+            if artifact_id in protected or len(kept) < limit:
+                kept[artifact_id] = record
+            else:
+                inline = getattr(record, "inline_content", None)
+                if inline is not None and artifact_store is not None:
+                    dropped_inline.append((artifact_id, record, inline))
+                elif inline is not None:
+                    kept[artifact_id] = record
+                else:
+                    pass
+        for artifact_id, record, inline in dropped_inline:
+            try:
+                tool_name_raw = getattr(record, "tool_name", None)
+                tool_name = str(tool_name_raw) if tool_name_raw else None
+                artifact_store.persist_generated_text(
+                    kind=str(getattr(record, "kind", "evicted") or "evicted"),
+                    source=str(getattr(record, "source", "") or "state_trim_artifacts"),
+                    content=str(inline),
+                    summary=str(getattr(record, "summary", "") or f"Evicted artifact {artifact_id}"),
+                    preview_text=getattr(record, "preview_text", None),
+                    metadata=dict(getattr(record, "metadata", {}) or {}),
+                    tool_name=tool_name,
+                    session_id=str(getattr(record, "session_id", "") or ""),
+                    tool_call_id=str(getattr(record, "tool_call_id", "") or ""),
+                )
+            except Exception:
+                kept[artifact_id] = record
+        self.artifacts = kept
+
+    def to_dict(self, artifact_store: Any = None) -> dict[str, Any]:
         started = time.perf_counter()
-        self.reasoning_graph.touch_ids()
+        self.trim_transcript_messages()
+        self.reasoning_graph.trim_records(self.reasoning_graph_max_records_per_lane)
+        self.trim_artifacts(artifact_store=artifact_store)
+        self.trim_tool_execution_records()
         serialized_messages = [
             json_safe_value(m.to_dict(include_retrieval_safe_text=True))
             for m in self.recent_messages
@@ -209,7 +390,7 @@ class LoopState(LoopStateFlowMixin):
             "inactive_steps": self.inactive_steps,
             "recent_errors": json_safe_value(self.recent_errors),
             "strategy": json_safe_value(self.strategy),
-            "scratchpad": json_safe_value(self.scratchpad),
+            "scratchpad": redact_sensitive_data(json_safe_value(self.scratchpad)),
             "recent_messages": serialized_messages,
             "transcript_messages": serialized_transcript_messages,
             "run_brief": json_safe_value(self.run_brief),
@@ -257,10 +438,10 @@ class LoopState(LoopStateFlowMixin):
             "intent_tags": json_safe_value(self.intent_tags),
             "warm_experiences": json_safe_value(self.warm_experiences),
             "retrieved_experience_ids": json_safe_value(self.retrieved_experience_ids),
-            "tool_execution_records": {
+            "tool_execution_records": redact_sensitive_data({
                 str(key): _coerce_tool_execution_record(value, operation_id=str(key))
                 for key, value in self.tool_execution_records.items()
-            },
+            }),
             "pending_interrupt": _coerce_pending_interrupt_payload(self.pending_interrupt),
             "background_processes": {
                 str(key): _coerce_background_process_record(value, job_id=str(key))
@@ -278,6 +459,10 @@ class LoopState(LoopStateFlowMixin):
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "recent_message_limit": self.recent_message_limit,
+            "transcript_message_limit": self.transcript_message_limit,
+            "reasoning_graph_max_records_per_lane": self.reasoning_graph_max_records_per_lane,
+            "artifact_limit": self.artifact_limit,
+            "tool_execution_records_limit": self.tool_execution_records_limit,
             "last_completion_tokens": self.last_completion_tokens,
         }
         payload["conversation_history"] = list(serialized_transcript_messages)
@@ -332,6 +517,14 @@ class LoopState(LoopStateFlowMixin):
         raw["recent_messages"] = recent_messages
         raw["transcript_messages"] = transcript_messages
         raw["recent_message_limit"] = recent_limit
+        raw["transcript_message_limit"] = max(_coerce_int(migrated.get("transcript_message_limit"), default=5000), 1)
+        raw["reasoning_graph_max_records_per_lane"] = max(
+            _coerce_int(migrated.get("reasoning_graph_max_records_per_lane"), default=5000), 1
+        )
+        raw["artifact_limit"] = max(_coerce_int(migrated.get("artifact_limit"), default=5000), 1)
+        raw["tool_execution_records_limit"] = max(
+            _coerce_int(migrated.get("tool_execution_records_limit"), default=2000), 1
+        )
         raw["run_brief"] = _coerce_run_brief(migrated.get("run_brief"))
         raw["working_memory"] = _coerce_working_memory(
             migrated.get("working_memory"),

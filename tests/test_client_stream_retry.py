@@ -382,7 +382,10 @@ def test_openrouter_context_probe_remembers_model_capabilities(monkeypatch) -> N
                 )
             raise AssertionError(f"unexpected url: {url}")
 
-    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(
+        "smallctl.client.client_transport_client_lifecycle._get_async_client",
+        lambda _client: _FakeAsyncClient(),
+    )
 
     limit = asyncio.run(client.fetch_model_context_limit())
 
@@ -432,7 +435,10 @@ def test_openrouter_metadata_completion_tokens_equal_context_length_is_capped(mo
                 )
             raise AssertionError(f"unexpected url: {url}")
 
-    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: _FakeAsyncClient())
+    monkeypatch.setattr(
+        "smallctl.client.client_transport_client_lifecycle._get_async_client",
+        lambda _client: _FakeAsyncClient(),
+    )
 
     limit = asyncio.run(client.fetch_model_context_limit())
 

@@ -40,11 +40,12 @@ from .state_support import (
     normalize_intent_label,
 )
 
+from .state_coercion_helpers import _compact_plan_step_lines
 from .state_memory import (
     _coerce_experience_memory,
+    _coerce_memory_entry,
     _coerce_memory_entry_list,
     _coerce_working_memory,
-    _compact_plan_step_lines,
     _trim_recent_messages,
     align_memory_entries,
     memory_entry_is_stale,
@@ -421,38 +422,3 @@ def _coerce_plan_interrupt(value: Any) -> Any | None:
     payload["response_mode"] = str(payload.get("response_mode", "yes/no/revise") or "yes/no/revise")
     return PlanInterrupt(**_filter_dataclass_payload(PlanInterrupt, payload))
 
-
-
-
-def _coerce_memory_entry(value: Any, *, current_step: int, current_phase: str) -> Any | None:
-    if isinstance(value, MemoryEntry):
-        return value
-    if not isinstance(value, dict):
-        if value is None:
-            return None
-        return MemoryEntry(
-            content=str(value),
-            created_at_step=current_step,
-            created_phase=current_phase,
-        )
-    payload = dict(value)
-    content = str(payload.get("content", "") or "")
-    if not content:
-        return None
-    created_at_step = _coerce_int(payload.get("created_at_step"), default=current_step)
-    created_phase = str(payload.get("created_phase", "") or current_phase)
-    freshness = str(payload.get("freshness", "") or "current")
-    confidence_raw = payload.get("confidence")
-    confidence = None
-    if confidence_raw not in (None, ""):
-        try:
-            confidence = float(confidence_raw)
-        except (TypeError, ValueError):
-            confidence = None
-    return MemoryEntry(
-        content=content,
-        created_at_step=created_at_step,
-        created_phase=created_phase,
-        freshness=freshness,
-        confidence=confidence,
-    )

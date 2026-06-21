@@ -10,6 +10,7 @@ from typing import Any
 
 from ..state import LoopState
 from ..write_session_fsm import new_write_session, record_write_session_event
+from .fs_paths import _same_target_path
 from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
@@ -18,7 +19,6 @@ from .fs_sessions import (
     _suggested_chunk_sections,
     infer_write_session_intent,
     new_write_session_id,
-    _same_target_path,
 )
 
 

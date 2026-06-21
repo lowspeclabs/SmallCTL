@@ -34,6 +34,10 @@ def maybe_reuse_identical_read_call(harness: Any, *, tool_name: str, args: dict[
         result = record.get("result")
         if not isinstance(result, dict) or not result.get("success"):
             continue
+        durable_meta = result.get("metadata", {}).get("durable_output_compacted")
+        if isinstance(durable_meta, dict) and durable_meta.get("truncated"):
+            # The stored result is a preview; do not return it as the full result.
+            continue
         artifact_id = str(result.get("metadata", {}).get("artifact_id", "") or "").strip()
         harness._runlog(
             "tool_cache_hit",

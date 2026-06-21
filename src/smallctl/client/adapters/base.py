@@ -31,5 +31,5 @@ class ProviderAdapter(Protocol):
     def mutate_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         ...
 
-    def should_retry_without_stream_options(self, exc: Any) -> bool:
+    def should_retry_without_stream_options(self, exc: Any, *, stream_options_present: bool = False) -> bool:
         ...

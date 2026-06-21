@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 try:
     import httpx
-except Exception:  # pragma: no cover
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
     httpx = None
 
 from ..logging_utils import log_kv
@@ -23,6 +23,8 @@ from .request_budget import client_context_limit as _budget_client_context_limit
 from .request_budget import json_size_bytes as _budget_json_size_bytes
 from .streaming import SSEStreamer, summarize_stream_chunk
 from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
+
+MAX_RETRY_AFTER_SEC = 120
 from .transport_constants import (
     _DEFAULT_MAX_COMPLETION_TOKENS,
     _LOCAL_PATCH_INTENT_RE,
@@ -72,19 +74,19 @@ from .client_transport_helpers import (
     request_first_token_timeout_sec as _request_first_token_timeout_sec,
     tool_name as _tool_name,
 )
-from .client_transport_client_lifecycle import (
-    _client_key,
-    _get_async_client,
-    _reset_async_client,
-)
-from .client_transport_llamacpp_repair import _repair_llamacpp_system_messages_for_transport
 from .client_transport_context_limits import (
     _client_context_limit,
     _json_size_bytes,
     _approx_token_count,
-    _remember_context_limit,
 )
-from .client_transport_model_metadata import _remember_model_metadata
+from .client_transport_client_lifecycle import (
+    _client_key,
+    _get_async_client,
+    _remember_context_limit,
+    _remember_model_metadata,
+    _reset_async_client,
+)
+from .client_transport_llamacpp_repair import _repair_llamacpp_system_messages_for_transport
 from .client_transport_openrouter_preflight import _preflight_openrouter_auth
 from .client_transport_audit import _log_request_audit
 from .usage import extract_context_limit, extract_max_completion_tokens, extract_runtime_context_limit
@@ -219,6 +221,14 @@ async def stream_chat(
     openrouter_minimal_context_attempted = False
     llamacpp_reduced_tools_attempted = False
     llamacpp_jinja_repair_attempted = False
+
+    def _openrouter_recovery_stages_attempted() -> int:
+        return (
+            openrouter_400_recovery_stage
+            + (1 if openrouter_nonstream_fallback_attempted else 0)
+            + (1 if openrouter_minimal_context_attempted else 0)
+        )
+
     async_client = _get_async_client(client)
     openrouter_auth_failure = await _preflight_openrouter_auth(client, async_client)
     if openrouter_auth_failure is not None:
@@ -236,6 +246,7 @@ async def stream_chat(
         aggressive_tool_call_timeout=client.is_small_model,
         run_logger=client.run_logger,
         log=client.log,
+        api_client=client,
     )
 
     for attempt in range(1, client.STREAM_RETRY_ATTEMPTS + 1):
@@ -679,7 +690,7 @@ async def stream_chat(
                         attempt=attempt,
                         provider_profile="openrouter",
                         message_count=len(original_messages),
-                        recovery_stages_attempted=4,
+                        recovery_stages_attempted=_openrouter_recovery_stages_attempted(),
                     )
                     if client.run_logger:
                         client.run_logger.log(
@@ -689,14 +700,14 @@ async def stream_chat(
                             attempt=attempt,
                             provider_profile="openrouter",
                             message_count=len(original_messages),
-                            recovery_stages_attempted=4,
+                            recovery_stages_attempted=_openrouter_recovery_stages_attempted(),
                         )
                     exhausted_details = _provider_400_chunk_error_details(
                         client,
                         payload=current_payload,
                         exc=last_error if last_error is not None else exc,
                         attempt=attempt,
-                        recovery_stages_attempted=4,
+                        recovery_stages_attempted=_openrouter_recovery_stages_attempted(),
                     )
                     yield {
                         "type": "chunk_error",
@@ -809,7 +820,7 @@ async def stream_chat(
                 last_error = exc
                 await _reset_async_client(client)
                 async_client = _get_async_client(client)
-            elif client.adapter.should_retry_without_stream_options(exc):
+            elif client.adapter.should_retry_without_stream_options(exc, stream_options_present="stream_options" in current_payload):
                 if "stream_options" not in current_payload:
                     raise
                 current_payload = dict(current_payload)
@@ -832,63 +843,61 @@ async def stream_chat(
                 raise
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if saw_chunk:
-                if client.provider_profile == "lmstudio" or client.is_small_model:
-                    if saw_tool_call_chunk or _is_tool_call_continuation_timeout(exc):
-                        log_kv(
-                            client.log,
-                            logging.WARNING,
-                            "chat_stream_incomplete_tool_call",
-                            error=str(exc),
-                            attempt=attempt,
-                        )
-                        if client.run_logger:
-                            client.run_logger.log(
-                                "chat",
-                                "stream_incomplete_tool_call",
-                                "treating stalled tool call as retryable chunk error",
-                                error=str(exc),
-                                attempt=attempt,
-                            )
-                        yield {
-                            "type": "chunk_error",
-                            "error": "Incomplete tool call from provider stream",
-                            "details": {
-                                "reason": "tool_call_continuation_timeout",
-                                "attempt": attempt,
-                                "provider_profile": client.provider_profile,
-                                "message": str(exc),
-                                "last_chunks": recent_chunks,
-                            },
-                        }
-                        return
+                if saw_tool_call_chunk or _is_tool_call_continuation_timeout(exc):
                     log_kv(
                         client.log,
                         logging.WARNING,
-                        "chat_stream_stalled_after_chunks",
+                        "chat_stream_incomplete_tool_call",
                         error=str(exc),
                         attempt=attempt,
                     )
                     if client.run_logger:
                         client.run_logger.log(
                             "chat",
-                            "stream_stalled_after_chunks",
-                            "treating stalled lmstudio stream as complete after partial output",
+                            "stream_incomplete_tool_call",
+                            "treating stalled tool call as retryable chunk error",
                             error=str(exc),
                             attempt=attempt,
                         )
                     yield {
-                        "type": "stream_ended_without_done",
+                        "type": "chunk_error",
+                        "error": "Incomplete tool call from provider stream",
                         "details": {
-                            "reason": "read_timeout_after_chunks",
+                            "reason": "tool_call_continuation_timeout",
                             "attempt": attempt,
                             "provider_profile": client.provider_profile,
                             "message": str(exc),
-                            "tool_call_stream_active": saw_tool_call_chunk,
                             "last_chunks": recent_chunks,
                         },
                     }
                     return
-                raise
+                log_kv(
+                    client.log,
+                    logging.WARNING,
+                    "chat_stream_stalled_after_chunks",
+                    error=str(exc),
+                    attempt=attempt,
+                )
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "stream_stalled_after_chunks",
+                        "treating stalled stream as complete after partial output",
+                        error=str(exc),
+                        attempt=attempt,
+                    )
+                yield {
+                    "type": "stream_ended_without_done",
+                    "details": {
+                        "reason": "read_timeout_after_chunks",
+                        "attempt": attempt,
+                        "provider_profile": client.provider_profile,
+                        "message": str(exc),
+                        "tool_call_stream_active": saw_tool_call_chunk,
+                        "last_chunks": recent_chunks,
+                    },
+                }
+                return
             last_error = exc
             _log_transport_error(
                 client,
@@ -914,10 +923,39 @@ async def stream_chat(
                 )
                 await _reset_async_client(client)
                 async_client = _get_async_client(client)
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            last_error = exc
+            _log_transport_error(
+                client,
+                "chat_stream_unexpected_error",
+                exc,
+                url=url,
+                attempt=attempt,
+                phase="stream",
+            )
+            await _reset_async_client(client)
+            async_client = _get_async_client(client)
+            if saw_chunk and attempt >= client.STREAM_RETRY_ATTEMPTS:
+                yield {
+                    "type": "chunk_error",
+                    "error": f"Unexpected stream error: {exc}",
+                    "details": {
+                        "reason": "unexpected_stream_error",
+                        "attempt": attempt,
+                        "provider_profile": client.provider_profile,
+                        "message": str(exc),
+                        "exception_type": exc.__class__.__name__,
+                        "last_chunks": recent_chunks,
+                    },
+                }
+                return
         if attempt < client.STREAM_RETRY_ATTEMPTS:
             backoff = float(attempt)
             if retry_after_seconds is not None:
-                backoff = max(backoff, retry_after_seconds)
+                capped_retry_after = min(retry_after_seconds, MAX_RETRY_AFTER_SEC)
+                backoff = max(backoff, capped_retry_after)
             log_kv(
                 client.log,
                 logging.WARNING,
@@ -937,7 +975,7 @@ async def stream_chat(
                 payload=current_payload,
                 exc=last_error,
                 attempt=client.STREAM_RETRY_ATTEMPTS,
-                recovery_stages_attempted=3,
+                recovery_stages_attempted=_openrouter_recovery_stages_attempted(),
             )
             yield {
                 "type": "chunk_error",

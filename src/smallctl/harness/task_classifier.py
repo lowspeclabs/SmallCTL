@@ -37,9 +37,11 @@ from .task_classifier_support import (
     is_smalltalk,
     looks_like_analysis_request,
     looks_like_debug_inspection_request,
+    looks_like_execution_followup,
     looks_like_plan_only_request,
-    task_is_local_coding_target,
+    looks_like_readonly_chat_request,
     task_has_local_scope_markers,
+    task_is_local_coding_target,
     task_is_local_ssh_file_target,
     task_is_local_system_target,
 )
@@ -135,22 +137,6 @@ def classify_task_mode(task: str) -> str:
     if "error" in lowered or "failed" in lowered or "failure" in lowered:
         return "analysis"
     return "chat"
-
-
-def looks_like_execution_followup(text: str) -> bool:
-    followup_phrases = (
-        "use the command",
-        "use that command",
-        "run it",
-        "run that",
-        "execute it",
-        "execute that",
-        "try again",
-        "use the shell command",
-        "run the shell command",
-        "execute the shell command",
-    )
-    return any(phrase in text for phrase in followup_phrases)
 
 
 def looks_like_action_request(task: str) -> bool:
@@ -359,72 +345,6 @@ def looks_like_tool_plan_candidate(task: str) -> bool:
     return mode in {"analysis", "debug_inspect"} and (
         needs_loop_for_content_lookup(text) or looks_like_readonly_chat_request(text)
     )
-
-
-def looks_like_readonly_chat_request(task: str) -> bool:
-    text = task.strip().lower()
-    if not text:
-        return False
-    if looks_like_execution_followup(text):
-        return False
-    readonly_markers = (
-        "what",
-        "which",
-        "show",
-        "read",
-        "find",
-        "search",
-        "grep",
-        "list",
-        "current",
-        "status",
-        "where",
-        "how many",
-        "inspect",
-        "check",
-        "look at",
-        "can you see",
-        "tell me",
-        "summarize",
-    )
-    readonly_targets = (
-        "file",
-        "files",
-        "folder",
-        "directory",
-        "repo",
-        "repository",
-        "cwd",
-        "working directory",
-        "log",
-        "logs",
-        "artifact",
-        "artifacts",
-        "process",
-        "cpu",
-        "ram",
-        "memory",
-        "host",
-        "system",
-        "status",
-        "code",
-        "source",
-        "src",
-        "web",
-        "website",
-        "internet",
-        "online",
-        "docs",
-        "documentation",
-        "pricing",
-        "release",
-        "releases",
-        "announcement",
-        "news",
-    )
-    has_readonly_marker = any(marker in text for marker in readonly_markers)
-    has_target = any(target in text for target in readonly_targets)
-    return has_readonly_marker and has_target
 
 
 def classify_runtime_intent(

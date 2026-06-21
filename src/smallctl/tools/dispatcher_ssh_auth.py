@@ -25,7 +25,7 @@ def ssh_auth_debug_metadata(
     password = str(arguments.get("password") or "").strip()
     identity_file = str(arguments.get("identity_file") or "").strip()
     auth_mode = "password" if password else "key"
-    auth_transport = "sshpass_env" if password else "ssh"
+    auth_transport = "sshpass_file" if password else "ssh"
     origin = str(password_source or "").strip() or ("explicit" if password else "none")
     return {
         "ssh_auth_mode": auth_mode,

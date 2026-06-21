@@ -466,7 +466,7 @@ def test_nested_raw_ssh_failure_does_not_record_auth_recovery_state() -> None:
             "stderr": "root@192.168.1.89: Permission denied (publickey,password).",
         },
         error="root@192.168.1.89: Permission denied (publickey,password).",
-        metadata={"ssh_auth_mode": "password", "ssh_auth_transport": "sshpass_env"},
+        metadata={"ssh_auth_mode": "password", "ssh_auth_transport": "sshpass_file"},
     )
 
     verdict = _store_verifier_verdict(

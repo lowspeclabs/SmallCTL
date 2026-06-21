@@ -525,14 +525,14 @@ def _is_staged_artifact_syntactically_valid(artifact_path: str, content: str) ->
     elif ext in {".js", ".ts"}:
         import subprocess
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["node", "--check", str(path)],
                 capture_output=True,
                 timeout=5,
             )
+            return result.returncode == 0
         except Exception:
-            pass
-    return True
+            return False
 
 
 def _abandon_staged_artifact(harness: Any, stage_path: str, reason: str) -> None:

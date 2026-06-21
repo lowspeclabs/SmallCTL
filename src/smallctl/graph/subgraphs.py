@@ -54,7 +54,7 @@ class ChildSubgraphRunner:
             harness_factory=harness_factory,
         )
         values = await compiled.ainvoke(
-            {"child_state": child_state.to_dict()},
+            {"child_state": child_state.to_dict(artifact_store=getattr(parent, "artifact_store", None))},
             {
                 "configurable": {
                     "thread_id": child_state.thread_id or uuid.uuid4().hex,

@@ -82,6 +82,7 @@ def collect_stream(
         data = _stream_chunk_data(item)
         if data is None:
             continue
+        # Capture usage/model from the final chunk even when choices is empty.
         next_usage = data.get("usage")
         if isinstance(next_usage, dict):
             usage = next_usage
@@ -184,7 +185,6 @@ class _TimelineCollector:
             thinking_start_tag=thinking_start_tag,
             thinking_end_tag=thinking_end_tag,
         )
-        self._auto_prefers_field = False
         self._auto_used_tag_thinking = False
 
     def feed(self, item: dict[str, Any]) -> None:
@@ -206,8 +206,6 @@ class _TimelineCollector:
             if kind == "thinking":
                 self._flush_pending_text()
                 if self.reasoning_mode in {"field", "auto", "tags"}:
-                    if self.reasoning_mode == "auto" and not self._auto_used_tag_thinking:
-                        self._auto_prefers_field = True
                     self._append_text("thinking", fragment)
             else:
                 self._feed_content(fragment)
@@ -216,8 +214,6 @@ class _TimelineCollector:
         if isinstance(field_reasoning, str) and field_reasoning:
             self._flush_pending_text()
             if self.reasoning_mode in {"field", "auto", "tags"}:
-                if self.reasoning_mode == "auto" and not self._auto_used_tag_thinking:
-                    self._auto_prefers_field = True
                 self._append_text("thinking", _scrub_reasoning_hallucinations(field_reasoning))
 
         tc_deltas = delta.get("tool_calls") or []
@@ -255,9 +251,6 @@ class _TimelineCollector:
 
     def _feed_content(self, text: str) -> None:
         if self.reasoning_mode in {"field", "off"}:
-            self._append_text("assistant", text)
-            return
-        if self.reasoning_mode == "auto" and self._auto_prefers_field:
             self._append_text("assistant", text)
             return
         self._feed_tagged_content(text)

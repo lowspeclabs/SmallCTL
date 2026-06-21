@@ -147,7 +147,7 @@ def test_teardown_autosaves_chat_session_state(tmp_path) -> None:
     harness.state = SimpleNamespace(
         cwd=str(tmp_path),
         thread_id="thread-123",
-        to_dict=lambda: {
+        to_dict=lambda **kwargs: {
             "thread_id": "thread-123",
             "created_at": "2026-04-23T12:00:00+00:00",
             "updated_at": "2026-04-23T12:05:00+00:00",
@@ -165,22 +165,21 @@ def test_teardown_autosaves_chat_session_state(tmp_path) -> None:
     assert saved["recent_messages"][0]["content"] == "hello world"
 
 
-def test_teardown_waits_for_background_autosave_snapshot_work(tmp_path) -> None:
+def test_teardown_waits_for_background_autosave_write_work(tmp_path, monkeypatch) -> None:
     proc = _FakeProcess()
     harness, _ = _make_harness(proc)
     harness.log = SimpleNamespace(debug=lambda *args, **kwargs: None)
     harness.client = SimpleNamespace(model="alpha-model")
     harness.conversation_id = "conversation-123"
 
-    state_started = threading.Event()
-    release_state = threading.Event()
+    write_started = threading.Event()
+    release_write = threading.Event()
     loop_thread_id: dict[str, int] = {}
     worker_thread_id: dict[str, int] = {}
+    snapshot_thread_id: dict[str, int] = {}
 
-    def _slow_state_payload() -> dict[str, object]:
-        worker_thread_id["value"] = threading.get_ident()
-        state_started.set()
-        release_state.wait(timeout=1.0)
+    def _state_payload(**kwargs) -> dict[str, object]:
+        snapshot_thread_id["value"] = threading.get_ident()
         return {
             "thread_id": "thread-123",
             "created_at": "2026-04-23T12:00:00+00:00",
@@ -189,24 +188,39 @@ def test_teardown_waits_for_background_autosave_snapshot_work(tmp_path) -> None:
             "recent_messages": [{"role": "user", "content": "hello world"}],
         }
 
+    original_persist = runtime_facade._persist_chat_session_state_from_runtime_state_sync
+
+    def _slow_persist(cwd: str, thread_id: str, state_payload: dict[str, object], model: str) -> None:
+        worker_thread_id["value"] = threading.get_ident()
+        write_started.set()
+        release_write.wait(timeout=1.0)
+        original_persist(cwd, thread_id, state_payload, model)
+
     harness.state = SimpleNamespace(
         cwd=str(tmp_path),
         thread_id="thread-123",
-        to_dict=_slow_state_payload,
+        to_dict=_state_payload,
     )
     harness._autosave_chat_session_state = lambda: runtime_facade._autosave_chat_session_state(harness)
+
+    monkeypatch.setattr(
+        runtime_facade,
+        "_persist_chat_session_state_from_runtime_state_sync",
+        _slow_persist,
+    )
 
     async def _run() -> None:
         loop_thread_id["value"] = threading.get_ident()
         teardown_task = asyncio.create_task(runtime_facade.teardown(harness))
-        started = await asyncio.to_thread(state_started.wait, 1.0)
+        started = await asyncio.to_thread(write_started.wait, 1.0)
         assert started
         assert not teardown_task.done()
-        release_state.set()
+        release_write.set()
         await teardown_task
 
     asyncio.run(_run())
 
+    assert snapshot_thread_id["value"] == loop_thread_id["value"]
     assert worker_thread_id["value"] != loop_thread_id["value"]
     saved = load_chat_session_state(cwd=tmp_path, thread_id="thread-123")
     assert saved is not None

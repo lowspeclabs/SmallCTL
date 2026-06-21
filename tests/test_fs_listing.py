@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from smallctl.tools.fs_listing import _resolve
+import pytest
+
+from smallctl.tools.fs_listing import WorkspaceContainmentError, _resolve
 
 
 def test_resolve_does_not_double_encode_cwd() -> None:
@@ -84,3 +86,38 @@ def test_file_read_blocks_likely_secret_file(tmp_path) -> None:
     assert result["success"] is False
     assert result["metadata"]["reason"] == "sensitive_file_read_blocked"
     assert "secret-value" not in result["error"]
+
+
+def test_resolve_enforces_workspace_containment_for_writes(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside_workspace.txt"
+    with pytest.raises(WorkspaceContainmentError) as exc_info:
+        _resolve(str(outside), str(tmp_path), operation="file_write")
+    assert exc_info.value.metadata["error_kind"] == "workspace_path_traversal"
+    assert exc_info.value.metadata["operation"] == "file_write"
+
+
+def test_resolve_allows_out_of_workspace_when_approved(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside_workspace.txt"
+    result = _resolve(
+        str(outside),
+        str(tmp_path),
+        operation="file_write",
+        approved_out_of_workspace=True,
+    )
+    assert result == outside.resolve()
+
+
+def test_resolve_blocks_sensitive_out_of_workspace(tmp_path: Path) -> None:
+    import os
+
+    home = os.path.expanduser("~")
+    with pytest.raises(WorkspaceContainmentError) as exc_info:
+        _resolve("~/.ssh/authorized_keys", str(tmp_path), operation="file_write")
+    assert exc_info.value.metadata["error_kind"] == "sensitive_location_unapproved"
+    assert exc_info.value.metadata["path"] == str(Path(home) / ".ssh" / "authorized_keys")
+
+
+def test_resolve_does_not_enforce_containment_for_reads(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside_workspace.txt"
+    result = _resolve(str(outside), str(tmp_path))
+    assert result == outside.resolve()

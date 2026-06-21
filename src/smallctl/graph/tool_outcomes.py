@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from time import time
 from typing import Any
+
+from ..logging_utils import log_kv
 
 from ..recovery_metrics import record_failure_event_metric
 from ..recovery_schema import FailureEvent
@@ -536,8 +539,16 @@ def _update_subtask_ledger_from_record(harness: Any, record: ToolExecutionRecord
             del events[:-40]
         record_failure_event_metric(harness.state, failure)
         service.attach_failure(active.subtask_id, failure)
-    except Exception:
-        return
+    except Exception as exc:
+        log_kv(
+            harness.log,
+            logging.WARNING,
+            "subtask_ledger_update_failed",
+            error=str(exc),
+            exception_type=exc.__class__.__name__,
+            tool_name=record.tool_name,
+            operation_id=record.operation_id,
+        )
 
 
 def _ledger_success_evidence(record: ToolExecutionRecord) -> str:

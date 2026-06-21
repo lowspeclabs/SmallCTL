@@ -8,6 +8,7 @@ from typing import Any
 from ..state import LoopState
 from .common import fail, ok
 from .process_lifecycle import unregister_process
+from .shell_support import _command_requires_shell
 
 
 def _find_active_process_by_pid(harness: Any, pid: int) -> Any | None:
@@ -119,6 +120,7 @@ async def shell_job_launch(command: str, state: LoopState, *, create_process, ha
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             harness=harness,
+            shell=_command_requires_shell(command),
         )
         job_id = str(proc.pid)
         state.background_processes[job_id] = {

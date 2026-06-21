@@ -6,6 +6,7 @@ from typing import Any
 
 from ..state import LoopState
 from ..shell_utils import is_read_only_shell_evidence_action, shell_tokens
+from .fs_paths import _same_target_path
 
 
 def _normalize_section_name(section_name: str | None, section_id: str | None) -> str:
@@ -269,15 +270,6 @@ def infer_write_session_intent(path: str, cwd: str | None = None) -> str:
         return "patch_existing" if _resolve(path, cwd).exists() else "replace_file"
     except Exception:
         return "replace_file"
-
-
-def _same_target_path(left: str, right: str, cwd: str | None = None) -> bool:
-    from .fs_write_sessions import _resolve
-
-    try:
-        return _resolve(left, cwd) == _resolve(right, cwd)
-    except Exception:
-        return str(left) == str(right)
 
 
 def _repair_cycle_reads(state: LoopState | None) -> list[str]:

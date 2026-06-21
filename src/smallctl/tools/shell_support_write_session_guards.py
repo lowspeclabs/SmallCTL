@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ..state import LoopState
-from .fs_sessions import _same_target_path, _write_session_can_finalize
+from .fs_paths import _same_target_path
+from .fs_sessions import _write_session_can_finalize
 from .fs_write_session_policy import _write_session_resume_metadata
 from .shell_parsing import _split_shell_words
 from .shell_path_utils import (
@@ -13,33 +14,7 @@ from .shell_path_utils import (
     _target_path_aliases,
     _token_path_candidates,
 )
-
-
-def _guard_fail(
-    message: str,
-    *,
-    reason: str,
-    command: str,
-    error_kind: str | None = None,
-    next_required_tool: dict[str, Any] | None = None,
-    next_required_action: dict[str, Any] | str | None = None,
-    extra_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a consistent guard failure result."""
-    from .common import fail
-    metadata: dict[str, Any] = {
-        "reason": reason,
-        "command": command,
-    }
-    if error_kind is not None:
-        metadata["error_kind"] = error_kind
-    if next_required_tool is not None:
-        metadata["next_required_tool"] = next_required_tool
-    if next_required_action is not None:
-        metadata["next_required_action"] = next_required_action
-    if extra_metadata is not None:
-        metadata.update(extra_metadata)
-    return fail(message, metadata=metadata)
+from .shell_support_common import _guard_fail
 
 
 def _shell_write_session_target_path_guard(state: LoopState, command: str) -> dict[str, Any] | None:

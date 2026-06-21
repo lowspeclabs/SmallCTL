@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..logging_utils import log_kv
 from .usage import extract_runtime_context_limit
+
+
+def _summarize_exception(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def fetch_model_context_limit(client: Any) -> int | None:
@@ -11,7 +16,7 @@ async def fetch_model_context_limit(client: Any) -> int | None:
         return None
     try:
         import httpx
-    except Exception:  # pragma: no cover
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover
         raise RuntimeError("Dependency missing: httpx")
 
     from urllib.parse import quote
@@ -21,8 +26,12 @@ async def fetch_model_context_limit(client: Any) -> int | None:
     model_url = f"{client.base_url}/models/{quote(model_id, safe='')}"  
     list_url = f"{client.base_url}/models"
 
-    # Reuse the shared async client from client_transport
-    from .client_transport import _get_async_client, _remember_context_limit, _remember_model_metadata
+    # Reuse the shared async client and client-state helpers from lifecycle module.
+    from .client_transport_client_lifecycle import (
+        _get_async_client,
+        _remember_context_limit,
+        _remember_model_metadata,
+    )
     async_client = _get_async_client(client)
 
     runtime_urls = [f"{client.base_url}/props", f"{client.base_url}/slots"]
@@ -40,8 +49,14 @@ async def fetch_model_context_limit(client: Any) -> int | None:
                 if runtime_limit:
                     log_kv(client.log, 20, "context_probe_success", source="runtime", limit=runtime_limit)
                     return _remember_context_limit(client, runtime_limit)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_kv(
+                client.log,
+                logging.WARNING,
+                "context_probe_failed",
+                url=runtime_url,
+                error=_summarize_exception(exc),
+            )
     try:
         response = await async_client.get(model_url, headers=headers, timeout=10.0)
         if response.status_code < 400:
@@ -50,14 +65,27 @@ async def fetch_model_context_limit(client: Any) -> int | None:
             if limit:
                 log_kv(client.log, 20, "context_probe_success", source="model_metadata", limit=limit)
                 return limit
-    except Exception:
-        pass
+    except Exception as exc:
+        log_kv(
+            client.log,
+            logging.WARNING,
+            "context_probe_failed",
+            url=model_url,
+            error=_summarize_exception(exc),
+        )
     try:
         response = await async_client.get(list_url, headers=headers, timeout=10.0)
         if response.status_code >= 400:
             return None
         payload = response.json()
-    except Exception:
+    except Exception as exc:
+        log_kv(
+            client.log,
+            logging.WARNING,
+            "context_probe_failed",
+            url=list_url,
+            error=_summarize_exception(exc),
+        )
         return None
 
     data = payload.get("data") if isinstance(payload, dict) else None

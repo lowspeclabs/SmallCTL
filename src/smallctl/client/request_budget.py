@@ -83,8 +83,10 @@ def client_context_limit(client: Any) -> int | None:
 def build_request_budget(context_limit: int) -> RequestBudget:
     normalized_limit = max(1, int(context_limit))
     reserve_completion_tokens = 1024
-    safety_margin_tokens = max(512, normalized_limit // 8)
-    tokenizer_slop_tokens = max(256, normalized_limit // 32)
+    # Cap the margins for very large context windows so the prompt budget stays
+    # usable; small windows keep the original conservative fractions.
+    safety_margin_tokens = min(4096, max(512, normalized_limit // 8))
+    tokenizer_slop_tokens = min(2048, max(256, normalized_limit // 32))
     effective_prompt_budget = max(
         1,
         normalized_limit - reserve_completion_tokens - safety_margin_tokens - tokenizer_slop_tokens,

@@ -34,6 +34,8 @@ def _request_has_write_heavy_tool(client: Any, tools: list[dict[str, Any]]) -> b
         return False
     write_tool_names = set(getattr(client, "_WRITE_HEAVY_TOOL_NAMES", set()) or set())
     write_argument_fields = set(getattr(client, "_WRITE_HEAVY_ARGUMENT_FIELDS", set()) or set())
+    write_argument_tool_allowlist = set(getattr(client, "_WRITE_HEAVY_ARGUMENT_TOOL_ALLOWLIST", set()) or set())
+    readonly_tool_denylist = set(getattr(client, "_READONLY_TOOL_NAME_DENYLIST", set()) or set())
     for tool in tools:
         if not isinstance(tool, dict):
             continue
@@ -44,7 +46,13 @@ def _request_has_write_heavy_tool(client: Any, tools: list[dict[str, Any]]) -> b
         parameters = function.get("parameters")
         properties = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
         property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
-        if tool_name in write_tool_names or property_names & write_argument_fields:
+        if tool_name in write_tool_names:
+            return True
+        if tool_name in readonly_tool_denylist:
+            continue
+        if tool_name not in write_argument_tool_allowlist:
+            continue
+        if property_names & write_argument_fields:
             return True
     return False
 

@@ -221,12 +221,21 @@ def _build_minimal_context_payload(
             break
 
     recent_user_msgs = []
+    recent_exchange: list[dict[str, Any]] = []
+    captured_exchange = False
     for msg in reversed(messages):
         role = str(msg.get("role", "")).strip()
         if role == "tool" or (role == "assistant" and msg.get("tool_calls")):
-            break
+            # Capture the most recent assistant/tool exchange preceding the user messages.
+            if not captured_exchange:
+                recent_exchange.insert(0, dict(msg))
+                if role == "assistant":
+                    captured_exchange = True
+            continue
         if role == "user":
-            recent_user_msgs.insert(0, msg)
+            if captured_exchange:
+                break
+            recent_user_msgs.insert(0, dict(msg))
             if len(recent_user_msgs) >= 2:
                 break
 
@@ -240,6 +249,8 @@ def _build_minimal_context_payload(
     reduced_messages = []
     if last_system_msg:
         reduced_messages.append(last_system_msg)
+    if recent_exchange:
+        reduced_messages.extend(recent_exchange)
     if user_content:
         reduced_messages.append({"role": "user", "content": user_content})
 

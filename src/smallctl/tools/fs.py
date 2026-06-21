@@ -9,6 +9,7 @@ from typing import Any
 from ..state import LoopState
 from ..risk_policy import evaluate_risk_policy
 from ..write_session_fsm import record_write_session_event
+from .fs_paths import _same_target_path
 from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
@@ -20,7 +21,6 @@ from .fs_sessions import (
     _repair_cycle_read_required_metadata,
     _record_file_change,
     _record_repair_cycle_read,
-    _same_target_path,
     _mark_repeat_patch,
     _mark_repeat_command,
     _write_session_can_finalize,
@@ -39,6 +39,7 @@ from .fs_patching import (
 from .fs_listing import (
     _active_session_staging_path,
     _build_dir_tree,
+    _guard_workspace_containment,
     _missing_dir_error,
     _missing_path_error,
     _workspace_relative_hint,
@@ -158,6 +159,14 @@ async def file_write(
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
         return suspicious_path
+
+    workspace = cwd or (state.cwd if state is not None else None)
+    if workspace:
+        containment = _guard_workspace_containment(
+            path, workspace, operation="file_write"
+        )
+        if containment is not None:
+            return containment
 
     target = _resolve(path, cwd)
     if not write_session_id and session_id:
@@ -457,8 +466,7 @@ async def file_write(
             },
         )
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding=encoding)
+        _write_text_file(target, content, encoding=encoding)
     except Exception as exc:
         return fail(f"Unable to write file: {exc}")
 

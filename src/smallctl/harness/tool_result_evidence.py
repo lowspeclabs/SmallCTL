@@ -41,7 +41,11 @@ def record_evidence(
     reasoning_graph = getattr(service.harness.state, "reasoning_graph", None)
     if reasoning_graph is not None:
         reasoning_graph.evidence_records.append(evidence)
-        reasoning_graph.touch_ids()
+        limit = getattr(service.harness.state, "reasoning_graph_max_records_per_lane", 5000) or 5000
+        harness_config = getattr(service.harness, "config", None)
+        if harness_config is not None:
+            limit = getattr(harness_config, "reasoning_graph_max_records_per_lane", limit) or limit
+        reasoning_graph.trim_records(limit)
     replayed_or_cached = bool(
         replayed
         or bool(context.get("replayed"))

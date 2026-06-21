@@ -6,16 +6,17 @@ from typing import Any
 from ..state import LoopState
 from ..risk_policy import evaluate_risk_policy
 from .common import fail, ok
+from .fs_paths import _same_target_path
 from .fs_sessions import (
     _mark_repeat_patch,
     _normalize_section_name,
     _repair_cycle_allows_patch,
     _repair_cycle_read_required_metadata,
     _record_file_change,
-    _same_target_path,
 )
 from .fs_write_session_policy import _guard_suspicious_temp_root_path, _guard_write_session_staging_mutation
 from .fs_write_sessions import _resolve
+from .fs_listing import _guard_workspace_containment
 
 
 async def file_append(
@@ -36,6 +37,12 @@ async def file_append(
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
         return suspicious_path
+
+    workspace = cwd or (state.cwd if state is not None else None)
+    if workspace:
+        containment = _guard_workspace_containment(path, workspace, operation="file_append")
+        if containment is not None:
+            return containment
 
     if not write_session_id and session_id:
         write_session_id = session_id
@@ -111,6 +118,12 @@ async def file_delete(
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
         return suspicious_path
+
+    workspace = cwd or (state.cwd if state is not None else None)
+    if workspace:
+        containment = _guard_workspace_containment(path, workspace, operation="file_delete")
+        if containment is not None:
+            return containment
 
     staging_guard = _guard_write_session_staging_mutation(
         tool_name="file_delete",

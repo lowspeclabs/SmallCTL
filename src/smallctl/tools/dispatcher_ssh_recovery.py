@@ -85,6 +85,7 @@ def _recover_ssh_arguments_from_task_context(
     arguments: dict[str, Any],
     *,
     state: Any | None = None,
+    credential_store: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not isinstance(arguments, dict):
         return arguments, {}
@@ -138,6 +139,7 @@ def _recover_ssh_arguments_from_task_context(
             host,
             user=user,
             state=state,
+            credential_store=credential_store,
         )
         if inferred_password:
             repaired["password"] = inferred_password
@@ -168,6 +170,7 @@ def _pin_and_guard_ssh_credentials(
     *,
     state: Any | None,
     normalization_metadata: dict[str, Any],
+    credential_store: Any | None = None,
 ) -> tuple[dict[str, Any], ToolEnvelope | None, dict[str, Any]]:
     """Pin confirmed SSH credentials and block dispatch when the model contradicts them."""
     if not isinstance(arguments, dict) or state is None:
@@ -182,7 +185,11 @@ def _pin_and_guard_ssh_credentials(
         return arguments, None, {}
 
     confirmed_user = str(target.get("user") or "").strip()
-    confirmed_password = str(target.get("password") or "").strip()
+    confirmed_password = ""
+    if credential_store is not None:
+        confirmed_password = credential_store.get_ssh_password(host, confirmed_user) or ""
+    if not confirmed_password:
+        confirmed_password = str(target.get("password") or "").strip()
     confirmed_port = target.get("port")
     confirmed_identity = str(target.get("identity_file") or "").strip()
 

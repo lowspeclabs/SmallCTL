@@ -68,13 +68,13 @@ def _persist_chat_session_state_sync(
 def _persist_chat_session_state_from_runtime_state_sync(
     cwd: str,
     thread_id: str,
-    state: Any,
+    state_payload: dict[str, Any],
     model: str,
 ) -> None:
     _persist_chat_session_state_sync(
         cwd=cwd,
         thread_id=thread_id,
-        state_payload=state.to_dict(),
+        state_payload=state_payload,
         model=model,
     )
 
@@ -145,7 +145,6 @@ def _planner_interrupt_payload(self: Any) -> dict[str, Any] | None:
 
 async def _run_teardown(self: Any) -> None:
     from ..logging_utils import log_kv
-    import time
 
     shutdown_reason = str(getattr(self, "_pending_task_shutdown_reason", "") or "").strip()
     if shutdown_reason:
@@ -248,6 +247,14 @@ async def _run_teardown(self: Any) -> None:
         except Exception:
             pass
     await _drain_background_persistence_tasks(self)
+
+    try:
+        from ..client import OpenAICompatClient
+        await OpenAICompatClient.aclose_shared_clients()
+    except Exception as exc:
+        log = self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness")
+        log.warning("Failed to close shared API clients during teardown: %s", exc)
+
     self.approvals.reject_pending_shell_approvals()
     self.approvals.reject_pending_sudo_password_prompts()
 
@@ -482,12 +489,15 @@ def _autosave_chat_session_state(self: Any) -> None:
         return
     try:
         client = getattr(self, "client", None)
+        # Snapshot state on the event loop so the background writer does not
+        # serialize the live object while it is being mutated.
+        state_payload = state.to_dict(artifact_store=getattr(self, "artifact_store", None))
         _schedule_background_persistence(
             self,
             _persist_chat_session_state_from_runtime_state_sync,
             cwd,
             thread_id,
-            state,
+            state_payload,
             str(getattr(client, "model", "") or ""),
         )
     except Exception:
@@ -577,6 +587,9 @@ def get_sudo_password(self: Any, *, command: str = "") -> str | None:
     user inline; callers that need interactive prompting should use
     request_sudo_password instead.
     """
+    store = getattr(self, "credential_store", None)
+    if store is not None:
+        return store.get_sudo_password()
     password = getattr(self.config, "sudo_password", None) or getattr(self, "sudo_password", None)
     if isinstance(password, str) and password.strip():
         return password.strip()

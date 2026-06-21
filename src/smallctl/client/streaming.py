@@ -10,10 +10,11 @@ from typing import Any, AsyncIterator
 
 try:
     import httpx
-except Exception:  # pragma: no cover
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
     httpx = None
 
 from .chunk_parser import chunk_contains_tool_call_delta
+from .client_transport_client_lifecycle import _get_async_client, _reset_async_client
 from .provider_adapters import get_provider_adapter
 from ..logging_utils import log_kv
 
@@ -57,6 +58,7 @@ class SSEStreamer:
         aggressive_tool_call_timeout: bool = False,
         run_logger: Any | None = None,
         log: logging.Logger | None = None,
+        api_client: Any | None = None,
     ) -> None:
         self.provider_profile = provider_profile
         self.adapter = get_provider_adapter(provider_profile)
@@ -71,6 +73,7 @@ class SSEStreamer:
             self.tool_call_continuation_timeout_sec = max(1.0, float(tool_call_continuation_timeout_sec))
         self.run_logger = run_logger
         self.log = log or logging.getLogger("smallctl.client.streaming")
+        self.api_client = api_client
 
     def _resolve_first_token_timeout_sec(self, override: float | None) -> float:
         if override is not None:
@@ -101,7 +104,7 @@ class SSEStreamer:
         payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream Server-Sent Events from the model endpoint.
-        
+
         Yields chunk events with parsed JSON data and done events when complete.
         Also handles error chunks and timeout conditions.
         """
@@ -133,6 +136,9 @@ class SSEStreamer:
                         error=str(exc),
                         provider_profile=self.provider_profile,
                     )
+                    if self.api_client is not None:
+                        await _reset_async_client(self.api_client)
+                        client = _get_async_client(self.api_client)
                     continue
                 yield {
                     "type": "chunk_error",
@@ -365,17 +371,18 @@ class SSEStreamer:
             pool=self.STREAM_POOL_TIMEOUT_SEC,
         )
         response = await client.post(url, headers=headers, json=fallback_payload, timeout=timeout)
-        response.raise_for_status()
-        obj = response.json()
-        if self.run_logger:
-            self.run_logger.log(
-                "chat",
-                "nonstream_response",
-                "chat non-stream response received",
-                chunk=obj,
-            )
-        yield {"type": "chunk", "data": _nonstream_response_to_chunk(obj)}
-        yield {"type": "done"}
+        async with response:
+            response.raise_for_status()
+            obj = response.json()
+            if self.run_logger:
+                self.run_logger.log(
+                    "chat",
+                    "nonstream_response",
+                    "chat non-stream response received",
+                    chunk=obj,
+                )
+            yield {"type": "chunk", "data": _nonstream_response_to_chunk(obj)}
+            yield {"type": "done"}
 
 
 def _nonstream_response_to_chunk(payload: dict[str, Any]) -> dict[str, Any]:

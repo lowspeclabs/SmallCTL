@@ -4,6 +4,8 @@ import asyncio
 import asyncio.subprocess
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 from typing import Any
@@ -226,6 +228,78 @@ async def shell_exec(
     return result
 
 
+def _tokenize_command(command: str, *, posix: bool) -> list[str]:
+    """Split a command string into an argv list without invoking a shell.
+
+    Raises ValueError for unbalanced quotes or an empty command.
+    """
+    try:
+        argv = shlex.split(str(command or ""), posix=posix, comments=False)
+    except ValueError as exc:
+        raise ValueError(f"Invalid command quoting: {command!r}: {exc}") from exc
+    if not argv:
+        raise ValueError("Empty command")
+    return argv
+
+
+async def _create_process_with_shell(
+    *,
+    command: str,
+    cwd: str,
+    env: dict[str, str],
+    stdout: Any,
+    stderr: Any,
+    stdin: Any,
+) -> asyncio.subprocess.Process:
+    """Opt-in shell path. Preserves legacy shell semantics for commands that
+    genuinely require pipes, redirects, variable expansion, etc. Callers must
+    gate this path through risk policy / human approval.
+    """
+    if os.name == "nt":
+        windows_commands = [
+            ("powershell", "-NoProfile", "-Command", command),
+            (_windows_cmd_exe(), "/c", command),
+        ]
+        last_error: Exception | None = None
+        for candidate in windows_commands:
+            try:
+                return await asyncio.create_subprocess_exec(
+                    *candidate,
+                    cwd=cwd,
+                    env=env,
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdin=stdin,
+                )
+            except (FileNotFoundError, PermissionError) as exc:
+                last_error = exc
+        try:
+            return _PopenProcessAdapter(
+                subprocess.Popen(
+                    command,
+                    cwd=cwd,
+                    shell=True,
+                    env=env,
+                    stdout=_subprocess_stdio(stdout),
+                    stderr=_subprocess_stdio(stderr),
+                    stdin=_subprocess_stdio(stdin),
+                )
+            )
+        except Exception as exc:
+            last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Failed to create Windows shell process")
+    return await asyncio.create_subprocess_shell(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=stdout,
+        stderr=stderr,
+        stdin=stdin,
+    )
+
+
 async def create_process(
     *,
     command: str,
@@ -235,50 +309,35 @@ async def create_process(
     stdin: Any = asyncio.subprocess.DEVNULL,
     env_overrides: dict[str, str] | None = None,
     harness: Any = None,
+    shell: bool = False,
 ) -> asyncio.subprocess.Process:
     env = _shell_env()
     if env_overrides:
         env.update({str(key): str(value) for key, value in env_overrides.items()})
-    proc = None
-    if os.name == "nt":
-        windows_commands = [
-            ("powershell", "-NoProfile", "-Command", command),
-            (_windows_cmd_exe(), "/c", command),
-        ]
-        last_error: Exception | None = None
-        for candidate in windows_commands:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *candidate,
-                    cwd=cwd,
-                    env=env,
-                    stdout=stdout,
-                    stderr=stderr,
-                    stdin=stdin,
-                )
-                break
-            except (FileNotFoundError, PermissionError) as exc:
-                last_error = exc
-        if proc is None:  # If no async process was created, try Popen
-            try:
-                proc = _PopenProcessAdapter(
-                    subprocess.Popen(
-                        command,
-                        cwd=cwd,
-                        shell=True,
-                        env=env,
-                        stdout=_subprocess_stdio(stdout),
-                        stderr=_subprocess_stdio(stderr),
-                        stdin=_subprocess_stdio(stdin),
-                    )
-                )
-            except Exception as exc:
-                last_error = exc
-        if proc is None and last_error is not None:
-            raise last_error
+    proc: asyncio.subprocess.Process | None = None
+    if shell:
+        proc = await _create_process_with_shell(
+            command=command,
+            cwd=cwd,
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=stdin,
+        )
+    elif os.name == "nt":
+        argv = _tokenize_command(command, posix=False)
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=stdin,
+        )
     else:
-        proc = await asyncio.create_subprocess_shell(
-            command,
+        argv = _tokenize_command(command, posix=True)
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             cwd=cwd,
             env=env,
             stdout=stdout,
@@ -300,6 +359,7 @@ async def _create_process(
     stdin: Any = asyncio.subprocess.DEVNULL,
     env_overrides: dict[str, str] | None = None,
     harness: Any = None,
+    shell: bool = False,
 ) -> asyncio.subprocess.Process:
     return await create_process(
         command=command,
@@ -309,6 +369,7 @@ async def _create_process(
         stdin=stdin,
         env_overrides=env_overrides,
         harness=harness,
+        shell=shell,
     )
 
 

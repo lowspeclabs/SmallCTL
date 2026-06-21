@@ -116,7 +116,14 @@ class BackendRecoveryService:
         if self.harness.backend_max_restarts_per_hour <= 0:
             return {"allowed": False, "count": len(history), "window_sec": 3600}
         cutoff = time.time() - 3600.0
-        recent = [float(ts) for ts in history if float(ts) >= cutoff]
+        recent = []
+        for ts in history:
+            try:
+                ts_float = float(ts)
+            except (ValueError, TypeError):
+                continue
+            if ts_float >= cutoff:
+                recent.append(ts_float)
         self.harness.state.scratchpad["_backend_restart_history"] = recent
         return {
             "allowed": len(recent) < self.harness.backend_max_restarts_per_hour,
@@ -127,7 +134,14 @@ class BackendRecoveryService:
     def _record_backend_restart_attempt(self) -> None:
         history = self._backend_restart_history()
         cutoff = time.time() - 3600.0
-        recent = [float(ts) for ts in history if float(ts) >= cutoff]
+        recent = []
+        for ts in history:
+            try:
+                ts_float = float(ts)
+            except (ValueError, TypeError):
+                continue
+            if ts_float >= cutoff:
+                recent.append(ts_float)
         recent.append(time.time())
         self.harness.state.scratchpad["_backend_restart_history"] = recent
 

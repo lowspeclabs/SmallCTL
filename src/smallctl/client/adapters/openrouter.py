@@ -47,5 +47,5 @@ class OpenRouterAdapter:
             )
         return mutated
 
-    def should_retry_without_stream_options(self, exc: Any) -> bool:
-        return _retry_without_stream_options(exc)
+    def should_retry_without_stream_options(self, exc: Any, *, stream_options_present: bool = False) -> bool:
+        return _retry_without_stream_options(exc, stream_options_present=stream_options_present)

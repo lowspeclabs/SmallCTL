@@ -274,7 +274,7 @@ def build_operation_id(
     return f"{thread_id}:{step_count}:{safe_tool_call_id}:{tool_name}"
 
 
-def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
+def serialize_graph_state(graph_state: GraphRunState, *, artifact_store: Any = None) -> dict[str, Any]:
     last_tool_results = [_serialize_tool_execution_record(item) for item in graph_state.last_tool_results]
     if log.isEnabledFor(logging.DEBUG):
         log.debug(
@@ -286,7 +286,7 @@ def serialize_graph_state(graph_state: GraphRunState) -> dict[str, Any]:
     return {
         "graph_state_schema_version": 1,
         "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
-        "loop_state": graph_state.loop_state.to_dict(),
+        "loop_state": graph_state.loop_state.to_dict(artifact_store=artifact_store),
         "thread_id": graph_state.thread_id,
         "run_mode": graph_state.run_mode,
         "pending_tool_calls": [_serialize_pending_tool_call(item) for item in graph_state.pending_tool_calls],

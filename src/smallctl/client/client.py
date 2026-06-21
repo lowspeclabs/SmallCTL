@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Literal
 
 try:
     import httpx
-except Exception:  # pragma: no cover
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
     httpx = None
 
 from ..logging_utils import RunLogger, log_kv
@@ -59,6 +59,24 @@ class OpenAICompatClient:
         "end_text",
         "patch",
         "diff",
+    }
+    _WRITE_HEAVY_ARGUMENT_TOOL_ALLOWLIST: ClassVar[set[str]] = {
+        "file_write",
+        "file_append",
+        "file_patch",
+        "ast_patch",
+        "ssh_file_write",
+        "ssh_file_patch",
+        "ssh_file_replace_between",
+    }
+    _READONLY_TOOL_NAME_DENYLIST: ClassVar[set[str]] = {
+        "ask_human",
+        "loop_status",
+        "step_complete",
+        "step_fail",
+        "task_complete",
+        "task_fail",
+        "escalate_to_bigger_model",
     }
     _shared_clients: ClassVar[dict[tuple[str, str], Any]] = {}
 
@@ -169,6 +187,10 @@ class OpenAICompatClient:
             property_names = {str(name).strip() for name in properties} if isinstance(properties, dict) else set()
             if tool_name in self._WRITE_HEAVY_TOOL_NAMES:
                 return True
+            if tool_name in self._READONLY_TOOL_NAME_DENYLIST:
+                continue
+            if tool_name not in self._WRITE_HEAVY_ARGUMENT_TOOL_ALLOWLIST:
+                continue
             if property_names & self._WRITE_HEAVY_ARGUMENT_FIELDS:
                 return True
         return False
@@ -292,6 +314,10 @@ class OpenAICompatClient:
             if tool_name in self._WRITE_HEAVY_TOOL_NAMES:
                 write_heavy = True
                 break
+            if tool_name in self._READONLY_TOOL_NAME_DENYLIST:
+                continue
+            if tool_name not in self._WRITE_HEAVY_ARGUMENT_TOOL_ALLOWLIST:
+                continue
             if property_names & self._WRITE_HEAVY_ARGUMENT_FIELDS:
                 write_heavy = True
                 break
@@ -308,13 +334,16 @@ class OpenAICompatClient:
 
     @classmethod
     async def aclose_shared_clients(cls) -> None:
-        clients = list(cls._shared_clients.values())
-        cls._shared_clients.clear()
+        from .client_transport_client_lifecycle import _shared_client_lock
+        with _shared_client_lock:
+            clients = list(cls._shared_clients.values())
+            cls._shared_clients.clear()
+        log = logging.getLogger("smallctl.client")
         for client in clients:
             try:
                 await client.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed to close shared async client: %s", exc)
 
     def stream_chat(
         self,

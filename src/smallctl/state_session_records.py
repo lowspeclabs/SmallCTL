@@ -88,8 +88,22 @@ def _coerce_context_brief(value: Any) -> Any:
         payload.setdefault("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
         payload.setdefault("tier", "warm")
         payload.setdefault("step_range", (0, 0))
+        payload.setdefault("task_goal", "")
+        payload.setdefault("current_phase", "")
+        payload.setdefault("next_action_hint", "")
+        payload.setdefault("staleness_step", 0)
         payload["brief_id"] = str(payload.get("brief_id", "") or "")
         payload["created_at"] = _coerce_timestamp_string(payload.get("created_at"))
+        payload["tier"] = str(payload.get("tier", "warm") or "warm")
+        step_range = payload.get("step_range", (0, 0))
+        if isinstance(step_range, (list, tuple)) and len(step_range) >= 2:
+            payload["step_range"] = (_coerce_int(step_range[0], default=0), _coerce_int(step_range[1], default=0))
+        else:
+            payload["step_range"] = (0, 0)
+        payload["task_goal"] = str(payload.get("task_goal", "") or "")
+        payload["current_phase"] = str(payload.get("current_phase", "") or "")
+        payload["next_action_hint"] = str(payload.get("next_action_hint", "") or "")
+        payload["staleness_step"] = _coerce_int(payload.get("staleness_step", 0), default=0)
 
         for key in (
             "key_discoveries",

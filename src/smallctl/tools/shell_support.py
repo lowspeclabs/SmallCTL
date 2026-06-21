@@ -7,7 +7,8 @@ from typing import Any
 
 from ..state import LoopState
 from .common import fail
-from .fs_sessions import _same_target_path, _write_session_can_finalize
+from .fs_paths import _same_target_path
+from .fs_sessions import _write_session_can_finalize
 from .fs_write_session_policy import _write_session_resume_metadata
 from .shell_parsing import (
     _simple_shell_command_segments,
@@ -132,4 +133,20 @@ def guard_fail(
     return fail(message, metadata=metadata)
 
 
+def _command_requires_shell(command: str) -> bool:
+    """Return True when the command string uses shell syntax outside single quotes.
 
+    Conservative: pipes, redirects, boolean operators, multiple commands,
+    command substitution, variable expansion, and tilde expansion are all
+    treated as requiring a shell interpreter. Metacharacters inside single
+    quotes are considered literal and do not trigger the shell path.
+    """
+    text = str(command or "")
+    # Strip single-quoted regions; metacharacters inside them are literal.
+    stripped = re.sub(r"'[^']*'", "", text)
+    return bool(
+        re.search(
+            r"[|&;<>]|&&|\|\||\$\(|\${|`|\$[A-Za-z_]|(?:^|\s)~",
+            stripped,
+        )
+    )

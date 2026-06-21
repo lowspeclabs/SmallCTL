@@ -9,13 +9,13 @@ from ..state import LoopState
 from ..write_session_fsm import record_write_session_event
 from ..risk_policy import evaluate_risk_policy
 from .common import fail, ok
+from .fs_paths import _same_target_path
 from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
     _normalize_replace_strategy,
     _normalize_section_name,
     _repair_cycle_session_id_failure,
-    _same_target_path,
     _mark_repeat_patch,
     _looks_like_complete_html_document,
     _looks_like_full_script_content,

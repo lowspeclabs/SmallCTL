@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 from typing import Any
 
 from .ssh_parsing import normalize_ssh_target, shell_join
@@ -96,7 +98,14 @@ def build_ssh_command(
     password: str | None,
     strict_host_key_checking: str = "accept-new",
     force_tty: bool = False,
-) -> tuple[str, dict[str, str] | None]:
+) -> tuple[str, dict[str, str] | None, str | None]:
+    """Build an SSH command string.
+
+    When a password is supplied, the password is written to a temporary file
+    with mode ``0600`` and ``sshpass -f`` is used so the secret is not exposed
+    in process environment variables. Callers are responsible for deleting the
+    returned ``password_file_path`` once the process has completed.
+    """
     host, user = normalize_ssh_target(host=host, user=user)
     ssh_args = [
         "-p", str(port),
@@ -106,6 +115,7 @@ def build_ssh_command(
         "-o", f"StrictHostKeyChecking={strict_host_key_checking}",
     ]
     env_overrides: dict[str, str] | None = None
+    password_file_path: str | None = None
 
     if password:
         if shutil.which("sshpass") is None:
@@ -117,8 +127,22 @@ def build_ssh_command(
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",
         ])
-        command_args = ["sshpass", "-e", "ssh"]
-        env_overrides = {"SSHPASS": password}
+        fd, password_file_path = tempfile.mkstemp(prefix="sshpass_", suffix=".txt", text=True)
+        try:
+            os.chmod(password_file_path, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(password)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(password_file_path)
+            except FileNotFoundError:
+                pass
+            raise
+        command_args = ["sshpass", "-f", password_file_path, "ssh"]
     else:
         ssh_args.extend(["-o", "BatchMode=yes"])
         command_args = ["ssh"]
@@ -130,7 +154,7 @@ def build_ssh_command(
 
     target = f"{user}@{host}" if user else host
     ssh_args.extend([target, command])
-    return shell_join([*command_args, *ssh_args]), env_overrides
+    return shell_join([*command_args, *ssh_args]), env_overrides, password_file_path
 
 
 def detect_interactive_prompt(text: str) -> dict[str, Any] | None:
@@ -334,7 +358,7 @@ def ssh_execution_debug_metadata(
     identity_file_text = str(identity_file or "").strip()
     return {
         "ssh_auth_mode": "password" if password_text else "key",
-        "ssh_auth_transport": "sshpass_env" if password_text else "ssh",
+        "ssh_auth_transport": "sshpass_file" if password_text else "ssh",
         "ssh_password_provided": bool(password_text),
         "ssh_identity_file_supplied": bool(identity_file_text),
         "ssh_strict_host_key_checking": strict_host_key_checking,

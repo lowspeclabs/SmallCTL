@@ -4,8 +4,8 @@ from typing import Any
 
 from ..state import LoopState
 from .common import fail
+from .fs_paths import _same_target_path
 from .fs_write_sessions import _ensure_write_session_files, _resolve
-from .fs_sessions import _same_target_path
 
 
 def _looks_like_system_repair_cycle_id(value: str | None) -> bool:

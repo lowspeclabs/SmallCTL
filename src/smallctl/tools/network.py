@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import asyncio.subprocess
+import os
 import re
 import shlex
 import shutil
@@ -57,7 +58,6 @@ from .shell_support import (
 from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
-    ssh_accept_new_is_incompatible as _ssh_accept_new_is_incompatible,
     ssh_command_is_package_manager_install as _ssh_command_is_package_manager_install,
     ssh_diagnostic_not_found as _ssh_diagnostic_not_found,
     ssh_error_class as _ssh_error_class,
@@ -490,7 +490,7 @@ async def run_ssh_command(
         return preflight_guard
 
     try:
-        full_cmd, env_overrides = _build_ssh_command(
+        full_cmd, env_overrides, password_file_path = _build_ssh_command(
             host=host,
             command=command,
             user=user,
@@ -617,6 +617,7 @@ async def run_ssh_command(
         return last_process_output, proc
 
     proc = None
+    password_file_path: str | None = None
     retry_metadata: dict[str, Any] = {}
     max_auth_retries = 3
     auth_retry_count = 0
@@ -643,66 +644,10 @@ async def run_ssh_command(
                 continue
             break
 
-        if int(output.get("exit_code") or 0) != 0 and _ssh_accept_new_is_incompatible(str(output.get("stderr") or "")):
-            strict_host_key_mode = "no"
-            full_cmd, env_overrides = _build_ssh_command(
-                host=host,
-                command=command,
-                user=user,
-                port=port,
-                identity_file=identity_file,
-                password=password,
-                strict_host_key_checking=strict_host_key_mode,
-            )
-            execution_debug_metadata = _ssh_execution_debug_metadata(
-                password=password,
-                identity_file=identity_file,
-                strict_host_key_checking=strict_host_key_mode,
-            )
-            if stripped_root_sudo:
-                execution_debug_metadata["stripped_redundant_root_sudo"] = True
-            output, proc = await _run_ssh_process(full_cmd, stdin_data)
-            retry_metadata = {
-                "ssh_option_retry": "strict_host_key_checking_no",
-                "ssh_option_retry_reason": "accept_new_incompatible",
-            }
-
-        # Auto-recover from stale host keys by retrying with strict checking
-        # disabled once per target.  This matches the common case where a
-        # remote host was reinstalled and its host key changed.
-        if (
-            int(output.get("exit_code") or 0) != 0
-            and retry_metadata.get("ssh_option_retry_reason") != "host_key_verification"
-            and _ssh_error_class(
-                exit_code=int(output.get("exit_code") or 0),
-                stderr=str(output.get("stderr") or ""),
-            ) == "host_key_verification"
-        ):
-            record = _get_ssh_recovery_record(state, host, user)
-            if not record.get("host_key_retry_done"):
-                record["host_key_retry_done"] = True
-                strict_host_key_mode = "no"
-                full_cmd, env_overrides = _build_ssh_command(
-                    host=host,
-                    command=command,
-                    user=user,
-                    port=port,
-                    identity_file=identity_file,
-                    password=password,
-                    strict_host_key_checking=strict_host_key_mode,
-                )
-                execution_debug_metadata = _ssh_execution_debug_metadata(
-                    password=password,
-                    identity_file=identity_file,
-                    strict_host_key_checking=strict_host_key_mode,
-                )
-                if stripped_root_sudo:
-                    execution_debug_metadata["stripped_redundant_root_sudo"] = True
-                output, proc = await _run_ssh_process(full_cmd, stdin_data)
-                retry_metadata = {
-                    "ssh_option_retry": "strict_host_key_checking_no",
-                    "ssh_option_retry_reason": "host_key_verification",
-                }
+        # Do not silently downgrade StrictHostKeyChecking to "no". Host-key
+        # verification failures are surfaced to the caller. The approved
+        # recovery path is to remove the stale local known_hosts entry with
+        # `ssh-keygen -R <host> -f ~/.ssh/known_hosts` and then retry.
 
         if auth_retry_count > 0:
             retry_metadata["ssh_auth_retries"] = auth_retry_count
@@ -785,6 +730,12 @@ async def run_ssh_command(
                     hints.append("Check if SSH keys are correctly configured on the remote host.")
             if "Connection timed out" in error_msg:
                 hints.append("Verify the host is reachable and the port is open.")
+            if ssh_error_class == "host_key_verification":
+                hints.append(
+                    "Host-key verification failed. If the host key changed, remove the stale entry with "
+                    "`ssh-keygen -R <host> -f ~/.ssh/known_hosts` and retry; otherwise investigate a "
+                    "possible man-in-the-middle condition."
+                )
             if ssh_error_class == "interactive_installer_blocked":
                 _expose_interactive_session_tools(state)
                 hints.append(
@@ -918,6 +869,11 @@ async def run_ssh_command(
             metadata=execution_debug_metadata,
         )
     finally:
+        if password_file_path:
+            try:
+                os.unlink(password_file_path)
+            except FileNotFoundError:
+                pass
         unregister_process(harness, proc)
 
 

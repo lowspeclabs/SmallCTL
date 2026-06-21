@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
+import httpx
+import pytest
+
+from smallctl.client import OpenAICompatClient
+from smallctl.client import client_transport
 from smallctl.client.request_budget import RequestEstimator, build_request_budget
 from smallctl.client.tool_budgeting import fit_tools_to_context_budget
 from smallctl.context import ContextPolicy, PromptAssembler
@@ -414,3 +420,39 @@ def test_apply_server_context_limit_logs_when_configured_budget_exceeds_model_ce
         and "exceeds known model context window" in str(call.get("message", ""))
         for call in log_calls
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_model_context_limit_logs_each_probe_failure(caplog, monkeypatch) -> None:
+    class _FailingAsyncClient:
+        async def get(self, url: str, headers: dict[str, str] | None = None, timeout: float | None = None) -> None:
+            raise httpx.ConnectError(f"probe failure for {url}")
+
+    client = OpenAICompatClient(
+        base_url="http://example.test/v1",
+        model="demo-model",
+        provider_profile="generic",
+        api_key="test-key",
+    )
+    monkeypatch.setattr(
+        "smallctl.client.client_transport_client_lifecycle._get_async_client",
+        lambda _client: _FailingAsyncClient(),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="smallctl.client"):
+        limit = await client.fetch_model_context_limit()
+
+    assert limit is None
+    failure_messages = [record.getMessage() for record in caplog.records if "context_probe_failed" in record.getMessage()]
+    assert len(failure_messages) == 6
+    expected_urls = [
+        "http://example.test/v1/props",
+        "http://example.test/v1/slots",
+        "http://example.test/props",
+        "http://example.test/slots",
+        "http://example.test/v1/models/demo-model",
+        "http://example.test/v1/models",
+    ]
+    for url in expected_urls:
+        assert any(url in message for message in failure_messages)
+    assert any("ConnectError" in message for message in failure_messages)

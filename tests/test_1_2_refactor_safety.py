@@ -253,7 +253,7 @@ def test_remote_preflight_timeout_kills_and_unregisters_probe(monkeypatch) -> No
 
     from smallctl.tools import shell as _shell_module
     monkeypatch.setattr(_shell_module, "create_process", _fake_create_process)
-    monkeypatch.setattr(network, "_build_ssh_command", lambda **_kwargs: ("ssh example", {}))
+    monkeypatch.setattr(network, "_build_ssh_command", lambda **_kwargs: ("ssh example", {}, None))
 
     result = asyncio.run(
         network._run_remote_installer_preflight_probes(
@@ -1206,7 +1206,7 @@ def test_dispatcher_ssh_auth_debug_metadata_reports_transport() -> None:
 
     assert password_meta == {
         "ssh_auth_mode": "password",
-        "ssh_auth_transport": "sshpass_env",
+        "ssh_auth_transport": "sshpass_file",
         "ssh_password_origin": "task_context",
         "ssh_password_recovered": True,
         "ssh_identity_file_supplied": True,
@@ -1366,7 +1366,7 @@ def test_network_ssh_helpers_classify_failures_and_build_command() -> None:
         ssh_failure_kind,
     )
 
-    cmd, env = build_ssh_command(
+    cmd, env, password_file_path = build_ssh_command(
         host="example.test",
         command="whoami",
         user="root",
@@ -1377,6 +1377,7 @@ def test_network_ssh_helpers_classify_failures_and_build_command() -> None:
     assert cmd.startswith("ssh")
     assert "root@example.test" in cmd
     assert env is None
+    assert password_file_path is None
 
     assert ssh_failure_kind(exit_code=1, stderr="permission denied") == "transport"
     assert ssh_failure_kind(exit_code=1, stderr="hello") == "remote_command"

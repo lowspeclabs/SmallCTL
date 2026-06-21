@@ -288,8 +288,12 @@ def verifier_failure_paths(event: dict[str, Any]) -> list[str]:
 
 def verifier_failure_related_to_text(text: str, event: dict[str, Any]) -> bool:
     failure_paths = verifier_failure_paths(event)
+    reason = str(event.get("reason") or "").strip().lower()
     if not failure_paths:
-        return True
+        # FAMA-detected failures are intentionally broad.  Raw verifier failures
+        # without a concrete command/target path are too vague to relate to a
+        # specific optimistic statement, so avoid blanket invalidation.
+        return reason == "fama_failure_detected"
     text_paths = path_tokens(text)
     if text_paths:
         return any(path_matches_any(path, failure_paths) for path in text_paths)

@@ -56,6 +56,28 @@ def _get_tool_execution_record(harness: Any, operation_id: str) -> dict[str, Any
     return dict(record) if isinstance(record, dict) else {}
 
 
+def _sanitize_tool_args_for_durable_state(harness: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of tool args safe to persist in durable state.
+
+    Plaintext SSH passwords are moved to the ephemeral credential store and
+    replaced with a fingerprint. Other sensitive keys are redacted in place.
+    """
+    if not isinstance(args, dict):
+        return {}
+    sanitized = dict(args)
+    password = str(sanitized.get("password") or "").strip()
+    if password:
+        host = str(sanitized.get("host") or "").strip()
+        user = str(sanitized.get("user") or "").strip()
+        store = getattr(harness, "credential_store", None)
+        if store is not None and host:
+            sanitized["password_fingerprint"] = store.set_ssh_password(host, user or None, password)
+        else:
+            sanitized["password_fingerprint"] = ""
+        del sanitized["password"]
+    return sanitized
+
+
 def _store_tool_execution_record(
     harness: Any,
     *,
@@ -75,6 +97,7 @@ def _store_tool_execution_record(
         step = plan.find_step(step_id)
         if step is not None:
             step_attempt = int(getattr(step, "retry_count", 0) or 0) + 1
+    durable_args = _sanitize_tool_args_for_durable_state(harness, pending.args)
     existing.update(
         {
             "operation_id": operation_id,
@@ -83,7 +106,7 @@ def _store_tool_execution_record(
             "tool_name": pending.tool_name,
             "tool_call_id": pending.tool_call_id,
             "source": str(getattr(pending, "source", "model") or "model"),
-            "args": dict(pending.args),
+            "args": durable_args,
             "result": compact_tool_result_for_durable_state(
                 result.to_dict(),
                 tool_name=str(pending.tool_name or ""),
@@ -100,7 +123,7 @@ def _store_tool_execution_record(
                 "tool_name": pending.tool_name,
                 "tool_call_id": pending.tool_call_id,
                 "source": str(getattr(pending, "source", "model") or "model"),
-                "args": dict(pending.args),
+                "args": durable_args,
                 "replayed": bool(result.metadata.get("cache_hit")) if isinstance(result.metadata, dict) else False,
                 "artifact_id": str(result.metadata.get("artifact_id", "") or "").strip() if isinstance(result.metadata, dict) else "",
                 "plan_id": plan_id,

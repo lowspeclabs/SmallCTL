@@ -283,6 +283,25 @@ def _strip_exact_small_gemma_4_protocol_noise(text: str, *, model_name: str | No
     )
 
 
+def _strip_gemma_control_token_fragments(text: str) -> str:
+    """Remove stray Gemma control-token fragments that leak into content streams.
+
+    Some Gemma-4-e2b-it checkpoints emit tool calls inside ``<|tool_call>`` blocks
+    in the reasoning channel, while the content channel receives only the interior
+    fragment of a quote control token such as ``<|"|>root<|"|>``.  This leaves
+    assistant text like ``|>root<|`` which pollutes conversation history and
+    triggers blank-message recovery loops.
+    """
+    if not text:
+        return ""
+    stripped = str(text)
+    # Interior of a quote token: "|>value<|" is the middle of "<|"|>value<|"|>".
+    stripped = re.sub(r"^\s*\|>[^<\s]+<\|\s*$", "", stripped, flags=re.DOTALL)
+    # Orphan control-token pieces that may remain after a split stream.
+    stripped = re.sub(r"^\s*(?:\|>|<\||<\|\"|\"\|>)\s*$", "", stripped)
+    return stripped.strip()
+
+
 def _normalize_model_specific_text(text: str, *, model_name: str | None) -> str:
     if not text:
         return ""
@@ -305,6 +324,7 @@ def _normalize_model_specific_text(text: str, *, model_name: str | None) -> str:
             normalized,
             model_name=model_name,
         )
+        normalized = _strip_gemma_control_token_fragments(normalized)
     return normalized.strip()
 
 

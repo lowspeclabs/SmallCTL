@@ -172,10 +172,6 @@ def confirmed_ssh_target_count(state: Any | None) -> int:
     return len(_confirmed_session_targets(state))
 
 
-def has_single_confirmed_ssh_target(state: Any | None) -> bool:
-    return confirmed_ssh_target_count(state) == 1
-
-
 def _handoff_remote_anchor_count(handoff: dict[str, Any]) -> int:
     count = 0
     ssh_target = handoff.get("ssh_target")

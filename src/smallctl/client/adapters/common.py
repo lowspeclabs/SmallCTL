@@ -315,7 +315,7 @@ def sanitize_messages_for_lmstudio(messages: list[dict[str, Any]]) -> list[dict[
     return sanitized
 
 
-def should_retry_without_stream_options(exc: Any) -> bool:
+def should_retry_without_stream_options(exc: Any, *, stream_options_present: bool = False) -> bool:
     try:
         response = exc.response
         if response.status_code not in {400, 404, 422}:
@@ -323,9 +323,9 @@ def should_retry_without_stream_options(exc: Any) -> bool:
         try:
             body = response.text.lower()
         except Exception:
-            return True
+            return stream_options_present
         if not body.strip():
-            return True
+            return stream_options_present
         return (
             "stream_options" in body
             or "include_usage" in body

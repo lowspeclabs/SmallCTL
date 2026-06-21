@@ -4,6 +4,8 @@ import json
 import time
 from typing import Any
 
+MAX_DEGENERATE_LOOP_RETRIES = 3
+
 from ..client import OpenAICompatClient
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
@@ -265,7 +267,6 @@ async def resolve_model_stream_result(
             scratchpad["_consecutive_degenerate_loops"] = degenerate_count
         else:
             degenerate_count = 1
-        MAX_DEGENERATE_LOOP_RETRIES = 3
         reasoning_mode_switched = False
         if degenerate_count >= MAX_DEGENERATE_LOOP_RETRIES:
             old_reasoning_mode = getattr(harness, "reasoning_mode", "tags")

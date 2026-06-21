@@ -25,8 +25,72 @@ _SENSITIVE_FILE_SUFFIXES = (
     ".pfx",
 )
 
+# Out-of-workspace locations that require explicit approval before mutation.
+_SENSITIVE_LOCATION_PATTERNS = (
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.aws",
+    "~/.docker",
+    "/etc",
+    "/root",
+    "/usr/local/etc",
+    "/var",
+)
 
-def _resolve(path: str, cwd: str | None = None) -> Path:
+# Tool operations for which _resolve enforces workspace containment by default.
+_MUTATING_OPERATIONS = frozenset({
+    "file_write",
+    "file_append",
+    "file_delete",
+    "file_patch",
+    "ast_patch",
+})
+
+
+class WorkspaceContainmentError(Exception):
+    """Raised when a mutating operation targets a path outside the workspace."""
+
+    def __init__(self, message: str, metadata: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
+def _is_sensitive_location(path: Path) -> bool:
+    """Return True if a resolved path points to a sensitive system location."""
+    normalized = path.as_posix().lower()
+    try:
+        home = str(Path.home().resolve()).lower()
+    except Exception:
+        home = ""
+    for pattern in _SENSITIVE_LOCATION_PATTERNS:
+        try:
+            expanded = str(Path(os.path.expanduser(pattern)).resolve()).lower()
+        except Exception:
+            continue
+        if normalized.startswith(expanded + "/") or normalized == expanded:
+            return True
+        raw = pattern.lower().rstrip("/")
+        if raw.startswith("~") and home:
+            raw = raw.replace("~", home, 1)
+        if normalized.startswith(raw + "/") or normalized == raw:
+            return True
+    name = path.name.lower()
+    if name in {
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+        "authorized_keys", "known_hosts", "known_hosts2",
+        "passwd", "shadow", "sudoers", "htpasswd",
+    }:
+        return True
+    return False
+
+
+def _resolve(
+    path: str,
+    cwd: str | None = None,
+    *,
+    operation: str | None = None,
+    approved_out_of_workspace: bool = False,
+) -> Path:
     base = Path(cwd) if cwd else Path.cwd()
     candidate = Path(os.path.expanduser(path))
     if not candidate.is_absolute():
@@ -37,7 +101,80 @@ def _resolve(path: str, cwd: str | None = None) -> Path:
             candidate = Path("/" + path_str)
         else:
             candidate = base / candidate
-    return candidate.resolve()
+    resolved = candidate.resolve()
+
+    if operation in _MUTATING_OPERATIONS and not approved_out_of_workspace:
+        workspace = _workspace_root(cwd)
+        if not _is_within_workspace(resolved, cwd):
+            reason = (
+                "sensitive_location_unapproved"
+                if _is_sensitive_location(resolved)
+                else "workspace_path_traversal"
+            )
+            raise WorkspaceContainmentError(
+                f"{operation} blocked: path must stay within the active workspace.",
+                metadata={
+                    "path": str(resolved),
+                    "workspace": str(workspace),
+                    "requested_path": path,
+                    "error_kind": reason,
+                    "operation": operation,
+                },
+            )
+
+    return resolved
+
+
+def _workspace_root(cwd: str | None = None) -> Path:
+    return Path(cwd).resolve() if cwd else Path.cwd().resolve()
+
+
+def _is_within_workspace(path: Path, cwd: str | None = None) -> bool:
+    try:
+        path.relative_to(_workspace_root(cwd))
+        return True
+    except ValueError:
+        return False
+
+
+def _guard_workspace_containment(
+    path: str,
+    cwd: str | None = None,
+    *,
+    operation: str = "file operation",
+    approved_out_of_workspace: bool = False,
+) -> dict[str, Any] | None:
+    """Return a failure envelope if the resolved path escapes the workspace.
+
+    The actual containment check is delegated to :func:`_resolve` so that no
+    caller can bypass enforcement by calling :func:`_resolve` directly.
+    """
+    try:
+        _resolve(
+            path,
+            cwd,
+            operation=operation,
+            approved_out_of_workspace=approved_out_of_workspace,
+        )
+    except WorkspaceContainmentError as exc:
+        workspace = _workspace_root(cwd)
+        relative = _workspace_relative_hint(path, cwd)
+        hint = (
+            f" Try `{relative!r}` if you meant a workspace-relative path."
+            if relative
+            else " Use a workspace-relative path or ask the user for explicit approval."
+        )
+        return fail(
+            f"{operation} blocked: path must stay within the active workspace.{hint}",
+            metadata={
+                **exc.metadata,
+                "requested_path": path,
+                "workspace": str(workspace),
+            },
+        )
+    except Exception as exc:
+        return fail(f"Unable to resolve path: {exc}")
+    return None
 
 
 def _looks_like_sensitive_read_path(path: str | Path) -> bool:

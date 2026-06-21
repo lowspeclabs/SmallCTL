@@ -5,7 +5,7 @@ from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from ..logging_utils import RunLogger, log_kv
 from ..models.tool_result import ToolEnvelope
-from ..remote_scope import has_single_confirmed_ssh_target, remote_scope_is_active
+from ..remote_scope import remote_scope_is_active
 from ..state import json_safe_value
 from ..challenge_progress import redundant_verifier_block
 from . import network
@@ -111,12 +111,14 @@ class ToolDispatcher:
         state: Any | None = None,
         phase: str = "explore",
         run_logger: RunLogger | None = None,
+        harness: Any | None = None,
     ) -> None:
         self.log = logging.getLogger("smallctl.dispatcher")
         self.run_logger = run_logger
         self.registry = registry
         self.state = state
         self.phase = phase
+        self.harness = harness
 
     async def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> ToolEnvelope:
         requested_tool_name = tool_name
@@ -126,6 +128,7 @@ class ToolDispatcher:
             arguments,
             phase=self.phase,
             state=self.state,
+            harness=self.harness,
         )
         log_kv(
             self.log,

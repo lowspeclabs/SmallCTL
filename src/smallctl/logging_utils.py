@@ -244,9 +244,6 @@ class RunLogger:
     def set_trace_id(self, trace_id: str) -> None:
         self.set_extra_field("trace_id", str(trace_id or "").strip())
 
-    def clear_trace_id(self) -> None:
-        self.set_extra_field("trace_id", None)
-
     def set_task_id(self, task_id: str) -> None:
         self.set_extra_field("task_id", str(task_id or "").strip())
 

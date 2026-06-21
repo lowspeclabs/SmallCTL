@@ -413,9 +413,9 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 if started is not None:
                     _add_latency_metric(graph_state, "worker_latency_sec", perf_counter() - started)
                 return serialize_runtime_state(graph_state)
-            except (NonParallelizableStepInDAGError, ValueError, TypeError, RuntimeError) as exc:
+            except Exception as exc:
                 increment_metric(self.deps.harness.state, "tool_plan_dag_fallback_count")
-                self.deps.harness._runlog("tool_dag_aborted", str(exc))
+                self.deps.harness._runlog("tool_dag_aborted", str(exc), exception_type=exc.__class__.__name__)
                 payload = serialize_runtime_state(graph_state)
                 # fall through to serial dispatch
         next_payload = await super()._dispatch_tools_node(payload)
@@ -500,8 +500,13 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 active.evidence.append(evidence)
             if getattr(self.deps.harness, "state", None) is not graph_state.loop_state:
                 self.deps.harness.state.subtask_ledger = ledger
-        except Exception:
-            pass
+        except Exception as exc:
+            self.deps.harness._runlog(
+                "tool_plan_subtask_ledger_failed",
+                "failed to update subtask ledger from ToolPlan observations",
+                error=str(exc),
+                exception_type=exc.__class__.__name__,
+            )
         self.deps.harness._runlog(
             "tool_plan_observations",
             "ToolPlan observations compressed",
@@ -629,8 +634,13 @@ class ToolPlanRuntime(LoopGraphRuntime):
             recorder = TrajectoryRecorder()
             try:
                 recorder.record_tool_plan_trajectory(harness, result)
-            except Exception:
-                pass
+            except Exception as exc:
+                harness._runlog(
+                    "tool_plan_trajectory_record_failed",
+                    "failed to record ToolPlan trajectory",
+                    error=str(exc),
+                    exception_type=exc.__class__.__name__,
+                )
 
     def _fallback_to_loop(self, graph_state: GraphRunState, message: str, *, failure_class: str) -> None:
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "fallback"

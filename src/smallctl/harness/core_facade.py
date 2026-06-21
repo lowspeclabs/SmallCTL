@@ -81,14 +81,14 @@ def _ssh_host_key_failure_causal_chain(state: Any, result: dict[str, Any]) -> st
     )
 
 
-def _write_checkpoint_file(path: Path, result: dict[str, Any], state: Any) -> None:
-    payload = {
+def _write_checkpoint_file(path: Path, result: dict[str, Any], state_snapshot: dict[str, Any]) -> None:
+    payload = redact_sensitive_data({
         "checkpoint_schema_version": 1,
         "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "result": json_safe_value(result),
-        "state": state.to_dict(),
-    }
+        "state": state_snapshot,
+    })
     _write_json_file(path, payload)
 
 
@@ -469,7 +469,7 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 _write_json_file(session_summary_path, session_summary_payload, trailing_newline=True)
                 _write_json_file(run_summary_path, run_summary_payload, trailing_newline=True)
         except Exception:
-            pass
+            self.log.exception("failed to write finalization summaries")
 
     self._cancel_requested = False
     self._active_dispatch_task = None
@@ -520,11 +520,14 @@ def _persist_checkpoint(self: Any, result: dict[str, Any]) -> None:
     )
     result_snapshot = dict(result)
     try:
+        # Snapshot state on the event loop so the background writer does not
+        # serialize the live object while it is being mutated.
+        state_snapshot = self.state.to_dict(artifact_store=getattr(self, "artifact_store", None))
         schedule = getattr(self, "_schedule_background_persistence", None)
         if callable(schedule):
-            schedule(_write_checkpoint_file, path, result_snapshot, self.state)
+            schedule(_write_checkpoint_file, path, result_snapshot, state_snapshot)
         else:
-            _write_checkpoint_file(path, result_snapshot, self.state)
+            _write_checkpoint_file(path, result_snapshot, state_snapshot)
         log_kv(self.log, logging.INFO, "harness_checkpoint_saved", path=str(path))
     except Exception:
         self.log.exception("failed to persist checkpoint")

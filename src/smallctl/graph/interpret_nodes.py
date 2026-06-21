@@ -1136,6 +1136,27 @@ async def interpret_model_output(
     return LoopRoute.FINALIZE
 
 
+_CHAT_SHELL_COMMAND_RE = re.compile(
+    r"(?:^|\s|`)(?:docker|systemctl|journalctl|ssh|scp|ls|cat|grep|find|ps|top|kill|curl|wget|python3?|bash|sh|apt|yum|dnf|npm|pip|git|make|cmake|go|rustc|cargo|java|node|kubectl)\b",
+    re.IGNORECASE,
+)
+
+
+def _assistant_text_looks_like_shell_command(text: str) -> bool:
+    """Detect assistant prose that is actually a bare shell/command line."""
+    stripped = str(text or "").strip().strip("`'")
+    if not stripped:
+        return False
+    if _CHAT_SHELL_COMMAND_RE.search(stripped):
+        return True
+    # A single line that looks like a tool-name invocation, e.g. "ssh_exec(...)"
+    if "(" in stripped and stripped.endswith(")"):
+        first_token = stripped.split("(", 1)[0].strip()
+        if first_token and not first_token[0].isdigit() and " " not in first_token:
+            return True
+    return False
+
+
 async def interpret_chat_output(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
@@ -1206,7 +1227,16 @@ async def interpret_chat_output(
             or harness.state.active_plan is not None
             or harness.state.draft_plan is not None
         )
-        if not has_active_write and not has_active_plan and not recent_tool_block and not actionable_chat_task:
+        if (
+            not has_active_write
+            and not has_active_plan
+            and not recent_tool_block
+            and not actionable_chat_task
+            and not text_looks_like_action
+            and not text_has_tool_tags
+            and not text_has_func_calls
+            and not _assistant_text_looks_like_shell_command(assistant_text)
+        ):
             graph_state.final_result = {
                 "status": "chat_completed",
                 "assistant": assistant_text,

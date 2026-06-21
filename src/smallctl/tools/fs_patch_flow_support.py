@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state import LoopState
-from .fs_sessions import _same_target_path
+from .fs_paths import _same_target_path
 from .fs_write_sessions import _content_hash, _read_text_file
 
 _REPEAT_SENSITIVE_PATCHES_KEY = "_repeat_sensitive_file_patches"

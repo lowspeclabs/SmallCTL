@@ -54,8 +54,11 @@ def infer_ssh_password(
     *,
     user: str | None = None,
     state: Any | None = None,
+    credential_store: Any | None = None,
 ) -> tuple[str, str]:
-    inferred_from_records = infer_ssh_password_from_execution_records(host, user=user, state=state)
+    inferred_from_records = infer_ssh_password_from_execution_records(
+        host, user=user, state=state, credential_store=credential_store
+    )
     if inferred_from_records:
         return inferred_from_records, "prior_ssh_exec"
 
@@ -63,7 +66,9 @@ def infer_ssh_password(
     if inferred_from_task:
         return inferred_from_task, "task_context"
 
-    inferred_from_session = infer_ssh_password_from_session_memory(host, user=user, state=state)
+    inferred_from_session = infer_ssh_password_from_session_memory(
+        host, user=user, state=state, credential_store=credential_store
+    )
     if inferred_from_session:
         return inferred_from_session, "session_memory"
 
@@ -75,6 +80,7 @@ def infer_ssh_password_from_execution_records(
     *,
     user: str | None = None,
     state: Any | None = None,
+    credential_store: Any | None = None,
 ) -> str:
     records = getattr(state, "tool_execution_records", None)
     if not isinstance(records, dict) or not records:
@@ -112,7 +118,15 @@ def infer_ssh_password_from_execution_records(
         if target_user and normalized_record_user != target_user:
             continue
 
-        password = str(args.get("password") or "").strip()
+        password = ""
+        if credential_store is not None:
+            password = credential_store.get_ssh_password(record_host, record_user_or_none) or ""
+        if not password:
+            fingerprint = str(args.get("password_fingerprint") or "").strip()
+            if fingerprint and credential_store is not None:
+                password = credential_store.get_ssh_password_by_fingerprint(fingerprint) or ""
+        if not password:
+            password = str(args.get("password") or "").strip()
         if password:
             return password
     return ""
@@ -135,6 +149,7 @@ def infer_ssh_password_from_session_memory(
     *,
     user: str | None = None,
     state: Any | None = None,
+    credential_store: Any | None = None,
 ) -> str:
     target = session_ssh_target_record(host, state=state)
     if not isinstance(target, dict):
@@ -143,6 +158,15 @@ def infer_ssh_password_from_session_memory(
     session_user = str(target.get("user") or "").strip().lower()
     if target_user and session_user and target_user != session_user:
         return ""
+    if credential_store is not None:
+        password = credential_store.get_ssh_password(host, target.get("user")) or ""
+        if password:
+            return password
+        fingerprint = str(target.get("password_fingerprint") or "").strip()
+        if fingerprint:
+            password = credential_store.get_ssh_password_by_fingerprint(fingerprint) or ""
+            if password:
+                return password
     return str(target.get("password") or "").strip()
 
 

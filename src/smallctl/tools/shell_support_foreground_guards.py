@@ -8,6 +8,7 @@ from .shell_parsing import (
     _split_shell_words,
     _strip_environment_and_wrappers,
 )
+from .shell_support_common import _guard_fail
 from .shell_support_constants import (
     _DETACHED_COMMAND_MARKERS,
     _FOLLOW_FLAGS,
@@ -17,33 +18,6 @@ from .shell_support_constants import (
     _PACKAGE_RUNNERS,
     _SERVICE_MANAGER_COMMANDS,
 )
-
-
-def _guard_fail(
-    message: str,
-    *,
-    reason: str,
-    command: str,
-    error_kind: str | None = None,
-    next_required_tool: dict[str, Any] | None = None,
-    next_required_action: dict[str, Any] | str | None = None,
-    extra_metadata: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a consistent guard failure result."""
-    from .common import fail
-    metadata: dict[str, Any] = {
-        "reason": reason,
-        "command": command,
-    }
-    if error_kind is not None:
-        metadata["error_kind"] = error_kind
-    if next_required_tool is not None:
-        metadata["next_required_tool"] = next_required_tool
-    if next_required_action is not None:
-        metadata["next_required_action"] = next_required_action
-    if extra_metadata is not None:
-        metadata.update(extra_metadata)
-    return fail(message, metadata=metadata)
 
 
 def _foreground_command_guard(

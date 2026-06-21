@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
+from ..logging_utils import log_kv
 from ..state import LoopState
 from .common import fail, ok
 from .fs_patching import (
@@ -60,11 +62,18 @@ async def handle_file_patch(
     multiline: bool = False,
     dotall: bool = False,
 ) -> dict[str, Any]:
+    from .fs_listing import _guard_workspace_containment
     from .fs import _guard_suspicious_temp_root_path, _mark_repeat_patch, _resolve
 
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
         return suspicious_path
+
+    workspace = cwd or (state.cwd if state is not None else None)
+    if workspace:
+        containment = _guard_workspace_containment(path, workspace, operation="file_patch")
+        if containment is not None:
+            return containment
 
     target = _resolve(path, cwd)
     if not write_session_id and session_id:
@@ -296,7 +305,15 @@ async def handle_file_patch(
         )
 
     repair_allows = _repair_cycle_allows_patch(state, target)
-    print(f"DEBUG fs_patch_flow: staged_only={staged_only}, repair_allows={repair_allows}, state.repair_cycle_id={getattr(state, 'repair_cycle_id', None)}")
+    log_kv(
+        state.log if state is not None else logging.getLogger("smallctl.tools.fs"),
+        logging.DEBUG,
+        "fs_patch_flow_repair_cycle_gate",
+        staged_only=staged_only,
+        repair_allows=repair_allows,
+        repair_cycle_id=getattr(state, "repair_cycle_id", None),
+        path=str(target),
+    )
     if not staged_only and not repair_allows:
         _mark_repeat_patch(state)
         return fail(

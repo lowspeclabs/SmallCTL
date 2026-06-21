@@ -39,6 +39,7 @@ class PlanExecutionEngine:
                 return
             if step_id in visiting:
                 errors.append(f"Plan dependency cycle includes step {step_id}.")
+                visiting.discard(step_id)
                 return
             visiting.add(step_id)
             step = by_id.get(step_id)

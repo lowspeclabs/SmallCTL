@@ -87,3 +87,29 @@ def test_collect_timeline_normalizes_content() -> None:
     assert len(timeline) == 1
     assert timeline[0].kind == "assistant"
     assert timeline[0].content == " Hello world"
+
+
+def test_collect_stream_extracts_usage_from_final_empty_choices_chunk() -> None:
+    """Backends such as llama.cpp emit usage on a final chunk with empty choices."""
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [{"delta": {"content": "hi"}}],
+                "model": "gemma-4-e2b",
+            },
+        },
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [],
+                "usage": {"prompt_tokens": 42, "completion_tokens": 7, "total_tokens": 49},
+                "model": "gemma-4-e2b",
+            },
+        },
+    ]
+    result = collect_stream(chunks, reasoning_mode="off")
+    assert result.usage["prompt_tokens"] == 42
+    assert result.usage["completion_tokens"] == 7
+    assert result.usage["total_tokens"] == 49
+    assert result.usage["_backend_model_name"] == "gemma-4-e2b"

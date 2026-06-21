@@ -230,6 +230,42 @@ def test_gemma_brace_task_complete_with_quote_tokens() -> None:
     assert result.pending_tool_calls[0].args == {"message": "Done"}
 
 
+def test_gemma_quote_token_fragment_in_assistant_text_is_stripped() -> None:
+    """Gemma-4-e2b-it may emit the tool call in reasoning and only a quote-token
+    fragment such as '|>root<|' in the assistant content stream. The fragment
+    must be stripped so it does not pollute conversation history."""
+    q = '<|"|>'
+    thinking_text = (
+        "<think>I will run the command on the remote host.</think>\n"
+        f"<|tool_call>call:ssh_exec{{command:{q}docker ps -a{q},"
+        f"host:{q}192.168.1.89{q},password:{q}secret{q},user:{q}root{q}}}<tool_call|>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    harness = _Harness(registry=registry)
+    stream = SimpleNamespace(assistant_text="|>root<|", thinking_text=thinking_text, tool_calls=[])
+    deps = SimpleNamespace(harness=harness)
+    graph_state = SimpleNamespace(run_mode="loop")
+    result = parse_tool_calls(stream, [], graph_state, deps, model_name="google/gemma-4-e2b-it")
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
+    assert result.pending_tool_calls[0].args["command"] == "docker ps -a"
+    assert result.pending_tool_calls[0].args["host"] == "192.168.1.89"
+    assert result.pending_tool_calls[0].args["user"] == "root"
+    assert "|>root<|" not in result.final_assistant_text
+
+
 def test_gemma_brace_tool_call_without_closing_tag() -> None:
     """Small models sometimes emit `<|tool_call>call:tool{...}` without a closing tag."""
     q = '<|"|>'

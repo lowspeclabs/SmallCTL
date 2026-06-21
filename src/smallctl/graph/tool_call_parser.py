@@ -132,9 +132,15 @@ def _strip_orphan_tool_protocol_markers(text: str) -> str:
     if not text:
         return ""
     stripped = re.sub(
-        r"</?(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?>",
+        r"</?(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?[|]?>",
         "",
         str(text),
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<\|(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?>",
+        "",
+        stripped,
         flags=re.IGNORECASE,
     )
     stripped = re.sub(
@@ -162,6 +168,24 @@ def _strip_tool_protocol_payloads(text: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     stripped = re.sub(
+        r"<tool_call\b[^>]*>.*?<tool_call\|>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped = re.sub(
+        r"<\|tool_call\b[^>]*>.*?</tool_call>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped = re.sub(
+        r"<\|tool_call\b[^>]*>.*?<tool_call\|>",
+        "",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    stripped = re.sub(
         r"<tool_code\b[^>]*>.*?</tool_code>",
         "",
         stripped,
@@ -186,7 +210,13 @@ def _strip_tool_protocol_payloads(text: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     stripped = re.sub(
-        r"</?(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?>",
+        r"</?(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?[|]?>",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    stripped = re.sub(
+        r"<\|(?:tool_call|tool_code|call|function|parameter)(?:=[^>]+)?>",
         "",
         stripped,
         flags=re.IGNORECASE,

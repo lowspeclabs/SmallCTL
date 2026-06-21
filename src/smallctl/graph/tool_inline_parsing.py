@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -155,6 +156,77 @@ def _infer_tool_name_from_orphan_parameters(
     return ""
 
 
+def _normalize_gemma_quote_tokens(text: str) -> str:
+    """Replace Gemma-4-e2b-it quote control tokens with regular quotes."""
+    return str(text or "").replace('<|"|>', '"')
+
+
+def _parse_gemma_colon_brace_call(
+    block_text: str,
+    *,
+    allowed_raw_function_names: set[str] | None = None,
+) -> PendingToolCall | None:
+    """Parse Gemma-4-e2b-it `call:tool_name{key: "value", ...}` syntax.
+
+    Some Gemma checkpoints emit tool calls wrapped in `<tool_call>` tags using a
+    colon-prefixed, brace-wrapped format with `<|"|>` quote tokens, e.g.:
+
+        <tool_call>call:ssh_exec{command:<|"|>ls<|"|>,host:<|"|>1.2.3.4<|"|>}<tool_call|>
+
+    This parser normalizes the quote tokens, strips the optional `call:` prefix,
+    and extracts key/value pairs separated by commas.
+    """
+    candidate = _normalize_gemma_quote_tokens(block_text).strip()
+    if not candidate:
+        return None
+
+    if candidate.lower().startswith("call:"):
+        candidate = candidate[5:].strip()
+
+    match = re.match(
+        r"^\s*([a-zA-Z0-9_-]+)\s*\{\s*(.*?)\s*\}\s*$",
+        candidate,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+
+    tool_name = match.group(1).strip()
+    if allowed_raw_function_names is not None and tool_name not in allowed_raw_function_names:
+        return None
+
+    body = match.group(2)
+    # Extract key:value pairs, respecting single/double quoted values and
+    # tolerating unquoted scalar values. Values may contain shell metacharacters
+    # including commas, so comma-splitting must stay inside quotes.
+    params: dict[str, str] = {}
+    kv_pattern = re.compile(
+        r"([a-zA-Z0-9_-]+)\s*:\s*"
+        r'("(?:[^"\\]|\\.)*"|'
+        r"'(?:[^'\\]|\\.)*'|"
+        r"[^,}]+)"
+    )
+    for key, value in kv_pattern.findall(body):
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            try:
+                value = ast.literal_eval(value)
+            except Exception:
+                value = value[1:-1]
+        params[key] = str(value)
+
+    if not params:
+        return None
+
+    return PendingToolCall(
+        tool_name=tool_name,
+        args=params,
+        raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
+    )
+
+
 def _extract_inline_tool_calls(
     text: str,
     *,
@@ -165,9 +237,11 @@ def _extract_inline_tool_calls(
         return "", []
 
     results: list[PendingToolCall] = []
-    cleaned_text = _strip_exact_small_gemma_4_protocol_noise(
-        text,
-        model_name=model_name,
+    cleaned_text = _normalize_gemma_quote_tokens(
+        _strip_exact_small_gemma_4_protocol_noise(
+            text,
+            model_name=model_name,
+        )
     )
 
     def _parse_bracketed_tool_block(block_text: str) -> PendingToolCall | None:
@@ -225,6 +299,14 @@ def _extract_inline_tool_calls(
                     args=params,
                     raw_arguments=json.dumps(params, ensure_ascii=True, sort_keys=True),
                 )
+
+        # Gemma-4-e2b-it `call:tool_name{key: "value", ...}` / `tool_name{...}` syntax
+        gemma_brace_call = _parse_gemma_colon_brace_call(
+            block_text,
+            allowed_raw_function_names=allowed_raw_function_names,
+        )
+        if gemma_brace_call is not None:
+            return gemma_brace_call
 
         struct_patterns = (
             r"<function=([\w_-]+)>(.*?)</function>",
@@ -361,6 +443,9 @@ def _extract_inline_tool_calls(
     xml_patterns = [
         r"<tool_code>(.*?)</tool_code>",
         r"<tool_call>(.*?)</tool_call>",
+        r"<\|tool_call>(.*?)</tool_call>",
+        r"<tool_call>(.*?)<tool_call\|>",
+        r"<\|tool_call>(.*?)<tool_call\|>",
         r"<call>(.*?)</call>",
     ]
     for pattern in xml_patterns:

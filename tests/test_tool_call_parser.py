@@ -153,3 +153,104 @@ def test_real_gemma_run_step_assistant_text_is_deduplicated() -> None:
     assert len(result.pending_tool_calls) == 1
     assert result.pending_tool_calls[0].tool_name == "task_complete"
     assert result.final_assistant_text == answer
+
+
+def test_gemma_brace_tool_call_with_quote_tokens() -> None:
+    """Gemma-4-e2b-it sometimes emits calls as `call:tool_name{key:<|\"|>value<|\"|>}<tool_call|>`."""
+    q = '<|"|>'
+    text = (
+        f"<tool_call>call:ssh_exec{{command:{q}docker pull vikunja/vikunja && "
+        f"docker run -d --name vikunja -p 80:80 vikunja/vikunja{q},"
+        f"host:{q}192.168.1.89{q},"
+        f"password:{q}secret{q},"
+        f"target:{q}root@192.168.1.89{q},"
+        f"user:{q}root{q}}}<tool_call|>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    result = _parse(text, registry=registry)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
+    assert result.pending_tool_calls[0].args["command"] == (
+        "docker pull vikunja/vikunja && docker run -d --name vikunja -p 80:80 vikunja/vikunja"
+    )
+    assert result.pending_tool_calls[0].args["host"] == "192.168.1.89"
+    assert result.pending_tool_calls[0].args["password"] == "secret"
+    assert result.pending_tool_calls[0].args["target"] == "root@192.168.1.89"
+    assert result.pending_tool_calls[0].args["user"] == "root"
+
+
+def test_gemma_brace_tool_call_without_call_prefix() -> None:
+    """The brace format may omit the `call:` prefix."""
+    q = '<|"|>'
+    text = (
+        f"<|tool_call>ssh_exec{{command:{q}ls{q},host:{q}1.2.3.4{q}}}"
+        f"<tool_call|>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    result = _parse(text, registry=registry)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
+    assert result.pending_tool_calls[0].args == {"command": "ls", "host": "1.2.3.4"}
+
+
+def test_gemma_brace_task_complete_with_quote_tokens() -> None:
+    """The brace format also applies to terminal tools like task_complete."""
+    q = '<|"|>'
+    text = f"<tool_call>call:task_complete{{message:{q}Done{q}}}<tool_call|>"
+
+    result = _parse(text)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["task_complete"]
+    assert result.pending_tool_calls[0].args == {"message": "Done"}
+
+
+def test_standard_tool_call_still_works_after_gemma_fix() -> None:
+    """The normal `<tool_call>tool_name(...)</tool_call>` path must remain intact."""
+    text = (
+        "<tool_call>ssh_exec(command='docker pull vikunja/vikunja',host='192.168.1.89')"
+        "</tool_call>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    result = _parse(text, registry=registry)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
+    assert result.pending_tool_calls[0].args == {"command": "docker pull vikunja/vikunja", "host": "192.168.1.89"}

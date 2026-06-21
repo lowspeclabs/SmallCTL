@@ -22,7 +22,11 @@ from .run_mode import (
     resolve_mode_task,
     should_enable_complex_write_chat_draft,
 )
-from .tool_dispatch_cache import maybe_reuse_file_read, maybe_reuse_identical_read_call, _reuse_cached_file_read
+from .tool_dispatch_cache import (
+    maybe_reuse_file_read,
+    maybe_reuse_identical_read_call,
+    _reuse_cached_file_read,  # noqa: F401  # re-exported for tests/backcompat
+)
 
 _CHAT_WRITE_TOOL_NAMES = {"file_write", "file_patch", "ast_patch"}
 _READONLY_CHAT_TOOL_BLOCKLIST = {
@@ -372,22 +376,22 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
             runtime_intent_label = "remote_handoff"
             task_mode = "remote_execute"
         elif runtime_intent_label == "smalltalk":
-            terminal_tools = _chat_terminal_tools(harness)
-            _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
-            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_terminal_only"
+            # Smalltalk is pure conversation; the runtime policy already says
+            # chat_requires_tools=False. Exposing task_complete/task_fail here
+            # causes small models to immediately terminate the chat instead of
+            # replying naturally. Return no tools and let the smalltalk bypass
+            # finalize from assistant prose.
+            _scratchpad(harness)["_chat_tools_exposed"] = False
+            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_no_tools"
             harness._runlog(
                 "chat_tool_selection",
-                "chat tool exposure reduced to terminal tools for smalltalk",
+                "chat tool exposure disabled for smalltalk",
                 task=task,
-                reason="smalltalk_terminal_only",
-                tool_names=[
-                    str(entry["function"]["name"])
-                    for entry in terminal_tools
-                    if isinstance(entry, dict) and isinstance(entry.get("function"), dict)
-                ],
+                reason="smalltalk_no_tools",
+                tool_names=[],
                 runtime_intent=runtime_intent_label,
             )
-            return terminal_tools
+            return []
         if not chat_mode_requires_tools(harness, task_for_intent):
             # Safety valve: if the task looks like an implementation follow-up,
             # do not reduce the model to terminal-only tools. Let it attempt the

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from ..models.conversation import ConversationMessage
 from ..harness.tool_visibility import (
     hidden_tool_reason,
     recent_hidden_tool_recovery_artifact_id,
     resolve_turn_tool_exposure,
-    schedule_retry_tool_exposure,
 )
 from .state import GraphRunState, PendingToolCall
 
@@ -159,7 +156,7 @@ def _strip_hidden_chat_terminal_completion_calls(
     suppressed_reason = str(
         getattr(harness.state, "scratchpad", {}).get("_chat_tools_suppressed_reason") or ""
     ).strip()
-    if suppressed_reason != "non_lookup_chat_terminal_only":
+    if suppressed_reason not in {"non_lookup_chat_terminal_only", "smalltalk_no_tools"}:
         return False
 
     model_calls = [

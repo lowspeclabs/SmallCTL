@@ -740,9 +740,9 @@ def test_auto_chat_smalltalk_sends_no_tools_to_qwen35(
         tool["function"]["name"]
         for tool in stream_calls[0][1]
         if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-    ] == ["task_complete", "task_fail"]
+    ] == []
     assert harness.state.scratchpad["_chat_runtime_intent"] == "smalltalk"
-    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_terminal_only"
+    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"
 
 
 def test_chat_runtime_promotes_fenced_task_complete_json(

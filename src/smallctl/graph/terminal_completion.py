@@ -4,7 +4,6 @@ import json
 import re
 from typing import Any
 
-from ..state import json_safe_value
 
 _COMPLETION_FACT_MARKERS = ("[COMPLETED]", "[DONE]", "[SUCCESS]", "task complete", "successfully removed", "successfully uninstalled")
 _TERMINAL_PROSE_STRONG_MARKERS = (
@@ -18,6 +17,13 @@ _TERMINAL_PROSE_STRONG_MARKERS = (
 )
 _FUNCTIONAL_TASK_COMPLETE_RE = re.compile(r"\btask_complete\s*\(", re.IGNORECASE)
 _FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+
+
+def _terminal_completion_suppressed_for_chat(harness: Any) -> bool:
+    """Return True when chat tools were explicitly suppressed for smalltalk."""
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    return str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip() == "smalltalk_no_tools"
 
 
 def working_memory_signals_completion(harness: Any) -> bool:
@@ -167,6 +173,8 @@ def maybe_promote_terminal_prose_task_complete(
     *,
     nudge_count: int,
 ) -> bool:
+    if _terminal_completion_suppressed_for_chat(harness):
+        return False
     from .state import PendingToolCall
     message = terminal_prose_completion_message(
         graph_state.last_assistant_text,
@@ -204,6 +212,8 @@ def maybe_promote_raw_terminal_json_task_complete(
     graph_state: Any,
     harness: Any,
 ) -> bool:
+    if _terminal_completion_suppressed_for_chat(harness):
+        return False
     from .state import PendingToolCall
     message = raw_terminal_json_completion_message(graph_state.last_assistant_text)
     if not message:

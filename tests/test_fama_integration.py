@@ -180,7 +180,7 @@ def test_fama_done_gate_hides_task_complete_from_chat_terminal_only_exposure(mon
     }
     harness = _harness(state)
     harness.client = SimpleNamespace(model="qwen")
-    harness._current_user_task = lambda: "thanks"
+    harness._current_user_task = lambda: "good job"
 
     monkeypatch.setattr("smallctl.harness.tool_dispatch.chat_mode_requires_tools", lambda harness, task: False)
 

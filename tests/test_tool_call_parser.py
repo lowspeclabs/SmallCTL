@@ -230,6 +230,30 @@ def test_gemma_brace_task_complete_with_quote_tokens() -> None:
     assert result.pending_tool_calls[0].args == {"message": "Done"}
 
 
+def test_gemma_brace_tool_call_without_closing_tag() -> None:
+    """Small models sometimes emit `<|tool_call>call:tool{...}` without a closing tag."""
+    q = '<|"|>'
+    text = f"<|tool_call>call:dir_list{{path:{q}.{q}}}"
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="dir_list",
+            description="list directory",
+            schema=build_tool_schema(
+                properties={"path": {"type": "string"}},
+                required=["path"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    result = _parse(text, registry=registry)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["dir_list"]
+    assert result.pending_tool_calls[0].args == {"path": "."}
+
+
 def test_standard_tool_call_still_works_after_gemma_fix() -> None:
     """The normal `<tool_call>tool_name(...)</tool_call>` path must remain intact."""
     text = (

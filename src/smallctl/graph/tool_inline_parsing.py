@@ -446,6 +446,10 @@ def _extract_inline_tool_calls(
         r"<\|tool_call>(.*?)</tool_call>",
         r"<tool_call>(.*?)<tool_call\|>",
         r"<\|tool_call>(.*?)<tool_call\|>",
+        # Some small models emit an opening `<|tool_call>` tag but forget the
+        # closing tag. Capture the rest of the line/string so the brace parser
+        # below can still recover the call.
+        r"<\|tool_call>([^\n]*?)(?:</tool_call>|<tool_call\|>|\n|$)",
         r"<call>(.*?)</call>",
     ]
     for pattern in xml_patterns:

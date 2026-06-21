@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from .shell_support_constants import _ARGPARSE_REQUIRED_ARGS_PATTERN, _ARGPARSE_UNRECOGNIZED_ARGS_PATTERN
 
 
@@ -47,8 +45,10 @@ def _build_argparse_unrecognized_args_hint(command: str, unrecognized_args: list
     args_text = ", ".join(unrecognized_args)
     return (
         f"The command `{command}` has unrecognized arguments: {args_text}. "
-        "If this is a CLI with subcommands, place global flags (like --url, --token) "
-        "BEFORE the subcommand (e.g., `script.py --url X --token Y subcommand`)."
+        "Check the usage output in the error above and replace them with the "
+        "exact flags the script lists (e.g., --url, --token). "
+        "If this is a CLI with subcommands, place global flags BEFORE the "
+        "subcommand (e.g., `script.py --url X --token Y subcommand`)."
     )
 
 

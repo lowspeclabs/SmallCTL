@@ -9,6 +9,7 @@ from .state import PendingToolCall
 from .tool_model_rules import (
     _model_is_lfm25_8b_a1b,
     _parse_raw_function_call,
+    _raw_function_call_pattern,
     _strip_exact_small_gemma_4_protocol_noise,
 )
 
@@ -519,6 +520,31 @@ def _extract_inline_tool_calls(
                         start = cleaned_text.find("{", start)
                         continue
                 break
+
+    # Some small models (e.g. Gemma-4-e2b-it) emit a raw function call at the
+    # start of a line and then continue generating text on the same line. Try
+    # to extract the call prefix without requiring the whole line to be only
+    # the call. We still remove just the matched call portion; any trailing
+    # duplicate text is handled by the caller.
+    raw_call_regex = _raw_function_call_pattern(model_name=model_name)
+    line_call_matches = list(
+        re.finditer(rf"(?m)^[ \t]*{raw_call_regex}", cleaned_text)
+    )
+    offset = 0
+    for match in line_call_matches:
+        pending = _parse_raw_function_call(
+            match.group(0),
+            model_name=model_name,
+            allowed_tool_names=allowed_raw_function_names,
+        )
+        if pending is None:
+            continue
+        pending = _try_parse_data({"tool_name": pending.tool_name, "arguments": pending.args})
+        if pending:
+            results.append(pending)
+            start, end = match.span()
+            cleaned_text = cleaned_text[:start - offset] + cleaned_text[end - offset :]
+            offset += end - start
 
     standalone_line_regex = r"(?m)^[ \t]*(?P<body>.+?)[ \t]*$"
     matches = list(re.finditer(standalone_line_regex, cleaned_text))

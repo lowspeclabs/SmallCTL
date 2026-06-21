@@ -132,6 +132,83 @@ def test_normalize_tool_result_summarizes_web_search_results_not_keys() -> None:
     assert '1 result for "weather jacksonville fl current forecast"' in evidence.statement
 
 
+def test_normalize_tool_result_summarizes_ssh_exec_stdout_not_keys() -> None:
+    evidence = normalize_tool_result(
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "stdout": "CONTAINER ID   IMAGE\n316eae6be6a5   vikunja/vikunja:latest\n",
+                "stderr": "",
+                "exit_code": 0,
+            },
+            metadata={"host": "192.168.1.89", "command": "docker ps"},
+        ),
+        artifact=None,
+        operation_id="op-ssh-1",
+        phase="execute",
+        evidence_context={"args": {"host": "192.168.1.89", "command": "docker ps"}},
+    )
+
+    assert "ssh_exec keys:" not in evidence.statement
+    assert "vikunja/vikunja:latest" in evidence.statement
+
+
+def test_normalize_tool_result_summarizes_ssh_exec_stderr_when_stdout_empty() -> None:
+    evidence = normalize_tool_result(
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={
+                "stdout": "",
+                "stderr": "Warning: something\n",
+                "exit_code": 0,
+            },
+            metadata={"host": "192.168.1.89", "command": "docker ps"},
+        ),
+        artifact=None,
+        operation_id="op-ssh-2",
+        phase="execute",
+        evidence_context={"args": {"host": "192.168.1.89", "command": "docker ps"}},
+    )
+
+    assert "ssh_exec keys:" not in evidence.statement
+    assert "Warning: something" in evidence.statement
+
+
+def test_normalize_tool_result_summarizes_shell_exec_stdout() -> None:
+    evidence = normalize_tool_result(
+        tool_name="shell_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={"stdout": "package installed\n", "stderr": "", "exit_code": 0},
+        ),
+        artifact=None,
+        operation_id="op-shell-1",
+        phase="execute",
+        evidence_context={"args": {"command": "dpkg -l | grep foo"}},
+    )
+
+    assert "shell_exec keys:" not in evidence.statement
+    assert "package installed" in evidence.statement
+
+
+def test_normalize_tool_result_summarizes_shell_exec_exit_code_when_empty() -> None:
+    evidence = normalize_tool_result(
+        tool_name="shell_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={"stdout": "", "stderr": "", "exit_code": 0},
+        ),
+        artifact=None,
+        operation_id="op-shell-2",
+        phase="execute",
+        evidence_context={"args": {"command": "true"}},
+    )
+
+    assert "exit code 0" in evidence.statement
+
+
 def test_normalize_tool_result_sets_observation_adapter_for_web_search() -> None:
     evidence = normalize_tool_result(
         tool_name="web_search",

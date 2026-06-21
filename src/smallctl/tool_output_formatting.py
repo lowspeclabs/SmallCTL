@@ -10,6 +10,9 @@ def summarize_structured_output(*, tool_name: str, output: dict[str, Any]) -> st
     web_fetch_summary = _summarize_web_fetch_output(output)
     if web_fetch_summary:
         return web_fetch_summary
+    shell_summary = _summarize_shell_output(tool_name=tool_name, output=output)
+    if shell_summary:
+        return shell_summary
     return None
 
 
@@ -82,6 +85,24 @@ def _summarize_web_fetch_output(output: dict[str, Any]) -> str | None:
     if excerpt:
         return f"{label}: {_truncate(excerpt, 120)}"
     return label
+
+
+def _summarize_shell_output(*, tool_name: str, output: dict[str, Any]) -> str | None:
+    """Summarize shell_exec / ssh_exec structured output for evidence statements."""
+    if tool_name not in {"shell_exec", "ssh_exec"}:
+        return None
+    if not ({"stdout", "stderr", "exit_code"} <= set(output.keys())):
+        return None
+    stdout = _clean_text(output.get("stdout"))
+    stderr = _clean_text(output.get("stderr"))
+    exit_code = output.get("exit_code")
+    if stdout:
+        return _truncate(stdout, 200)
+    if stderr:
+        return f"exit {exit_code}: {_truncate(stderr, 180)}" if exit_code is not None else _truncate(stderr, 200)
+    if exit_code is not None:
+        return f"exit code {exit_code}"
+    return None
 
 
 def _render_web_search_output(output: dict[str, Any]) -> str | None:

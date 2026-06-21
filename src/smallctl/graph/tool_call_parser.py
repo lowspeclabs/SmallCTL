@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import json
 import re
-import time
-from pathlib import Path
+import time  # noqa: F401
+from pathlib import Path  # noqa: F401
 from typing import Any
 
 from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
-from ..state import WriteSession, json_safe_value
-from ..task_targets import extract_task_target_paths, primary_task_target_path
-from ..write_session_fsm import new_write_session, record_write_session_event
+from ..state import WriteSession, json_safe_value  # noqa: F401
+from ..task_targets import (  # noqa: F401
+    extract_task_target_paths,
+    primary_task_target_path,
+)
+from ..write_session_fsm import (  # noqa: F401
+    new_write_session,
+    record_write_session_event,
+)
 from .state import PendingToolCall
 from .tool_model_rules import (
     _clean_reasoning_fallback_text,
@@ -21,8 +27,11 @@ from .tool_model_rules import (
     _strip_qwen_25_duplicate_thinking,
 )
 from .tool_inline_parsing import _extract_inline_tool_calls
-from .write_recovery import infer_write_target_path, normalize_write_argument_aliases
-from .tool_call_parser_support import (
+from .write_recovery import (  # noqa: F401
+    infer_write_target_path,
+    normalize_write_argument_aliases,
+)
+from .tool_call_parser_support import (  # noqa: F401
     _artifact_read_recovery_hint,
     _artifact_read_synthesis_hint,
     _clear_artifact_read_guard_state,
@@ -361,6 +370,26 @@ def parse_tool_calls(
                 unique_calls.append(call)
 
     pending_calls = unique_calls
+
+    # Terminal inline tool calls should end the assistant's textual turn, but
+    # some small models (e.g. Gemma-4-e2b-it) continue generating after the
+    # call and repeat the answer they already gave. Truncate cleaned_text at
+    # the first terminal call marker in the original assistant text so the UI
+    # and conversation history only retain the answer that preceded the call.
+    if any(call.tool_name in TERMINAL_TOOLS for call in pending_calls):
+        earliest = -1
+        for name in TERMINAL_TOOLS:
+            idx = assistant_text.find(f"{name}(")
+            if idx != -1 and (earliest == -1 or idx < earliest):
+                earliest = idx
+        if earliest != -1:
+            prefix = assistant_text[:earliest]
+            # If the prefix is only whitespace and markdown formatting, the
+            # turn's textual content was just the wrapped terminal call.
+            if re.fullmatch(r"[\s*_'\"`~\-]+", prefix):
+                cleaned_text = ""
+            else:
+                cleaned_text = prefix.strip()
 
     # STEP 5: Triple-Answer Guard (Progressive/Stability Layer)
     # If the model emits task_complete with a message that matches assistant_text,

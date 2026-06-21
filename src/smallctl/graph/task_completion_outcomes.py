@@ -121,6 +121,88 @@ def _maybe_schedule_task_complete_remote_mutation_verifier(
     return True
 
 
+def _maybe_schedule_task_complete_post_change_verifier(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+) -> bool:
+    if record.tool_name != "task_complete" or record.result.success:
+        return False
+
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("reason") or "").strip() != "post_change_verification_required":
+        return False
+
+    action = metadata.get("next_required_action")
+    if not isinstance(action, dict):
+        return False
+    if str(action.get("tool_name") or "").strip() != "shell_exec":
+        return False
+
+    required_arguments = action.get("required_arguments")
+    if not isinstance(required_arguments, dict):
+        return False
+    command = str(required_arguments.get("command") or "").strip()
+    if not command:
+        return False
+
+    signature = "|".join(
+        [
+            str(record.tool_call_id or ""),
+            str(record.operation_id or ""),
+            "task_complete_post_change_verifier",
+            command,
+        ]
+    )
+    if harness.state.scratchpad.get("_task_complete_post_change_verifier_autocontinue") == signature:
+        return False
+    harness.state.scratchpad["_task_complete_post_change_verifier_autocontinue"] = signature
+
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="shell_exec",
+            args={"command": command},
+            raw_arguments='{"command": "' + command.replace('"', '\\"') + '"}',
+            source="system",
+        )
+    ]
+    required_call_text = f"shell_exec(command={command!r})"
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                "VERIFICATION REQUIRED: Before calling task_complete, verify the latest file change. "
+                f"Required call: {required_call_text}. "
+                "Run this verifier and then call task_complete if it passes."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "task_complete_post_change_verifier_autocontinue",
+                "tool_name": "shell_exec",
+                "required_arguments": {"command": command},
+            },
+        )
+    )
+    harness._runlog(
+        "recovery_decision",
+        "selected post-change verifier before task completion",
+        status="scheduled",
+        recovery_kind="task_complete_post_change_verifier_autocontinue",
+        tool_name="shell_exec",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        command=command,
+    )
+    harness._runlog(
+        "task_complete_post_change_verifier_autocontinue",
+        "scheduled automatic post-change verifier after task completion block",
+        tool_call_id=record.tool_call_id,
+        operation_id=record.operation_id,
+        command=command,
+    )
+    return True
+
+
 async def maybe_auto_complete_after_remote_mutation_verifier(
     graph_state: GraphRunState,
     harness: Any,

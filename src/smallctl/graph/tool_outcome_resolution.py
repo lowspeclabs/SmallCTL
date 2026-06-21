@@ -13,6 +13,7 @@ from .write_session_outcomes import _auto_update_active_plan_step
 from .task_completion_outcomes import (
     maybe_auto_complete_after_remote_mutation_verifier,
     _maybe_emit_task_complete_verifier_nudge,
+    _maybe_schedule_task_complete_post_change_verifier,
     _maybe_schedule_task_complete_remote_mutation_verifier,
     _maybe_schedule_task_complete_repair_loop_status,
     _maybe_schedule_task_complete_verifier_loop_status,
@@ -100,7 +101,9 @@ async def maybe_apply_terminal_tool_outcome(
         return True
 
     if record.tool_name == "task_complete" and not record.result.success:
-        scheduled_recovery = _maybe_schedule_task_complete_remote_mutation_verifier(graph_state, harness, record)
+        scheduled_recovery = _maybe_schedule_task_complete_post_change_verifier(graph_state, harness, record)
+        if not scheduled_recovery:
+            scheduled_recovery = _maybe_schedule_task_complete_remote_mutation_verifier(graph_state, harness, record)
         if not scheduled_recovery:
             scheduled_recovery = _maybe_schedule_task_complete_repair_loop_status(graph_state, harness, record)
         if not scheduled_recovery:

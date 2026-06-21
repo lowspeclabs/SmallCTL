@@ -25,11 +25,17 @@ def post_change_verification_block(state: LoopState) -> dict[str, Any] | None:
         command = (
             f"test -s {shlex.quote(target)} && python3 - <<'PY'\n"
             "from pathlib import Path\n"
+            "import re\n"
             f"s = Path({target!r}).read_text()\n"
             "assert '<!DOCTYPE html' in s\n"
-            "assert '<canvas' in s\n"
+            "assert '<script' in s\n"
             "assert s.count('<script') == s.count('</script>')\n"
             "assert '<small_model_thought>' not in s\n"
+            "# Allow either canvas-based or DOM-based games.\n"
+            "if '<canvas' not in s:\n"
+            "    assert re.search(r'<div\\b[^>]*id=[\"\\'][^\"\\']+[\"\\']', s, re.IGNORECASE) is not None\n"
+            "    lowered = s.lower()\n"
+            "    assert any(marker in lowered for marker in ('score', 'lives', 'game over', 'restart'))\n"
             "print('OK')\n"
             "PY"
         )

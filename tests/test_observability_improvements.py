@@ -313,6 +313,51 @@ def test_task_completion_remote_verifier_logs_recovery_decision():
     assert decision["path"] == "/etc/app.conf"
 
 
+def test_task_completion_post_change_verifier_logs_recovery_decision():
+    from smallctl.graph.state import GraphRunState, ToolExecutionRecord
+    from smallctl.graph.task_completion_outcomes import (
+        _maybe_schedule_task_complete_post_change_verifier,
+    )
+    from smallctl.models.tool_result import ToolEnvelope
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad = {}
+    graph_state = GraphRunState(loop_state=state, thread_id="t", run_mode="loop")
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    record = ToolExecutionRecord(
+        operation_id="op-1",
+        tool_name="task_complete",
+        args={"message": "done"},
+        tool_call_id="call-1",
+        result=ToolEnvelope(
+            success=False,
+            error="Cannot complete the task until the latest file change is verified.",
+            metadata={
+                "reason": "post_change_verification_required",
+                "next_required_action": {
+                    "tool_name": "shell_exec",
+                    "required_arguments": {
+                        "command": "python3 -m py_compile app.py",
+                    },
+                },
+            },
+        ),
+    )
+
+    assert _maybe_schedule_task_complete_post_change_verifier(graph_state, harness, record) is True
+    assert len(graph_state.pending_tool_calls) == 1
+    assert graph_state.pending_tool_calls[0].tool_name == "shell_exec"
+    assert graph_state.pending_tool_calls[0].args["command"] == "python3 -m py_compile app.py"
+    decision = next(data for event, _message, data in events if event == "recovery_decision")
+    assert decision["recovery_kind"] == "task_complete_post_change_verifier_autocontinue"
+    assert decision["tool_name"] == "shell_exec"
+    assert decision["command"] == "python3 -m py_compile app.py"
+
+
 def test_finalize_writes_run_summary(tmp_path):
     from smallctl.harness.core_facade import _finalize
     from smallctl.logging_utils import RunLogger

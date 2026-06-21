@@ -1522,6 +1522,36 @@ def test_control_post_change_helpers_build_focused_verifier_and_dependency_block
     assert dependency["command"] == "python3 -m pip install demo_dep"
 
 
+def test_post_change_html_verifier_accepts_dom_based_game(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    target = tmp_path / "catch-the-stars.html"
+    target.write_text(
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head><title>Catch the Stars</title></head>\n"
+        "<body>\n"
+        '<div id="game"></div>\n'
+        "<script>\n"
+        "let score = 0;\n"
+        "let lives = 3;\n"
+        "function gameOver() {}\n"
+        "function restart() {}\n"
+        "</script>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = False
+    state.challenge_progress.last_code_change_paths = [str(target)]
+
+    block = post_change_verification_block(state)
+    assert block is not None
+    assert block["reason"] == "post_change_verification_required"
+    command = block["next_required_action"]["required_arguments"]["command"]
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_control_phase_gates_block_zero_change_and_weak_verifier() -> None:
     state = LoopState(cwd="/tmp")
     state.challenge_progress.task_category = "coding"

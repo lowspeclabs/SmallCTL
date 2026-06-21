@@ -25,6 +25,8 @@ lost.
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
 
+| IMP-009 | model_output_lint.py, run_diagnose.py | high | Detect a final assistant text that is only a Gemma-style control-token fragment (e.g. `|>root<|`) or a model turn that produced reasoning containing tool-call wrappers but no dispatched tool calls, and classify it as a tool-call parsing/protocol mismatch rather than `recovery_failure`. | In run `4d76c46f`, the model emitted a valid `ssh_exec` call inside `<|tool_call>...</tool_call|>` in the reasoning channel, but the harness stopped with `no_tool_calls` and the diagnosis was classified as `recovery_failure`. A lint/diagnosis hint pointing at reasoning-channel tool-call recovery would have saved manual log replay. | open |
+
 | IMP-008 | run_diagnose.py | medium | Detect "continue/proceed" loops that fail with repeated `prompt_budget` errors and classify them as a harness context-bloat issue rather than only reporting the underlying environmental blocker. | In run `8429ca86`, the agent said "continue" three times after a terminal `task_fail`; each continue created a new task that immediately died with `PROMPT BUDGET OVERFLOW`. Diagnosis focused on the SSH `no route to host` blocker and missed the harness symptom, so the agent had to manually trace the prompt-state frames to find the root cause. | open |
 
 ## Completed Improvements

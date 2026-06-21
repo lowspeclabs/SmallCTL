@@ -24,12 +24,15 @@ moving on.
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
 
+| BUG-012 | model_output_lint.py | major | Only checked `assistant_text` for leaked `<think>`/`<thinking>` tags; it missed 11 occurrences where tags leaked into `thinking_text` (e.g. Gemma-4-e2b-it provider reasoning field). | `python3 Agent-Tools/model_output_lint.py 4d76c46f --summary` reported 0 thinking-tag leaks before the fix. | fixed |
+
 ## Fixed Bugs
 
 Move resolved bugs here and keep the original ID for reference.
 
 | ID | Tool | Fix Summary | Fixed Date |
 |----|------|-------------|------------|
+| BUG-012 | model_output_lint.py | Added `thinking_text` to the thinking-tag leak scan so literal `<think>`/`<thinking>` tags inside recorded reasoning are surfaced. | 2026-06-21 |
 | BUG-011 | run_diagnose.py | Detect `stderr_signature_circuit_breaker` trips and classify as `harness_circuit_breaker_false_positive` instead of `model_degeneration`. | 2026-06-19 |
 | BUG-010 | trace_call.py | Warn when the resolved run directory does not match a full trace id prefix. | 2026-06-19 |
 | BUG-009 | run_diagnose.py | Distinguish chat-mode terminal-only repetition loops from ask_human resume terminal stalls by focusing on the final task and terminal-only tool exposure. | 2026-06-19 |

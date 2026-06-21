@@ -6,7 +6,11 @@ import time  # noqa: F401
 from pathlib import Path  # noqa: F401
 from typing import Any
 
-from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
+from ..client.chunk_parser import (
+    extract_response_from_wrapper_tags,
+    extract_thinking_from_tags,
+    normalize_thinking_tag_aliases,
+)
 from ..state import WriteSession, json_safe_value  # noqa: F401
 from ..task_targets import (  # noqa: F401
     extract_task_target_paths,
@@ -99,6 +103,7 @@ from .tool_call_parser_support import (  # noqa: F401
 
 from dataclasses import dataclass, field
 
+
 @dataclass
 class ToolCallParseResult:
     pending_tool_calls: list[PendingToolCall] = field(default_factory=list)
@@ -114,14 +119,26 @@ def _text_contains_tool_protocol_markers(text: str) -> bool:
     markers = (
         "<tool_call",
         "</tool_call>",
+        "<|tool_call",
+        "<tool_call|",
         "<tool_code",
+        "</tool_code>",
+        "<|tool_code",
+        "<tool_code|",
         "<call>",
         "</call>",
+        "<|call>",
+        "<call|>",
         "<function=",
         "<function ",
         "</function>",
+        "<|function",
+        "<function|",
         "<parameter=",
         "<parameter ",
+        "</parameter>",
+        "<|parameter",
+        "<parameter|",
         "<task_complete",
         "<task_fail",
     )
@@ -237,13 +254,19 @@ def _strip_tool_protocol_payloads(text: str) -> str:
     return stripped.strip()
 
 
-def _log_inline_tool_metadata_stripped(harness: Any, calls: list[PendingToolCall]) -> None:
+def _log_inline_tool_metadata_stripped(
+    harness: Any, calls: list[PendingToolCall]
+) -> None:
     runlog = getattr(harness, "_runlog", None)
     if not callable(runlog):
         return
     for call in calls:
         metadata = getattr(call, "parser_metadata", {}) or {}
-        extra_fields = metadata.get("inline_json_extra_fields") if isinstance(metadata, dict) else None
+        extra_fields = (
+            metadata.get("inline_json_extra_fields")
+            if isinstance(metadata, dict)
+            else None
+        )
         if not extra_fields:
             continue
         runlog(
@@ -267,15 +290,15 @@ def parse_tool_calls(
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
     if isinstance(scratchpad, dict):
         scratchpad.pop("_assistant_text_from_reasoning_fallback", None)
-    active_model_name = model_name or getattr(getattr(harness, "client", None), "model", None)
+    active_model_name = model_name or getattr(
+        getattr(harness, "client", None), "model", None
+    )
     allowed_raw_function_names: set[str] | None = None
     registry = getattr(harness, "registry", None)
     if registry is not None:
         try:
             allowed_raw_function_names = {
-                str(name).strip()
-                for name in registry.names()
-                if str(name).strip()
+                str(name).strip() for name in registry.names() if str(name).strip()
             }
         except Exception:
             allowed_raw_function_names = None
@@ -288,7 +311,9 @@ def parse_tool_calls(
     ]
 
     # Extract Inline tool calls (from text body)
-    assistant_text = _normalize_model_specific_text(stream.assistant_text, model_name=active_model_name)
+    assistant_text = _normalize_model_specific_text(
+        stream.assistant_text, model_name=active_model_name
+    )
     assistant_text = _strip_qwen_25_duplicate_thinking(
         assistant_text,
         thinking_text=str(getattr(stream, "thinking_text", "") or ""),
@@ -317,7 +342,9 @@ def parse_tool_calls(
         str(getattr(stream, "thinking_text", "") or ""),
         model_name=active_model_name,
     )
-    thinking_contains_tool_protocol = _text_contains_tool_protocol_markers(thinking_text)
+    thinking_contains_tool_protocol = _text_contains_tool_protocol_markers(
+        thinking_text
+    )
     final_thinking_text = thinking_text
     if thinking_contains_tool_protocol:
         cleaned_thinking_text, thinking_inline_calls = _extract_inline_tool_calls(
@@ -371,7 +398,7 @@ def parse_tool_calls(
                     "tool_deduplication",
                     "redundant terminal tool call ignored",
                     tool_name=call.tool_name,
-                    source="inline_or_repeat"
+                    source="inline_or_repeat",
                 )
                 continue
             terminal_called = True
@@ -390,7 +417,7 @@ def parse_tool_calls(
                     "tool_deduplication",
                     "duplicate action tool call suppressed",
                     tool_name=call.tool_name,
-                    fingerprint=fingerprint
+                    fingerprint=fingerprint,
                 )
         except (TypeError, ValueError):
             # Fallback for non-serializable args
@@ -425,19 +452,29 @@ def parse_tool_calls(
     # If the model emits task_complete with a message that matches assistant_text,
     # we strip the assistant_text to avoid redundancy in the logs.
     from ..guards import apply_triple_answer_guard
+
     final_assistant_text = apply_triple_answer_guard(cleaned_text, pending_calls)
     if pending_calls and _text_contains_tool_protocol_markers(final_assistant_text):
         final_assistant_text = _strip_orphan_tool_protocol_markers(final_assistant_text)
 
     recovered_reasoning_text = ""
-    allow_reasoning_fallback = not (not pending_calls and thinking_contains_tool_protocol)
+    allow_reasoning_fallback = not (
+        not pending_calls and thinking_contains_tool_protocol
+    )
     if not final_assistant_text.strip():
         if allow_reasoning_fallback:
-            recovered_reasoning_text = _recover_reasoning_only_assistant_text(final_thinking_text)
+            recovered_reasoning_text = _recover_reasoning_only_assistant_text(
+                final_thinking_text
+            )
 
     if not final_assistant_text.strip() and pending_calls:
-        candidate = _clean_reasoning_fallback_text(extract_response_from_wrapper_tags(final_thinking_text))
-        if candidate and candidate != "The model returned reasoning text but no final answer.":
+        candidate = _clean_reasoning_fallback_text(
+            extract_response_from_wrapper_tags(final_thinking_text)
+        )
+        if (
+            candidate
+            and candidate != "The model returned reasoning text but no final answer."
+        ):
             final_assistant_text = apply_triple_answer_guard(candidate, pending_calls)
 
     reasoning_fallback_used = False
@@ -445,14 +482,18 @@ def parse_tool_calls(
         if allow_reasoning_fallback:
             final_assistant_text = recovered_reasoning_text
             if not final_assistant_text.strip():
-                final_assistant_text = _clean_reasoning_fallback_text(final_thinking_text)
+                final_assistant_text = _clean_reasoning_fallback_text(
+                    final_thinking_text
+                )
             reasoning_fallback_used = bool(final_assistant_text.strip())
     elif not final_assistant_text.strip() and not native_calls:
-        final_assistant_text = _recover_small_gemma_terminal_message_from_raw_function_syntax(
-            assistant_text,
-            pending_calls,
-            model_name=active_model_name,
-            allowed_tool_names=allowed_raw_function_names,
+        final_assistant_text = (
+            _recover_small_gemma_terminal_message_from_raw_function_syntax(
+                assistant_text,
+                pending_calls,
+                model_name=active_model_name,
+                allowed_tool_names=allowed_raw_function_names,
+            )
         )
 
     # Defense-in-depth: strip thinking tags from final assistant text before it is
@@ -461,10 +502,24 @@ def parse_tool_calls(
     if final_assistant_text.strip():
         stripped, _ = extract_thinking_from_tags(
             final_assistant_text,
-            thinking_start_tag=getattr(harness, "thinking_start_tag", "<think>") or "<think>",
-            thinking_end_tag=getattr(harness, "thinking_end_tag", "</think>") or "</think>",
+            thinking_start_tag=getattr(harness, "thinking_start_tag", "<think>")
+            or "<think>",
+            thinking_end_tag=getattr(harness, "thinking_end_tag", "</think>")
+            or "</think>",
         )
         final_assistant_text = stripped.strip()
+
+    if final_thinking_text.strip():
+        start_tag = getattr(harness, "thinking_start_tag", "<think>") or "<think>"
+        end_tag = getattr(harness, "thinking_end_tag", "</think>") or "</think>"
+        normalized_thinking = normalize_thinking_tag_aliases(
+            final_thinking_text,
+            thinking_start_tag=start_tag,
+            thinking_end_tag=end_tag,
+        )
+        final_thinking_text = normalized_thinking.replace(start_tag, "").replace(
+            end_tag, ""
+        )
 
     if reasoning_fallback_used and isinstance(scratchpad, dict):
         scratchpad["_assistant_text_from_reasoning_fallback"] = True

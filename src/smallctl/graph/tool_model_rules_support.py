@@ -49,11 +49,14 @@ def _clean_reasoning_fallback_text(text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(
-        r"</?(?:tool_call|tool_code|call|function|parameter|thinking|reasoning|analysis|plan|execution|response)(?:=[^>]+)?>",
+        r"</?\|?(?:tool_call|tool_code|call|function|parameter|thinking|reasoning|analysis|plan|execution|response)\|?>",
         "",
         str(text),
         flags=re.IGNORECASE,
     )
+    # Gemma-4-e2b-it quote control tokens; leaving them in lets the quoted-answer
+    # fallback extract artifact fragments such as "|>root<|" as a final answer.
+    cleaned = cleaned.replace('<|"|>', "")
     return cleaned.strip()
 
 

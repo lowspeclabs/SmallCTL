@@ -103,7 +103,11 @@ def test_collect_stream_extracts_usage_from_final_empty_choices_chunk() -> None:
             "type": "chunk",
             "data": {
                 "choices": [],
-                "usage": {"prompt_tokens": 42, "completion_tokens": 7, "total_tokens": 49},
+                "usage": {
+                    "prompt_tokens": 42,
+                    "completion_tokens": 7,
+                    "total_tokens": 49,
+                },
                 "model": "gemma-4-e2b",
             },
         },
@@ -113,3 +117,26 @@ def test_collect_stream_extracts_usage_from_final_empty_choices_chunk() -> None:
     assert result.usage["completion_tokens"] == 7
     assert result.usage["total_tokens"] == 49
     assert result.usage["_backend_model_name"] == "gemma-4-e2b"
+
+
+def test_collect_stream_strips_thinking_tags_from_reasoning_field() -> None:
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "<think>Field reasoning.</think>",
+                            "content": "Answer.",
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+    result = collect_stream(chunks, reasoning_mode="auto")
+    assert result.assistant_text == "Answer."
+    assert result.thinking_text == "Field reasoning."
+    assert "<think>" not in result.thinking_text
+    assert "</think>" not in result.thinking_text

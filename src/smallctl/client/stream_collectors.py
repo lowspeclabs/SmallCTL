@@ -27,6 +27,21 @@ _REASONING_HALLUCINATION_PATTERNS = [
     re.compile(r"</call>"),
 ]
 
+_GEMMA_MODEL_MARKERS = (
+    "google_gemma-4",
+    "google_gemma",
+    "gemma-4",
+    "gemma-3",
+    "gemma/",
+)
+
+
+def _model_name_uses_gemma_rules(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _GEMMA_MODEL_MARKERS)
+
 
 def _scrub_reasoning_hallucinations(text: str) -> str:
     """Strip unauthorized tool-call-like XML tokens that models hallucinate in reasoning."""
@@ -36,9 +51,40 @@ def _scrub_reasoning_hallucinations(text: str) -> str:
     return cleaned
 
 
+def _maybe_scrub_reasoning_field(
+    text: str,
+    backend_model_name: str | None,
+) -> str:
+    """Scrub reasoning-field hallucinations except for Gemma-family models.
+
+    Gemma-4-e2b-it and related checkpoints emit real tool calls inside the
+    reasoning channel using ``<|tool_call>...<tool_call|>`` wrappers. Stripping
+    those wrappers destroys the tool call before the parser can recover it.
+    """
+    if _model_name_uses_gemma_rules(backend_model_name):
+        return text
+    return _scrub_reasoning_hallucinations(text)
+
+
+def _strip_thinking_tags_only(
+    text: str,
+    *,
+    thinking_start_tag: str,
+    thinking_end_tag: str,
+) -> str:
+    cleaned = normalize_thinking_tag_aliases(
+        text,
+        thinking_start_tag=thinking_start_tag,
+        thinking_end_tag=thinking_end_tag,
+    )
+    cleaned = cleaned.replace(thinking_start_tag, "").replace(thinking_end_tag, "")
+    return cleaned
+
+
 @dataclass
 class StreamResult:
     """Result of collecting a stream."""
+
     assistant_text: str = ""
     thinking_text: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -48,6 +94,7 @@ class StreamResult:
 @dataclass
 class TimelineEntry:
     """Single entry in a collected timeline."""
+
     kind: Literal["assistant", "thinking", "tool_call"]
     content: str
     data: dict[str, Any] = field(default_factory=dict)
@@ -106,7 +153,11 @@ def collect_stream(
                 text_parts.append(fragment)
         field_reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if isinstance(field_reasoning, str) and field_reasoning:
-            reasoning_parts.append(_scrub_reasoning_hallucinations(field_reasoning))
+            reasoning_parts.append(
+                _maybe_scrub_reasoning_field(
+                    field_reasoning, usage.get("_backend_model_name")
+                )
+            )
 
         tc_deltas = delta.get("tool_calls") or []
         for tc in tc_deltas:
@@ -130,9 +181,13 @@ def collect_stream(
             if "id" in tc:
                 existing["id"] = tc["id"]
             if "name" in fn and isinstance(fn["name"], str):
-                existing["function"]["name"] += normalize_sentencepiece_whitespace(fn["name"])
+                existing["function"]["name"] += normalize_sentencepiece_whitespace(
+                    fn["name"]
+                )
             if "arguments" in fn and isinstance(fn["arguments"], str):
-                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(fn["arguments"])
+                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(
+                    fn["arguments"]
+                )
 
     assistant_text = "".join(text_parts)
     tag_assistant, tag_thinking = extract_thinking_from_tags(
@@ -141,6 +196,12 @@ def collect_stream(
         thinking_end_tag=thinking_end_tag,
     )
     field_thinking = "".join(reasoning_parts)
+    if field_thinking:
+        field_thinking = _strip_thinking_tags_only(
+            field_thinking,
+            thinking_start_tag=thinking_start_tag,
+            thinking_end_tag=thinking_end_tag,
+        )
 
     thinking_text = ""
     if reasoning_mode == "tags":
@@ -186,11 +247,15 @@ class _TimelineCollector:
             thinking_end_tag=thinking_end_tag,
         )
         self._auto_used_tag_thinking = False
+        self._backend_model_name: str | None = None
 
     def feed(self, item: dict[str, Any]) -> None:
         data = _stream_chunk_data(item)
         if data is None:
             return
+        backend_model = data.get("model")
+        if isinstance(backend_model, str) and backend_model.strip():
+            self._backend_model_name = backend_model.strip()
         choices = data.get("choices") or []
         if not choices:
             return
@@ -214,7 +279,12 @@ class _TimelineCollector:
         if isinstance(field_reasoning, str) and field_reasoning:
             self._flush_pending_text()
             if self.reasoning_mode in {"field", "auto", "tags"}:
-                self._append_text("thinking", _scrub_reasoning_hallucinations(field_reasoning))
+                self._append_text(
+                    "thinking",
+                    _maybe_scrub_reasoning_field(
+                        field_reasoning, self._backend_model_name
+                    ),
+                )
 
         tc_deltas = delta.get("tool_calls") or []
         if tc_deltas:
@@ -240,9 +310,13 @@ class _TimelineCollector:
             if "id" in tc:
                 existing["id"] = tc["id"]
             if "name" in fn and isinstance(fn["name"], str):
-                existing["function"]["name"] += normalize_sentencepiece_whitespace(fn["name"])
+                existing["function"]["name"] += normalize_sentencepiece_whitespace(
+                    fn["name"]
+                )
             if "arguments" in fn and isinstance(fn["arguments"], str):
-                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(fn["arguments"])
+                existing["function"]["arguments"] += normalize_sentencepiece_whitespace(
+                    fn["arguments"]
+                )
             self._upsert_tool_call_entry(idx)
 
     def finalize(self) -> list[TimelineEntry]:
@@ -267,7 +341,9 @@ class _TimelineCollector:
             if self._inside_thinking_tag:
                 end = pending.find(self.thinking_end_tag, cursor)
                 control_marker = find_protocol_control_marker(pending, cursor)
-                if control_marker is not None and (end == -1 or control_marker[0] < end):
+                if control_marker is not None and (
+                    end == -1 or control_marker[0] < end
+                ):
                     control_start, control_length = control_marker
                     if control_start > cursor:
                         self._append_text("thinking", pending[cursor:control_start])
@@ -276,7 +352,9 @@ class _TimelineCollector:
                     self._inside_thinking_tag = False
                     continue
                 if end == -1:
-                    safe_end = max(cursor, len(pending) - max(0, self._max_tag_length - 1))
+                    safe_end = max(
+                        cursor, len(pending) - max(0, self._max_tag_length - 1)
+                    )
                     if safe_end > cursor:
                         self._append_text("thinking", pending[cursor:safe_end])
                         self._auto_used_tag_thinking = True
@@ -342,7 +420,11 @@ class _TimelineCollector:
     def _flush_pending_text(self) -> None:
         if not self._tag_pending:
             return
-        kind = "thinking" if self._inside_thinking_tag and self.reasoning_mode != "off" else "assistant"
+        kind: Literal["assistant", "thinking"] = (
+            "thinking"
+            if self._inside_thinking_tag and self.reasoning_mode != "off"
+            else "assistant"
+        )
         self._append_text(kind, strip_protocol_control_markers(self._tag_pending))
         if kind == "thinking":
             self._auto_used_tag_thinking = True

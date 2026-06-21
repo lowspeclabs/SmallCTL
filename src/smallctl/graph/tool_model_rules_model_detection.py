@@ -96,6 +96,7 @@ def _model_is_exact_small_gemma_4_it(model_name: str | None) -> bool:
             normalized == suffix
             or normalized.startswith(f"{suffix}-")
             or normalized.endswith(f"-{suffix}")
+            or re.search(rf"(?:^|-){re.escape(suffix)}(?:$|-)", normalized)
         ):
             return True
     return False

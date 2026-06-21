@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
+from smallctl.client import OpenAICompatClient
 from smallctl.graph.tool_call_parser import ToolCallParseResult, parse_tool_calls
 from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
 from smallctl.tools.base import ToolSpec, build_tool_schema
@@ -47,8 +49,15 @@ class _Harness:
         pass
 
 
-def _parse(assistant_text: str, *, model_name: str = "google/gemma-4-e2b-it", registry: ToolRegistry | None = None) -> ToolCallParseResult:
-    stream = SimpleNamespace(assistant_text=assistant_text, thinking_text="", tool_calls=[])
+def _parse(
+    assistant_text: str,
+    *,
+    model_name: str = "google/gemma-4-e2b-it",
+    registry: ToolRegistry | None = None,
+) -> ToolCallParseResult:
+    stream = SimpleNamespace(
+        assistant_text=assistant_text, thinking_text="", tool_calls=[]
+    )
     harness = _Harness(registry=registry)
     deps = SimpleNamespace(harness=harness)
     graph_state = SimpleNamespace(run_mode="loop")
@@ -63,7 +72,9 @@ def test_extract_inline_raw_function_call_with_trailing_text_on_same_line() -> N
         "2. **How to Run It:** Open the file in a browser."
     )
     raw_call = "task_complete(message='Done')"
-    text = f"{answer}\n\n{raw_call}1. **File Path Created:** `./temp/catch-the-stars.html`"
+    text = (
+        f"{answer}\n\n{raw_call}1. **File Path Created:** `./temp/catch-the-stars.html`"
+    )
 
     cleaned, calls = _extract_inline_tool_calls(
         text,
@@ -143,7 +154,7 @@ def test_real_gemma_run_step_assistant_text_is_deduplicated() -> None:
         "    *   The game logic is entirely contained within the single HTML file, limiting complexity compared to a multi-file project."
     )
     raw_call = (
-        "task_complete(message='Successfully created the single-file HTML game \"Catch the Stars\" "
+        'task_complete(message=\'Successfully created the single-file HTML game "Catch the Stars" '
         "at ./temp/catch-the-stars.html and provided the required verification explanation.')"
     )
     text = f"{answer}\n\n{raw_call}{answer}"
@@ -195,10 +206,7 @@ def test_gemma_brace_tool_call_with_quote_tokens() -> None:
 def test_gemma_brace_tool_call_without_call_prefix() -> None:
     """The brace format may omit the `call:` prefix."""
     q = '<|"|>'
-    text = (
-        f"<|tool_call>ssh_exec{{command:{q}ls{q},host:{q}1.2.3.4{q}}}"
-        f"<tool_call|>"
-    )
+    text = f"<|tool_call>ssh_exec{{command:{q}ls{q},host:{q}1.2.3.4{q}}}<tool_call|>"
 
     registry = ToolRegistry()
     registry.register(
@@ -254,16 +262,23 @@ def test_gemma_quote_token_fragment_in_assistant_text_is_stripped() -> None:
         )
     )
     harness = _Harness(registry=registry)
-    stream = SimpleNamespace(assistant_text="|>root<|", thinking_text=thinking_text, tool_calls=[])
+    stream = SimpleNamespace(
+        assistant_text="|>root<|", thinking_text=thinking_text, tool_calls=[]
+    )
     deps = SimpleNamespace(harness=harness)
     graph_state = SimpleNamespace(run_mode="loop")
-    result = parse_tool_calls(stream, [], graph_state, deps, model_name="google/gemma-4-e2b-it")
+    result = parse_tool_calls(
+        stream, [], graph_state, deps, model_name="google/gemma-4-e2b-it"
+    )
 
     assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
     assert result.pending_tool_calls[0].args["command"] == "docker ps -a"
     assert result.pending_tool_calls[0].args["host"] == "192.168.1.89"
     assert result.pending_tool_calls[0].args["user"] == "root"
     assert "|>root<|" not in result.final_assistant_text
+    assert "<think>" not in result.final_thinking_text
+    assert "</think>" not in result.final_thinking_text
+    assert "I will run the command on the remote host." in result.final_thinking_text
 
 
 def test_gemma_brace_tool_call_without_closing_tag() -> None:
@@ -313,7 +328,10 @@ def test_standard_tool_call_still_works_after_gemma_fix() -> None:
     result = _parse(text, registry=registry)
 
     assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
-    assert result.pending_tool_calls[0].args == {"command": "docker pull vikunja/vikunja", "host": "192.168.1.89"}
+    assert result.pending_tool_calls[0].args == {
+        "command": "docker pull vikunja/vikunja",
+        "host": "192.168.1.89",
+    }
 
 
 def test_case_insensitive_json_fence_is_parsed() -> None:
@@ -372,3 +390,109 @@ def test_plain_text_fence_is_not_parsed_as_tool_call() -> None:
 
     assert result.pending_tool_calls == []
     assert "hello world" in result.final_assistant_text
+
+
+def _gemma_chunks(
+    reasoning_text: str,
+    *,
+    backend_model_name: str = "C:\\\\Users\\\\svaye\\\\.lmstudio\\\\models\\\\unsloth\\\\gemma-4-E2B-it-GGUF\\\\gemma-4-E2B-it-IQ4_XS.gguf",
+) -> list[dict[str, Any]]:
+    """Build a minimal chunk list with reasoning delivered in `reasoning_content`."""
+    return [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": reasoning_text,
+                    }
+                }
+            ],
+            "model": backend_model_name,
+        },
+        {"choices": [], "model": backend_model_name},
+    ]
+
+
+def test_gemma_reasoning_field_preserves_tool_call_wrappers() -> None:
+    """The stream collector must not strip `<|tool_call>...<tool_call|>` from Gemma
+    reasoning fields, and the parser must recover the call from inside the
+    `<think>` block."""
+    q = '<|"|>'
+    reasoning = (
+        "<think>Run dockerd directly to see the fatal error.</think>\n"
+        f"<|tool_call>call:ssh_exec{{command:{q}timeout 15 dockerd --debug{q},"
+        f"host:{q}192.168.1.89{q},password:{q}secret{q},user:{q}root{q}}}"
+        f"<tool_call|>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    stream = OpenAICompatClient.collect_stream(
+        _gemma_chunks(reasoning),
+        reasoning_mode="auto",
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+    )
+    harness = _Harness(registry=registry)
+    deps = SimpleNamespace(harness=harness)
+    graph_state = SimpleNamespace(run_mode="loop")
+    result = parse_tool_calls(stream, [], graph_state, deps, model_name="Gemma 4 e2b")
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_exec"]
+    assert result.pending_tool_calls[0].args["command"] == "timeout 15 dockerd --debug"
+    assert result.pending_tool_calls[0].args["host"] == "192.168.1.89"
+    assert "<|tool_call>" not in result.final_thinking_text
+    assert "<tool_call|>" not in result.final_thinking_text
+
+
+def test_non_gemma_reasoning_field_strips_tool_call_wrappers() -> None:
+    """Non-Gemma models still have hallucinated tool-call XML tokens removed from
+    the reasoning field so they cannot be misinterpreted as real calls."""
+    reasoning = (
+        "<think>I will check the logs.</think>\n"
+        "<tool_call>call:ssh_exec{command:'docker logs foo',host:'1.2.3.4'}</tool_call>"
+    )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+
+    stream = OpenAICompatClient.collect_stream(
+        _gemma_chunks(reasoning, backend_model_name="qwen/qwen-2.5-7b-instruct"),
+        reasoning_mode="auto",
+        thinking_start_tag="<think>",
+        thinking_end_tag="</think>",
+    )
+    harness = _Harness(registry=registry)
+    deps = SimpleNamespace(harness=harness)
+    graph_state = SimpleNamespace(run_mode="loop")
+    result = parse_tool_calls(
+        stream, [], graph_state, deps, model_name="qwen/qwen-2.5-7b-instruct"
+    )
+
+    # The hallucinated wrapper is removed; the bare brace payload is not in a
+    # format the parser recognizes as a real call, so no tool calls are emitted.
+    assert result.pending_tool_calls == []
+    assert "<tool_call>" not in stream.thinking_text
+    assert "</tool_call>" not in stream.thinking_text

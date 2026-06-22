@@ -10,7 +10,8 @@ import pytest
 
 from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.graph.tool_execution_nodes import dispatch_tools
-from smallctl.models.events import UIEventType
+from smallctl.models.events import UIEvent, UIEventType
+from smallctl.models.tool_result import ToolEnvelope
 from smallctl.tools import shell
 from smallctl.tools import shell_foreground
 from smallctl.tools import shell_support
@@ -230,6 +231,62 @@ def test_dispatch_cancellation_records_synthetic_tool_result() -> None:
     assert result.metadata["cancellation_source"] == "ui_stop_button"
     assert "thread-1:3:call-1:ssh_exec" in state.tool_execution_records
     assert any(entry[0][0] == "tool_dispatch_cancelled" for entry in runlog)
+
+
+def test_dispatch_emits_tool_call_event_before_result() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 1
+    state.run_brief.original_task = "run a command"
+
+    class _Registry:
+        @staticmethod
+        def names() -> set[str]:
+            return {"shell_exec"}
+
+    events: list[UIEvent] = []
+
+    async def _emit(_handler: object, event: UIEvent) -> None:
+        events.append(event)
+
+    async def _dispatch(_tool_name: str, _args: dict[str, object]) -> ToolEnvelope:
+        return ToolEnvelope(success=True, output={"stdout": "ok", "stderr": "", "exit_code": 0})
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        _dispatch_tool_call=_dispatch,
+        _active_dispatch_task=None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=_emit,
+        log=SimpleNamespace(log=lambda *args, **kwargs: None),
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="shell_exec",
+                args={"command": "echo hi"},
+                tool_call_id="call-1",
+            )
+        ],
+    )
+
+    asyncio.run(dispatch_tools(graph_state, SimpleNamespace(harness=harness, event_handler=object())))
+
+    tool_call_events = [e for e in events if e.event_type == UIEventType.TOOL_CALL]
+    tool_result_events = [e for e in events if e.event_type == UIEventType.TOOL_RESULT]
+
+    assert len(tool_call_events) == 1
+    assert tool_call_events[0].content == "shell_exec"
+    assert tool_call_events[0].data.get("tool_call_id") == "call-1"
+    assert tool_call_events[0].data.get("display_text") == 'shell_exec({"command": "echo hi"})'
+    assert len(tool_result_events) == 1
+    assert not any(
+        e.event_type == UIEventType.SYSTEM and "Invoking" in str(e.content)
+        for e in events
+    )
 
 
 def test_shell_exec_feeds_configured_sudo_password_inline() -> None:

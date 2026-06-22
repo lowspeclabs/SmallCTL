@@ -2,11 +2,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from typing import Any
 
 from textual.containers import Vertical, VerticalScroll
 
+from ..graph.tool_model_rules_support import _raw_function_call_pattern
 from ..models.events import UIEvent, UIEventType
 from .bubbles import ArtifactBubbleWidget, AssistantTurnWidget, BubbleWidget, SystemInterruptWidget
 from .display import _CRITICAL_EVENTS, format_test_time_scaling_event
@@ -85,12 +87,14 @@ class ConsolePane(VerticalScroll):
             if event.data.get("kind") == "print":
                 await self.flush_stream_buffers()
                 await self._append_full_printout(
-                    event.content, 
+                    event.content,
                     artifact_id=event.data.get("artifact_id")
                 )
             else:
-                self._append_stream_buffer("assistant", event.content)
-                self._schedule_stream_flush()
+                filtered = self._filter_tool_call_tokens_from_stream(event.content)
+                if filtered:
+                    self._append_stream_buffer("assistant", filtered)
+                    self._schedule_stream_flush()
             return
         if event.event_type == UIEventType.THINKING:
             await self._ensure_assistant_turn(speaker=speaker)
@@ -317,6 +321,31 @@ class ConsolePane(VerticalScroll):
         await self._enforce_visible_retention()
         self._active_assistant_turn = None
         self._last_system_message = event.content
+
+    def _filter_tool_call_tokens_from_stream(self, text: str) -> str:
+        """Strip inline tool-call syntax from assistant stream chunks.
+
+        The inline parser will later extract these calls and emit a proper
+        TOOL_CALL event, but the live token stream must not render the raw
+        `tool_name(key=value)` signature as user-visible assistant text.
+
+        Only raw function calls with explicit key=value arguments (the harness
+        inline format) are removed.  Ordinary prose, markdown code fences, and
+        generic function-like text such as `print("hi")` are preserved.
+        """
+        if not text:
+            return text
+        # Terminal tool calls: task_complete(...), task_fail(...)
+        stripped = re.sub(
+            r"(?s)\b(task_complete|task_fail)\s*\([^)]*\)",
+            "",
+            text,
+        )
+        # Generic registered tool calls using the harness inline format:
+        # tool_name(key=value, ...)
+        raw_call_regex = _raw_function_call_pattern()
+        stripped = re.sub(raw_call_regex, "", stripped)
+        return stripped
 
     def _schedule_stream_flush(self) -> None:
         handle = self._stream_flush_handle

@@ -206,7 +206,7 @@ async def interpret_model_output(
                     ):
                         if harness.state.step_count < harness.config.min_exploration_steps:
                             harness.state.append_message(ConversationMessage(
-                                role="user",
+                                role="system",
                                 content=(
                                     f"ANTI-LAZINESS: You are trying to finish at step {harness.state.step_count}, "
                                     f"but this task requires at least {harness.config.min_exploration_steps} discovery steps. "
@@ -234,7 +234,7 @@ async def interpret_model_output(
                     else:
                         phase_bits = phase_contract(current_phase)
                         harness.state.append_message(ConversationMessage(
-                            role="user",
+                            role="system",
                             content=(
                                 f"You are in the DISCOVERY phase ({current_phase.upper()}). "
                                 f"Phase contract focus: {phase_bits.focus}. "
@@ -251,7 +251,7 @@ async def interpret_model_output(
                 else:
                     phase_bits = phase_contract(current_phase)
                     harness.state.append_message(ConversationMessage(
-                        role="user",
+                        role="system",
                         content=(
                             f"You are in the {current_phase.upper()} phase. "
                             f"Phase contract focus: {phase_bits.focus}. "
@@ -271,7 +271,7 @@ async def interpret_model_output(
                 if any(c.tool_name in blocked for c in graph_state.pending_tool_calls):
                     graph_state.pending_tool_calls = [c for c in graph_state.pending_tool_calls if c.tool_name not in blocked]
                     harness.state.append_message(ConversationMessage(
-                        role="user",
+                        role="system",
                         content=(
                             "You are in VERIFICATION. Review the verifier evidence and acceptance criteria before "
                             "moving to execution or repair."
@@ -298,7 +298,7 @@ async def interpret_model_output(
                     ]
                     if graph_state.pending_tool_calls:
                         harness.state.append_message(ConversationMessage(
-                            role="user",
+                            role="system",
                             content=(
                                 "VERIFIER RECOVERY: The latest verifier check failed. "
                                 "Attempt a repair (file_patch, file_write, or shell_exec) before "
@@ -684,7 +684,7 @@ async def interpret_model_output(
                     recovery_message = f"{recovery_message} {retry_message}"
             harness.state.append_message(
                 ConversationMessage(
-                    role="user",
+                    role="system",
                     content=recovery_message,
                     metadata={
                         "is_recovery_nudge": True,

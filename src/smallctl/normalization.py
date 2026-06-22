@@ -7,6 +7,21 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+def collapse_model_name(model_name: str | None) -> str:
+    """Collapse provider/path/whitespace separators to dashes for matching.
+
+    Backends and users report the same checkpoints with wildly different slugs
+    (e.g. ``gemma-4-e4b-it``, ``Gemma 4 e4b``, ``google/gemma-4-e4b-it``,
+    ``gemma_4_e4b``).  Collapsing every run of non-alphanumeric characters to a
+    single dash makes substring/suffix checks robust across these forms.
+    """
+    text = str(model_name or "").strip().lower()
+    if not text:
+        return ""
+    collapsed = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return collapsed
+
+
 def _strip_summary_markup(text: str) -> str:
     cleaned = text.strip()
     for marker in ("**", "__", "`"):

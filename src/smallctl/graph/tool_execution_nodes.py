@@ -23,6 +23,7 @@ from ..tools.dispatcher import normalize_tool_request
 from ..tools.planning import _refresh_plan_playbook_artifact
 from ..tools.fs import infer_write_session_intent, new_write_session_id
 from ..write_session_fsm import new_write_session, record_write_session_event
+from ..client.chunk_parser import format_tool_call_text
 from .display import format_tool_result_display
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
 from . import nodes as _nodes
@@ -402,7 +403,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                             )
                         harness.state.append_message(
                             ConversationMessage(
-                                role="user",
+                                role="system",
                                 content=retry_message,
                                 metadata={
                                     "is_recovery_nudge": True,
@@ -506,9 +507,27 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 intent_tags=list(getattr(harness.state, "intent_tags", []) or []),
             )
 
+        safe_args = json_safe_value(pending.args)
+        tool_call_display = format_tool_call_text(
+            pending.tool_name,
+            json.dumps(safe_args, ensure_ascii=True, sort_keys=True),
+            safe_args,
+        )
         await harness._emit(
             deps.event_handler,
-            UIEvent(event_type=UIEventType.SYSTEM, content=f"Invoking {pending.tool_name}..."),
+            UIEvent(
+                event_type=UIEventType.TOOL_CALL,
+                content=pending.tool_name,
+                data=_nodes._planner_speaker_data(
+                    graph_state,
+                    {
+                        "tool_name": pending.tool_name,
+                        "tool_call_id": pending.tool_call_id,
+                        "args": safe_args,
+                        "display_text": tool_call_display,
+                    },
+                ),
+            ),
         )
         clear_durable_autocontinue_for_pending(harness, pending)
         operation_id = build_operation_id(

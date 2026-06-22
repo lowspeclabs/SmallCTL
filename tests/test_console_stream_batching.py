@@ -84,6 +84,34 @@ def test_tool_call_flushes_pending_assistant_stream_before_boundary() -> None:
     asyncio.run(_run())
 
 
+def test_inline_tool_call_syntax_is_filtered_from_assistant_stream() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        await console.append_event(
+            UIEvent(
+                UIEventType.ASSISTANT,
+                'I will run shell_exec(command="echo hi") now.',
+            )
+        )
+        await console.flush_stream_buffers()
+
+        assert console.calls == [("assistant", "I will run  now.", None, None)]
+
+    asyncio.run(_run())
+
+
+def test_stream_filter_preserves_markdown_code_and_prose() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        markdown = "**Done**\n\n- first\n- second\n\n```python\nprint(\"hi\")\n```"
+        await console.append_event(UIEvent(UIEventType.ASSISTANT, markdown))
+        await console.flush_stream_buffers()
+
+        assert console.calls == [("assistant", markdown, None, None)]
+
+    asyncio.run(_run())
+
+
 def test_shell_stream_chunks_are_coalesced_by_tool_identity() -> None:
     async def _run() -> None:
         console = _RecordingConsole()

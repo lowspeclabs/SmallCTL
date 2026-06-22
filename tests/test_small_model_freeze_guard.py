@@ -205,7 +205,7 @@ def test_multiphase_discovery_uses_state_strategy_when_scratchpad_missing() -> N
     assert route == LoopRoute.NEXT_STEP
     assert graph_state.pending_tool_calls == []
     assert harness.state.recent_messages
-    assert harness.state.recent_messages[-1].role == "user"
+    assert harness.state.recent_messages[-1].role == "system"
     assert "DISCOVERY phase" in harness.state.recent_messages[-1].content
 
 

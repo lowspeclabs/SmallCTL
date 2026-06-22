@@ -156,6 +156,49 @@ def test_consecutive_tool_calls_group_between_thinking_statements() -> None:
     asyncio.run(_run())
 
 
+def test_web_search_tool_result_attaches_to_tool_call_bubble() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_CALL,
+                    "web_search",
+                    data={
+                        "display_text": 'web_search({"query": "docker daemon error"})',
+                        "tool_call_id": "call-1",
+                    },
+                )
+            )
+            await console.append_event(
+                UIEvent(
+                    UIEventType.TOOL_RESULT,
+                    "Budget remaining: 6 fetches...",
+                    data={
+                        "tool_name": "web_search",
+                        "tool_call_id": "call-1",
+                        "display_text": "Budget remaining: 6 fetches...",
+                    },
+                )
+            )
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            stack = console.query_one("#bubble-stack", Vertical)
+            assert len(stack.children) == 1
+            turn = stack.children[0]
+            assert isinstance(turn, AssistantTurnWidget)
+
+            details = list(turn.query(ToolCallDetailWidget))
+            assert len(details) == 1
+            assert details[0].tool_name == "web_search"
+            assert details[0].has_result
+
+    asyncio.run(_run())
+
+
 def test_assistant_turn_stays_compact_without_stylesheet() -> None:
     async def _run() -> None:
         app = _ConsoleApp()

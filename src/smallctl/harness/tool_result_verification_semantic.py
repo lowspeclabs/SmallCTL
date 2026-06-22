@@ -179,14 +179,20 @@ def _passing_verifier_is_weaker_than_prior_failure(
     current_command: str,
     current_kind: str,
 ) -> bool:
-    if verifier_strength(current_kind) > verifier_strength("syntax_only"):
-        return False
+    current_strength = verifier_strength(current_kind)
     prior_command = _prior_failed_verifier_command(state)
     if not prior_command:
         return False
     prior_kind = verifier_kind_for_command(prior_command)
-    if verifier_strength(prior_kind) <= verifier_strength(current_kind):
-        return False
+    prior_strength = verifier_strength(prior_kind)
+    # If the current verifier is strictly weaker than a prior failed verifier,
+    # it cannot overwrite that failure.
+    if current_strength < prior_strength:
+        return True
+    # Even if strengths are equal, a read-only diagnostic (e.g. journalctl, cat)
+    # should not overwrite a prior functional status/command verifier that failed.
+    if current_strength == prior_strength and current_kind == "diagnostic" and prior_kind != "diagnostic":
+        return True
     normalized_current = re.sub(r"\s+", " ", str(current_command or "").strip().lower())
     normalized_prior = re.sub(r"\s+", " ", prior_command.strip().lower())
     return normalized_current != normalized_prior
@@ -196,10 +202,10 @@ def _insufficient_verifier_message(state: Any, *, command: str) -> str:
     prior_command = _prior_failed_verifier_command(state)
     if prior_command:
         return (
-            f"Verifier `{command}` only checks syntax and is weaker than the prior failed verifier "
+            f"Verifier `{command}` is weaker than or equal to the prior failed verifier "
             f"`{prior_command}`; rerun the script/tests that failed."
         )
-    return f"Verifier `{command}` only checks syntax; rerun the script/tests required by the task."
+    return f"Verifier `{command}` is too weak; rerun the script/tests required by the task."
 
 
 def _install_task_requires_strong_verifier(state: Any, *, command: str) -> tuple[bool, str]:

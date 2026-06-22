@@ -365,16 +365,6 @@ async def model_call(
             "thinking output complete",
             thinking_text=parse_result.final_thinking_text,
         )
-    for entry in result.timeline:
-        if entry.kind == "tool_call":
-            await harness._emit(
-                deps.event_handler,
-                UIEvent(
-                    event_type=UIEventType.TOOL_CALL,
-                    content=entry.content,
-                    data=_nodes._planner_speaker_data(graph_state, entry.data),
-                ),
-            )
 
 
 def _maybe_inject_file_truncation_hallucination_nudge(harness: Any, thinking_text: str) -> None:

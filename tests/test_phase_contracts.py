@@ -301,7 +301,7 @@ def test_staged_phase_contract_blocks_disallowed_tools_in_explore() -> None:
 
     assert route == LoopRoute.NEXT_STEP
     assert harness.state.recent_messages
-    assert harness.state.recent_messages[-1].role == "user"
+    assert harness.state.recent_messages[-1].role == "system"
     assert "DISCOVERY phase" in harness.state.recent_messages[-1].content
     assert "file_write" in harness.state.recent_messages[-1].content
     assert "file_patch" in harness.state.recent_messages[-1].content

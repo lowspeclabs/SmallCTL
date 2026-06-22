@@ -412,6 +412,65 @@ def test_py_compile_pass_does_not_clear_prior_failed_runtime_verifier() -> None:
     assert "prior failed verifier" in verdict["acceptance_delta"]["notes"][0]
 
 
+def test_diagnostic_pass_does_not_overwrite_install_service_status_failure() -> None:
+    """Regression for 35b29086: journalctl success must not clear a failed systemctl status."""
+    state = LoopState()
+    state.run_brief.original_task = "ssh root@192.168.1.89 and try to get docker running"
+    state.scratchpad["_last_failed_verifier"] = {
+        "tool_name": "ssh_exec",
+        "command": "systemctl status docker.service",
+        "summary": ["docker.service failed with exit code"],
+        "raw_output": "docker.service: failed",
+    }
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "dockerd logs...", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.89", "command": "journalctl -xeu docker.service"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict["failure_mode"] == "insufficient_verifier"
+    assert verdict["insufficient_verifier"] is True
+    assert "systemctl status docker.service" in verdict["acceptance_delta"]["notes"][0]
+    assert "journalctl" in verdict["acceptance_delta"]["notes"][0]
+
+
+def test_equal_strength_diagnostic_pass_does_not_overwrite_service_status_failure() -> None:
+    """A read-only diagnostic must not clear a functional service-status failure of equal strength."""
+    state = LoopState()
+    state.run_brief.original_task = "ssh root@192.168.1.89 and try to get docker running"
+    state.scratchpad["_last_failed_verifier"] = {
+        "tool_name": "ssh_exec",
+        "command": "systemctl start docker.service",
+        "summary": ["docker.service failed to start"],
+        "raw_output": "docker.service: failed",
+    }
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=result,
+        arguments={"host": "192.168.1.89", "command": "cat /etc/docker/daemon.json"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert verdict["failure_mode"] == "insufficient_verifier"
+    assert verdict["insufficient_verifier"] is True
+    assert "daemon.json" in verdict["acceptance_delta"]["notes"][0]
+
+
 def test_diagnostic_status_probe_exit_one_is_pass() -> None:
     """systemctl status returning exit 1 with 'not found' is informational."""
     state = LoopState()

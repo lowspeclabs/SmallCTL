@@ -202,6 +202,88 @@ def test_fama_done_gate_does_not_block_task_fail() -> None:
     assert enforce_fama_tool_call("task_fail", {}, state=state, mode="loop", config=_Config()) is None
 
 
+def test_done_gate_exposes_task_complete_for_read_only_status_inquiry() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "is docker up and running on the remote host?"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "systemctl status docker",
+    }
+    _activate_done_gate(state)
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "task_complete" in names
+
+
+def test_done_gate_hides_task_complete_when_status_inquiry_has_action_intent() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "start docker and verify it is running on the remote host"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "systemctl status docker",
+    }
+    _activate_done_gate(state)
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = [entry["function"]["name"] for entry in schemas]
+    assert "task_complete" not in names
+
+
+def test_done_gate_allows_dispatch_for_diagnostic_status_failure() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "is docker up and running on the remote host?"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "systemctl status docker",
+    }
+    _activate_done_gate(state)
+
+    result = enforce_fama_tool_call(
+        "task_complete",
+        {"message": "Docker is not up and running on the remote host."},
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    assert result is None
+
+
+def test_done_gate_blocks_dispatch_when_diagnostic_message_omits_failure() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "is docker up and running on the remote host?"
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": "systemctl status docker",
+    }
+    _activate_done_gate(state)
+
+    result = enforce_fama_tool_call(
+        "task_complete",
+        {"message": "done"},
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    assert result is not None
+    assert result.success is False
+    assert result.metadata["reason"] == "fama_done_gate"
+
+
 def test_fama_disabled_is_noop() -> None:
     state = LoopState()
     _activate_done_gate(state)

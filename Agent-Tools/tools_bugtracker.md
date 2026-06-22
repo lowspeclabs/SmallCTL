@@ -24,6 +24,7 @@ moving on.
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
 
+| BUG-013 | run_diagnose.py | major | Classified a FAMA `done_gate` block of `task_complete` after a diagnostic status-probe failure as `model_tool_loop_stall`, and reported no primary blockers. The correct classification should surface a `policy_block`/`fama_block` (or a new `done_gate_diagnostic_block`) and list the hidden `task_complete` call as the primary blocker. | `python3 Agent-Tools/run_diagnose.py 0aab45a0 --json` returns `failure_classification: model_tool_loop_stall` and `primary_blockers: []`, despite `tool_blocked_not_exposed` blocking `task_complete` because of active `done_gate`. | open |
 | BUG-012 | model_output_lint.py | major | Only checked `assistant_text` for leaked `<think>`/`<thinking>` tags; it missed 11 occurrences where tags leaked into `thinking_text` (e.g. Gemma-4-e2b-it provider reasoning field). | `python3 Agent-Tools/model_output_lint.py 4d76c46f --summary` reported 0 thinking-tag leaks before the fix. | fixed |
 
 ## Fixed Bugs

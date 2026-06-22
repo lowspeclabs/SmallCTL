@@ -1,14 +1,44 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
-from ..diagnostic_tasks import diagnostic_failure_completion_allowed
+from ..diagnostic_tasks import (
+    diagnostic_completion_reports_failure,
+    diagnostic_failure_completion_allowed,
+)
 from ..models.tool_result import ToolEnvelope
 from .config import done_gate_on_failure, fama_enabled
 from .fingerprints import active_done_gate_fingerprints, normalize_verifier_target
 from .signals import get_fama_state
 from .state import active_mitigation_names
+
+# Read-only status/presence inquiry: the answer to the question may be that the
+# resource is absent or failed, which is valid negative intelligence.
+_READ_ONLY_STATUS_INQUIRY_RE = re.compile(
+    r"\b(?:is|are)\s+\S+(?:\s+\S+){0,6}\s+(?:up(?:\s+and\s+running)?|running|installed|active|enabled|disabled)\b"
+    r"|\b(?:status|state)\s+of\b"
+    r"|\bcheck\s+(?:if|whether)\s+\S+(?:\s+\S+){0,6}\s+(?:is|are)\s+(?:up(?:\s+and\s+running)?|running|installed|active|enabled|disabled)\b",
+    re.IGNORECASE,
+)
+
+# Action/repair intent markers that turn a status question into a task that
+# must actually fix or change state before completing.
+_ACTION_INTENT_RE = re.compile(
+    r"\b(?:start|restart|stop|enable|disable|fix|repair|install|uninstall|reinstall|deploy|"
+    r"set\s+up|make\s+sure|ensure|get\b.+?\brunning|bring\b.+?\bup|configure|troubleshoot|resolve)\b",
+    re.IGNORECASE,
+)
+
+# Service / binary / package presence probes whose failure is informative.
+_STATUS_PROBE_RE = re.compile(
+    r"\b(?:systemctl\s+(?:status|is-active|is-enabled)|service\s+\S+\s+status|rc-service\s+\S+\s+status|"
+    r"which\s+\S+|whereis\s+\S+|type\s+\S+|command\s+-v\s+\S+|dpkg\s+-l\s+\S+|"
+    r"apt\s+(?:list|show|search)\s+\S+|rpm\s+-q\s+\S+|apk\s+info\s+\S+|pgrep\b|pidof\b|"
+    r"\S+\s+(?:--version|version|info|status|--help))\b",
+    re.IGNORECASE,
+)
 
 _LOCAL_MUTATING_TOOLS = {"shell_exec", "file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 _READ_LOOP_TOOLS = {"artifact_read", "file_read", "dir_list", "ssh_file_read", "web_fetch"}
@@ -22,6 +52,53 @@ _REPAIR_TOOLS = _LOCAL_MUTATING_TOOLS | _READ_LOOP_TOOLS | {
     "ssh_file_replace_between",
 }
 _INTERACTIVE_SSH_TOOLS = {"ssh_session_start", "ssh_session_read", "ssh_session_send", "ssh_session_close"}
+
+
+def _task_text(state: Any) -> str:
+    bits: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    for value in (
+        getattr(run_brief, "original_task", ""),
+        getattr(run_brief, "effective_task", ""),
+        getattr(working_memory, "current_goal", ""),
+        getattr(state, "active_intent", ""),
+        " ".join(str(item) for item in (getattr(state, "secondary_intents", []) or [])),
+        " ".join(str(item) for item in (getattr(state, "intent_tags", []) or [])),
+    ):
+        value = str(value or "").strip()
+        if value:
+            bits.append(value)
+    return " ".join(bits).casefold()
+
+
+def _read_only_status_inquiry(state: Any) -> bool:
+    text = _task_text(state)
+    if not text:
+        return False
+    if _ACTION_INTENT_RE.search(text):
+        return False
+    return bool(_READ_ONLY_STATUS_INQUIRY_RE.search(text))
+
+
+def _latest_verifier_is_status_probe(state: Any) -> bool:
+    verifier = _latest_verifier(state)
+    if not isinstance(verifier, dict):
+        return False
+    command = str(verifier.get("command") or verifier.get("target") or "").strip()
+    if not command:
+        return False
+    return bool(_STATUS_PROBE_RE.search(command))
+
+
+def _done_gate_diagnostic_failure_exemption(state: Any) -> bool:
+    verifier = _latest_verifier(state)
+    if not isinstance(verifier, dict):
+        return False
+    verdict = str(verifier.get("verdict") or "").strip().lower()
+    if verdict not in {"fail", "failed", "error"}:
+        return False
+    return _read_only_status_inquiry(state) and _latest_verifier_is_status_probe(state)
 
 
 def apply_fama_tool_exposure(
@@ -58,6 +135,8 @@ def fama_hidden_tools_for_exposure(
         # after successfully patching a file that previously caused a timeout.
         elif _repair_file_write_exemption(state):
             pass  # keep task_complete visible
+        elif _done_gate_diagnostic_failure_exemption(state):
+            pass  # read-only status inquiry: failure is the answer
         else:
             hidden_tools.add("task_complete")
     if "done_gate" in active and "task_fail" in exported and (_REPAIR_TOOLS & exported):
@@ -182,6 +261,8 @@ def enforce_fama_tool_call(
         return None
     message = str((arguments or {}).get("message") or "")
     if diagnostic_failure_completion_allowed(state, message=message, verifier=verifier):
+        return None
+    if _done_gate_diagnostic_failure_exemption(state) and diagnostic_completion_reports_failure(message, verifier):
         return None
     required_fps = active_done_gate_fingerprints(state)
     actual_fp = normalize_verifier_target(str((verifier or {}).get("command") or (verifier or {}).get("target") or ""))

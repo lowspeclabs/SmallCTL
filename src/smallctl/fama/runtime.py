@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from typing import Any
@@ -502,10 +503,11 @@ def _handle_signal(
                         hallucination=is_hallucination,
                     )
                     # Escalate severity and force re-processing
-                    signal = signal.model_copy(update={
-                        "severity": 3,
-                        "evidence": f"{signal.evidence} (hallucination={is_hallucination}, repeated={count}x)",
-                    })
+                    signal = dataclasses.replace(
+                        signal,
+                        severity=3,
+                        evidence=f"{signal.evidence} (hallucination={is_hallucination}, repeated={count}x)",
+                    )
                     # Hard circuit-breaker: when the same (failure_class, tool_name)
                     # combination has escalated 3+ times, clear done_gate and
                     # force a strategic pivot so the model stops cycling.

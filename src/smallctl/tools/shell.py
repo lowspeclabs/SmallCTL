@@ -13,6 +13,7 @@ from typing import Any
 from ..state import LoopState
 from .common import fail
 from .installer_preflight import run_installer_preflight_probes
+from .http import _preflight_pipe_to_shell_command
 from .process_lifecycle import register_process
 from .shell_processes import cwd_get, cwd_set, env_get, env_set, process_kill, shell_job_launch, shell_job_status
 from .shell_foreground import shell_exec_foreground
@@ -206,6 +207,17 @@ async def shell_exec(
 
         error_text = "\n".join(parts)
         return fail(error_text, metadata=metadata)
+
+    blocked, reason = await _preflight_pipe_to_shell_command(command)
+    if blocked:
+        return fail(
+            reason,
+            metadata={
+                "command": command,
+                "reason": "pipe_to_shell_preflight_failed",
+                "preflight": True,
+            },
+        )
 
     result = await shell_exec_foreground(
         command,

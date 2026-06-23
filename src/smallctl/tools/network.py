@@ -150,6 +150,12 @@ async def _preflight_curl_url_in_command(command: str) -> tuple[bool, str]:
     return False, ""
 
 
+async def _preflight_pipe_to_shell_command(command: str) -> tuple[bool, str]:
+    """Block curl/wget | sh unless the URL passes a HEAD preflight."""
+    from .http import _preflight_pipe_to_shell_command as _http_pipe_preflight
+    return await _http_pipe_preflight(command)
+
+
 async def ssh_exec(
     host: str,
     command: str,
@@ -244,6 +250,18 @@ async def ssh_exec(
                 "host": host,
                 "command": command,
                 "reason": "url_preflight_failed",
+                "preflight": True,
+            },
+        )
+
+    blocked, reason = await _preflight_pipe_to_shell_command(command)
+    if blocked:
+        return fail(
+            reason,
+            metadata={
+                "host": host,
+                "command": command,
+                "reason": "pipe_to_shell_preflight_failed",
                 "preflight": True,
             },
         )

@@ -1496,6 +1496,48 @@ def detect_apt_deb822_preflight_blocked(
     )
 
 
+def detect_debian_13_installer_readiness(
+    state: Any,
+    *,
+    threshold: int = 1,
+) -> FamaSignal | None:
+    """Detect Debian 13 installer readiness issues from preflight probe results.
+
+    When the harness has already probed the remote/local environment and found
+    missing keyrings, invalid deb822 sources, or trixie-security 404 footguns,
+    surface a targeted capsule so the model stops churning on the same command.
+    """
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return None
+    readiness = scratchpad.get("_debian_installer_readiness")
+    if not isinstance(readiness, dict):
+        return None
+    issues = readiness.get("issues") or []
+    if not issues:
+        return None
+    if len(issues) < max(1, int(threshold or 1)):
+        return None
+    host = str(readiness.get("host") or "").strip()
+    user = str(readiness.get("user") or "").strip()
+    evidence_parts = [f"{len(issues)} Debian installer readiness issue(s) detected"]
+    if host:
+        evidence_parts.append(f"host={host}")
+    if user:
+        evidence_parts.append(f"user={user}")
+    return FamaSignal(
+        kind=FamaFailureKind.PREFLIGHT_CONTRADICTION,
+        severity=2,
+        source="preflight",
+        evidence="; ".join(evidence_parts),
+        step=current_step(state),
+        tool_name="ssh_exec",
+        failure_class="debian_13_installer_readiness",
+        next_safe_action="Repair Debian 13 apt/keyring state before retrying the installer: ensure /etc/apt/keyrings/debian-archive-keyring.gpg exists, validate /etc/apt/sources.list.d/debian.sources as deb822, avoid apt-key, and verify trixie-security URLs.",
+        suggested_mitigations=["debian_13_installer_readiness_capsule", "evidence_reuse_capsule"],
+    )
+
+
 def detect_loop_rewrite(
     state: Any,
     *,

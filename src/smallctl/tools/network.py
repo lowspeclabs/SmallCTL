@@ -55,6 +55,7 @@ from .shell_support import (
     _remote_installer_preflight_has_verified_write,
     record_apt_update_result,
 )
+from .shell_support_curl_guards import _curl_fail_flag_guard
 from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
@@ -171,6 +172,7 @@ async def ssh_exec(
     """
     Execute a command on a remote host via SSH with live streaming support.
     """
+    strict_host_key_mode = "accept-new"
     plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
     if plan is not None and not getattr(plan, "approved", False):
         return fail(
@@ -253,6 +255,23 @@ async def ssh_exec(
                 "preflight": True,
             },
         )
+
+    curl_guard = _curl_fail_flag_guard(command, tool_name="ssh_exec")
+    if curl_guard is not None:
+        metadata = dict(curl_guard.get("metadata") or {})
+        metadata.update(
+            {
+                "host": host,
+                "user": user,
+                **_ssh_execution_debug_metadata(
+                    password=password,
+                    identity_file=identity_file,
+                    strict_host_key_checking=strict_host_key_mode,
+                ),
+            }
+        )
+        curl_guard["metadata"] = metadata
+        return curl_guard
 
     blocked, reason = await _preflight_pipe_to_shell_command(command)
     if blocked:
@@ -495,6 +514,11 @@ async def run_ssh_command(
             parts.append(
                 f"- Preseed/config files found: {', '.join(probes['preseed_files'])}"
             )
+
+        debian_readiness = probes.get("debian_readiness")
+        if isinstance(debian_readiness, dict) and debian_readiness.get("is_debian"):
+            from .debian_installer_preflight import debian_readiness_summary
+            parts.append("\n" + debian_readiness_summary(debian_readiness))
 
         parts.append(f"\n{probes['recommended_approach']}")
 

@@ -32,6 +32,7 @@ from .shell_support import (
     _shell_write_session_target_path_guard,
     record_apt_update_result,
 )
+from .shell_support_curl_guards import _curl_fail_flag_guard
 
 
 def _local_user() -> str:
@@ -202,11 +203,21 @@ async def shell_exec(
             )
         if probes.get("probe_error"):
             parts.append(f"- Probe error: {probes['probe_error']}")
+
+        debian_readiness = probes.get("debian_readiness")
+        if isinstance(debian_readiness, dict) and debian_readiness.get("is_debian"):
+            from .debian_installer_preflight import debian_readiness_summary
+            parts.append("\n" + debian_readiness_summary(debian_readiness))
+
         parts.append("")
         parts.append(probes.get("recommended_approach", ""))
 
         error_text = "\n".join(parts)
         return fail(error_text, metadata=metadata)
+
+    curl_guard = _curl_fail_flag_guard(command, tool_name="shell_exec")
+    if curl_guard is not None:
+        return curl_guard
 
     blocked, reason = await _preflight_pipe_to_shell_command(command)
     if blocked:

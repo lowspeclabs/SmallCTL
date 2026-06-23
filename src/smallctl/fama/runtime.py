@@ -22,6 +22,7 @@ from .detectors import (
     detect_backend_stream_halt,
     detect_bad_tool_args,
     detect_context_drift,
+    detect_debian_13_installer_readiness,
     detect_empty_write,
     detect_generic_stuck_loop,
     detect_interactive_installer_stall,
@@ -48,7 +49,7 @@ from .detectors import (
 from .judge import maybe_run_llm_judge
 from .reflexion_bridge import record_fama_failure_event
 from .router import route_signal
-from .signals import FamaSignal, current_step, get_fama_state, push_fama_signal
+from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state, push_fama_signal
 from .state import activate_mitigations, active_mitigations, clear_mitigations, expire_mitigations
 from ..recovery_metrics import increment_metric, increment_metric_bucket
 
@@ -290,6 +291,10 @@ async def observe_tool_result(
         if apt_deb822_block is not None:
             await _handle_observed_signal(harness, state=state, config=config, signal=apt_deb822_block, dedupe=True)
 
+        debian_readiness = detect_debian_13_installer_readiness(state, threshold=1)
+        if debian_readiness is not None:
+            await _handle_observed_signal(harness, state=state, config=config, signal=debian_readiness, dedupe=True)
+
         stale_success = detect_stale_success_claim(
             state,
             tool_name=tool_name,
@@ -325,6 +330,92 @@ async def observe_tool_result(
             source="observe_tool_result",
             tool_name=tool_name,
         )
+
+
+async def observe_guard_trip(
+    harness: Any,
+    *,
+    guard_error: str,
+    tool_history_tail: list[str] | None = None,
+    grouped_errors: list[dict[str, Any]] | None = None,
+) -> None:
+    """Route a guard trip diagnosis into FAMA so a mitigation capsule is injected.
+
+    The signal is classified as LOOPING when the guard error mentions repeated
+    loops, repeated tools, or stagnation; otherwise it is treated as CONTEXT_DRIFT
+    (e.g. max_consecutive_errors where the model has lost the thread).
+    """
+    state = getattr(harness, "state", None)
+    config = getattr(harness, "config", None)
+    if state is None or not fama_enabled(config):
+        return
+    try:
+        error_text = str(guard_error or "").lower()
+        is_looping = any(
+            marker in error_text
+            for marker in (
+                "loop detected",
+                "repeated tool",
+                "repeated tool call loop",
+                "stagnation",
+                "stuck",
+            )
+        )
+        kind = FamaFailureKind.LOOPING if is_looping else FamaFailureKind.CONTEXT_DRIFT
+
+        # Try to identify the most repeated failing tool from grouped errors.
+        repeated_tool: str | None = None
+        max_count = 0
+        for group in grouped_errors or []:
+            if not isinstance(group, dict):
+                continue
+            sig = str(group.get("signature") or "").strip()
+            count = int(group.get("count", 0) or 0)
+            if sig and count > max_count:
+                max_count = count
+                tool_candidate = sig.split(":", 1)[0].strip()
+                if tool_candidate:
+                    repeated_tool = tool_candidate
+
+        # Fall back to the most recent failing tool in the history tail.
+        if not repeated_tool and tool_history_tail:
+            for entry in reversed(tool_history_tail):
+                entry_text = str(entry or "").strip()
+                if "|" in entry_text:
+                    candidate = entry_text.split("|", 1)[0].strip()
+                    if candidate and candidate != "Guard tripped":
+                        repeated_tool = candidate
+                        break
+
+        evidence = str(guard_error or "guard tripped").strip()
+        if repeated_tool:
+            evidence = f"repeated_tool={repeated_tool}; {evidence}"
+
+        if kind == FamaFailureKind.LOOPING:
+            next_safe_action = (
+                "Do not retry the same failing command or tool unchanged. "
+                "Pick one concrete different action: gather fresh evidence, "
+                "change an argument, or explain the blocker before continuing."
+            )
+        else:
+            next_safe_action = (
+                "Stop and re-read the current state. Choose one bounded read or "
+                "diagnostic action to rebuild context before mutating or finishing."
+            )
+
+        signal = FamaSignal(
+            kind=kind,
+            severity=2,
+            source="guard_trip",
+            evidence=evidence,
+            step=current_step(state),
+            tool_name=repeated_tool,
+            failure_class="repeated_action" if kind == FamaFailureKind.LOOPING else "context_missing",
+            next_safe_action=next_safe_action,
+        )
+        await _handle_observed_signal(harness, state=state, config=config, signal=signal, dedupe=True)
+    except Exception as exc:
+        logger.warning("FAMA guard-trip observation failed: %s", exc)
 
 
 def expire_for_turn(harness: Any, *, mode: str) -> None:

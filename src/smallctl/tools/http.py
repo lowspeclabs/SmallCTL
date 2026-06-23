@@ -19,6 +19,7 @@ from .fs_write_sessions import _resolve
 
 _SUSPICIOUS_URL_PATTERNS = ("github.com",)
 _PREFLIGHT_TIMEOUT_SEC = 2
+_PREFLIGHT_SCRIPT_SAMPLE_BYTES = 1024
 
 
 _PIPE_TO_SHELL_RE = re.compile(
@@ -26,6 +27,8 @@ _PIPE_TO_SHELL_RE = re.compile(
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+_SCRIPT_SHEBANG_RE = re.compile(r"^\s*#!", re.MULTILINE)
+
 
 
 async def _preflight_head_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool, str]:
@@ -155,7 +158,7 @@ def _coerce_body(response: Any) -> Any:
 
 
 async def _preflight_pipe_to_shell_command(command: str) -> tuple[bool, str]:
-    """Block curl/wget | sh unless the URL passes a HEAD preflight."""
+    """Block curl/wget | sh unless the URL passes a HEAD preflight and looks like a script."""
     if not _PIPE_TO_SHELL_RE.search(command):
         return False, ""
     urls = _URL_RE.findall(command)
@@ -170,4 +173,41 @@ async def _preflight_pipe_to_shell_command(command: str) -> tuple[bool, str]:
         except Exception:
             # Network errors are not a reason to block; the shell command will fail on its own.
             continue
+
+        # Fetch a sample of the body and verify it starts with a shebang or looks
+        # like a script.  This prevents piping empty 404 HTML or unexpected
+        # content into a shell.
+        try:
+            headers = {"Range": f"bytes=0-{_PREFLIGHT_SCRIPT_SAMPLE_BYTES - 1}"}
+            async with httpx.AsyncClient(timeout=_PREFLIGHT_TIMEOUT_SEC) as client:
+                response = await client.get(url, headers=headers, follow_redirects=True)
+            if response.status_code in {200, 206}:
+                sample = response.text[:_PREFLIGHT_SCRIPT_SAMPLE_BYTES]
+                if not _script_sample_looks_like_script(sample):
+                    return (
+                        True,
+                        "Fetched resource does not start with a shebang or expected script header. "
+                        "Do not pipe it to a shell; verify the URL returns the intended installer script.",
+                    )
+        except Exception:
+            # Network errors are not a reason to block; the shell command will fail on its own.
+            continue
     return False, ""
+
+
+def _script_sample_looks_like_script(sample: str) -> bool:
+    """Return True if the fetched sample looks like an executable script."""
+    if not sample:
+        return False
+    # Accept a shebang anywhere in the first few hundred characters, but prefer
+    # leading.  Some legitimate scripts start with a short comment header before
+    # the shebang, so we search within the sample rather than requiring #! at
+    # byte zero.
+    if _SCRIPT_SHEBANG_RE.search(sample[:_PREFLIGHT_SCRIPT_SAMPLE_BYTES]):
+        return True
+    # Accept common installer signatures that omit a shebang (rare but real).
+    lowered = sample.lower()
+    if any(marker in lowered for marker in ("#!/", "install", "setup", "bootstrap")):
+        return True
+    return False
+

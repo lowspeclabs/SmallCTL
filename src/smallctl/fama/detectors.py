@@ -145,6 +145,71 @@ def detect_identical_tool_loop(state: Any, *, threshold: int = 3) -> FamaSignal 
     )
 
 
+def detect_generic_stuck_loop(
+    state: Any,
+    *,
+    threshold: int = 3,
+) -> FamaSignal | None:
+    """Fire after N consecutive tool failures or no-progress turns, regardless of fingerprint.
+
+    Unlike detect_identical_tool_loop / detect_repeated_tool_loop, this detector
+    does not require the exact same tool/arguments to repeat. It catches models
+    that churn on slightly different failing commands or stall without making
+    progress.
+    """
+    counters = getattr(state, "stagnation_counters", None) or {}
+    no_progress = int(counters.get("no_actionable_progress", 0) or 0)
+    threshold = max(1, int(threshold or 3))
+
+    # Count consecutive failed tool outcomes at the tail of tool_history.
+    # tool_history entries are formatted as: tool_name|args_json|outcome
+    consecutive_failures = 0
+    tool_name: str | None = None
+    for entry in reversed(getattr(state, "tool_history", []) or []):
+        parts = str(entry or "").split("|")
+        if len(parts) < 3:
+            break
+        this_tool = parts[0].strip() or None
+        outcome = parts[2].strip().lower()
+        if outcome.startswith("error") or outcome in {"false", "failure", "fail"}:
+            consecutive_failures += 1
+            if tool_name is None:
+                tool_name = this_tool
+        elif outcome in {"success", "true", "ok"}:
+            break
+        else:
+            break
+
+    recent_errors = getattr(state, "recent_errors", None) or []
+    recent_error_count = sum(1 for item in recent_errors[-threshold:] if str(item or "").strip())
+
+    # Require both no-progress and some evidence of repeated failure.
+    if no_progress < threshold:
+        return None
+    if consecutive_failures < 2 and recent_error_count < 2:
+        return None
+
+    evidence_bits = [f"no_actionable_progress={no_progress}", f"consecutive_failures={consecutive_failures}"]
+    if recent_error_count:
+        evidence_bits.append(f"recent_errors={recent_error_count}")
+    if tool_name:
+        evidence_bits.append(f"last_tool={tool_name}")
+
+    return FamaSignal(
+        kind=FamaFailureKind.LOOPING,
+        severity=2,
+        source="loop_guard",
+        evidence="; ".join(evidence_bits),
+        step=current_step(state),
+        tool_name=tool_name,
+        failure_class="no_progress",
+        next_safe_action=(
+            "Progress has stalled. Gather one fresh piece of evidence, change approach, "
+            "or ask for help instead of repeating similar actions."
+        ),
+    )
+
+
 def detect_interactive_installer_stall(state: Any, *, threshold: int = 2) -> FamaSignal | None:
     history = [str(item or "").strip() for item in getattr(state, "tool_history", []) or [] if str(item or "").strip()]
     threshold = max(1, int(threshold or 2))

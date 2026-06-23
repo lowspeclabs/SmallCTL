@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from .fs_write_sessions import _resolve
 
 _SUSPICIOUS_URL_PATTERNS = ("github.com",)
 _PREFLIGHT_TIMEOUT_SEC = 2
+
+
+_PIPE_TO_SHELL_RE = re.compile(
+    r"(?:curl|wget)\b[^|]*\|\s*(?:bash|sh|dash|zsh|ksh)\b",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
 
 
 async def _preflight_head_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool, str]:
@@ -144,3 +152,22 @@ def _coerce_body(response: Any) -> Any:
     if "application/json" in content_type:
         return response.json()
     return response.text
+
+
+async def _preflight_pipe_to_shell_command(command: str) -> tuple[bool, str]:
+    """Block curl/wget | sh unless the URL passes a HEAD preflight."""
+    if not _PIPE_TO_SHELL_RE.search(command):
+        return False, ""
+    urls = _URL_RE.findall(command)
+    for url in urls:
+        if httpx is None:
+            return False, ""
+        try:
+            async with httpx.AsyncClient(timeout=_PREFLIGHT_TIMEOUT_SEC) as client:
+                response = await client.head(url, follow_redirects=True)
+            if response.status_code == 404:
+                return True, "URL returned 404 on HEAD preflight. The resource does not exist. Do not pipe it to a shell."
+        except Exception:
+            # Network errors are not a reason to block; the shell command will fail on its own.
+            continue
+    return False, ""

@@ -564,7 +564,7 @@ def _update_remote_install_stall_counter(state: Any, graph_state: Any, counters:
         counters["_remote_install_stall_history"] = prior
         count = sum(1 for item in prior if item == key)
         counters["remote_install_stall"] = max(int(counters.get("remote_install_stall", 0) or 0), count)
-        if count >= 3:
+        if count >= 2:
             break
 
 

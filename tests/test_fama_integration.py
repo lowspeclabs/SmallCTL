@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from smallctl.fama.capsules import render_fama_capsules
+from smallctl.fama.runtime import expire_for_turn
 from smallctl.fama.state import active_mitigation_names
 from smallctl.harness import tool_result_flow
 from smallctl.harness.tool_dispatch import chat_mode_tools, dispatch_tool_call
@@ -385,3 +387,45 @@ def test_fama_disabled_observe_is_noop(monkeypatch) -> None:
     )
 
     assert "_fama" not in state.scratchpad
+
+
+def test_fama_generic_stuck_loop_fires_after_three_identical_failing_commands() -> None:
+    state = LoopState(step_count=6)
+    state.task_mode = "local_execute"
+    state.stagnation_counters = {"no_actionable_progress": 3}
+    state.tool_history = [
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+    ]
+    state.recent_errors = ["command not found", "command not found", "command not found"]
+    harness = _harness(state)
+
+    expire_for_turn(harness, mode="loop")
+
+    mitigations = active_mitigation_names(state)
+    assert mitigations, "expected at least one FAMA mitigation after 3 identical failing commands"
+    capsules = render_fama_capsules(state, token_budget=500)
+    assert len(capsules) >= 1, "expected at least one FAMA capsule to render"
+
+
+def test_fama_remote_install_failure_routes_to_install_capsule() -> None:
+    state = LoopState(step_count=6)
+    state.task_mode = "remote_execute"
+    state.stagnation_counters = {"no_actionable_progress": 3}
+    state.tool_history = [
+        'ssh_exec|{"host": "box", "command": "apt install -y foo"}|error:exit code 100',
+        'ssh_exec|{"host": "box", "command": "apt install -y foo"}|error:exit code 100',
+        'ssh_exec|{"host": "box", "command": "apt install -y foo"}|error:exit code 100',
+    ]
+    state.recent_errors = ["exit code 100", "exit code 100", "exit code 100"]
+    harness = _harness(state)
+
+    expire_for_turn(harness, mode="loop")
+
+    mitigations = active_mitigation_names(state)
+    assert "repeated_remote_installer_failure_capsule" in mitigations or "interactive_installer_stall_capsule" in mitigations
+    capsules = render_fama_capsules(state, token_budget=500)
+    assert any(
+        "remote installer" in c.lower() or "interactive" in c.lower() for c in capsules
+    )

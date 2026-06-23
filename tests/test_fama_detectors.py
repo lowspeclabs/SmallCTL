@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from smallctl.fama.detectors import (
     detect_early_stop_from_result,
+    detect_generic_stuck_loop,
     detect_ssh_host_key_verification_failure_from_result,
     detect_verifier_failure_from_result,
 )
@@ -150,3 +151,34 @@ def test_detect_ssh_host_key_failure_from_single_tool_result() -> None:
     assert "known_hosts" in signal.evidence
     assert "local harness file" in str(signal.next_safe_action)
     assert signal.suggested_mitigations == ["ssh_host_key_recovery_capsule"]
+
+
+def test_detect_generic_stuck_loop_fires_after_repeated_failures() -> None:
+    state = LoopState(step_count=5)
+    state.stagnation_counters = {"no_actionable_progress": 3}
+    state.tool_history = [
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+    ]
+    state.recent_errors = ["command not found", "command not found", "command not found"]
+
+    signal = detect_generic_stuck_loop(state, threshold=3)
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.LOOPING
+    assert signal.source == "loop_guard"
+    assert signal.failure_class == "no_progress"
+    assert "no_actionable_progress=3" in signal.evidence
+    assert signal.tool_name == "shell_exec"
+
+
+def test_detect_generic_stuck_loop_ignores_insufficient_failure_evidence() -> None:
+    state = LoopState(step_count=2)
+    state.stagnation_counters = {"no_actionable_progress": 1}
+    state.tool_history = [
+        'shell_exec|{"command": "bad-cmd"}|error:command not found',
+    ]
+    state.recent_errors = ["command not found"]
+
+    assert detect_generic_stuck_loop(state, threshold=3) is None

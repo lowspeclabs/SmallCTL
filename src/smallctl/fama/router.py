@@ -40,6 +40,54 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
 }
 
 
+_REMOTE_INSTALL_TOOLS = {
+    "ssh_exec",
+    "ssh_session_read",
+    "ssh_session_send",
+    "ssh_session_start",
+    "http_get",
+    "file_download",
+}
+
+_REMOTE_INSTALL_FAILURE_CLASSES = {
+    "repeated_remote_installer_failure",
+    "interactive_session_stall",
+    "verifier_failed",
+    "tool_execution_failed",
+    "no_progress",
+    "repeated_action",
+    "wrong_path",
+    "remote_verification_pending",
+}
+
+_REMOTE_INSTALL_MARKERS = (
+    "remote installer",
+    "installer",
+    "ssh_exec",
+    "ssh session",
+    "apt",
+    "curl",
+    "wget",
+    "download",
+)
+
+
+def _is_remote_install_failure(signal: FamaSignal, state: Any) -> bool:
+    if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
+        return False
+    tool_name = str(signal.tool_name or "").strip()
+    if tool_name in _REMOTE_INSTALL_TOOLS:
+        return True
+    failure_class = str(signal.failure_class or "").strip()
+    if failure_class in _REMOTE_INSTALL_FAILURE_CLASSES:
+        evidence_lower = str(signal.evidence or "").lower()
+        return any(marker in evidence_lower for marker in _REMOTE_INSTALL_MARKERS)
+    evidence_lower = str(signal.evidence or "").lower()
+    if tool_name and any(marker in evidence_lower for marker in _REMOTE_INSTALL_MARKERS):
+        return True
+    return False
+
+
 def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveMitigation]:
     names = list(MITIGATION_RULES.get(signal.kind, []))
     # SSH auth / environment failures: replace done_gate with a
@@ -68,6 +116,18 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
     # to break the repeat cycle directly
     if signal.source == "loop_guard" and "tool_exposure_narrowing" not in names:
         names = list(names) + ["tool_exposure_narrowing"]
+    # Remote-install failures should always surface an install-specific capsule
+    # (repeated_remote_installer_failure_capsule or interactive_installer_stall_capsule)
+    # so the model does not cycle on generic advice.
+    if _is_remote_install_failure(signal, state):
+        install_capsules = {"repeated_remote_installer_failure_capsule", "interactive_installer_stall_capsule"}
+        if not (install_capsules & set(names)):
+            names = ["repeated_remote_installer_failure_capsule"] + list(names)
+        # Suppress generic completion-gate advice for repeated install failures;
+        # the installer needs environment repair, not a verifier checklist.
+        names = [n for n in names if n not in {"done_gate", "acceptance_checklist_capsule"}]
+        if "micro_plan_capsule" not in names:
+            names.append("micro_plan_capsule")
     # Severity-3 escalation for repeated early_stop: pivot from blocking
     # completion to admitting defeat, so the model does not cycle
     # indefinitely on an unfixable external blocker.

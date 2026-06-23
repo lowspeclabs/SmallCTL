@@ -23,6 +23,7 @@ from .detectors import (
     detect_bad_tool_args,
     detect_context_drift,
     detect_empty_write,
+    detect_generic_stuck_loop,
     detect_interactive_installer_stall,
     detect_model_output_degenerate_loop,
     detect_objective_verifier_mismatch,
@@ -358,6 +359,7 @@ def expire_for_turn(harness: Any, *, mode: str) -> None:
     threshold = int(getattr(config, "loop_guard_stagnation_threshold", 3) or 3)
     for signal in (
         detect_repeated_tool_loop(state, threshold=threshold),
+        detect_generic_stuck_loop(state, threshold=threshold),
         detect_interactive_installer_stall(state, threshold=2),
         detect_write_session_stall(state, threshold=threshold),
         detect_model_output_degenerate_loop(state),

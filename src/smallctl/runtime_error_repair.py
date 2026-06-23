@@ -11,7 +11,7 @@ _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError:\s+No module named ['\"](?
 _IMPORT_ERROR_RE = re.compile(r"ImportError:\s+(?P<message>.+)")
 _EXCEPTION_RE = re.compile(r"(?P<kind>[A-Z][A-Za-z_]*(?:Error|Exception)):\s*(?P<message>[^\n]+)")
 _RUNTIME_ERROR_HINT_RE = re.compile(
-    r"\b(?:traceback|error:|exception|modulenotfounderror|importerror|syntaxerror|typeerror|attributeerror|"
+    r"\b(?:traceback|error:|exception|"
     r"does not run|doesn't run|crashes|failed when|here is the error)\b",
     re.IGNORECASE,
 )

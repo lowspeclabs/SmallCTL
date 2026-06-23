@@ -190,3 +190,25 @@ AttributeError: 'pygame.time.Clock' object has no attribute 'get_scrolling'
     }
 
     assert runtime_error_completion_block(state, verifier_verdict=None) is not None
+
+
+def test_task_instruction_mentioning_typeerror_is_not_recorded() -> None:
+    # A task that tells the model to "raise TypeError if ..." is an
+    # implementation instruction, not a user-reported runtime error.
+    state = LoopState()
+    task = (
+        "Update add(a, b) to handle type checking: if either argument is not a "
+        "number, raise TypeError. Then verify with python -m py_compile."
+    )
+    assert maybe_record_reported_runtime_error(state, task) is None
+    assert state.scratchpad.get("_reported_runtime_error") is None
+
+
+def test_task_instruction_mentioning_modulenotfounderror_is_not_recorded() -> None:
+    state = LoopState()
+    task = (
+        "Refactor imports so a missing widget_core dependency raises "
+        "ModuleNotFoundError with a helpful message."
+    )
+    assert maybe_record_reported_runtime_error(state, task) is None
+    assert state.scratchpad.get("_reported_runtime_error") is None

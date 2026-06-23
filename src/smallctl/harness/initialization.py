@@ -94,11 +94,14 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
 
     self.reasoning_mode = config.reasoning_mode
     if _model_uses_gemma_rules(config.model):
-        is_known_tagged_gemma = (
-            is_exact_small_gemma_4_it_model_name(config.model)
-            or is_gemma_4_it_model_name(config.model)
-        )
-        if is_known_tagged_gemma:
+        if is_exact_small_gemma_4_it_model_name(config.model):
+            # Gemma-4-e2b/e4b IT checkpoints emit native reasoning_content and
+            # tool_calls deltas more reliably when not instructed to wrap
+            # reasoning in explicit <think> tags. Use field reasoning so the
+            # native reasoning channel is preserved and native tool calls work.
+            self.reasoning_mode = "field"
+            self.state.scratchpad["_thinking_tags_disabled"] = True
+        elif is_gemma_4_it_model_name(config.model):
             # Known Gemma variants that follow the explicit <think> tag protocol.
             self.reasoning_mode = "tags"
         elif config.reasoning_mode == "auto":

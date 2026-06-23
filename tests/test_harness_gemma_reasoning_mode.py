@@ -55,9 +55,10 @@ def test_harness_preserves_off_reasoning_mode_for_non_gemma() -> None:
     assert harness.reasoning_mode == "off"
 
 
-def test_harness_recognizes_bare_gemma_4_quantized_suffix_as_tagged() -> None:
-    # Some backends/gguf filenames drop the "-it" suffix even though the
-    # checkpoint is instruction-tuned and emits <think> tags.
+def test_harness_uses_field_reasoning_for_small_gemma_4_it() -> None:
+    # Small Gemma-4 IT checkpoints (e2b/e4b) emit native reasoning_content and
+    # tool_calls deltas more reliably when not instructed to wrap reasoning in
+    # explicit <think> tags.
     harness = Harness(
         endpoint="http://localhost:8080/v1",
         model="gemma-4-e4b",
@@ -66,5 +67,21 @@ def test_harness_recognizes_bare_gemma_4_quantized_suffix_as_tagged() -> None:
         reasoning_mode="auto",
         runtime_context_probe=False,
     )
-    assert harness.reasoning_mode == "tags"
-    assert harness.state.scratchpad.get("_thinking_tags_disabled") is None
+    assert harness.reasoning_mode == "field"
+    assert harness.state.scratchpad.get("_thinking_tags_disabled") is True
+
+
+def test_harness_recognizes_spaced_gemma_4_e4b_name_as_field() -> None:
+    # Users often pass model names with spaces (e.g. "Gemma 4 e4b"). The
+    # classifier must collapse separators so the harness selects the native
+    # reasoning-field mode and disables explicit <think> tag instructions.
+    harness = Harness(
+        endpoint="http://localhost:8080/v1",
+        model="Gemma 4 e4b",
+        provider_profile="llamacpp",
+        api_key="test-key",
+        reasoning_mode="auto",
+        runtime_context_probe=False,
+    )
+    assert harness.reasoning_mode == "field"
+    assert harness.state.scratchpad.get("_thinking_tags_disabled") is True

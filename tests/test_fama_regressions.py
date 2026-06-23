@@ -165,6 +165,42 @@ def test_fama_renders_interactive_installer_stall_capsule_by_turn_10() -> None:
     assert len(capsules) > 0
     combined = "\n".join(capsules)
     assert "interactive" in combined.lower() or "stall" in combined.lower() or "prompt" in combined.lower()
+    assert "only `ssh_session_send`" in combined.lower()
+    assert "one exact answer" in combined.lower()
+
+
+def test_interactive_installer_stall_capsule_forbids_retry_installer() -> None:
+    """The stall capsule explicitly forbids restarting the installer."""
+    state = LoopState()
+    state.step_count = 10
+    state.scratchpad["_fama_config"] = {"enabled": True, "mode": "lite", "capsule_token_budget": 180}
+    state.tool_history = [
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+    ]
+    assert detect_interactive_installer_stall(state, threshold=2) is not None
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="interactive_installer_stall_capsule",
+                reason="stall_detected",
+                source_signal=f"interactive_session_stall:{state.step_count}",
+                activated_step=state.step_count,
+                expires_after_step=state.step_count + 5,
+            )
+        ],
+        max_active=5,
+    )
+    capsules = render_fama_capsules(state, token_budget=180)
+    combined = "\n".join(capsules).lower()
+    assert "do not run `ssh_exec`" in combined
+    assert "curl" in combined or "wget" in combined
+    assert "start another session" in combined
 
 
 def test_loop_guard_context_aware_nudge_not_generic() -> None:

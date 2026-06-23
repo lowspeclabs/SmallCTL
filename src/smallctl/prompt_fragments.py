@@ -224,6 +224,13 @@ _INSTALLER_TIMEOUT_RECOVERY = (
     "Do not abandon the task just because the first attempt exceeded the default timeout."
 )
 
+_INTERACTIVE_INSTALLER_RUN_HINT = (
+    "INTERACTIVE INSTALLERS: For remote installers that prompt for input (e.g., Pi-hole, Webmin), "
+    "use `interactive_run(target=..., command=..., answers=[...])` when the prompt sequence is known. "
+    "If the prompt sequence is unknown, use `ssh_session_start` then `ssh_session_read`/`ssh_session_send`. "
+    "Do not retry the same `ssh_exec` or `curl | bash` command when it stalls on a prompt."
+)
+
 _PLANNING_MODE_INTRO = (
     "PLANNING MODE IS ACTIVE. "
     "Gather facts before proposing execution, use planning tools to create and refine a structured plan, "

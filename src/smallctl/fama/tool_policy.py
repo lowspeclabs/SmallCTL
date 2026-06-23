@@ -52,6 +52,10 @@ _REPAIR_TOOLS = _LOCAL_MUTATING_TOOLS | _READ_LOOP_TOOLS | {
     "ssh_file_replace_between",
 }
 _INTERACTIVE_SSH_TOOLS = {"ssh_session_start", "ssh_session_read", "ssh_session_send", "ssh_session_close"}
+# When an interactive installer stall is detected, only these tools stay exposed.
+# Everything else (especially ssh_exec and pipe-to-shell retries) is hidden so the
+# model must send one exact answer to the existing session instead of restarting.
+_INTERACTIVE_INSTALLER_STALL_ALLOWED_TOOLS = {"ssh_session_read", "ssh_session_send", "ssh_session_close"}
 
 
 def _task_text(state: Any) -> str:
@@ -158,6 +162,12 @@ def fama_hidden_tools_for_exposure(
         repeated_tool = _latest_loop_repeated_tool(state)
         if repeated_tool in _READ_LOOP_TOOLS and repeated_tool in exported:
             hidden_tools.add(repeated_tool)
+    # Interactive SSH installer stall: the prompt has not advanced despite prior
+    # sends. Force the model to send one exact answer to the existing session and
+    # then read the new state. Block every other tool so it cannot retry the
+    # installer with ssh_exec or curl|bash.
+    if "interactive_installer_stall_capsule" in active:
+        hidden_tools.update(exported - _INTERACTIVE_INSTALLER_STALL_ALLOWED_TOOLS)
     # Repair-phase read-only loop breaker: if the model has made repeated
     # read-only calls without mutation progress in repair phase, suppress
     # further reads and force mutation action.
@@ -209,6 +219,11 @@ def fama_hidden_tool_reasons_for_exposure(
         repeated_tool = _latest_loop_repeated_tool(state)
         if repeated_tool in hidden_tools:
             reasons[repeated_tool].append("tool_exposure_narrowing_repeated_tool")
+    if "interactive_installer_stall_capsule" in active:
+        for tool in sorted(hidden_tools):
+            if tool in _INTERACTIVE_INSTALLER_STALL_ALLOWED_TOOLS:
+                continue
+            reasons[tool].append("interactive_installer_stall_narrows_to_send")
     state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     stagnation = getattr(state, "stagnation_counters", None)
     if state_phase == "repair" and isinstance(stagnation, dict):
@@ -296,6 +311,12 @@ def enforce_fama_tool_call(
 
 
 def _interactive_ssh_tools_exposed(state: Any) -> bool:
+    active = active_mitigation_names(state)
+    # A detected interactive installer stall is the strongest signal that the
+    # interactive SSH session tools must be visible so the model can send one
+    # exact answer to the existing session.
+    if "interactive_installer_stall_capsule" in active:
+        return True
     scratchpad = getattr(state, "scratchpad", None)
     if isinstance(scratchpad, dict):
         if bool(

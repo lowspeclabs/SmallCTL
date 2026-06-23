@@ -14,6 +14,7 @@ from .prompt_fragments import (
     _EVIDENCE_ANCHORED_DIAGNOSIS_RULE,
     _GEMMA_4_STRICT_FORMAT,
     _INSTALLER_TIMEOUT_RECOVERY,
+    _INTERACTIVE_INSTALLER_RUN_HINT,
     _LARGE_GEMMA_26B_ANTI_LOOP_RULE,
     _LFM_25_8B_STRICT_FORMAT,
     _LARGE_MODEL_STRUCTURED_REASONING,
@@ -137,6 +138,7 @@ def build_system_prompt(
                 _SHELL_POSIX_REDIRECTION,
                 _REMOTE_PROBES_BATCH,
                 _REMOTE_DOWNLOAD_FALLBACK,
+                _INTERACTIVE_INSTALLER_RUN_HINT,
                 _MEMORY_PERSIST_KEY_FACTS,
                 "MEMORY: `memory_update`, session notes, and plans do not satisfy the supported-claim gate for diagnosis/remediation. Only actual tool evidence counts, so do not try to satisfy a shell/SSH/file guard by storing the intended command in memory. ",
                 _REDUNDANCY_PREFER_SUMMARY,
@@ -169,6 +171,7 @@ def build_system_prompt(
                 _SHELL_POSIX_REDIRECTION,
                 "SHELL: When verifying a Python script that has `if __name__ == '__main__': main()`, do not run it bare without arguments if `main()` reads from stdin. Pipe sample input (e.g., `echo '{}' | python3 script.py`) or use `python3 -m unittest discover` / `python3 -m pytest` instead of bare execution. ",
                 _REMOTE_PROBES_BATCH,
+                _INTERACTIVE_INSTALLER_RUN_HINT,
                 _MEMORY_PERSIST_KEY_FACTS,
                 "MEMORY: If the user asks you to save, remember, store, or pin information, call `memory_update` before `task_complete`. ",
                 "MEMORY: If `memory_update` says the content already exists, treat it as a no-op and do not call it again for the same fact. Move on to the next step or call `task_complete`. ",
@@ -210,7 +213,7 @@ def build_system_prompt(
                 "Complete the entire session before moving to other tasks or verification. ",
                 "PLAN HANDOFF: Before calling `task_complete`, ensure the acceptance criteria are satisfied or explicitly waived. Use `loop_status` to check progress and the latest verifier verdict. If you have sufficient evidence to answer, call `task_complete` in the same turn as your final answer. ",
                 "Efficiency: Use the fewest calls. Do not repeat identical calls. Do not repeat the same or near-identical tool call. ",
-                f"Once your objective is met, stop exploring and call task_complete(message='...').",
+                "Once your objective is met, stop exploring and call task_complete(message='...').",
             ]
     if gemma_mode and not thinking_tags_disabled:
         parts.append(_GEMMA_4_STRICT_FORMAT)
@@ -713,6 +716,12 @@ def build_system_prompt(
             "Query the index first (e.g. searching symbols, tracing references) to find relevant files and specific line ranges. "
             "Do not read entire large files—use the index to locate the relevant blocks.\n"
             f"```json\n{manifest_json}\n```\n"
+        )
+    
+    if isinstance(scratchpad, dict) and str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip() == "smalltalk_terminal_only":
+        parts.append(
+            "SMALLTALK: This is a casual greeting. No file, shell, SSH, or ask_human tools are needed. "
+            "Reply naturally in chat. When you are ready to finish, call `task_complete(message='...')`."
         )
     
     prompt = " ".join(parts)

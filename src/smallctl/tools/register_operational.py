@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from . import http, network, shell, ssh_files
+from . import network_interactive_sessions
 
 
 def register_operational_tools(
@@ -48,6 +49,44 @@ def register_operational_tools(
                     "additionalProperties": False,
                 },
                 handler=inject_state_and_harness(network.ssh_exec),
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
+                name="interactive_run",
+                description=(
+                    "Run a command in a fresh interactive SSH session and feed it a sequence of answers. "
+                    "This is the preferred high-level tool for straightforward interactive remote installers "
+                    "(e.g., Pi-hole, Webmin) when the model would otherwise manage session IDs manually. "
+                    "For complex multi-prompt installers with unknown prompts, use `ssh_session_start` followed by "
+                    "`ssh_session_read`/`ssh_session_send` instead."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "Preferred SSH target in `user@host` or `host` form."},
+                        "host": {"type": "string", "description": "Target hostname or IP."},
+                        "command": {"type": "string", "description": "Interactive command to run remotely."},
+                        "answers": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Ordered list of answers to send when the remote command prompts for input.",
+                        },
+                        "user": {"type": "string", "description": "SSH username."},
+                        "username": {"type": "string", "description": "Alias for `user`."},
+                        "port": {"type": "integer", "default": 22},
+                        "identity_file": {"type": "string", "description": "Path to SSH private key."},
+                        "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
+                        "timeout_sec": {"type": "integer", "default": 900},
+                        "wait_sec": {"type": "number", "default": 1.0, "description": "Seconds to wait after each read/send."},
+                        "max_chars": {"type": "integer", "default": 6000},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state_and_harness(network_interactive_sessions.interactive_run),
                 category="network",
                 risk="high",
                 allowed_modes={"chat", "loop", "planning"},

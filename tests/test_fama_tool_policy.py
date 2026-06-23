@@ -585,3 +585,78 @@ def test_permission_denied_failure_does_not_activate_host_key_capsule() -> None:
     )
 
     assert "ssh_host_key_recovery_capsule" not in active_mitigation_names(state)
+
+
+def test_interactive_installer_stall_capsule_narrows_tool_exposure() -> None:
+    """When the interactive installer stall capsule is active, only ssh_session_send/read/close are exposed."""
+    state = LoopState()
+    state.tool_history = [
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+        "ssh_session_send|sess_abc|y",
+        "ssh_session_read|sess_abc|Continue? (y/N)|waiting",
+    ]
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="interactive_installer_stall_capsule",
+                reason="stall_detected",
+                source_signal="interactive_session_stall:10",
+                activated_step=10,
+                expires_after_step=15,
+            )
+        ],
+        max_active=5,
+    )
+
+    schemas = apply_fama_tool_exposure(
+        [
+            _schema("ssh_exec"),
+            _schema("interactive_run"),
+            _schema("ssh_session_start"),
+            _schema("ssh_session_read"),
+            _schema("ssh_session_send"),
+            _schema("ssh_session_close"),
+            _schema("shell_exec"),
+            _schema("task_complete"),
+        ],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = {entry["function"]["name"] for entry in schemas}
+    assert names == {"ssh_session_read", "ssh_session_send", "ssh_session_close"}
+
+
+def test_interactive_installer_stall_capsule_reasons() -> None:
+    """Hidden tools during an interactive installer stall carry the correct reason."""
+    from smallctl.fama.tool_policy import fama_hidden_tool_reasons_for_exposure
+
+    state = LoopState()
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="interactive_installer_stall_capsule",
+                reason="stall_detected",
+                source_signal="interactive_session_stall:10",
+                activated_step=10,
+                expires_after_step=15,
+            )
+        ],
+        max_active=5,
+    )
+
+    schemas = [
+        _schema("ssh_exec"),
+        _schema("interactive_run"),
+        _schema("ssh_session_send"),
+    ]
+    reasons = fama_hidden_tool_reasons_for_exposure(schemas, state=state, mode="loop", config=_Config())
+    assert reasons.get("ssh_exec") == ["interactive_installer_stall_narrows_to_send"]
+    assert reasons.get("interactive_run") == ["interactive_installer_stall_narrows_to_send"]
+    assert "ssh_session_send" not in reasons

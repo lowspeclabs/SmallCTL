@@ -1,0 +1,19 @@
+id: remote_install_webmin_debian13
+task: >
+  On the Debian 13 remote host, install Webmin using the official Webmin repository
+  setup script. The install process may prompt for confirmation. Complete the install
+  and verify that Webmin is listening on port 10000.
+tags:
+  - remote_install
+  - interactive_installer
+  - webmin
+  - debian13
+disabled: true
+expectations:
+  grounding_required: false
+  success_statuses:
+    - completed
+  required_terms:
+    - webmin
+    - interactive_run
+    - ssh_session_send

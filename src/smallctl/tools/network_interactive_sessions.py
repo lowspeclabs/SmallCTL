@@ -618,3 +618,120 @@ async def ssh_session_close(
         terminate=terminate,
     )
     return ok(snapshot, metadata={"interactive_session": True})
+
+
+async def interactive_run(
+    *,
+    host: str = "",
+    target: str | None = None,
+    command: str = "",
+    answers: list[str] | None = None,
+    user: str | None = None,
+    username: str | None = None,
+    port: int = 22,
+    identity_file: str | None = None,
+    password: str | None = None,
+    timeout_sec: int = 900,
+    wait_sec: float = 1.0,
+    max_chars: int = 6000,
+    state: Any = None,
+    harness: Any = None,
+) -> dict[str, Any]:
+    """Run a command in a fresh interactive SSH session and feed it a sequence of answers.
+
+    This is a high-level wrapper around `ssh_session_start`, `ssh_session_read`,
+    `ssh_session_send`, and `ssh_session_close`. It is intended for small/mid-size
+    models and straightforward interactive installers where managing session IDs
+    across multiple turns is error-prone. For multi-prompt installers with unknown
+    prompts, prefer the low-level session tools.
+    """
+    if not command:
+        return fail("command is required.", metadata={"host": host, "target": target})
+
+    started = await ssh_session_start(
+        host=host,
+        target=target,
+        command=command,
+        user=user,
+        username=username,
+        port=port,
+        identity_file=identity_file,
+        password=password,
+        timeout_sec=timeout_sec,
+        state=state,
+        harness=harness,
+    )
+    if not bool(started.get("success")):
+        return started
+
+    session_id = str((started.get("metadata") or {}).get("session_id") or "")
+    if not session_id:
+        session_id = str((started.get("data") or {}).get("session_id") or "")
+    if not session_id:
+        return fail(
+            "interactive_run started a session but no session_id was returned.",
+            metadata={"start_result": started},
+        )
+
+    outputs: list[dict[str, Any]] = []
+    final_snapshot: dict[str, Any] | None = None
+
+    try:
+        initial = await ssh_session_read(
+            session_id=session_id,
+            wait_sec=wait_sec,
+            max_chars=max_chars,
+            state=state,
+            harness=harness,
+        )
+        outputs.append({"event": "read", "snapshot": initial.get("data") or initial.get("snapshot")})
+        final_snapshot = initial.get("data") or initial.get("snapshot")
+
+        for answer in answers or []:
+            sent = await ssh_session_send(
+                session_id=session_id,
+                input=str(answer),
+                send_newline=True,
+                wait_sec=wait_sec,
+                max_chars=max_chars,
+                state=state,
+                harness=harness,
+            )
+            outputs.append({"event": "send", "snapshot": sent.get("data") or sent.get("snapshot")})
+            final_snapshot = sent.get("data") or sent.get("snapshot")
+            if not bool(sent.get("success")):
+                break
+            read_after = await ssh_session_read(
+                session_id=session_id,
+                wait_sec=wait_sec,
+                max_chars=max_chars,
+                state=state,
+                harness=harness,
+            )
+            outputs.append({"event": "read", "snapshot": read_after.get("data") or read_after.get("snapshot")})
+            final_snapshot = read_after.get("data") or read_after.get("snapshot")
+    finally:
+        closed = await ssh_session_close(
+            session_id=session_id,
+            terminate=True,
+            max_chars=max_chars,
+            state=state,
+            harness=harness,
+        )
+        outputs.append({"event": "close", "snapshot": closed.get("data") or closed.get("snapshot")})
+
+    combined_output = "\n".join(
+        str(o.get("snapshot", {}).get("output") or o.get("snapshot", {}).get("output_tail") or "")
+        for o in outputs
+        if isinstance(o.get("snapshot"), dict)
+    )
+    metadata = {
+        "interactive_run": True,
+        "session_id": session_id,
+        "outputs": outputs,
+        "combined_output": combined_output,
+    }
+    if isinstance(final_snapshot, dict):
+        metadata["exit_code"] = final_snapshot.get("exit_code")
+        metadata["status"] = final_snapshot.get("status")
+    return ok(final_snapshot or {}, metadata=metadata)

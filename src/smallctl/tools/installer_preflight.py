@@ -4,6 +4,10 @@ import asyncio
 import shlex
 from typing import Any
 
+from .debian_installer_preflight import (
+    build_debian_readiness_probe_script,
+    parse_debian_readiness_probe_output,
+)
 from .process_lifecycle import stop_process, unregister_process
 from .process_streams import read_stream_chunks
 
@@ -70,11 +74,13 @@ async def run_installer_preflight_probes(
         )
 
     probe_script_parts.append('echo "__PREFLIGHT_DONE__"')
+    probe_script_parts.append(build_debian_readiness_probe_script())
     probe_command = "bash -c " + shlex.quote("; ".join(probe_script_parts))
 
     if build_probe_command is not None:
         probe_command = build_probe_command(probe_command)
 
+    proc: Any = None
     try:
         proc = await create_process(
             command=probe_command,
@@ -126,6 +132,11 @@ async def run_installer_preflight_probes(
             if "FOG_PRESEED" in preseed_section:
                 probes["preseed_files"].append(".fogsettings")
 
+        probes["debian_readiness"] = parse_debian_readiness_probe_output(combined)
+        _store_debian_readiness_results(
+            state, host=host, user=user, readiness=probes["debian_readiness"]
+        )
+
         probes["is_interactive"] = len(probes["noninteractive_flags"]) == 0
 
         if probes["noninteractive_flags"]:
@@ -140,11 +151,33 @@ async def run_installer_preflight_probes(
                 "or configure a preseed/config file when available."
             )
     except asyncio.TimeoutError:
-        await stop_process(proc, harness=harness, timeout=1.0)
+        if proc is not None:
+            await stop_process(proc, harness=harness, timeout=1.0)
         probes["probe_error"] = "Preflight probes timed out after 30s"
     except Exception as exc:
         probes["probe_error"] = str(exc)
     finally:
-        unregister_process(harness, proc)
+        if proc is not None:
+            unregister_process(harness, proc)
 
     return probes
+
+
+def _store_debian_readiness_results(
+    state: Any, *, host: str, user: str, readiness: dict[str, Any]
+) -> None:
+    """Persist Debian readiness results so FAMA/context can surface them proactively."""
+    if state is None:
+        return
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    if not readiness.get("is_debian"):
+        return
+    payload = dict(readiness)
+    payload["host"] = str(host or "").strip().lower()
+    payload["user"] = str(user or "").strip().lower()
+    payload["created_at_step"] = int(getattr(state, "step_count", 0) or 0)
+    scratchpad["_debian_installer_readiness"] = payload
+    if hasattr(state, "touch"):
+        state.touch()

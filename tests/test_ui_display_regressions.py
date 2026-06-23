@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from smallctl.models.events import UIEvent, UIEventType
 from smallctl.state import LoopState
 from smallctl.tools import control
@@ -612,3 +610,31 @@ def test_format_run_log_row_tool_dispatch_cancelled() -> None:
         "data": {"tool_name": "shell_exec", "elapsed_sec": 3.711},
     }
     assert "Tool dispatch cancelled: shell_exec after 3.711s" in format_run_log_row(row)
+
+
+def test_backend_failure_error_event_renders_red_bubble_by_default() -> None:
+    console = ConsolePane(verbose=False)
+    calls: list[str] = []
+    event = UIEvent(
+        event_type=UIEventType.ERROR,
+        content="Stream error: backend wedged",
+    )
+
+    async def _record_add_bubble(kind: str, text: str) -> object:
+        calls.append(f"bubble:{kind}:{text}")
+        return None
+
+    console._add_bubble = _record_add_bubble  # type: ignore[assignment]
+    asyncio.run(console.append_event(event))
+    assert any(c.startswith("bubble:error:") for c in calls)
+    assert "Stream error: backend wedged" in calls[0]
+
+
+def test_guard_trip_diagnosis_recovery_banner() -> None:
+    banner = format_recovery_banner(
+        "guard_trip_diagnosis",
+        {"guard_error": "max_steps exceeded", "recent_error_count": 5},
+    )
+    assert "guard tripped" in banner.lower()
+    assert "max_steps exceeded" in banner
+    assert "5" in banner

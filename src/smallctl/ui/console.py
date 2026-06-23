@@ -176,7 +176,7 @@ class ConsolePane(VerticalScroll):
 
         kind_map = {
             UIEventType.USER: "user",
-            UIEventType.ERROR: "system",
+            UIEventType.ERROR: "error",
             UIEventType.SYSTEM: "system",
             UIEventType.ALERT: "system",
         }

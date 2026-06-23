@@ -336,6 +336,10 @@ def format_run_log_row(row: dict[str, Any]) -> str:
 
 def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
     """Build a compact status-bar banner for recovery state."""
+    if event == "guard_trip_diagnosis":
+        guard_error = str(data.get("guard_error") or "guard tripped").strip()
+        recent_count = data.get("recent_error_count", "?")
+        return f"Guard tripped: {guard_error} (recent errors: {recent_count})"
     if event == "upstream_install_source_invalid_pivot":
         return "Blocked: installer source invalid or unavailable"
     if event == "verifier_loop_detected":

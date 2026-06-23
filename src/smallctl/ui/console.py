@@ -30,6 +30,9 @@ class ConsolePane(VerticalScroll):
         self._visible_transcript_limit = 250
         self._hidden_transcript_entries = 0
         self._retention_placeholder: BubbleWidget | None = None
+        self._json_suppress_active = False
+        self._json_suppress_buffer = ""
+        self._json_suppress_max_len = 5000
 
     def set_verbose(self, verbose: bool) -> None:
         self._verbose = bool(verbose)
@@ -51,6 +54,8 @@ class ConsolePane(VerticalScroll):
     async def clear_bubbles(self) -> None:
         self._cancel_stream_flush()
         self._clear_stream_buffers()
+        self._json_suppress_active = False
+        self._json_suppress_buffer = ""
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.remove_children()
         self._active_assistant_turn = None
@@ -322,19 +327,156 @@ class ConsolePane(VerticalScroll):
         self._active_assistant_turn = None
         self._last_system_message = event.content
 
+    def _strip_json_tool_call_blocks(self, text: str) -> str:
+        """Remove markdown JSON tool-call blocks from combined stream text.
+
+        This catches blocks whose opening fence and `json` language tag were
+        split across stream chunks, which the per-chunk filter cannot detect
+        until the tag arrives.
+        """
+        if "```" not in text:
+            return text
+        cleaned = text
+        # Repeatedly remove ```json ... ``` blocks.
+        while True:
+            match = re.search(r"```json\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+            if not match:
+                break
+            block = match.group(1)
+            # Only remove if the block looks like a tool call.
+            lowered = block.lower()
+            if any(key in lowered for key in ('"name"', '"tool_name"', '"tool_call"', '"tool"', '"action"', '"function"')):
+                cleaned = cleaned[: match.start()] + cleaned[match.end() :]
+            else:
+                break
+        return cleaned
+
     def _filter_tool_call_tokens_from_stream(self, text: str) -> str:
         """Strip inline tool-call syntax from assistant stream chunks.
 
         The inline parser will later extract these calls and emit a proper
         TOOL_CALL event, but the live token stream must not render the raw
-        `tool_name(key=value)` signature as user-visible assistant text.
+        `tool_name(key=value)` signature or JSON tool-call blocks as user-visible
+        assistant text.
 
         Only raw function calls with explicit key=value arguments (the harness
-        inline format) are removed.  Ordinary prose, markdown code fences, and
-        generic function-like text such as `print("hi")` are preserved.
+        inline format) and JSON objects that look like tool calls are removed.
+        Ordinary prose, markdown code fences, and generic function-like text
+        such as `print("hi")` are preserved.
         """
         if not text:
             return text
+
+        # If we are already suppressing a JSON tool-call block, keep buffering
+        # until the block terminates (closing fence or balanced braces).
+        if self._json_suppress_active:
+            self._json_suppress_buffer += text
+            buf = self._json_suppress_buffer
+            # Markdown JSON fence end
+            if "\n```" in buf or buf.rstrip().endswith("```"):
+                self._json_suppress_active = False
+                self._json_suppress_buffer = ""
+                return ""
+            # Balanced braces for raw JSON objects
+            brace_count = 0
+            in_string = False
+            escape = False
+            closed_at = -1
+            for i, ch in enumerate(buf):
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == "{":
+                        brace_count += 1
+                    elif ch == "}":
+                        brace_count -= 1
+                        if brace_count == 0:
+                            closed_at = i
+                            break
+            if closed_at != -1:
+                remainder = buf[closed_at + 1 :]
+                # The JSON object may be inside a markdown fence; consume the
+                # closing fence so it does not leak into the visible stream.
+                remainder_stripped = remainder.lstrip()
+                if remainder_stripped.startswith("```"):
+                    remainder = remainder_stripped[len("```") :]
+                self._json_suppress_active = False
+                self._json_suppress_buffer = ""
+                return self._filter_tool_call_tokens_from_stream(remainder)
+            # Safety flush if the buffer grows too large without termination
+            if len(self._json_suppress_buffer) > self._json_suppress_max_len:
+                flushed = self._json_suppress_buffer
+                self._json_suppress_active = False
+                self._json_suppress_buffer = ""
+                return flushed
+            return ""
+
+        # Detect the start of a markdown JSON fence. Split chunks can separate
+        # the triple backticks from the `json` language tag, so look for either.
+        lower = text.lower()
+        fence_start_idx = -1
+        fence_kind = ""
+        for marker in ("```json", "```"):
+            idx = lower.find(marker)
+            if idx != -1 and (fence_start_idx == -1 or idx < fence_start_idx):
+                fence_start_idx = idx
+                fence_kind = marker
+        if fence_kind == "```json":
+            before = text[:fence_start_idx]
+            after = text[fence_start_idx + len("```json") :]
+            # If the block closes in the same chunk, suppress just the block.
+            if "\n```" in after or after.rstrip().endswith("```"):
+                return before
+            self._json_suppress_active = True
+            self._json_suppress_buffer = after
+            return before
+        if fence_kind == "```":
+            # We saw an unlabeled fence start; only suppress if the next
+            # non-whitespace content is the `json` language tag.
+            after_fence = text[fence_start_idx + len("```") :]
+            stripped = after_fence.lstrip()
+            if stripped.lower().startswith("json"):
+                after_lang = stripped[len("json") :]
+                if "\n```" in after_lang or after_lang.rstrip().endswith("```"):
+                    return text[:fence_start_idx]
+                self._json_suppress_active = True
+                self._json_suppress_buffer = after_lang
+                return text[:fence_start_idx]
+
+        # Detect raw JSON tool-call objects that are not inside fences.
+        # Look for a leading `{` followed quickly by a tool-name key. This
+        # catches {"name": "tool_name", ...} and {"tool_name": "tool_name", ...}
+        # as well as the common "json\n{" prefix emitted by some models.
+        stripped = text.lstrip()
+        leading_ws = text[: len(text) - len(stripped)] if stripped else text
+        json_start_match = re.match(
+            r"(?:json\s*[\n\r]+)?\s*\{\s*\"(name|tool_name|tool_call|tool|action|function)\"",
+            stripped,
+            re.IGNORECASE,
+        )
+        if json_start_match:
+            # If the previous buffered assistant text ends with an opening
+            # markdown fence, that fence belongs to the JSON block we are
+            # about to suppress. Remove it from the buffer so it does not leak.
+            if self._stream_buffer_groups:
+                last_group = self._stream_buffer_groups[-1]
+                if last_group.get("kind") == "assistant" and last_group.get("parts"):
+                    last_part = last_group["parts"][-1]
+                    fence_match = re.search(r"```\s*$", last_part)
+                    if fence_match:
+                        last_group["parts"][-1] = last_part[: fence_match.start()]
+            # Start suppressing from the JSON object onward.
+            self._json_suppress_active = True
+            self._json_suppress_buffer = stripped
+            return leading_ws
+
         # Terminal tool calls: task_complete(...), task_fail(...)
         stripped = re.sub(
             r"(?s)\b(task_complete|task_fail)\s*\([^)]*\)",
@@ -368,8 +510,32 @@ class ConsolePane(VerticalScroll):
     async def flush_stream_buffers(self, *, finalize_assistant: bool = True) -> None:
         started = time.perf_counter()
         self._cancel_stream_flush()
+        # If we were suppressing a JSON tool-call block that never terminated,
+        # flush the buffered text as ordinary assistant text so it is not lost.
+        if self._json_suppress_active:
+            buffered = self._json_suppress_buffer
+            self._json_suppress_active = False
+            self._json_suppress_buffer = ""
+            if buffered:
+                self._append_stream_buffer("assistant", buffered)
         groups = list(self._stream_buffer_groups)
         self._clear_stream_buffers()
+        # Merge consecutive groups of the same kind so that JSON tool-call
+        # fences split across chunk boundaries can be stripped from the full
+        # assistant text before it is rendered.
+        merged_groups: list[dict[str, Any]] = []
+        for item in groups:
+            if not item.get("parts"):
+                continue
+            key = (item.get("kind"), item.get("tool_name") or "", item.get("tool_call_id") or "")
+            if merged_groups:
+                last = merged_groups[-1]
+                last_key = (last.get("kind"), last.get("tool_name") or "", last.get("tool_call_id") or "")
+                if last_key == key:
+                    last.setdefault("parts", []).extend(item.get("parts") or [])
+                    continue
+            merged_groups.append(dict(item))
+        groups = merged_groups
         flushed_chars = 0
         for item in groups:
             text = "".join(item.get("parts") or [])
@@ -378,7 +544,9 @@ class ConsolePane(VerticalScroll):
             flushed_chars += len(text)
             kind = item.get("kind")
             if kind == "assistant":
-                await self._append_assistant(text)
+                text = self._strip_json_tool_call_blocks(text)
+                if text:
+                    await self._append_assistant(text)
             elif kind == "thinking":
                 await self._append_thinking(text)
             elif kind == "shell":
@@ -456,6 +624,8 @@ class ConsolePane(VerticalScroll):
             stack = self.query_one("#bubble-stack", Vertical)
             await stack.mount(turn)
             self._active_assistant_turn = turn
+            self._json_suppress_active = False
+            self._json_suppress_buffer = ""
             await self._enforce_visible_retention()
         elif speaker:
             self._active_assistant_turn.set_speaker(speaker)

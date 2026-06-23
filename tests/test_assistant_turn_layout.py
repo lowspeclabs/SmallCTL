@@ -971,6 +971,99 @@ def test_assistant_turn_has_dark_grey_left_border() -> None:
     asyncio.run(_run())
 
 
+def test_json_tool_call_blocks_are_suppressed_from_stream() -> None:
+    """Markdown JSON tool-call blocks and raw JSON objects must not leak into
+    the visible assistant text while streaming.
+    """
+
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Intro. "))
+            await console.append_event(
+                UIEvent(UIEventType.ASSISTANT, '```json\n{"name": "file_read", "arguments": {"path": "x"}}\n```')
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, " Outro."))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == "Intro.  Outro."
+
+    asyncio.run(_run())
+
+
+def test_split_chunk_json_tool_call_blocks_are_suppressed() -> None:
+    """JSON tool-call blocks split across many small stream chunks must still
+    be suppressed from the visible assistant text.
+    """
+
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "I will read.\n\n```"))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "json\n{\"name\":"))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, ' "file_read", "arguments":'))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, ' {"path": "x"}\n```'))
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Done."))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == "I will read.\n\nDone."
+
+    asyncio.run(_run())
+
+
+def test_raw_json_tool_call_object_is_suppressed_from_stream() -> None:
+    """A raw inline JSON object that looks like a tool call should be hidden."""
+
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, "Prefix "))
+            await console.append_event(
+                UIEvent(UIEventType.ASSISTANT, '{"name": "shell_exec", "arguments": {"command": "ls"}}')
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, " Suffix."))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == "Prefix  Suffix."
+
+    asyncio.run(_run())
+
+
+def test_ordinary_json_prose_is_preserved_in_stream() -> None:
+    """JSON examples that do not look like tool calls should remain visible."""
+
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(UIEventType.ASSISTANT, 'Example config: {"host": "localhost", "port": 8080}.')
+            )
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == 'Example config: {"host": "localhost", "port": 8080}.'
+
+    asyncio.run(_run())
+
 def test_degenerate_loop_hides_empty_turns() -> None:
     """A replace event with the degenerate loop placeholder should hide empty turns and clear the active turn reference."""
 

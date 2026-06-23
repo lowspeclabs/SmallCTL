@@ -371,6 +371,10 @@ ENV_BLOCKER_PATTERNS = (
     "timeout",
     "errno 111",
     "errno 113",
+    "http 401",
+    "unauthorized",
+    "invalid token",
+    "token provided",
 )
 
 

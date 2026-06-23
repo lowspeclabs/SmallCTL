@@ -72,12 +72,51 @@ def _looks_like_complete_pipe_table(text: str) -> bool:
     return False
 
 
+def _inline_code_backticks_balanced(text: str) -> bool:
+    """Return True if every inline code backtick span is properly closed.
+
+    This is more accurate than a global backtick count because it ignores
+    triple-backtick code fences and checks each inline span independently.
+    Markdown allows runs of one or more backticks to delimit inline code,
+    so `` ` `` and ```` ``code`` ```` are both valid.
+    """
+    # Remove fenced code blocks so their backticks are not counted as inline
+    # spans.  A crude strip is enough because we only care about balance.
+    without_fences = re.sub(r"```[\s\S]*?```", "", text)
+    pos = 0
+    while pos < len(without_fences):
+        if without_fences[pos] != "`":
+            pos += 1
+            continue
+        # Count the length of the backtick run that opens the span.
+        start_run = pos
+        while pos < len(without_fences) and without_fences[pos] == "`":
+            pos += 1
+        run_len = pos - start_run
+        # Look for a matching run of the same length.
+        match_pos = pos
+        while match_pos < len(without_fences):
+            if without_fences[match_pos] != "`":
+                match_pos += 1
+                continue
+            end_run = match_pos
+            while end_run < len(without_fences) and without_fences[end_run] == "`":
+                end_run += 1
+            if end_run - match_pos == run_len:
+                pos = end_run
+                break
+            match_pos = end_run
+        else:
+            return False
+    return True
+
+
 def _markdown_render_ready(text: str) -> bool:
     if not text.strip():
         return False
     if text.count("```") % 2 == 1:
         return False
-    if text.count("`") % 2 == 1:
+    if not _inline_code_backticks_balanced(text):
         return False
     if _looks_like_complete_pipe_table(text):
         return True
@@ -230,13 +269,19 @@ class TextBlockWidget(Static):
         self._refresh_content()
 
     def _refresh_content(self) -> None:
-        if self.render_markdown and self._markdown_finalized and _markdown_render_ready(self.text):
-            if not isinstance(self._rendered_content, RichMarkdown):
+        if (
+            self.render_markdown
+            and self._markdown_finalized
+            and _markdown_render_ready(self.text)
+        ):
+            try:
                 self._rendered_content = RichMarkdown(self.text)
-            else:
-                self._rendered_content = RichMarkdown(self.text)
-            self.update(self._rendered_content)
-            return
+                self.update(self._rendered_content)
+                return
+            except Exception:
+                # Malformed markdown can occasionally crash Rich's parser.
+                # Fall back to plain text so the UI never goes blank.
+                pass
         # Use a plain Text object to avoid Rich markup parsing on arbitrary model output.
         # Model responses may contain brackets like [task_complete(...)] that Rich
         # would try to parse as markup tags, causing 'Expected markup value' crashes.

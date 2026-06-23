@@ -335,6 +335,89 @@ def test_scheduled_stream_flush_defers_markdown_render_until_boundary() -> None:
     asyncio.run(_run())
 
 
+def test_inline_code_markdown_renders_as_markdown() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            markdown = (
+                "I have access to tools.\n\n"
+                "### **File & Directory Operations**\n"
+                "- **`dir_list`**: List entries in a local directory.\n"
+                "- **`file_read` / `file_write`**: Read or write files.\n"
+                "- **`ssh_file_read` / `ssh_file_write` / `ssh_file_patch`**: Remote files."
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, markdown))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == markdown
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
+def test_unbalanced_inline_backtick_falls_back_to_plain_text() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            malformed = "**Header**\n\n- `dir_list`: works\n- `file_read: broken"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, malformed))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, Text)
+
+    asyncio.run(_run())
+
+
+def test_rich_markdown_crash_falls_back_to_plain_text(monkeypatch) -> None:
+    async def _run() -> None:
+        import smallctl.ui.bubbles as bubbles
+
+        call_count = 0
+
+        def _exploding_markdown(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("parser boom")
+
+        monkeypatch.setattr(bubbles, "RichMarkdown", _exploding_markdown)
+
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            markdown = "**Header**\n\n- first\n- second"
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, markdown))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            assert call_count >= 1
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, Text)
+
+    asyncio.run(_run())
+
+
 def test_assistant_replace_after_alert_cleans_previous_turn() -> None:
     async def _run() -> None:
         app = _ConsoleApp(verbose=True)
@@ -877,7 +960,7 @@ def test_assistant_turn_has_dark_grey_left_border() -> None:
 
     async def _run() -> None:
         app = _StyledApp()
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(80, 24)):
             user_bubble = app.query_one(".bubble-user", BubbleWidget)
             system_bubble = app.query_one(".bubble-system", BubbleWidget)
             assistant_turn = app.query_one(AssistantTurnWidget)

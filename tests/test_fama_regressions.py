@@ -583,6 +583,46 @@ def test_route_signal_preexisting_state_as_success() -> None:
     assert "acceptance_checklist_capsule" in names
 
 
+def test_route_signal_ssh_auth_failure_not_install_failure() -> None:
+    """SSH authentication failures must route to remote_auth_failure_capsule,
+    not be misclassified as repeated remote installer failures.
+    """
+    state = LoopState(step_count=2)
+    state.task_mode = "remote_execute"
+    signal = FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="verifier",
+        evidence="task_complete rejected with verifier verdict fail: systemctl status docker [permission denied (publickey,password).]",
+        step=1,
+        tool_name="ssh_exec",
+        failure_class="verifier_failed",
+    )
+    mitigations = route_signal(signal, state=state, config=SimpleNamespace(loop_guard_stagnation_threshold=3))
+    names = {m.name for m in mitigations}
+    assert "remote_auth_failure_capsule" in names
+    assert "repeated_remote_installer_failure_capsule" not in names
+    assert "interactive_installer_stall_capsule" not in names
+
+
+def test_route_signal_ssh_exec_apt_install_is_install_failure() -> None:
+    """ssh_exec failures that mention apt/install markers still route to install capsules."""
+    state = LoopState(step_count=2)
+    state.task_mode = "remote_execute"
+    signal = FamaSignal(
+        kind=FamaFailureKind.EARLY_STOP,
+        severity=2,
+        source="verifier",
+        evidence="task_complete rejected with verifier verdict fail: apt install -y foo",
+        step=1,
+        tool_name="ssh_exec",
+        failure_class="verifier_failed",
+    )
+    mitigations = route_signal(signal, state=state, config=SimpleNamespace(loop_guard_stagnation_threshold=3))
+    names = {m.name for m in mitigations}
+    assert "repeated_remote_installer_failure_capsule" in names
+
+
 def test_capsule_text_has_entries_for_new_kinds() -> None:
     assert "repeated_remote_installer_failure_capsule" in CAPSULE_TEXT
     assert "preexisting_state_as_success_capsule" in CAPSULE_TEXT

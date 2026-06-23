@@ -122,6 +122,34 @@ def test_detect_verifier_failure_ignores_expected_diagnostic_failure() -> None:
     assert signal is None
 
 
+def test_detect_early_stop_includes_ssh_auth_error_in_evidence() -> None:
+    state = LoopState(step_count=1)
+    state.task_mode = "remote_execute"
+    result = ToolEnvelope(
+        success=False,
+        error="Permission denied (publickey,password).",
+        metadata={
+            "last_verifier_verdict": {
+                "verdict": "fail",
+                "command": "systemctl status docker",
+                "key_stdout": "",
+                "key_stderr": "Permission denied (publickey,password).",
+                "failure_mode": "environment",
+                "latest_blocker": {
+                    "salient_error": "Permission denied (publickey,password).",
+                },
+            }
+        },
+    )
+
+    signal = detect_early_stop_from_result(state, tool_name="task_complete", result=result)
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.EARLY_STOP
+    assert "verifier verdict fail" in signal.evidence
+    assert "permission denied" in signal.evidence.lower()
+
+
 def test_detect_ssh_host_key_failure_from_single_tool_result() -> None:
     state = LoopState(step_count=4)
     result = ToolEnvelope(

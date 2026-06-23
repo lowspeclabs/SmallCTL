@@ -76,14 +76,18 @@ def _is_remote_install_failure(signal: FamaSignal, state: Any) -> bool:
     if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
         return False
     tool_name = str(signal.tool_name or "").strip()
+    evidence_lower = str(signal.evidence or "").lower()
+    has_install_marker = any(marker in evidence_lower for marker in _REMOTE_INSTALL_MARKERS)
+    # Remote tools (e.g. ssh_exec) are used for many non-install tasks. Only
+    # treat the failure as an install failure when the evidence actually
+    # mentions install-related markers (apt, curl, wget, download, installer,
+    # or the tool name itself as recorded by loop detectors).
     if tool_name in _REMOTE_INSTALL_TOOLS:
-        return True
+        return has_install_marker
     failure_class = str(signal.failure_class or "").strip()
     if failure_class in _REMOTE_INSTALL_FAILURE_CLASSES:
-        evidence_lower = str(signal.evidence or "").lower()
-        return any(marker in evidence_lower for marker in _REMOTE_INSTALL_MARKERS)
-    evidence_lower = str(signal.evidence or "").lower()
-    if tool_name and any(marker in evidence_lower for marker in _REMOTE_INSTALL_MARKERS):
+        return has_install_marker
+    if tool_name and has_install_marker:
         return True
     return False
 

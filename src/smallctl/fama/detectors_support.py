@@ -232,9 +232,23 @@ def _verifier_evidence(verifier: dict[str, Any]) -> str:
         for key in ("key_stdout", "key_stderr", "failure_mode")
     )
     qualifier = "; zero tests discovered" if _looks_like_zero_tests(output) else ""
+    error_snippet = ""
+    if verdict != "pass":
+        blocker = verifier.get("latest_blocker") or {}
+        salient = str(blocker.get("salient_error") or "").strip()
+        if salient:
+            error_snippet = salient
+        else:
+            for key in ("key_stderr", "key_stdout", "failure_mode"):
+                text = str(verifier.get(key) or "").strip()
+                if text:
+                    error_snippet = text
+                    break
+        if error_snippet:
+            error_snippet = f" [{error_snippet[:200]}]"
     if target:
-        return f"task_complete rejected with verifier verdict {verdict}: {target}{qualifier}"
-    return f"task_complete rejected with verifier verdict {verdict}{qualifier}"
+        return f"task_complete rejected with verifier verdict {verdict}: {target}{qualifier}{error_snippet}"
+    return f"task_complete rejected with verifier verdict {verdict}{qualifier}{error_snippet}"
 
 
 def _checklist_has_pending(checklist: Any) -> bool:

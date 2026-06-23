@@ -158,6 +158,99 @@ def test_verifier_fails_ssh_exec_with_interactive_prompt() -> None:
     assert "interactive" in str(verdict.get("failure_mode", "")).lower()
 
 
+def test_verifier_fails_shell_exec_with_interactive_prompt() -> None:
+    """A local shell_exec verifier that returns a prompt must fail verification."""
+    state = LoopState()
+    state.run_brief.original_task = "Install Node.js locally."
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "exit_code": 0,
+            "stdout": "Do you want to continue? (Y/n) ",
+            "stderr": "",
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "bash install-node.sh"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert "interactive" in str(verdict.get("failure_mode", "")).lower()
+
+
+def test_verifier_fails_pipe_to_shell_404_body() -> None:
+    """A curl | sh verifier that receives a 404 HTML body must fail."""
+    state = LoopState()
+    state.run_brief.original_task = "Install the remote agent."
+    result = ToolEnvelope(
+        success=True,
+        output={
+            "exit_code": 0,
+            "stdout": "404 Not Found: the requested URL was not found on this server.\n",
+            "stderr": "",
+        },
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "curl -fsSL https://example.com/install.sh | bash"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert "404" in str(verdict.get("acceptance_delta", {}).get("notes", [""])[0]).lower()
+
+
+def test_install_task_rejects_tee_cat_with_interactive_prompt() -> None:
+    """A tee/cat verifier masking an interactive prompt is insufficient for install tasks."""
+    state = LoopState()
+    state.run_brief.original_task = "Install FOG on Debian"
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "continue? (y/N)", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "tee /tmp/fog-install.log | cat"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    note = str(verdict.get("acceptance_delta", {}).get("notes", [""])[0]).lower()
+    assert "interactive" in note or "post-condition" in note
+
+
+def test_install_task_rejects_weak_diagnostic_verifier() -> None:
+    """A generic diagnostic command is not a valid install post-condition verifier."""
+    state = LoopState()
+    state.run_brief.original_task = "Install FOG on Debian"
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "fog install log contents", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "cat /tmp/fog-install.log"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert "post-condition" in str(verdict.get("acceptance_delta", {}).get("notes", [""])[0]).lower()
+
+
 def test_verifier_passes_install_followed_by_verification_command() -> None:
     """A successful install followed by dpkg -l verification passes."""
     state = LoopState()

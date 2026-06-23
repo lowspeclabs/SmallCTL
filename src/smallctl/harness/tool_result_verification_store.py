@@ -144,11 +144,11 @@ def _store_verifier_verdict(
     else:
         verdict = "fail"
 
-    if verdict == "pass" and tool_name == "ssh_exec":
+    if verdict == "pass" and tool_name in {"shell_exec", "ssh_exec"}:
         combined = "\n".join(part for part in (raw_stdout, raw_stderr) if str(part or "").strip())
         if _INTERACTIVE_PROMPT_RE.search(combined) or re.search(r"\([yYnN]/[yYnN]\)|continue\?.*\([yYnN]/[yYnN]\)|password:\s*$", combined, re.IGNORECASE | re.DOTALL):
             verdict = "fail"
-            semantic_failure = "interactive prompt detected in ssh_exec output"
+            semantic_failure = f"interactive prompt detected in {tool_name} output"
 
     # Fix 2: detect false-negative path verifiers for SSH exec
     false_negative_path = False
@@ -208,7 +208,7 @@ def _store_verifier_verdict(
         stderr=stderr,
     ):
         failure_class = "long_running_remote_command"
-    if semantic_failure == "interactive prompt detected in ssh_exec output":
+    if semantic_failure and "interactive prompt detected in" in semantic_failure:
         failure_class = "interactive_prompt"
     docker_retry = _record_docker_retry_state(
         state,

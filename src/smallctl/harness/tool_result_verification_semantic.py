@@ -101,6 +101,8 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
         and not re.search(r"\bexists\b", normalized_output)
     ):
         return "file existence verifier reported MISSING"
+    if _command_is_pipe_to_shell(normalized_command) and _output_looks_like_404_body(combined):
+        return "pipe-to-shell command fetched a 404 / HTML error body instead of a script"
     if _NGINX_VERIFIER_COMMAND_RE.search(command) or "nginx:" in combined.lower():
         match = _NGINX_VERIFIER_FAILURE_RE.search(combined)
         if match:
@@ -125,6 +127,28 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
         if match:
             return _snip_text(match.group(0), limit=240)
     return ""
+
+
+_PIPE_TO_SHELL_RE = re.compile(
+    r"(?:curl|wget)\b.*\|\s*(?:bash|sh|dash|zsh|ksh)\b",
+    re.IGNORECASE,
+)
+
+_404_BODY_START_RE = re.compile(
+    r"^(?:404\s*:|404\s+not\s+found|<html)",
+    re.IGNORECASE,
+)
+
+
+def _command_is_pipe_to_shell(command: str) -> bool:
+    """Return True when a command downloads and immediately executes a script."""
+    return bool(_PIPE_TO_SHELL_RE.search(str(command or "")))
+
+
+def _output_looks_like_404_body(output: str) -> bool:
+    """Return True when the leading output looks like a 404 or HTML error page."""
+    first_line = str(output or "").lstrip().splitlines()[0] if str(output or "").strip() else ""
+    return bool(_404_BODY_START_RE.search(first_line))
 
 
 def _task_or_history_requires_runtime_verifier(state: Any) -> bool:
@@ -224,20 +248,23 @@ def _install_task_requires_strong_verifier(state: Any, *, command: str) -> tuple
     normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
     if re.fullmatch(r"(?:sudo\s+)?cat\s+/etc/(?:os-release|redhat-release|centos-release)", normalized):
         return False, ""
+
+    # tee/cat combined with an interactive prompt is never a valid install verifier.
+    if re.search(r"\b(?:tee|cat)\b", normalized) and re.search(
+        r"\b(?:Choice:\s*\[\d+\]|Are you sure you wish to continue|Should .*?\?\s*\([yYnN]/|Hit \[?Enter\]?|password:)\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return True, (
+            f"This is an install task, but the verifier `{command}` only masks an interactive prompt "
+            f"with tee/cat. For install tasks, verify with service status, package status, listening port, or version command."
+        )
+
     kind = verifier_kind_for_command(command)
     if verifier_strength(kind) >= verifier_strength("install_service_status"):
-        # Strong install verifier (service status, package, port, version)
         return False, ""
-    # Weak verifiers for install tasks: only check file existence
-    weak_patterns = [
-        (r"\bls\s+-la?\s+\S+", "file existence check"),
-        (r"\btest\s+-[ef]\s+\S+", "file existence check"),
-        (r"\bcat\s+\S+", "file content check"),
-    ]
-    for pattern, check_type in weak_patterns:
-        if re.search(pattern, normalized):
-            return True, (
-                f"This is an install task, but the verifier only does a {check_type} (`{command}`). "
-                f"For install tasks, verify with service status, version command, or listening port."
-            )
-    return False, ""
+
+    return True, (
+        f"This is an install task, but the verifier `{command}` is not a post-condition check. "
+        f"For install tasks, verify with service status, package status, listening port, or version command."
+    )

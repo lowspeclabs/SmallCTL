@@ -12,7 +12,9 @@ from .common import fail, needs_human, ok
 from .shell import shell_exec
 
 
-def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> PlanStep | None:
+def _coerce_step_payload(
+    value: Any, *, fallback_step_id: str | None = None
+) -> PlanStep | None:
     if isinstance(value, PlanStep):
         return value
     if isinstance(value, str):
@@ -46,7 +48,9 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
         description=str(value.get("description", "") or ""),
         status=raw_status,
         notes=[str(item) for item in (value.get("notes") or []) if str(item).strip()],
-        depends_on=[str(item) for item in (value.get("depends_on") or []) if str(item).strip()],
+        depends_on=[
+            str(item) for item in (value.get("depends_on") or []) if str(item).strip()
+        ],
         substeps=[
             substep
             for index, item in enumerate((value.get("substeps") or []), start=1)
@@ -57,12 +61,20 @@ def _coerce_step_payload(value: Any, *, fallback_step_id: str | None = None) -> 
                 )
             )
         ],
-        evidence_refs=[str(item) for item in (value.get("evidence_refs") or []) if str(item).strip()],
-        claim_refs=[str(item) for item in (value.get("claim_refs") or []) if str(item).strip()],
+        evidence_refs=[
+            str(item)
+            for item in (value.get("evidence_refs") or [])
+            if str(item).strip()
+        ],
+        claim_refs=[
+            str(item) for item in (value.get("claim_refs") or []) if str(item).strip()
+        ],
         task=task,
         difficulty=str(value.get("difficulty", "") or "").strip().lower(),
         tool_allowlist=_coerce_string_list(value.get("tool_allowlist")),
-        prompt_token_budget=max(0, _coerce_int(value.get("prompt_token_budget"), default=0)),
+        prompt_token_budget=max(
+            0, _coerce_int(value.get("prompt_token_budget"), default=0)
+        ),
         acceptance=_coerce_string_list(value.get("acceptance")),
         verifiers=[
             spec
@@ -102,7 +114,9 @@ def _sync_plan_state(state: LoopState, plan: ExecutionPlan) -> None:
     state.touch()
 
 
-def _refresh_plan_playbook_artifact(*, state: LoopState, harness: Any, plan: ExecutionPlan) -> dict[str, Any]:
+def _refresh_plan_playbook_artifact(
+    *, state: LoopState, harness: Any, plan: ExecutionPlan
+) -> dict[str, Any]:
     if harness is None or not hasattr(harness, "artifact_store"):
         return {"artifact_id": "", "artifact_summary": ""}
 
@@ -169,6 +183,7 @@ def _suggest_plan_export_path(path: str | None) -> str | None:
 def _normalize_plan_export_request(
     output_path: str | None,
     output_format: str | None,
+    cwd: str | None = None,
 ) -> tuple[str | None, str | None, dict[str, Any]]:
     normalized_output_path = str(output_path or "").strip() or None
     raw_output_format = str(output_format or "").strip() or None
@@ -178,7 +193,11 @@ def _normalize_plan_export_request(
         if not raw_output_format:
             return None, None, warning_metadata
         try:
-            return None, _normalize_requested_format(raw_output_format), warning_metadata
+            return (
+                None,
+                _normalize_requested_format(raw_output_format),
+                warning_metadata,
+            )
         except ValueError as exc:
             warning_metadata["export_warning"] = str(exc)
             warning_metadata["rejected_output_format"] = raw_output_format
@@ -188,6 +207,7 @@ def _normalize_plan_export_request(
         _, normalized_output_format = resolve_plan_export_target(
             normalized_output_path,
             format=raw_output_format,
+            cwd=cwd,
         )
         return normalized_output_path, normalized_output_format, warning_metadata
     except ValueError as exc:
@@ -197,6 +217,7 @@ def _normalize_plan_export_request(
         _, inferred_output_format = resolve_plan_export_target(
             normalized_output_path,
             format=None,
+            cwd=cwd,
         )
     except ValueError:
         warning_metadata["rejected_output_path"] = normalized_output_path
@@ -205,7 +226,9 @@ def _normalize_plan_export_request(
             warning_metadata["suggested_output_path"] = suggestion
         if raw_output_format:
             try:
-                normalized_output_format = _normalize_requested_format(raw_output_format)
+                normalized_output_format = _normalize_requested_format(
+                    raw_output_format
+                )
             except ValueError:
                 warning_metadata["rejected_output_format"] = raw_output_format
                 normalized_output_format = None
@@ -218,12 +241,17 @@ def _normalize_plan_export_request(
     return normalized_output_path, inferred_output_format, warning_metadata
 
 
-def _try_write_plan_export(plan: ExecutionPlan) -> str | None:
+def _try_write_plan_export(plan: ExecutionPlan, cwd: str | None = None) -> str | None:
     if not plan.requested_output_path:
         return None
     try:
-        write_plan_file(plan, plan.requested_output_path, format=plan.requested_output_format)
-    except ValueError as exc:
+        write_plan_file(
+            plan,
+            plan.requested_output_path,
+            format=plan.requested_output_format,
+            cwd=cwd,
+        )
+    except (ValueError, OSError) as exc:
         return str(exc)
     return None
 
@@ -246,11 +274,18 @@ async def plan_set(
     state: LoopState,
     harness: Any,
 ) -> dict:
-    requested_output_path = plan_output_path if plan_output_path is not None else output_path
-    requested_output_format = plan_output_format if plan_output_format is not None else output_format
-    normalized_output_path, normalized_output_format, warning_metadata = _normalize_plan_export_request(
-        requested_output_path,
-        requested_output_format,
+    requested_output_path = (
+        plan_output_path if plan_output_path is not None else output_path
+    )
+    requested_output_format = (
+        plan_output_format if plan_output_format is not None else output_format
+    )
+    normalized_output_path, normalized_output_format, warning_metadata = (
+        _normalize_plan_export_request(
+            requested_output_path,
+            requested_output_format,
+            cwd=getattr(state, "cwd", None),
+        )
     )
 
     plan = ExecutionPlan(
@@ -266,7 +301,8 @@ async def plan_set(
         steps=[
             step
             for index, item in enumerate((steps or []), start=1)
-            if (step := _coerce_step_payload(item, fallback_step_id=f"P{index}")) is not None
+            if (step := _coerce_step_payload(item, fallback_step_id=f"P{index}"))
+            is not None
         ],
         status="draft",
         requested_output_path=normalized_output_path,
@@ -318,7 +354,9 @@ async def plan_set(
             ledger_service.import_plan_if_needed(replace_synthetic_root=True)
         except Exception:
             pass
-    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
+    artifact_info = _refresh_plan_playbook_artifact(
+        state=state, harness=harness, plan=plan
+    )
     state.touch()
     payload = {
         "status": "plan_set",
@@ -340,22 +378,34 @@ async def plan_step_update(
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
-        return {"success": False, "output": None, "error": "No active or draft plan available.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "No active or draft plan available.",
+            "metadata": {},
+        }
     step = plan.find_step(str(step_id).strip())
     if step is None:
-        return {"success": False, "output": None, "error": f"Unknown plan step: {step_id}", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": f"Unknown plan step: {step_id}",
+            "metadata": {},
+        }
     step.status = str(status or "pending").strip().lower()
     if note.strip():
         step.notes.append(note.strip())
     plan.touch()
     _sync_plan_state(state, plan)
-    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
-    export_warning = _try_write_plan_export(plan)
+    artifact_info = _refresh_plan_playbook_artifact(
+        state=state, harness=harness, plan=plan
+    )
+    export_warning = _try_write_plan_export(plan, cwd=getattr(state, "cwd", None))
     return ok(
         {
             "status": "step_updated",
             "step_id": step.step_id,
-            "step_status": step.status,
+            "step_status": step.step_status,
             "note": note,
             **artifact_info,
             **({"export_warning": export_warning} if export_warning else {}),
@@ -372,13 +422,21 @@ async def plan_request_execution(
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
-        return {"success": False, "output": None, "error": "No active or draft plan available.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "No active or draft plan available.",
+            "metadata": {},
+        }
     plan.status = "awaiting_approval"
     plan.touch()
-    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
-    export_warning = _try_write_plan_export(plan)
+    artifact_info = _refresh_plan_playbook_artifact(
+        state=state, harness=harness, plan=plan
+    )
+    export_warning = _try_write_plan_export(plan, cwd=getattr(state, "cwd", None))
     interrupt = PlanInterrupt(
-        question=str(question or "Plan ready. Execute it now?").strip() or "Plan ready. Execute it now?",
+        question=str(question or "Plan ready. Execute it now?").strip()
+        or "Plan ready. Execute it now?",
         plan_id=plan.plan_id,
     )
     state.planner_interrupt = interrupt
@@ -408,7 +466,19 @@ def _is_safe_auto_approval_command(command: str) -> bool:
     if not normalized:
         return False
     # Block dangerous patterns
-    dangerous = ("rm ", "mv ", "dd ", "sudo ", "ssh ", "scp ", "wget ", "curl ", ">", "|", "&")
+    dangerous = (
+        "rm ",
+        "mv ",
+        "dd ",
+        "sudo ",
+        "ssh ",
+        "scp ",
+        "wget ",
+        "curl ",
+        ">",
+        "|",
+        "&",
+    )
     if any(d in normalized for d in dangerous):
         return False
     # Allow only specific safe Python debug/verifier patterns
@@ -436,7 +506,12 @@ async def request_validation_execution(
 ) -> dict:
     validation_command = str(command or "").strip()
     if not validation_command:
-        return {"success": False, "output": None, "error": "Validation command is required.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "Validation command is required.",
+            "metadata": {},
+        }
     validation_reason = str(reason or "").strip()
     prompt = str(question or "").strip()
     if not prompt:
@@ -444,7 +519,9 @@ async def request_validation_execution(
 
     # Fix 3: Auto-approve safe local commands instead of always blocking on human approval
     if _is_safe_auto_approval_command(validation_command):
-        result = await shell_exec(command=validation_command, state=state, harness=harness)
+        result = await shell_exec(
+            command=validation_command, state=state, harness=harness
+        )
         return ok(
             {
                 "status": "auto_approved",
@@ -487,13 +564,25 @@ async def plan_export(
 ) -> dict:
     plan = _resolve_plan(state)
     if plan is None:
-        return {"success": False, "output": None, "error": "No active or draft plan available.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "No active or draft plan available.",
+            "metadata": {},
+        }
     export_path = str(path or "").strip()
     if not export_path:
-        return {"success": False, "output": None, "error": "Plan export path is required.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "Plan export path is required.",
+            "metadata": {},
+        }
     requested_format = format if format is not None else plan.requested_output_format
     try:
-        _, normalized_format = resolve_plan_export_target(export_path, format=requested_format)
+        _, normalized_format = resolve_plan_export_target(
+            export_path, format=requested_format, cwd=getattr(state, "cwd", None)
+        )
     except ValueError as exc:
         return {"success": False, "output": None, "error": str(exc), "metadata": {}}
     plan.requested_output_path = export_path
@@ -501,8 +590,23 @@ async def plan_export(
     state.planner_requested_output_path = export_path
     state.planner_requested_output_format = normalized_format
     state.touch()
-    content = write_plan_file(plan, Path(export_path), format=normalized_format)
-    artifact_info = _refresh_plan_playbook_artifact(state=state, harness=harness, plan=plan)
+    try:
+        content = write_plan_file(
+            plan,
+            Path(export_path),
+            format=normalized_format,
+            cwd=getattr(state, "cwd", None),
+        )
+    except (ValueError, OSError) as exc:
+        return {
+            "success": False,
+            "output": None,
+            "error": f"Failed to export plan: {exc}",
+            "metadata": {"reason": "plan_export_write_failed"},
+        }
+    artifact_info = _refresh_plan_playbook_artifact(
+        state=state, harness=harness, plan=plan
+    )
     return ok(
         {
             "status": "exported",
@@ -526,7 +630,12 @@ async def plan_subtask(
 ) -> dict:
     del state
     if harness is None:
-        return {"success": False, "output": None, "error": "Harness unavailable.", "metadata": {}}
+        return {
+            "success": False,
+            "output": None,
+            "error": "Harness unavailable.",
+            "metadata": {},
+        }
     result = await harness.run_subtask(
         brief=brief,
         phase=phase,

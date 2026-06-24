@@ -56,3 +56,28 @@ def test_ssh_diagnostic_not_found_standard_diagnostic_errors() -> None:
         "exit_code": 2
     }
     assert ssh_diagnostic_not_found(cmd, output) is True
+
+
+def test_ssh_diagnostic_not_found_command_missing_exit_127() -> None:
+    # A purely diagnostic chain probing for an optional tool (e.g. getenforce)
+    # should be informational when that tool is not installed.
+    cmd = "ls -ld /opt/app/data; echo '---'; getenforce"
+    output: dict[str, Any] = {
+        "stdout": "drwxr-xr-x 2 root root 2 Jun 23 21:14 /opt/app/data\n---\n",
+        "stderr": "bash: line 1: getenforce: command not found\n",
+        "exit_code": 127,
+    }
+    assert ssh_diagnostic_not_found(cmd, output) is True
+
+
+def test_ssh_mutating_command_missing_exit_127_is_failure() -> None:
+    # A mutating command that cannot run because the binary is missing is a
+    # real failure, not an informational probe result.
+    cmd = "chmown root:root /opt/app/data"
+    output: dict[str, Any] = {
+        "stdout": "",
+        "stderr": "bash: line 1: chmown: command not found\n",
+        "exit_code": 127,
+    }
+    assert ssh_diagnostic_not_found(cmd, output) is False
+

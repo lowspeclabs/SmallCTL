@@ -15,6 +15,10 @@ _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS = (
     "no such file",
     "command not found",
 )
+_KNOWN_HOSTS_ADDED_RE = re.compile(
+    r"Warning: Permanently added '[^']+' \([^)]+\) to the list of known hosts\.\r?\n?",
+    re.IGNORECASE,
+)
 _SSH_TRANSPORT_FAILURE_MARKERS = (
     "permission denied",
     "connection timed out",
@@ -75,6 +79,18 @@ def ssh_timeout_suggests_verify(command: str) -> str:
             "(e.g., `dnf list installed <pkg>`, `systemctl status <svc>`)."
         )
     return ""
+
+
+def filter_ssh_known_hosts_warning(stderr: str) -> tuple[str, bool]:
+    """Strip the noisy 'Permanently added ... to the list of known hosts' line from SSH stderr.
+
+    Returns the cleaned stderr and a flag indicating whether the warning was removed.
+    Callers may use the flag to record that a new host key was accepted.
+    """
+    if not stderr:
+        return stderr, False
+    filtered = _KNOWN_HOSTS_ADDED_RE.sub("", stderr)
+    return filtered, len(filtered) < len(stderr)
 
 
 _INTERACTIVE_PROMPT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -270,10 +286,11 @@ def is_purely_diagnostic(command: str) -> bool:
             
     # List of diagnostic command keywords/roots
     diagnostic_keywords = {
-        "ls", "cat", "grep", "egrep", "fgrep", "stat", "test", "file", "find", 
-        "du", "df", "head", "tail", "wc", "which", "type", "hostname", "whoami", 
-        "id", "uname", "ps", "md5sum", "sha256sum", "apt", "dnf", "yum", "apk", 
-        "pacman", "zypper", "git", "systemctl", "service"
+        "ls", "cat", "grep", "egrep", "fgrep", "stat", "test", "file", "find",
+        "du", "df", "head", "tail", "wc", "which", "type", "hostname", "whoami",
+        "id", "uname", "ps", "md5sum", "sha256sum", "apt", "dnf", "yum", "apk",
+        "pacman", "zypper", "git", "systemctl", "service", "echo", "getenforce",
+        "sestatus", "aa-status",
     }
     if words.intersection(diagnostic_keywords):
         return True
@@ -288,28 +305,36 @@ def is_purely_diagnostic(command: str) -> bool:
 
 
 def ssh_diagnostic_not_found(command: str, output: dict[str, Any]) -> bool:
-    """Return True when an exit-1/2 SSH result is a diagnostic 'not found' probe."""
+    """Return True when an SSH result is a diagnostic 'not found' probe.
+
+    Covers the common non-zero statuses produced by informational probes:
+    exit 1/2 (grep no match, missing file) and exit 127 (command not found
+    because the tool being probed is not installed).
+    """
     if not is_purely_diagnostic(command):
         return False
-        
+
     stderr = str(output.get("stderr") or "").lower()
     stdout = str(output.get("stdout") or "").lower()
     combined = stdout + " " + stderr
-    
+
     if any(marker in combined for marker in _SSH_DIAGNOSTIC_NOT_FOUND_MARKERS):
         return True
-        
+
     try:
         exit_code = int(output.get("exit_code") or 0)
     except (TypeError, ValueError):
         exit_code = 0
-        
+
     if exit_code in (1, 2):
         cmd_lower = command.lower()
         if any(g in cmd_lower for g in ("grep", "egrep", "fgrep")):
             if not stdout.strip() and not stderr.strip():
                 return True
-                
+
+    if exit_code == 127:
+        return True
+
     return False
 
 

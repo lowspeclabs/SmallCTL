@@ -6,12 +6,22 @@ import time
 from typing import Any
 
 from ..guards import check_guards
-from ..interrupt_replies import interrupt_response_action, is_interrupt_affirmative_response, is_interrupt_response
+from ..interrupt_replies import (
+    interrupt_response_action,
+    is_interrupt_affirmative_response,
+    is_interrupt_response,
+)
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
-from ..phases import PHASES, filter_phase_blocked_tools, is_phase_contract_active, phase_contract, normalize_phase
+from ..phases import (
+    PHASES,
+    filter_phase_blocked_tools,
+    is_phase_contract_active,
+    phase_contract,
+    normalize_phase,
+)
 from ..plans import write_plan_file
 from ..state import ExecutionPlan, PlanStep, json_safe_value
 from ..normalization import coerce_int as _coerce_int_value
@@ -26,16 +36,25 @@ from ..graph.tool_write_session_policy import _ensure_chunk_write_session
 from . import node_support as _nodes
 from .deps import GraphRuntimeDeps
 from .routing import LoopRoute
-from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
+from .state import (
+    GraphRunState,
+    PendingToolCall,
+    ToolExecutionRecord,
+    build_operation_id,
+)
 from .autocontinue import drain_durable_autocontinue
 from .chat_progress import _chat_progress_guard_failure
 from .recovery_context import build_goal_recap
 from .progress_guard import _check_completion_confabulation, _check_progress_stagnation
-from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
+from ..harness.task_transactions import (
+    recovery_context_lines,
+    transaction_from_scratchpad,
+)
 from .write_session_outcomes import (
     maybe_finalize_stranded_write_session,
     maybe_replay_stranded_write_session_record,
 )
+from ..fama.runtime import observe_guard_trip
 from .lifecycle_guard_recovery import (
     _dispatch_artifact_read_recovery,
     _dispatch_stagnation_recovery,
@@ -43,7 +62,7 @@ from .lifecycle_guard_recovery import (
 )
 from .lifecycle_tool_validation import _validate_pending_tool_calls
 from .lifecycle_nodes_support import (
-    _apply_continue_task_state_reset,
+    _apply_guard_trip_resteer_or_escalate,
     _apply_small_model_remote_constraints,
     _handle_cancel_requested,
     _initialize_chat_mode_scratchpad,
@@ -117,8 +136,67 @@ def _guard_error_signature(error: Any) -> str:
     return text[:160]
 
 
+def _guard_trip_reason(guard_error: str, grouped_errors: list[dict[str, Any]]) -> str:
+    """Return a concise human-readable reason for the guard trip."""
+    error_text = str(guard_error or "").strip()
+    # Extract the guard name if present, e.g. "Guard tripped: max_consecutive_errors (...)"
+    guard_name = "guard tripped"
+    if "Guard tripped:" in error_text:
+        prefix = error_text.split("Guard tripped:", 1)[1].strip()
+        guard_name = prefix.split(" ", 1)[0].strip(" ()-:") or guard_name
+        if "(" in prefix and ")" in prefix:
+            guard_name = prefix.split("(", 1)[0].strip() or guard_name
 
-def _maybe_schedule_near_budget_verifier(harness: Any, graph_state: GraphRunState) -> bool:
+    # Use the most frequent grouped error signature as the reason body.
+    top_group = None
+    top_count = 0
+    for group in grouped_errors:
+        if isinstance(group, dict) and int(group.get("count", 0) or 0) > top_count:
+            top_count = int(group.get("count", 0) or 0)
+            top_group = group
+    if top_group:
+        signature = str(top_group.get("signature") or "").strip()
+        if signature:
+            return f"{guard_name}: {signature[:180]}"
+    return guard_name
+
+
+def _guard_trip_recovery_action(
+    guard_error: str, grouped_errors: list[dict[str, Any]]
+) -> str:
+    """Return a concrete recovery action suggestion for the TUI and context."""
+    error_lower = str(guard_error or "").lower()
+    repeated_tool: str | None = None
+    for group in grouped_errors:
+        if isinstance(group, dict) and int(group.get("count", 0) or 0) >= 2:
+            sig = str(group.get("signature") or "").strip()
+            if sig and ":" in sig:
+                candidate = sig.split(":", 1)[0].strip()
+                if candidate and candidate != "Guard tripped":
+                    repeated_tool = candidate
+                    break
+
+    if repeated_tool:
+        return (
+            f"Stop repeating `{repeated_tool}`. Use a different tool or argument, "
+            "or gather fresh evidence before trying again."
+        )
+    if "max_consecutive_errors" in error_lower:
+        return (
+            "Too many consecutive errors. Run one diagnostic/read to rebuild context "
+            "before making another mutation or finishing."
+        )
+    if "stagnation" in error_lower or "loop" in error_lower:
+        return (
+            "Progress has stalled. Pick one concrete new action that produces new "
+            "evidence instead of repeating the last step."
+        )
+    return "Choose a different concrete next action; do not retry the same failing step unchanged."
+
+
+def _maybe_schedule_near_budget_verifier(
+    harness: Any, graph_state: GraphRunState
+) -> bool:
     if graph_state.final_result is not None or graph_state.pending_tool_calls:
         return False
     progress = getattr(harness.state, "challenge_progress", None)
@@ -156,7 +234,11 @@ def _maybe_schedule_near_budget_verifier(harness: Any, graph_state: GraphRunStat
     from .tool_call_parser import allow_repeated_tool_call_once
 
     allow_repeated_tool_call_once(harness, "shell_exec", args)
-    changed_paths = [str(path) for path in getattr(progress, "last_code_change_paths", []) or [] if str(path).strip()]
+    changed_paths = [
+        str(path)
+        for path in getattr(progress, "last_code_change_paths", []) or []
+        if str(path).strip()
+    ]
     path_text = ", ".join(changed_paths[:3]) or "changed files"
     harness.state.append_message(
         ConversationMessage(
@@ -189,7 +271,7 @@ def _maybe_schedule_near_budget_verifier(harness: Any, graph_state: GraphRunStat
 
 def _log_guard_trip_diagnosis(
     harness: Any, graph_state: GraphRunState, guard_error: str
-) -> None:
+) -> dict[str, Any]:
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {})
     if not isinstance(scratchpad, dict):
         scratchpad = {}
@@ -210,17 +292,25 @@ def _log_guard_trip_diagnosis(
         )
         row["count"] = int(row.get("count", 0) or 0) + 1
         row["last_index"] = index
+    grouped_errors = list(grouped.values())
+
+    # Derive a concise guard reason and a suggested recovery action for UI/context.
+    guard_reason = _guard_trip_reason(guard_error, grouped_errors)
+    suggested_recovery_action = _guard_trip_recovery_action(guard_error, grouped_errors)
+
     active_sessions = scratchpad.get("_active_ssh_interactive_sessions")
     harness._runlog(
         "guard_trip_diagnosis",
         "guard tripped with diagnostic state snapshot",
         guard_error=guard_error,
+        guard_reason=guard_reason,
+        suggested_recovery_action=suggested_recovery_action,
         step_count=getattr(harness.state, "step_count", 0),
         current_phase=getattr(harness.state, "current_phase", ""),
         task_id=getattr(harness.state, "current_task_id", ""),
         run_mode=getattr(graph_state, "run_mode", ""),
         recent_error_count=len(recent_errors),
-        grouped_errors=list(grouped.values()),
+        grouped_errors=grouped_errors,
         last_errors=recent_errors[-8:],
         tool_history_tail=list((getattr(harness.state, "tool_history", []) or [])[-8:]),
         pending_tool_count=len(getattr(graph_state, "pending_tool_calls", []) or []),
@@ -230,6 +320,12 @@ def _log_guard_trip_diagnosis(
             active_sessions if isinstance(active_sessions, dict) else {}
         ),
     )
+    return {
+        "guard_error": guard_error,
+        "guard_reason": guard_reason,
+        "suggested_recovery_action": suggested_recovery_action,
+        "grouped_errors": grouped_errors,
+    }
 
 
 _VACUOUS_REQUIREMENT_REPLIES = {
@@ -272,7 +368,9 @@ def _is_vacuous_requirement_reply(human_input: str) -> bool:
     if lowered in _VACUOUS_REQUIREMENT_REPLIES:
         return True
     tokens = lowered.split()
-    if len(tokens) <= 3 and any(token in _VACUOUS_REQUIREMENT_REPLIES for token in tokens):
+    if len(tokens) <= 3 and any(
+        token in _VACUOUS_REQUIREMENT_REPLIES for token in tokens
+    ):
         return not any(char.isdigit() for char in lowered)
     return False
 
@@ -289,11 +387,17 @@ async def initialize_loop_run(
     _initialize_chat_mode_scratchpad(harness, graph_state.run_mode)
     resolved_task, is_continue_task = _resolve_followup_task(harness, task)
     if is_continue_task:
-        _apply_continue_task_state_reset(harness, task=task, resolved_task=resolved_task)
+        should_continue = _apply_guard_trip_resteer_or_escalate(
+            harness, graph_state, task=task, resolved_task=resolved_task
+        )
+        if not should_continue:
+            return
     else:
         maybe_reset = getattr(harness, "_maybe_reset_for_new_task", None)
         if callable(maybe_reset):
             maybe_reset(resolved_task, raw_task=task)
+        # Clear the guard-trip resteer counter for a genuinely new task.
+        harness.state.scratchpad.pop("_guard_trip_resteer_count", None)
     begin_task_scope = getattr(harness, "_begin_task_scope", None)
     task_scope: dict[str, object] = {}
     if callable(begin_task_scope):
@@ -350,7 +454,9 @@ async def resume_loop_run(
     created_at = pending.get("created_at")
     if isinstance(created_at, (int, float)):
         elapsed = time.time() - created_at
-        timeout = getattr(getattr(harness, "config", None), "needs_human_timeout_sec", 600)
+        timeout = getattr(
+            getattr(harness, "config", None), "needs_human_timeout_sec", 600
+        )
         reply_matches_interrupt = is_interrupt_response(pending, human_input)
         if elapsed > timeout and not reply_matches_interrupt:
             postmortem = f"Task timed out after {int(elapsed)}s in paused state awaiting user input."
@@ -428,7 +534,9 @@ async def resume_loop_run(
             ]
             if len(cleaned) != len(recent_errors):
                 harness.state.recent_errors = cleaned
-            tool_name = str(pending.get("tool_name") or "ssh_exec").strip() or "ssh_exec"
+            tool_name = (
+                str(pending.get("tool_name") or "ssh_exec").strip() or "ssh_exec"
+            )
             arguments = pending.get("arguments")
             if isinstance(arguments, dict) and arguments:
                 apt_validator_pending = PendingToolCall(
@@ -461,7 +569,10 @@ async def resume_loop_run(
                 host=str(pending.get("host") or ""),
                 user=str(pending.get("user") or ""),
             )
-    if continue_like and str(pending.get("kind") or "").strip() == "repeated_tool_loop_resume":
+    if (
+        continue_like
+        and str(pending.get("kind") or "").strip() == "repeated_tool_loop_resume"
+    ):
         interrupted_tool_name = str(pending.get("tool_name") or "").strip()
         interrupted_args = pending.get("arguments")
         if interrupted_tool_name and isinstance(interrupted_args, dict):
@@ -470,7 +581,10 @@ async def resume_loop_run(
                 args=dict(interrupted_args),
             )
             interrupted_guidance = str(pending.get("guidance") or "").strip()
-    if continue_like and str(pending.get("kind") or "").strip() == "chunked_write_loop_guard_outline":
+    if (
+        continue_like
+        and str(pending.get("kind") or "").strip() == "chunked_write_loop_guard_outline"
+    ):
         outline_resume_path = str(pending.get("path") or "").strip()
         clear_loop_guard_outline_requirement(
             harness.state,
@@ -486,6 +600,7 @@ async def resume_loop_run(
         next_section = ""
         if session is not None:
             from pathlib import Path
+
             staging_path = str(getattr(session, "write_staging_path", "") or "").strip()
             if staging_path:
                 try:
@@ -517,13 +632,17 @@ async def resume_loop_run(
             "continuing task with retained recovery and guard state snapshot",
             old_step_count=harness.state.step_count,
             recent_error_count=len(getattr(harness.state, "recent_errors", []) or []),
-            recent_errors=list((getattr(harness.state, "recent_errors", []) or [])[-8:]),
+            recent_errors=list(
+                (getattr(harness.state, "recent_errors", []) or [])[-8:]
+            ),
             tool_history_tail=list(
                 (getattr(harness.state, "tool_history", []) or [])[-8:]
             ),
             current_phase=getattr(harness.state, "current_phase", ""),
             task_mode=getattr(harness.state, "task_mode", ""),
-            active_tool_profiles=list(getattr(harness.state, "active_tool_profiles", []) or []),
+            active_tool_profiles=list(
+                getattr(harness.state, "active_tool_profiles", []) or []
+            ),
             last_failure_class=getattr(harness.state, "last_failure_class", ""),
             guard_context=bool(
                 scratchpad.get("_guard_trip_recovery_capsule")
@@ -533,7 +652,11 @@ async def resume_loop_run(
                 scratchpad.get("_active_ssh_interactive_sessions") or {}
             ),
         )
-        harness._runlog("step_count_reset", "resetting step count for continuation", old_count=harness.state.step_count)
+        harness._runlog(
+            "step_count_reset",
+            "resetting step count for continuation",
+            old_count=harness.state.step_count,
+        )
         harness.state.step_count = 0
         harness.state.inactive_steps = 0
         harness.state.stagnation_counters.pop("no_actionable_progress", None)
@@ -543,10 +666,9 @@ async def resume_loop_run(
         harness.state.scratchpad.pop("_progress_prior_plan_step", None)
         harness.state.scratchpad.pop("_ssh_auth_recovery_state", None)
 
-    ask_human_affirmative_resume = (
-        str(pending.get("kind") or "").strip() == "ask_human"
-        and is_interrupt_affirmative_response(pending, human_input)
-    )
+    ask_human_affirmative_resume = str(
+        pending.get("kind") or ""
+    ).strip() == "ask_human" and is_interrupt_affirmative_response(pending, human_input)
     ambiguous_ask_human_resume = bool(
         ask_human_affirmative_resume
         and _question_requires_concrete_details(pending.get("question"))
@@ -567,7 +689,11 @@ async def resume_loop_run(
         )
     if ask_human_affirmative_resume:
         run_brief = getattr(harness.state, "run_brief", None)
-        original_task = str(getattr(run_brief, "original_task", "") or getattr(harness.state, "current_task", "") or "").strip()
+        original_task = str(
+            getattr(run_brief, "original_task", "")
+            or getattr(harness.state, "current_task", "")
+            or ""
+        ).strip()
         harness.state.scratchpad["_ask_human_affirmative_resume"] = {
             "original_task": original_task,
             "question": str(pending.get("question") or "").strip(),
@@ -582,7 +708,9 @@ async def resume_loop_run(
             }
 
     _clear_tool_attempt_history(harness)
-    if hasattr(harness.state, "tool_history") and isinstance(harness.state.tool_history, list):
+    if hasattr(harness.state, "tool_history") and isinstance(
+        harness.state.tool_history, list
+    ):
         harness.state.tool_history.clear()
 
     harness.state.pending_interrupt = None
@@ -631,7 +759,11 @@ async def resume_loop_run(
         )
     elif ask_human_affirmative_resume:
         run_brief = getattr(harness.state, "run_brief", None)
-        original_task = str(getattr(run_brief, "original_task", "") or getattr(harness.state, "current_task", "") or "").strip()
+        original_task = str(
+            getattr(run_brief, "original_task", "")
+            or getattr(harness.state, "current_task", "")
+            or ""
+        ).strip()
         if original_task:
             harness.state.append_message(
                 ConversationMessage(
@@ -675,10 +807,14 @@ async def resume_loop_run(
         goal_recap = build_goal_recap(harness)
         state = getattr(harness, "state", None)
         scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
-        transaction = transaction_from_scratchpad(scratchpad if isinstance(scratchpad, dict) else {})
+        transaction = transaction_from_scratchpad(
+            scratchpad if isinstance(scratchpad, dict) else {}
+        )
         tx_lines = recovery_context_lines(transaction)
         tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
-        suppressed_tool = str(scratchpad.get("_repeated_tool_loop_suppressed_tool") or "").strip()
+        suppressed_tool = str(
+            scratchpad.get("_repeated_tool_loop_suppressed_tool") or ""
+        ).strip()
         suppression_note = ""
         if suppressed_tool and suppressed_tool == interrupted_pending.tool_name:
             suppression_note = (
@@ -769,9 +905,13 @@ async def initialize_planning_run(
     await initialize_loop_run(graph_state, deps, task=task)
     harness.state.planning_mode_enabled = True
     harness.state.planner_resume_target_mode = "loop"
-    harness.state.run_brief.current_phase_objective = f"planning: {task}" if task else "planning"
+    harness.state.run_brief.current_phase_objective = (
+        f"planning: {task}" if task else "planning"
+    )
     if not harness.state.working_memory.current_goal:
-        harness.state.working_memory.current_goal = task or harness.state.run_brief.original_task
+        harness.state.working_memory.current_goal = (
+            task or harness.state.run_brief.original_task
+        )
     await harness._emit(
         deps.event_handler,
         UIEvent(
@@ -835,9 +975,16 @@ async def resume_planning_run(
             harness.state.touch()
             if plan.requested_output_path:
                 try:
-                    write_plan_file(plan, plan.requested_output_path, format=plan.requested_output_format)
-                except ValueError as exc:
-                    harness.log.warning("skipping invalid plan export during approval: %s", exc)
+                    write_plan_file(
+                        plan,
+                        plan.requested_output_path,
+                        format=plan.requested_output_format,
+                        cwd=getattr(harness.state, "cwd", None),
+                    )
+                except (ValueError, OSError) as exc:
+                    harness.log.warning(
+                        "skipping invalid plan export during approval: %s", exc
+                    )
         await harness._emit(
             deps.event_handler,
             UIEvent(
@@ -850,7 +997,9 @@ async def resume_planning_run(
             "status": "plan_approved",
             "message": "Plan approved.",
             "approved": True,
-            "plan": json_safe_value(harness.state.active_plan or harness.state.draft_plan),
+            "plan": json_safe_value(
+                harness.state.active_plan or harness.state.draft_plan
+            ),
         }
         return
 
@@ -876,7 +1025,9 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
         graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
         return
     if graph_state.run_mode == "chat":
-        chat_rounds = _coerce_int_value(harness.state.scratchpad.get("_chat_rounds")) + 1
+        chat_rounds = (
+            _coerce_int_value(harness.state.scratchpad.get("_chat_rounds")) + 1
+        )
         harness.state.scratchpad["_chat_rounds"] = chat_rounds
         progress_guard = _chat_progress_guard_failure(harness)
         if progress_guard is not None:
@@ -889,7 +1040,9 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             return
 
     drain_durable_autocontinue(graph_state, harness)
-    deferred_schema_repairs = harness.state.scratchpad.pop("_deferred_schema_validation_repair_messages", None)
+    deferred_schema_repairs = harness.state.scratchpad.pop(
+        "_deferred_schema_validation_repair_messages", None
+    )
     if isinstance(deferred_schema_repairs, list):
         for item in deferred_schema_repairs:
             if not isinstance(item, dict):
@@ -897,7 +1050,9 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             content = str(item.get("content") or "").strip()
             if not content:
                 continue
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            metadata = (
+                item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            )
             role = str(item.get("role") or "system").strip().lower()
             if role not in {"system", "user", "assistant", "tool"}:
                 role = "system"
@@ -922,7 +1077,10 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     harness.state.step_count += 1
 
-    from .lifecycle_step_budget import STEP_BUDGET_NUDGE_THRESHOLD, _maybe_inject_step_budget_nudge
+    from .lifecycle_step_budget import (
+        STEP_BUDGET_NUDGE_THRESHOLD,
+        _maybe_inject_step_budget_nudge,
+    )
 
     _maybe_schedule_near_budget_verifier(harness, graph_state)
 
@@ -947,24 +1105,34 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             new_phase=harness.state.current_phase,
             trigger="contract_phase_sync",
             blocked_tools=list(contract.blocked_tools),
-            allowed_tools=[name for name in harness.registry.names() if name not in contract.blocked_tools][:50],
+            allowed_tools=[
+                name
+                for name in harness.registry.names()
+                if name not in contract.blocked_tools
+            ][:50],
             contract_inferred=True,
         )
 
     # Refresh stale phase prefix in current_phase_objective after contract_phase
     # stabilizes the real phase (e.g. resetting from explore back to execute).
     if prior_phase != harness.state.current_phase:
-        phase_objective = str(harness.state.run_brief.current_phase_objective or "").strip()
+        phase_objective = str(
+            harness.state.run_brief.current_phase_objective or ""
+        ).strip()
         if phase_objective:
             for phase in PHASES:
                 prefix = f"{phase}: "
-                if phase_objective.startswith(prefix) and phase != harness.state.current_phase:
-                    harness.state.run_brief.current_phase_objective = (
-                        f"{harness.state.current_phase}: {phase_objective[len(prefix):]}"
-                    )
+                if (
+                    phase_objective.startswith(prefix)
+                    and phase != harness.state.current_phase
+                ):
+                    harness.state.run_brief.current_phase_objective = f"{harness.state.current_phase}: {phase_objective[len(prefix) :]}"
                     break
 
-    if not graph_state.pending_tool_calls and getattr(harness.state, "write_session", None) is None:
+    if (
+        not graph_state.pending_tool_calls
+        and getattr(harness.state, "write_session", None) is None
+    ):
         target_path = primary_task_target_path(harness)
         if target_path:
             # Fix 2 (RCA 8b79ca76): Don't pre-arm a write session if the target
@@ -973,9 +1141,14 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             # the model in a task_complete deadlock.
             from pathlib import Path
             from ..tools.fs import _resolve
+
             try:
                 resolved = _resolve(target_path, getattr(harness.state, "cwd", None))
-                file_already_exists = resolved.exists() and resolved.is_file() and resolved.stat().st_size > 0
+                file_already_exists = (
+                    resolved.exists()
+                    and resolved.is_file()
+                    and resolved.stat().st_size > 0
+                )
             except Exception:
                 file_already_exists = False
             if not file_already_exists:
@@ -994,7 +1167,10 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
         if suppressed_plan_reads:
             graph_state.pending_tool_calls = remaining_calls
             for artifact_id in suppressed_plan_reads:
-                if harness.state.scratchpad.get("_plan_artifact_read_suppressed") == artifact_id:
+                if (
+                    harness.state.scratchpad.get("_plan_artifact_read_suppressed")
+                    == artifact_id
+                ):
                     continue
                 harness.state.scratchpad["_plan_artifact_read_suppressed"] = artifact_id
                 harness.state.append_message(
@@ -1051,7 +1227,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
 
     if guard_error:
         harness.state.recent_errors.append(guard_error)
-        _log_guard_trip_diagnosis(harness, graph_state, guard_error)
+        diagnosis = _log_guard_trip_diagnosis(harness, graph_state, guard_error)
         log_kv(
             harness.log,
             logging.WARNING,
@@ -1059,11 +1235,41 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             step=harness.state.step_count,
             guard_error=guard_error,
         )
+        display_text = (
+            f"Guard tripped: {diagnosis['guard_reason']}. "
+            f"Recovery: {diagnosis['suggested_recovery_action']}"
+        )
         await harness._emit(
             deps.event_handler,
-            UIEvent(event_type=UIEventType.ERROR, content=guard_error),
+            UIEvent(
+                event_type=UIEventType.ERROR,
+                content=guard_error,
+                data={
+                    "display_text": display_text,
+                    "guard_reason": diagnosis["guard_reason"],
+                    "suggested_recovery_action": diagnosis["suggested_recovery_action"],
+                },
+            ),
         )
+        try:
+            await observe_guard_trip(
+                harness,
+                guard_error=guard_error,
+                tool_history_tail=list(
+                    (getattr(harness.state, "tool_history", []) or [])[-8:]
+                ),
+                grouped_errors=diagnosis.get("grouped_errors"),
+            )
+        except Exception as exc:
+            log_kv(
+                harness.log,
+                logging.WARNING,
+                "guard_trip_fama_observation_failed",
+                error=str(exc),
+            )
         graph_state.final_result = harness._failure(guard_error, error_type="guard")
         graph_state.error = graph_state.final_result["error"]
 
-    graph_state.latency_metrics["overhead_preparation_duration_sec"] = round(time.perf_counter() - start_time, 3)
+    graph_state.latency_metrics["overhead_preparation_duration_sec"] = round(
+        time.perf_counter() - start_time, 3
+    )

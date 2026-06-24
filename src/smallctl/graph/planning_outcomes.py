@@ -12,8 +12,12 @@ from .routing import LoopRoute
 from .state import GraphRunState, ToolExecutionRecord
 from . import write_session_outcomes as _write_session_outcomes
 
-_is_plan_export_validation_error = _write_session_outcomes._is_plan_export_validation_error
-_build_plan_export_recovery_message = _write_session_outcomes._build_plan_export_recovery_message
+_is_plan_export_validation_error = (
+    _write_session_outcomes._is_plan_export_validation_error
+)
+_build_plan_export_recovery_message = (
+    _write_session_outcomes._build_plan_export_recovery_message
+)
 _auto_update_active_plan_step = _write_session_outcomes._auto_update_active_plan_step
 
 
@@ -50,14 +54,24 @@ async def apply_planning_tool_outcomes(
         for record in graph_state.last_tool_results
     )
     for record in graph_state.last_tool_results:
-        _write_session_outcomes._maybe_schedule_write_recovery_readback(graph_state, harness, record)
+        _write_session_outcomes._maybe_schedule_write_recovery_readback(
+            graph_state, harness, record
+        )
 
-        if not record.result.success and _is_plan_export_validation_error(record.result.error):
-            repair_attempts = int(harness.state.scratchpad.get("_plan_export_recovery_nudges", 0))
+        if not record.result.success and _is_plan_export_validation_error(
+            record.result.error
+        ):
+            repair_attempts = int(
+                harness.state.scratchpad.get("_plan_export_recovery_nudges", 0)
+            )
             if repair_attempts < 1:
                 repair_message = _build_plan_export_recovery_message(record)
-                harness.state.scratchpad["_plan_export_recovery_nudges"] = repair_attempts + 1
-                harness.state.recent_errors.append(str(record.result.error or repair_message))
+                harness.state.scratchpad["_plan_export_recovery_nudges"] = (
+                    repair_attempts + 1
+                )
+                harness.state.recent_errors.append(
+                    str(record.result.error or repair_message)
+                )
                 harness.state.append_message(
                     ConversationMessage(
                         role="user",
@@ -113,7 +127,9 @@ async def apply_planning_tool_outcomes(
                         data={"status_activity": "draft plan created"},
                     ),
                 )
-                export_warning = str(record.result.metadata.get("export_warning", "") or "").strip()
+                export_warning = str(
+                    record.result.metadata.get("export_warning", "") or ""
+                ).strip()
                 if export_warning:
                     await _emit_ui_event(
                         harness,
@@ -124,16 +140,27 @@ async def apply_planning_tool_outcomes(
                             data={
                                 "status_activity": "draft plan created",
                                 "warning_type": "plan_export_validation",
-                                "rejected_output_path": record.result.metadata.get("rejected_output_path", ""),
-                                "suggested_output_path": record.result.metadata.get("suggested_output_path", ""),
+                                "rejected_output_path": record.result.metadata.get(
+                                    "rejected_output_path", ""
+                                ),
+                                "suggested_output_path": record.result.metadata.get(
+                                    "suggested_output_path", ""
+                                ),
                             },
                         ),
                     )
                 if plan.requested_output_path:
                     try:
-                        write_plan_file(plan, plan.requested_output_path, format=plan.requested_output_format)
-                    except ValueError as exc:
-                        harness.log.warning("skipping invalid plan export after plan_set: %s", exc)
+                        write_plan_file(
+                            plan,
+                            plan.requested_output_path,
+                            format=plan.requested_output_format,
+                            cwd=getattr(harness.state, "cwd", None),
+                        )
+                    except (ValueError, OSError) as exc:
+                        harness.log.warning(
+                            "skipping invalid plan export after plan_set: %s", exc
+                        )
                 if not has_explicit_plan_request:
                     await pause_for_plan_approval(graph_state, deps)
                     return LoopRoute.FINALIZE
@@ -143,8 +170,14 @@ async def apply_planning_tool_outcomes(
             if plan is not None:
                 plan.touch()
                 harness.state.sync_plan_mirror()
-                active_step = plan.find_step(str(record.args.get("step_id", "")).strip())
-                step_label = active_step.step_id if active_step is not None else str(record.args.get("step_id", "")).strip()
+                active_step = plan.find_step(
+                    str(record.args.get("step_id", "")).strip()
+                )
+                step_label = (
+                    active_step.step_id
+                    if active_step is not None
+                    else str(record.args.get("step_id", "")).strip()
+                )
                 await _emit_ui_event(
                     harness,
                     deps.event_handler,
@@ -156,9 +189,16 @@ async def apply_planning_tool_outcomes(
                 )
                 if plan.requested_output_path:
                     try:
-                        write_plan_file(plan, plan.requested_output_path, format=plan.requested_output_format)
-                    except ValueError as exc:
-                        harness.log.warning("skipping invalid plan export after step update: %s", exc)
+                        write_plan_file(
+                            plan,
+                            plan.requested_output_path,
+                            format=plan.requested_output_format,
+                            cwd=getattr(harness.state, "cwd", None),
+                        )
+                    except (ValueError, OSError) as exc:
+                        harness.log.warning(
+                            "skipping invalid plan export after step update: %s", exc
+                        )
             continue
         if record.tool_name == "plan_export" and record.result.success:
             plan = harness.state.active_plan or harness.state.draft_plan
@@ -177,7 +217,9 @@ async def apply_planning_tool_outcomes(
             plan = harness.state.active_plan or harness.state.draft_plan
             payload = {
                 "kind": "plan_execute_approval",
-                "question": record.result.metadata.get("question", "Plan ready. Execute it now?"),
+                "question": record.result.metadata.get(
+                    "question", "Plan ready. Execute it now?"
+                ),
                 "plan_id": plan.plan_id if plan is not None else "",
                 "approved": False,
                 "response_mode": "yes/no/revise",
@@ -192,7 +234,10 @@ async def apply_planning_tool_outcomes(
                 UIEvent(
                     event_type=UIEventType.ALERT,
                     content=payload["question"],
-                    data={"status_activity": "awaiting plan approval...", "interrupt": payload},
+                    data={
+                        "status_activity": "awaiting plan approval...",
+                        "interrupt": payload,
+                    },
                 ),
             )
             graph_state.final_result = {
@@ -205,10 +250,14 @@ async def apply_planning_tool_outcomes(
             }
             return LoopRoute.FINALIZE
         if record.tool_name == "task_complete" and record.result.success:
-            _auto_update_active_plan_step(harness, status="completed", note=str(record.result.output or ""))
+            _auto_update_active_plan_step(
+                harness, status="completed", note=str(record.result.output or "")
+            )
             harness.state.planning_mode_enabled = False
             message = _terminal_message_text(record.result.output)
-            assistant_text = str(graph_state.last_assistant_text or "").strip() or message
+            assistant_text = (
+                str(graph_state.last_assistant_text or "").strip() or message
+            )
             await _emit_ui_event(
                 harness,
                 deps.event_handler,

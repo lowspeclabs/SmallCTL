@@ -16,7 +16,7 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from .deps import GraphRuntimeDeps
 from .state import GraphRunState
-from .tool_model_rules import _model_is_lfm25_8b_a1b
+from .tool_model_rules import _model_is_gemma_4, _model_is_lfm25_8b_a1b
 from .model_stream_fallback_support import (
     _classify_model_call_error,
 )
@@ -31,7 +31,14 @@ _REASONING_ONLY_TOOL_MAX_SECONDS = 25.0
 _REASONING_ONLY_TOOL_MAX_CHUNKS = 1500
 _LFM25_REASONING_ONLY_TOOL_MAX_SECONDS = 12.0
 _LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS = 512
+# Gemma-4 variants (including 12b) often emit long reasoning traces before
+# producing a tool call, especially when recovering from a prior tool failure.
+# Give them a wider chunk/time budget so the harness can nudge them into action
+# instead of halting immediately.
+_GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS = 40.0
+_GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS = 2500
 _REASONING_ONLY_MAX_RETRIES = 1
+_REASONING_ONLY_GEMMA4_MAX_RETRIES = 2
 _REASONING_PROGRESS_MIN_FRAGMENTS = 4
 _REASONING_PROGRESS_MIN_UNIQUE_RATIO = 0.35
 _REASONING_PROGRESS_MIN_DISTINCT_WORDS = 12
@@ -339,18 +346,26 @@ def _reasoning_only_limits(
             min(_REASONING_ONLY_MAX_SECONDS, _LFM25_REASONING_ONLY_TOOL_MAX_SECONDS),
             min(_REASONING_ONLY_MAX_CHUNKS, _LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS),
         )
+    if _model_is_gemma_4(model_name):
+        return (
+            min(_REASONING_ONLY_MAX_SECONDS, _GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS),
+            min(_REASONING_ONLY_MAX_CHUNKS, _GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS),
+        )
     return (
         min(_REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_TOOL_MAX_SECONDS),
         min(_REASONING_ONLY_MAX_CHUNKS, _REASONING_ONLY_TOOL_MAX_CHUNKS),
     )
 
 
-def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "") -> str:
+def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "", harness: Any = None) -> str:
     names = _tool_names(tools)
     base = (
         "The prior response stream spent too long in reasoning without producing assistant content "
         "or a tool call."
     )
+    context_hint = _build_reasoning_only_context_hint(harness)
+    if context_hint:
+        base = f"{base} {context_hint}"
     if phase == "repair":
         if "escalate_to_bigger_model" in names:
             return (
@@ -372,6 +387,27 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "")
     return (
         f"{base} Continue now by calling an appropriate available tool, or answer directly if "
         "no tool is needed. Do not continue hidden reasoning only."
+    )
+
+
+def _build_reasoning_only_context_hint(harness: Any) -> str:
+    """Return a short, actionable hint from the most recent error/tool failure."""
+    state = getattr(harness, "state", None)
+    if state is None:
+        return ""
+    recent_errors = getattr(state, "recent_errors", None) or []
+    if not recent_errors:
+        return ""
+    last_error = str(recent_errors[-1]).strip()
+    if not last_error:
+        return ""
+    # Keep the hint concise; long hints consume context and can confuse small models.
+    snipped = last_error[:220]
+    if len(last_error) > 220:
+        snipped = snipped + "..."
+    return (
+        f"The most recent issue was: {snipped} "
+        "Address it with your very next action; do not re-analyze."
     )
 
 
@@ -434,9 +470,26 @@ async def run_model_stream_loop(
             reasoning_only_chunks = 0
             active_model_name = str(getattr(getattr(harness, "client", None), "model", "") or "")
             lfm25_reasoning_guard = _model_is_lfm25_8b_a1b(active_model_name)
+            gemma4_reasoning_guard = _model_is_gemma_4(active_model_name)
             reasoning_only_max_seconds, reasoning_only_max_chunks = _reasoning_only_limits(
                 tools,
                 model_name=active_model_name,
+            )
+            # Shrink the reasoning-only window on each retry. A model that already
+            # stalled once is unlikely to need the full initial budget again;
+            # tightening the limit keeps the TUI responsive and avoids long waits
+            # before halting/escalation.
+            _reasoning_retry_scale = 0.5 ** reasoning_only_retries
+            reasoning_only_max_seconds = max(
+                1.0, reasoning_only_max_seconds * _reasoning_retry_scale
+            )
+            reasoning_only_max_chunks = max(
+                1, int(reasoning_only_max_chunks * _reasoning_retry_scale)
+            )
+            max_reasoning_only_retries = (
+                _REASONING_ONLY_GEMMA4_MAX_RETRIES
+                if gemma4_reasoning_guard
+                else _REASONING_ONLY_MAX_RETRIES
             )
             reasoning_only_base_seconds = reasoning_only_max_seconds
             reasoning_only_base_chunks = reasoning_only_max_chunks
@@ -445,6 +498,7 @@ async def run_model_stream_loop(
             saw_assistant_content = False
             saw_tool_call = False
             assistant_text_buffer = ""
+            reasoning_text_buffer = ""
             partial_assistant_text = ""
             async for event in harness.client.stream_chat(messages=messages, tools=tools):
                 if harness._cancel_requested:
@@ -621,8 +675,14 @@ async def run_model_stream_loop(
                     ):
                         elapsed_seconds = round(time.monotonic() - attempt_started_at, 3)
                         tool_names = _tool_names(tools)
-                        hard_max_seconds = max(reasoning_only_max_seconds, _REASONING_ONLY_MAX_SECONDS)
-                        hard_max_chunks = max(reasoning_only_max_chunks, _REASONING_ONLY_MAX_CHUNKS)
+                        hard_max_seconds = max(
+                            reasoning_only_max_seconds,
+                            _REASONING_ONLY_MAX_SECONDS * _reasoning_retry_scale,
+                        )
+                        hard_max_chunks = max(
+                            reasoning_only_max_chunks,
+                            int(_REASONING_ONLY_MAX_CHUNKS * _reasoning_retry_scale),
+                        )
                         progress_assessment = _assess_reasoning_fragments_progress(reasoning_only_fragments)
                         progress_details = progress_assessment.to_log_dict()
                         if (
@@ -652,7 +712,7 @@ async def run_model_stream_loop(
                                 **progress_details,
                             )
                         else:
-                            if reasoning_only_retries >= _REASONING_ONLY_MAX_RETRIES:
+                            if reasoning_only_retries >= max_reasoning_only_retries:
                                 stream_ended_without_done = True
                                 stream_ended_without_done_details = {
                                     "reason": "reasoning_only_stream_stall",
@@ -662,6 +722,7 @@ async def run_model_stream_loop(
                                     "elapsed_seconds": elapsed_seconds,
                                     "tools_available": tool_names,
                                     "progress": progress_details,
+                                    "max_reasoning_only_retries": max_reasoning_only_retries,
                                 }
                                 harness.state.scratchpad["_last_reasoning_only_stall"] = dict(
                                     stream_ended_without_done_details
@@ -691,7 +752,7 @@ async def run_model_stream_loop(
                                 break
                             reasoning_only_retries += 1
                             current_phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
-                            nudge = _build_reasoning_only_nudge(tools, phase=current_phase)
+                            nudge = _build_reasoning_only_nudge(tools, phase=current_phase, harness=harness)
                             messages = list(messages) + [ConversationMessage(role="system", content=nudge).to_dict()]
                             harness.state.scratchpad["_last_reasoning_only_retry"] = {
                                 "attempt": _model_attempt + 1,
@@ -741,6 +802,17 @@ async def run_model_stream_loop(
                     if isinstance(content, str):
                         assistant_text_buffer += normalize_sentencepiece_whitespace(content)
                         repetition = _detect_degenerate_repetition(assistant_text_buffer)
+                        if repetition is not None:
+                            phrase, count, window = repetition
+                            raise _ModelOutputDegenerate(
+                                repeated_phrase=phrase,
+                                repeat_count=count,
+                                window=window,
+                            )
+                    reasoning_text = _chunk_reasoning_text(event)
+                    if isinstance(reasoning_text, str) and reasoning_text:
+                        reasoning_text_buffer += normalize_sentencepiece_whitespace(reasoning_text)
+                        repetition = _detect_degenerate_repetition(reasoning_text_buffer)
                         if repetition is not None:
                             phrase, count, window = repetition
                             raise _ModelOutputDegenerate(

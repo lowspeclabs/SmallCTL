@@ -547,3 +547,15 @@ def test_non_gemma_reasoning_field_strips_tool_call_wrappers() -> None:
     assert result.pending_tool_calls == []
     assert "<tool_call>" not in stream.thinking_text
     assert "</tool_call>" not in stream.thinking_text
+
+
+def test_flat_inline_json_preserves_argument_key_matching_tool_name() -> None:
+    text = '{"tool_call": "file_read", "path": "README.md", "file_read": "literal argument value"}'
+
+    result = _parse(text)
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["file_read"]
+    assert result.pending_tool_calls[0].args == {
+        "path": "README.md",
+        "file_read": "literal argument value",
+    }

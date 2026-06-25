@@ -384,7 +384,8 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         arguments=pending.args,
                     )
                     if retry_scheduled:
-                        path = str(pending.args.get("path") or pending.args.get("target_path") or "").strip()
+                        pending_args = pending.args if isinstance(pending.args, dict) else {}
+                        path = str(pending_args.get("path") or pending_args.get("target_path") or "").strip()
                         retry_message = (
                             f"Registered but unavailable on this turn: `{pending.tool_name}`. "
                             f"Retry on the next turn with `{pending.tool_name}` immediately. "
@@ -590,10 +591,11 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             except _nodes.ToolNotFoundError:
                 if pending.tool_name in _nodes.HALLUCINATION_MAP:
                     mapped_tool = _nodes.HALLUCINATION_MAP[pending.tool_name]
+                    pending_args = pending.args if isinstance(pending.args, dict) else {}
                     raw_id = (
-                        pending.args.get("path") or
-                        pending.args.get("artifact_id") or
-                        pending.args.get("pattern") or
+                        pending_args.get("path") or
+                        pending_args.get("artifact_id") or
+                        pending_args.get("pattern") or
                         "A000X"
                     )
                     artifact_id = str(raw_id).split("/")[-1]
@@ -744,6 +746,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             finally:
                 harness._active_dispatch_task = None
                 harness._active_ui_tool_context = None
+            if isinstance(result, dict):
+                result = _tool_envelope_from_dict(result)
+            elif isinstance(result, ToolEnvelope) and not isinstance(result.metadata, dict):
+                result.metadata = {}
             _store_tool_execution_record(
                 harness,
                 operation_id=operation_id,

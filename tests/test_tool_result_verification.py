@@ -602,6 +602,36 @@ def test_approval_denied_tool_outcome_stops_generation() -> None:
     assert graph_state.interrupt_payload is None
 
 
+def test_tool_outcome_ignores_non_dict_metadata() -> None:
+    state = LoopState()
+    graph_state = GraphRunState(loop_state=state, thread_id="none-metadata", run_mode="loop")
+    record = ToolExecutionRecord(
+        operation_id="op-none-metadata",
+        tool_name="shell_exec",
+        args={"command": "python3 test.py"},
+        tool_call_id="call-none-metadata",
+        result=ToolEnvelope(
+            success=False,
+            error="command failed",
+            metadata=None,
+        ),
+    )
+    harness = SimpleNamespace(state=state)
+    deps = SimpleNamespace(harness=harness, event_handler=None)
+
+    handled = asyncio.run(
+        maybe_apply_terminal_tool_outcome(
+            graph_state,
+            deps,
+            record,
+            chat_mode=False,
+        )
+    )
+
+    assert handled is False
+    assert graph_state.final_result is None
+
+
 def test_latest_blocker_tracks_fogproject_account_over_interactive_prompt() -> None:
     state = LoopState()
     state.thread_id = "fog-run"

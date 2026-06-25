@@ -88,6 +88,55 @@ async def test_tool_dispatch_exception_becomes_recoverable_error() -> None:
     assert harness.state.recent_errors
 
 
+@pytest.mark.asyncio
+async def test_tool_dispatch_normalizes_none_metadata() -> None:
+    from smallctl.graph.tool_execution_nodes import dispatch_tools
+
+    harness = MagicMock()
+    harness.registry.names.return_value = ["some_tool"]
+    harness.state = LoopState()
+    harness.state.step_count = 1
+    harness.state.recent_errors = []
+    harness._runlog = MagicMock()
+
+    async def _noop_emit(*_args, **_kwargs):
+        pass
+
+    harness._emit = _noop_emit
+    harness._active_dispatch_task = None
+    harness._active_ui_tool_context = None
+    harness.log = logging.getLogger("test.tool_dispatch_none_metadata")
+
+    async def _dispatch(_name: str, _args: dict[str, Any]) -> ToolEnvelope:
+        return ToolEnvelope(success=True, output="ok", metadata=None)
+
+    harness._dispatch_tool_call = _dispatch
+
+    deps = MagicMock()
+    deps.event_handler = None
+    deps.harness = harness
+
+    graph_state = GraphRunState(
+        loop_state=harness.state,
+        thread_id="t-1",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_call_id="tc-1",
+                tool_name="some_tool",
+                args={"x": 1},
+                source="internal",
+            )
+        ],
+    )
+
+    await dispatch_tools(graph_state, deps)
+
+    assert len(graph_state.last_tool_results) == 1
+    assert graph_state.last_tool_results[0].result.success is True
+    assert graph_state.last_tool_results[0].result.metadata == {}
+
+
 # -----------------------------------------------------------------------------
 # 3.2 DAG dispatch fallback broad exception handling
 # -----------------------------------------------------------------------------

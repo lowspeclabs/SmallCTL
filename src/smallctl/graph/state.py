@@ -141,10 +141,10 @@ class PendingToolCall:
             last_error = parse_error
         if not parsed:
             # Step 4: Final fallback for very common 'code-block' wrap halluciations
-            if "```json" in cleaned:
+            if "```json" in cleaned.lower():
                 # Pre-clean the whole thing for trailing commas if we're desperate
                 desperate = re.sub(r',\s*([\]}])', r'\1', cleaned)
-                match = re.search(r"```json\s*(\{.*?\})\s*```", desperate, re.DOTALL)
+                match = re.search(r"```json\s*(\{.*?\})\s*```", desperate, re.DOTALL | re.IGNORECASE)
                 if match:
                     parsed, parse_error = _parse_mapping(match.group(1))
                     if parse_error is not None:

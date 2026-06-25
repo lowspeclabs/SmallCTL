@@ -297,6 +297,24 @@ def test_native_tool_empty_json_object_arguments_are_not_marked_malformed() -> N
     assert "arguments_parse_error" not in pending.parser_metadata
 
 
+def test_native_tool_uppercase_json_fence_arguments_parse() -> None:
+    raw_arguments = '```JSON\n{"path": "README.md"}\n```'
+
+    pending = PendingToolCall.from_payload(
+        {
+            "id": "call_fenced",
+            "type": "function",
+            "function": {"name": "file_read", "arguments": raw_arguments},
+        }
+    )
+
+    assert pending is not None
+    assert pending.tool_name == "file_read"
+    assert pending.args == {"path": "README.md"}
+    assert pending.raw_arguments == raw_arguments
+    assert "arguments_parse_error" not in pending.parser_metadata
+
+
 def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
     runlog_events = []
     stream = SimpleNamespace(

@@ -34,13 +34,18 @@ def _terminal_message_text(output: Any) -> str:
     return str(output).strip()
 
 
+def _result_metadata(record: ToolExecutionRecord) -> dict[str, Any]:
+    metadata = getattr(getattr(record, "result", None), "metadata", None)
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _clear_shell_retry_state_if_applicable(harness: Any, record: ToolExecutionRecord) -> None:
     if record.tool_name != "shell_exec":
         return
     if record.result.success:
         _clear_shell_human_retry_state(harness)
         return
-    if getattr(record.result, "status", None) != "needs_human" and record.result.metadata.get("status") != "needs_human":
+    if getattr(record.result, "status", None) != "needs_human" and _result_metadata(record).get("status") != "needs_human":
         _clear_shell_human_retry_state(harness)
 
 
@@ -193,7 +198,7 @@ async def maybe_apply_terminal_tool_outcome(
         }
         return True
 
-    if record.result.metadata.get("approval_denied"):
+    if _result_metadata(record).get("approval_denied"):
         if chat_mode:
             _clear_chat_progress_guard(harness)
         message = str(record.result.error or "Approval denied by user.")
@@ -204,24 +209,25 @@ async def maybe_apply_terminal_tool_outcome(
             "thinking": graph_state.last_thinking_text,
             "usage": graph_state.last_usage,
             "tool_name": record.tool_name,
-            "metadata": dict(record.result.metadata),
+            "metadata": dict(_result_metadata(record)),
         }
         return True
 
     if (
         getattr(record.result, "status", None) == "needs_human"
-        or record.result.metadata.get("status") == "needs_human"
+        or _result_metadata(record).get("status") == "needs_human"
     ):
         if chat_mode:
             _clear_chat_progress_guard(harness)
         if record.tool_name == "shell_exec":
             _remember_shell_human_retry_state(harness, record)
-        question = record.result.metadata.get("question", "Human input required for tool.")
+        metadata = _result_metadata(record)
+        question = metadata.get("question", "Human input required for tool.")
         payload = {
             "question": question,
             "tool_name": record.tool_name,
             "tool_call_id": record.tool_call_id,
-            "metadata": {**record.result.metadata, "interrupt_type": "tool_request"},
+            "metadata": {**metadata, "interrupt_type": "tool_request"},
             "current_phase": "explore",
             "active_profiles": list(harness.state.active_tool_profiles),
             "thread_id": graph_state.thread_id,

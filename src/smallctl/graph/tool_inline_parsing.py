@@ -77,7 +77,7 @@ def _try_parse_data(data: Any) -> PendingToolCall | None:
         inferred_args = {
             str(key): value
             for key, value in data.items()
-            if str(key) not in _INLINE_TOOL_SCHEMA_KEYS and str(key) != name
+            if str(key) not in _INLINE_TOOL_SCHEMA_KEYS
         }
         if inferred_args:
             args = inferred_args

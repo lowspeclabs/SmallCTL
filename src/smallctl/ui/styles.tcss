@@ -638,10 +638,23 @@
 }
 
 #chat-menu-buttons {
+  layout: vertical;
   width: 100%;
   height: auto;
   padding-top: 1;
   align: center middle;
+}
+
+#chat-menu-resume,
+#chat-menu-new,
+#chat-menu-provider,
+#chat-menu-cancel {
+  width: 28;
+  margin-top: 1;
+}
+
+#chat-menu-cancel {
+  margin-bottom: 0;
 }
 
 #chat-menu-resume,

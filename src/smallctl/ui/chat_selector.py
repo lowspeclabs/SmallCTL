@@ -30,7 +30,7 @@ class ChatMenuScreen(ModalScreen[str | None]):
                 with Vertical(id="chat-menu"):
                     yield Static("Chat", id="chat-menu-title")
                     yield Static("Choose how to continue.", id="chat-menu-message")
-                    with Horizontal(id="chat-menu-buttons"):
+                    with Vertical(id="chat-menu-buttons"):
                         yield Button("Resume", id="chat-menu-resume", variant="primary", compact=True)
                         yield Button("New", id="chat-menu-new", variant="success", compact=True)
                         yield Button("Provider", id="chat-menu-provider", variant="warning", compact=True)

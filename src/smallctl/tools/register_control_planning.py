@@ -9,8 +9,14 @@ def register_control_planning_tools(
     *,
     register: Callable[[list[Any]], None],
     make_registration: Callable[..., Any],
-    inject_state: Callable[[Callable[..., Awaitable[dict[str, Any]]]], Callable[..., Awaitable[dict[str, Any]]]],
-    inject_state_and_harness: Callable[[Callable[..., Awaitable[dict[str, Any]]]], Callable[..., Awaitable[dict[str, Any]]]],
+    inject_state: Callable[
+        [Callable[..., Awaitable[dict[str, Any]]]],
+        Callable[..., Awaitable[dict[str, Any]]],
+    ],
+    inject_state_and_harness: Callable[
+        [Callable[..., Awaitable[dict[str, Any]]]],
+        Callable[..., Awaitable[dict[str, Any]]],
+    ],
     core_profile: str,
 ) -> None:
     register(
@@ -157,24 +163,69 @@ def register_control_planning_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string", "description": "High-level objective the plan is trying to achieve."},
-                        "summary": {"type": "string", "description": "Optional short context summary for the plan."},
-                        "inputs": {"type": "array", "description": "Facts, files, or inputs the implementation will rely on."},
-                        "outputs": {"type": "array", "description": "Artifacts, files, or outcomes the plan should produce."},
-                        "constraints": {"type": "array", "description": "Rules or limits the implementation must respect."},
-                        "acceptance_criteria": {"type": "array", "description": "Checklist items that must be satisfied before task completion."},
-                        "implementation_plan": {"type": "array", "description": "Short implementation stages or ordered authoring plan items."},
+                        "goal": {
+                            "type": "string",
+                            "description": "High-level objective the plan is trying to achieve.",
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Optional short context summary for the plan.",
+                        },
+                        "inputs": {
+                            "type": "array",
+                            "description": "Facts, files, or inputs the implementation will rely on.",
+                        },
+                        "outputs": {
+                            "type": "array",
+                            "description": "Artifacts, files, or outcomes the plan should produce.",
+                        },
+                        "constraints": {
+                            "type": "array",
+                            "description": "Rules or limits the implementation must respect.",
+                        },
+                        "acceptance_criteria": {
+                            "type": "array",
+                            "description": "Checklist items that must be satisfied before task completion.",
+                        },
+                        "implementation_plan": {
+                            "type": "array",
+                            "description": "Short implementation stages or ordered authoring plan items.",
+                        },
                         "steps": {
                             "type": "array",
                             "description": "Ordered plan steps. Each step must have a short `title` (≤6 words, imperative mood, e.g. 'Write backoff script'). The title is ONLY a concise task name for the checklist UI. Put ALL implementation details, file paths, and full specs in the `description` or `task` field. Never put file paths or long descriptions in `title`. Step objects may include task, difficulty, tool_allowlist, acceptance, verifiers, outputs_expected, max_retries, and depends_on.",
-                            "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
+                            "items": {
+                                "anyOf": [{"type": "string"}, {"type": "object"}]
+                            },
                         },
-                        "output_path": {"type": "string", "description": "Optional plan document export target. Use only .md, .txt, or .text; never pass implementation paths like .py."},
-                        "plan_output_path": {"type": "string", "description": "Alias for output_path. Reserved for plan document exports only."},
-                        "output_format": {"type": "string", "enum": ["markdown", "md", "text", "txt"], "description": "Optional plan document format. Use markdown/md or text/txt only."},
-                        "plan_output_format": {"type": "string", "enum": ["markdown", "md", "text", "txt"], "description": "Alias for output_format."},
+                        "output_path": {
+                            "type": "string",
+                            "description": "Optional plan document export target. Must be a workspace-relative path (e.g. 'plan.md' or 'docs/plan.md'). Use only .md, .txt, or .text; never pass absolute paths or implementation paths like .py.",
+                        },
+                        "plan_output_path": {
+                            "type": "string",
+                            "description": "Alias for output_path. Reserved for plan document exports only. Must be a workspace-relative path; never absolute.",
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["markdown", "md", "text", "txt"],
+                            "description": "Optional plan document format. Use markdown/md or text/txt only.",
+                        },
+                        "plan_output_format": {
+                            "type": "string",
+                            "enum": ["markdown", "md", "text", "txt"],
+                            "description": "Alias for output_format.",
+                        },
                     },
-                    "required": ["goal", "inputs", "outputs", "constraints", "acceptance_criteria", "implementation_plan", "steps"],
+                    "required": [
+                        "goal",
+                        "inputs",
+                        "outputs",
+                        "constraints",
+                        "acceptance_criteria",
+                        "implementation_plan",
+                        "steps",
+                    ],
                     "additionalProperties": False,
                 },
                 handler=inject_state_and_harness(planning.plan_set),

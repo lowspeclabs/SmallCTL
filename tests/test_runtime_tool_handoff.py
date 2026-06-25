@@ -736,13 +736,13 @@ def test_auto_chat_smalltalk_sends_no_tools_to_qwen35(
     assert result["status"] == "chat_completed"
     assert result["assistant"] == "Hello! How can I help?"
     assert len(stream_calls) == 1
-    assert [
+    assert sorted(
         tool["function"]["name"]
         for tool in stream_calls[0][1]
         if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-    ] == []
+    ) == ["task_complete", "task_fail"]
     assert harness.state.scratchpad["_chat_runtime_intent"] == "smalltalk"
-    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"
+    assert harness.state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_terminal_only"
 
 
 def test_chat_runtime_promotes_fenced_task_complete_json(
@@ -795,3 +795,117 @@ def test_chat_runtime_promotes_fenced_task_complete_json(
         harness.state.scratchpad["_terminal_json_task_complete_autopromoted"]["recovery_kind"]
         == "terminal_json_task_complete"
     )
+
+
+def test_chat_runtime_promotes_malformed_inline_task_complete_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression for Gemma-4 emitting task_complete JSON with unescaped quotes."""
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="gemma-4-e4b-it",
+        provider_profile="llamacpp",
+        phase="explore",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    async def fake_stream_chat(*, messages, tools):
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                                '{"name": "task_complete", "arguments": {"message": '
+                                '"Reports mention "Isolated storms" and "heat hazards" today."}}'
+                            )
+                        }
+                    }
+                ]
+            },
+        }
+        yield {"type": "done"}
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            ChatGraphRuntime.from_harness(harness).run("what is the weather"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "chat_completed"
+    assert 'Reports mention "Isolated storms" and "heat hazards" today.' == result["message"]
+    assert (
+        harness.state.scratchpad["_terminal_json_task_complete_autopromoted"]["recovery_kind"]
+        == "terminal_json_task_complete"
+    )
+
+
+def test_smalltalk_greeting_exposes_task_complete_and_completes_cleanly(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Regression for Gemma-4 small models looping on blocked tools for 'hi'."""
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="gemma-4-e2b-it",
+        provider_profile="llamacpp",
+        phase="explore",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+    )
+
+    async def fake_stream_chat(*, messages, tools):
+        assert any(
+            tool.get("function", {}).get("name") == "task_complete"
+            for tool in tools
+            if isinstance(tool, dict)
+        )
+        assert not any(
+            tool.get("function", {}).get("name") in {"file_read", "shell_exec", "ask_human"}
+            for tool in tools
+            if isinstance(tool, dict)
+        )
+        system = next(
+            (str(m.get("content", "")) for m in messages if m.get("role") == "system"), ""
+        )
+        assert "SMALLTALK:" in system
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": (
+                            "Hi there! I'm ready to help when you have a task. "
+                            '{"name":"task_complete","arguments":{"message":"Greeting acknowledged."}}'
+                        ),
+                        },
+                    }
+                ]
+            },
+        }
+        yield {"type": "done"}
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            AutoGraphRuntime.from_harness(harness).run("hi"),
+            timeout=5,
+        )
+    )
+
+    assert result["status"] == "chat_completed"
+    assert "Greeting acknowledged" in str(result.get("message") or result.get("assistant") or "")

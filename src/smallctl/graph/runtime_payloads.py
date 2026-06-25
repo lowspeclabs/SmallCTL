@@ -10,6 +10,7 @@ from typing_extensions import TypedDict
 
 from .checkpoint import create_graph_checkpointer
 from .state import GraphRunState, inflate_graph_state, serialize_graph_state
+from ..logging_utils import runlog as _runlog
 from ..state import json_safe_value
 
 
@@ -245,12 +246,6 @@ async def execute_streaming_graph(
         result = dict(result)
         result["latency_metrics"] = metrics
     return harness._finalize(result)
-
-
-def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:
-    logger = getattr(harness, "_runlog", None)
-    if callable(logger):
-        logger(event, message, **data)
 
 
 def _config_value(harness: Any, name: str, default: Any) -> Any:

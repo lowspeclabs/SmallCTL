@@ -527,12 +527,12 @@ def test_chat_mode_tools_expose_only_terminal_tools_for_smalltalk(tmp_path) -> N
 
     tools = chat_mode_tools(harness)
 
-    assert _tool_names(tools) == []
-    assert state.scratchpad["_chat_tools_exposed"] is False
-    assert state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_no_tools"
+    assert _tool_names(tools) == ["task_complete", "task_fail"]
+    assert state.scratchpad["_chat_tools_exposed"] is True
+    assert state.scratchpad["_chat_tools_suppressed_reason"] == "smalltalk_terminal_only"
     exposure = resolve_turn_tool_exposure(harness, "chat")
     assert exposure["schemas"] == tools
-    assert exposure["names"] == []
+    assert exposure["names"] == ["task_complete", "task_fail"]
 
 
 def test_chat_mode_tools_logs_structured_diagnostic_when_selection_fails(tmp_path) -> None:

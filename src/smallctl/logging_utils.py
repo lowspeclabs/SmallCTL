@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -544,3 +543,14 @@ def create_run_logger(
         log_max_mb=log_max_mb,
         debug_tokens=debug_tokens,
     )
+
+
+def runlog(harness: Any, event: str, message: str = "", **data: Any) -> None:
+    """Forward a structured event to a harness's ``_runlog`` method if present.
+
+    This keeps the common ``getattr(harness, '_runlog', None)`` guard in one
+    place and makes run-log call sites easier to read and test.
+    """
+    logger = getattr(harness, "_runlog", None)
+    if callable(logger):
+        logger(event, message, **data)

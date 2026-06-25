@@ -396,6 +396,13 @@ class OpenAICompatClient:
         if not normalized:
             return None
         normalized = normalized.lower()
+        # Some backends (e.g. LM Studio on Windows) report the full filesystem
+        # path of the loaded GGUF. Extract the basename so the rest of the
+        # normalization can see the model slug.
+        if "\\" in normalized or "/" in normalized:
+            normalized = normalized.replace("\\", "/").split("/")[-1]
+        if normalized.endswith(".gguf"):
+            normalized = normalized[:-5]
         prefixes = (
             "openrouter/",
             "google/",

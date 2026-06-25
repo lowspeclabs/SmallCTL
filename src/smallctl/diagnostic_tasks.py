@@ -13,6 +13,10 @@ _DIAGNOSTIC_MARKERS = (
     "why ",
     "what failed",
     "failure analysis",
+    "analysis",
+    "health check",
+    "system health",
+    "resource utilization",
 )
 
 _NEGATIVE_VERIFICATION_MARKERS = (

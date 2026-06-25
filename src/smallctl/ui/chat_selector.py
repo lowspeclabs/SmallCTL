@@ -25,13 +25,16 @@ class ChatMenuScreen(ModalScreen[str | None]):
     ]
 
     def compose(self) -> ComposeResult:
-        with Container(id="chat-menu-shell"):
-            with Vertical(id="chat-menu"):
-                yield Static("Chat", id="chat-menu-title")
-                yield Static("Choose how to continue.", id="chat-menu-message")
-                yield Button("Resume Previous Chat", id="chat-menu-resume", variant="primary", compact=True)
-                yield Button("Start New Chat", id="chat-menu-new", variant="success", compact=True)
-                yield Button("Cancel", id="chat-menu-cancel", variant="error", compact=True)
+        with Container(id="chat-menu-overlay"):
+            with Container(id="chat-menu-shell"):
+                with Vertical(id="chat-menu"):
+                    yield Static("Chat", id="chat-menu-title")
+                    yield Static("Choose how to continue.", id="chat-menu-message")
+                    with Horizontal(id="chat-menu-buttons"):
+                        yield Button("Resume", id="chat-menu-resume", variant="primary", compact=True)
+                        yield Button("New", id="chat-menu-new", variant="success", compact=True)
+                        yield Button("Provider", id="chat-menu-provider", variant="warning", compact=True)
+                        yield Button("Cancel", id="chat-menu-cancel", variant="error", compact=True)
 
     def on_mount(self) -> None:
         self.query_one("#chat-menu-resume", Button).focus()
@@ -46,6 +49,10 @@ class ChatMenuScreen(ModalScreen[str | None]):
             return
         if event.button.id == "chat-menu-new":
             self.dismiss("new")
+            event.stop()
+            return
+        if event.button.id == "chat-menu-provider":
+            self.dismiss("provider")
             event.stop()
             return
         if event.button.id == "chat-menu-cancel":

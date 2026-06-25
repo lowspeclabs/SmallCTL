@@ -23,9 +23,8 @@ moving on.
 
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
-
-| BUG-013 | run_diagnose.py | major | Classified a FAMA `done_gate` block of `task_complete` after a diagnostic status-probe failure as `model_tool_loop_stall`, and reported no primary blockers. The correct classification should surface a `policy_block`/`fama_block` (or a new `done_gate_diagnostic_block`) and list the hidden `task_complete` call as the primary blocker. | `python3 Agent-Tools/run_diagnose.py 0aab45a0 --json` returns `failure_classification: model_tool_loop_stall` and `primary_blockers: []`, despite `tool_blocked_not_exposed` blocking `task_complete` because of active `done_gate`. | open |
-| BUG-012 | model_output_lint.py | major | Only checked `assistant_text` for leaked `<think>`/`<thinking>` tags; it missed 11 occurrences where tags leaked into `thinking_text` (e.g. Gemma-4-e2b-it provider reasoning field). | `python3 Agent-Tools/model_output_lint.py 4d76c46f --summary` reported 0 thinking-tag leaks before the fix. | fixed |
+| BUG-014 | model_output_lint.py | minor | Reports `missing_tool_calls` for assistant turns that use native function calling (`tool_calls` in the API response). The `assistant_text` contains explanatory prose while the actual tool calls live in separate `tool_calls` fields, so the heuristic that looks for inline `tool_name(` patterns is noisy for native-tooling runs. | `python3 Agent-Tools/model_output_lint.py e19cdf4c --json` shows 4 `missing_tool_calls` entries even though each turn emitted valid `tool_calls`. | open |
+| BUG-015 | tui_screenshot.py | major | `pilot.exit(0)` triggers an `asyncio` `RecursionError` (`Task.task_wakeup` -> `child.cancel` repeated ~990 times). The screenshot and PNG are produced, but the exception indicates a shutdown/cancellation lifecycle bug in the UI/harness boundary that may also affect real TUI sessions. | `.venv/bin/python Agent-Tools/tui_screenshot.py --task "what is 2+2" --timeout 30 --json` or any task that completes. Observed on runs `55f2c1f0-20260625-172955` and `92eaaaf3-20260625-173043`. | open |
 
 ## Fixed Bugs
 
@@ -33,6 +32,7 @@ Move resolved bugs here and keep the original ID for reference.
 
 | ID | Tool | Fix Summary | Fixed Date |
 |----|------|-------------|------------|
+| BUG-013 | run_diagnose.py, runscan.py | Moved `policy_block` and `fama_block` classification checks ahead of `model_tool_loop_stall` so done-gate / not-exposed tool blocks are surfaced before generic stall labels. Added regression tests. | 2026-06-22 |
 | BUG-012 | model_output_lint.py | Added `thinking_text` to the thinking-tag leak scan so literal `<think>`/`<thinking>` tags inside recorded reasoning are surfaced. | 2026-06-21 |
 | BUG-011 | run_diagnose.py | Detect `stderr_signature_circuit_breaker` trips and classify as `harness_circuit_breaker_false_positive` instead of `model_degeneration`. | 2026-06-19 |
 | BUG-010 | trace_call.py | Warn when the resolved run directory does not match a full trace id prefix. | 2026-06-19 |

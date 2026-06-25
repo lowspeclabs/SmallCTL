@@ -133,9 +133,9 @@ def _apt_deb822_preflight_guard(
                 update_succeeded = guard_state.get("apt_update_succeeded")
                 if update_succeeded is not False:
                     return None
-                # If the failure was a GPG / signature issue rather than
-                # a source-file format problem, the deb822 gate is
-                # irrelevant — let the operation through.
+                # If the failure was a GPG / signature issue or a network /
+                # DNS issue rather than a source-file format problem, the
+                # deb822 gate is irrelevant — let the operation through.
                 last_err = str(guard_state.get("last_update_error") or "").lower()
                 _gpg_markers = (
                     "gpg",
@@ -150,6 +150,21 @@ def _apt_deb822_preflight_guard(
                     "openpgp",
                 )
                 if any(m in last_err for m in _gpg_markers):
+                    return None
+                _network_markers = (
+                    "could not resolve",
+                    "could not resolve hostname",
+                    "name or service not known",
+                    "temporary failure resolving",
+                    "temporary failure in name resolution",
+                    "connection timed out",
+                    "operation timed out",
+                    "connection refused",
+                    "no route to host",
+                    "network is unreachable",
+                    "cannot initiate the connection",
+                )
+                if any(m in last_err for m in _network_markers):
                     return None
             else:
                 return None

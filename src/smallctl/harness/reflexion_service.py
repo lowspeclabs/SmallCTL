@@ -6,6 +6,7 @@ from typing import Any
 
 from ..recovery_metrics import increment_metric
 from ..recovery_schema import FailureEvent, ReflectionMemory, Subtask, SubtaskLedger
+from ..logging_utils import runlog
 
 _SEVERITY_ORDER = {"info": 0, "warning": 1, "recoverable": 2, "hard": 3}
 _DEFAULT_MAX_ITEMS = 5
@@ -117,7 +118,14 @@ class ReflexionService:
         limit = max(1, int(getattr(config, "reflexion_max_items", _DEFAULT_MAX_ITEMS) or _DEFAULT_MAX_ITEMS))
         memory.sort(key=lambda item: (float(getattr(item, "score", 0.0) or 0.0), float(getattr(item, "timestamp", 0.0) or 0.0)))
         del memory[:-limit]
-        _runlog(self.harness, "reflexion_created", reflection=reflection, failure=failure)
+        runlog(
+        self.harness,
+        "reflexion_created",
+        "Reflexion memory updated",
+        reflection_id=reflection.reflection_id,
+        failure_class=failure.failure_class,
+        source_event_id=failure.event_id,
+    )
         return reflection
 
     def select_for_prompt(
@@ -188,15 +196,3 @@ def _task_id(state: Any) -> str | None:
     if not task:
         return None
     return "task-" + hashlib.sha1(task.encode("utf-8", errors="replace")).hexdigest()[:12]
-
-
-def _runlog(harness: Any, event: str, *, reflection: ReflectionMemory, failure: FailureEvent) -> None:
-    runlog = getattr(harness, "_runlog", None)
-    if callable(runlog):
-        runlog(
-            event,
-            "Reflexion memory updated",
-            reflection_id=reflection.reflection_id,
-            failure_class=failure.failure_class,
-            source_event_id=failure.event_id,
-        )

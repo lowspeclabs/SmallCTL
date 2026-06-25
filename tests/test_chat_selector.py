@@ -105,6 +105,34 @@ def test_chat_menu_screen_returns_resume_choice() -> None:
     assert asyncio.run(_run()) == "resume"
 
 
+def test_chat_menu_screen_returns_provider_choice() -> None:
+    class _App(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.selection: str | None = None
+
+        def compose(self) -> ComposeResult:
+            yield Button("Open", id="open")
+
+        async def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "open":
+                await self.push_screen(
+                    ChatMenuScreen(),
+                    callback=lambda selection: setattr(self, "selection", selection),
+                )
+
+    async def _run() -> str | None:
+        app = _App()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.click("#open")
+            await pilot.pause(0.2)
+            await pilot.click("#chat-menu-provider")
+            await pilot.pause(0.2)
+            return app.selection
+
+    assert asyncio.run(_run()) == "provider"
+
+
 def test_chat_session_screen_returns_selected_thread() -> None:
     class _App(App[None]):
         def __init__(self) -> None:

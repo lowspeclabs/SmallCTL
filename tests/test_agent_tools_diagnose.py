@@ -366,3 +366,67 @@ def test_trace_task_parsing() -> None:
     assert _trace_task("abc:task-1:step-5:call-2") == "task-1"
     assert _trace_task("invalid") is None
 
+
+def test_diagnose_classifies_policy_block_before_model_tool_loop_stall() -> None:
+    events: Counter[str] = Counter({
+        "tool_blocked_not_exposed": 1,
+        "action_stall": 1,
+        "no_tool_recovery": 1,
+    })
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "policy_block"
+
+
+def test_diagnose_classifies_fama_block_before_model_tool_loop_stall() -> None:
+    events: Counter[str] = Counter({
+        "fama_tool_call_blocked": 1,
+        "action_stall": 1,
+    })
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "fama_block"
+
+
+def test_runscan_classifies_policy_block_before_model_tool_loop_stall() -> None:
+    events: Counter[str] = Counter({
+        "tool_blocked_not_exposed": 1,
+        "action_stall": 1,
+        "no_tool_recovery": 1,
+    })
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    task_summary: dict = {}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
+
+    assert classification == "policy_block"
+
+
+def test_runscan_classifies_fama_block_before_model_tool_loop_stall() -> None:
+    events: Counter[str] = Counter({
+        "fama_tool_call_blocked": 1,
+        "action_stall": 1,
+    })
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    task_summary: dict = {}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
+
+    assert classification == "fama_block"
+

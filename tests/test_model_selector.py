@@ -15,10 +15,16 @@ from smallctl.client.model_listing import (
     parse_openai_models,
 )
 from smallctl.harness import Harness, HarnessConfig
+from smallctl.provider_profiles import supported_provider_profiles
 from smallctl.ui.app import SmallctlApp
 from smallctl.ui.app_actions import SmallctlAppActionsMixin
 from smallctl.ui.app_flow import SmallctlAppFlowMixin
-from smallctl.ui.model_selector import ModelSelectButton, ModelSelectScreen
+from smallctl.ui.model_selector import (
+    ModelSelectButton,
+    ModelSelectScreen,
+    ProviderSelectButton,
+    ProviderSelectScreen,
+)
 
 
 def test_openai_compatible_model_list_parsing_returns_data_ids() -> None:
@@ -429,7 +435,104 @@ def test_clicking_model_button_while_running_does_not_switch_model() -> None:
     assert "Model can be changed after the active task finishes." in actions.messages
 
 
-def test_switching_model_updates_harness_kwargs() -> None:
+def test_provider_select_button_set_provider_updates_label() -> None:
+    button = ProviderSelectButton("generic")
+
+    button.set_provider("openrouter")
+
+    assert "provider: openrouter v" in str(button.label)
+
+
+def test_provider_select_screen_returns_profile_endpoint_and_key() -> None:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Button, Select
+
+    class _App(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.selection: dict[str, str] | None = None
+
+        def compose(self) -> ComposeResult:
+            yield Button("Open", id="open")
+
+        async def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "open":
+                await self.push_screen(
+                    ProviderSelectScreen(
+                        profiles=("lmstudio", "openrouter"),
+                        current_profile="lmstudio",
+                        current_endpoint="http://localhost:1234/v1",
+                        current_api_key="old-key",
+                    ),
+                    callback=lambda selection: setattr(self, "selection", selection),
+                )
+
+    async def _run() -> dict[str, str] | None:
+        app = _App()
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#open")
+            await pilot.pause(0.2)
+            backend_select = app.screen.query_one("#provider-select-backend", Select)
+            backend_select.value = "openrouter"
+            await pilot.pause(0.1)
+            endpoint_input = app.screen.query_one("#provider-select-endpoint")
+            assert endpoint_input.value == "https://openrouter.ai/api/v1"
+            profile_select = app.screen.query_one("#provider-select-profile", Select)
+            assert profile_select.value == "openrouter"
+            await pilot.click("#provider-select-confirm")
+            await pilot.pause(0.2)
+            return app.selection
+
+    result = asyncio.run(_run())
+    assert isinstance(result, dict)
+    assert result["profile"] == "openrouter"
+    assert result["endpoint"] == "https://openrouter.ai/api/v1"
+    assert result["api_key"] == "old-key"
+
+
+def test_provider_select_screen_uses_default_endpoint_for_profile() -> None:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Button, Select
+
+    class _App(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.selection: dict[str, str] | None = None
+
+        def compose(self) -> ComposeResult:
+            yield Button("Open", id="open")
+
+        async def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "open":
+                await self.push_screen(
+                    ProviderSelectScreen(
+                        profiles=supported_provider_profiles(),
+                        current_profile="auto",
+                    ),
+                    callback=lambda selection: setattr(self, "selection", selection),
+                )
+
+    async def _run() -> dict[str, str] | None:
+        app = _App()
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.click("#open")
+            await pilot.pause(0.2)
+            backend_select = app.screen.query_one("#provider-select-backend", Select)
+            backend_select.value = "kimi"
+            await pilot.pause(0.1)
+            endpoint_input = app.screen.query_one("#provider-select-endpoint")
+            assert endpoint_input.value == "https://api.moonshot.cn/v1"
+            profile_select = app.screen.query_one("#provider-select-profile", Select)
+            assert profile_select.value == "openai"
+            await pilot.click("#provider-select-confirm")
+            await pilot.pause(0.2)
+            return app.selection
+
+    result = asyncio.run(_run())
+    assert isinstance(result, dict)
+    assert result["profile"] == "openai"
+    assert result["endpoint"] == "https://api.moonshot.cn/v1"
+    assert result["api_key"] is None
     state = SimpleNamespace(scratchpad={})
 
     class _Harness:

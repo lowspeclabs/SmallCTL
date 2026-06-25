@@ -6,6 +6,7 @@ from typing import Any
 
 from ..recovery_metrics import record_failure_event_metric
 from ..recovery_schema import FailureEvent, FailureSeverity
+from ..logging_utils import runlog
 from .signals import DEFAULT_FAILURE_CLASS_BY_KIND, FamaSignal
 
 _FAILURE_EVENT_LIMIT = 40
@@ -57,7 +58,16 @@ def record_fama_failure_event(
         _attach_to_active_subtask(state, event)
     _maybe_create_reflection(harness, state, event)
     _mirror_working_memory_failure(state, event)
-    _runlog(harness, event)
+    runlog(
+        harness,
+        "recovery_failure_event_recorded",
+        "Recovery failure event recorded",
+        event_id=event.event_id,
+        failure_class=event.failure_class,
+        source=event.source,
+        fama_kind=event.fama_kind,
+        tool_name=event.tool_name,
+    )
     return event
 
 
@@ -163,17 +173,3 @@ def _mirror_working_memory_failure(state: Any, event: FailureEvent) -> None:
     if line not in failures:
         failures.append(line)
         del failures[:-5]
-
-
-def _runlog(harness: Any, event: FailureEvent) -> None:
-    runlog = getattr(harness, "_runlog", None)
-    if callable(runlog):
-        runlog(
-            "recovery_failure_event_recorded",
-            "Recovery failure event recorded",
-            event_id=event.event_id,
-            failure_class=event.failure_class,
-            source=event.source,
-            fama_kind=event.fama_kind,
-            tool_name=event.tool_name,
-        )

@@ -6,9 +6,13 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Select, Static
 
 from ..client.model_listing import ModelListResult, ProviderModel, fetch_available_models
+from ..provider_profiles import (
+    normalize_provider_profile_alias,
+    supported_provider_profiles,
+)
 
 
 class ModelSelectButton(Button):
@@ -240,3 +244,162 @@ class ModelSelectScreen(ModalScreen[str | None]):
             if model.id.lower() == target or model.display_name.lower() == target:
                 return model
         return None
+
+
+class ProviderSelectButton(Button):
+    def __init__(self, provider: str = "n/a", **kwargs: Any) -> None:
+        super().__init__("", compact=True, flat=True, **kwargs)
+        self._provider = ""
+        self.set_provider(provider)
+
+    def set_provider(self, provider: str) -> None:
+        self._provider = str(provider or "n/a").strip() or "n/a"
+        self.label = f"provider: {self._provider} v"
+
+
+class ProviderSelectScreen(ModalScreen[dict[str, str] | None]):
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("enter", "submit", "Select"),
+    ]
+
+    _BACKEND_PROVIDERS: tuple[tuple[str, str], ...] = (
+        ("OpenRouter", "openrouter"),
+        ("Kimi Code", "kimi"),
+        ("Localhost (LM Studio)", "lmstudio"),
+        ("Localhost (Ollama)", "ollama"),
+        ("Localhost (llama.cpp)", "llamacpp"),
+        ("Custom", "custom"),
+    )
+
+    _BACKEND_DEFAULTS: dict[str, tuple[str, str]] = {
+        "openrouter": ("https://openrouter.ai/api/v1", "openrouter"),
+        "kimi": ("https://api.moonshot.cn/v1", "openai"),
+        "lmstudio": ("http://localhost:1234/v1", "lmstudio"),
+        "ollama": ("http://localhost:11434/v1", "ollama"),
+        "llamacpp": ("http://localhost:8080/v1", "llamacpp"),
+        "custom": ("", "auto"),
+    }
+
+    def __init__(
+        self,
+        *,
+        profiles: tuple[str, ...],
+        current_profile: str,
+        current_endpoint: str = "",
+        current_api_key: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.profiles = tuple(profiles)
+        self.current_profile = str(current_profile or "").strip() or "auto"
+        self.current_endpoint = str(current_endpoint or "").strip()
+        self.current_api_key = current_api_key
+        self._current_backend = self._detect_backend(self.current_endpoint, self.current_profile)
+
+    def compose(self) -> ComposeResult:
+        with Container(id="provider-select-overlay"):
+            with Container(id="provider-select-shell"):
+                with Vertical(id="provider-select"):
+                    yield Static("Select Provider", id="provider-select-title")
+                    yield Static(self._message_text(), id="provider-select-message", markup=False)
+                    with Horizontal(id="provider-select-backend-row"):
+                        yield Select(
+                            options=self._BACKEND_PROVIDERS,
+                            prompt="Backend provider",
+                            value=self._current_backend,
+                            id="provider-select-backend",
+                        )
+                    with Horizontal(id="provider-select-profile-row"):
+                        yield Select(
+                            options=self._profile_options(),
+                            prompt="Provider profile",
+                            value=self.current_profile,
+                            id="provider-select-profile",
+                        )
+                    yield Input(
+                        placeholder="Endpoint URL",
+                        id="provider-select-endpoint",
+                        value=self.current_endpoint,
+                    )
+                    yield Input(
+                        placeholder="API key (optional)",
+                        id="provider-select-api-key",
+                        value=self.current_api_key or "",
+                    )
+                    with Horizontal(id="provider-select-buttons"):
+                        yield Button("Select", id="provider-select-confirm", variant="success", compact=True)
+                        yield Button("Cancel", id="provider-select-cancel", variant="error", compact=True)
+
+    def on_mount(self) -> None:
+        self.query_one("#provider-select-confirm", Button).disabled = False
+        self.query_one("#provider-select-backend", Select).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_submit(self) -> None:
+        profile = str(self.query_one("#provider-select-profile", Select).value or "").strip()
+        endpoint = self.query_one("#provider-select-endpoint", Input).value.strip()
+        api_key = self.query_one("#provider-select-api-key", Input).value.strip() or None
+        if not profile or profile == str(Select.NULL):
+            return
+        self.dismiss({
+            "profile": profile,
+            "endpoint": endpoint,
+            "api_key": api_key,
+        })
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "provider-select-backend":
+            backend = str(event.value or "").strip()
+            endpoint, profile = self._BACKEND_DEFAULTS.get(backend, ("", "auto"))
+            if endpoint:
+                self.query_one("#provider-select-endpoint", Input).value = endpoint
+            self.query_one("#provider-select-profile", Select).value = profile
+        elif event.select.id == "provider-select-profile":
+            profile = str(event.value or "").strip()
+            backend = self._backend_for_profile(profile)
+            if backend != "custom":
+                endpoint, _ = self._BACKEND_DEFAULTS.get(backend, ("", "auto"))
+                if endpoint:
+                    self.query_one("#provider-select-endpoint", Input).value = endpoint
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "provider-select-confirm":
+            self.action_submit()
+            event.stop()
+            return
+        if event.button.id == "provider-select-cancel":
+            self.dismiss(None)
+            event.stop()
+
+    def _message_text(self) -> str:
+        return f"Current: {self.current_profile}. Choose a backend provider or set a custom endpoint."
+
+    def _profile_options(self) -> list[tuple[str, str]]:
+        return [(profile, profile) for profile in self.profiles]
+
+    def _detect_backend(self, endpoint: str, profile: str) -> str:
+        endpoint_lower = endpoint.lower()
+        profile_lower = profile.lower()
+        if "openrouter" in endpoint_lower or profile_lower == "openrouter":
+            return "openrouter"
+        if "moonshot" in endpoint_lower or "kimi" in endpoint_lower:
+            return "kimi"
+        if "localhost:1234" in endpoint_lower or profile_lower == "lmstudio":
+            return "lmstudio"
+        if "localhost:11434" in endpoint_lower or profile_lower == "ollama":
+            return "ollama"
+        if "localhost:8080" in endpoint_lower or profile_lower == "llamacpp":
+            return "llamacpp"
+        return "custom"
+
+    def _backend_for_profile(self, profile: str) -> str:
+        mapping = {
+            "openrouter": "openrouter",
+            "openai": "kimi",
+            "lmstudio": "lmstudio",
+            "ollama": "ollama",
+            "llamacpp": "llamacpp",
+        }
+        return mapping.get(profile, "custom")

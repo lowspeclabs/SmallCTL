@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 
-def summarize_structured_output(*, tool_name: str, output: dict[str, Any]) -> str | None:
+def summarize_structured_output(
+    *, tool_name: str, output: dict[str, Any]
+) -> str | None:
     web_search_summary = _summarize_web_search_output(output)
     if web_search_summary:
         return web_search_summary
@@ -62,7 +64,7 @@ def _summarize_web_search_output(output: dict[str, Any]) -> str | None:
             label = f"{title} ({domain})"
         result_fragments.append(label)
 
-    head = f'{count} result{"s" if count != 1 else ""}'
+    head = f"{count} result{'s' if count != 1 else ''}"
     if query:
         head = f'{head} for "{_truncate(query, 60)}"'
     if result_fragments:
@@ -76,7 +78,9 @@ def _summarize_web_fetch_output(output: dict[str, Any]) -> str | None:
 
     title = _clean_text(output.get("title"))
     domain = _clean_text(output.get("domain"))
-    excerpt = _clean_text(output.get("text_excerpt")) or _clean_text(output.get("untrusted_text"))
+    excerpt = _clean_text(output.get("text_excerpt")) or _clean_text(
+        output.get("untrusted_text")
+    )
     label = title or domain or _clean_text(output.get("url"))
     if not label:
         return "web fetch"
@@ -99,7 +103,11 @@ def _summarize_shell_output(*, tool_name: str, output: dict[str, Any]) -> str | 
     if stdout:
         return _truncate(stdout, 200)
     if stderr:
-        return f"exit {exit_code}: {_truncate(stderr, 180)}" if exit_code is not None else _truncate(stderr, 200)
+        return (
+            f"exit {exit_code}: {_truncate(stderr, 180)}"
+            if exit_code is not None
+            else _truncate(stderr, 200)
+        )
     if exit_code is not None:
         return f"exit code {exit_code}"
     return None
@@ -122,7 +130,9 @@ def _render_web_search_output(output: dict[str, Any]) -> str | None:
             f"{chars_left} chars"
         )
         if fetches_left <= 1 or chars_left <= 5000:
-            lines.append("WARNING: Web budget is critically low. Plan remaining fetches carefully.")
+            lines.append(
+                "WARNING: Web budget is critically low. Plan remaining fetches carefully."
+            )
         lines.append("")
 
     query = _clean_text(output.get("query"))
@@ -149,8 +159,14 @@ def _render_web_search_output(output: dict[str, Any]) -> str | None:
         for index, item in enumerate(results[:5], start=1):
             if not isinstance(item, dict):
                 continue
-            title = _clean_text(item.get("title")) or _clean_text(item.get("url")) or f"Result {index}"
-            fetch_id = _clean_text(item.get("fetch_id")) or _clean_text(item.get("result_id"))
+            title = (
+                _clean_text(item.get("title"))
+                or _clean_text(item.get("url"))
+                or f"Result {index}"
+            )
+            fetch_id = _clean_text(item.get("fetch_id")) or _clean_text(
+                item.get("result_id")
+            )
             result_id = _clean_text(item.get("result_id"))
             url = _clean_text(item.get("url"))
             domain = _clean_text(item.get("domain"))
@@ -159,7 +175,7 @@ def _render_web_search_output(output: dict[str, Any]) -> str | None:
             lines.append(f"{index}. {title}")
             if fetch_id:
                 lines.append(f"   Fetch ID: {fetch_id}")
-            if result_id:
+            if result_id and result_id != fetch_id:
                 lines.append(f"   Result ID: {result_id}")
             if fetch_id:
                 lines.append(f"   Use with: web_fetch(result_id='{fetch_id}')")
@@ -194,18 +210,28 @@ def _render_web_fetch_output(output: dict[str, Any]) -> str | None:
         chars_left = int(budget.get("chars_remaining") or 0)
         lines.append(f"Budget remaining: {fetches_left} fetches, {chars_left} chars")
         if fetches_left <= 1 or chars_left <= 5000:
-            lines.append("WARNING: Web budget is critically low. Plan remaining fetches carefully.")
+            lines.append(
+                "WARNING: Web budget is critically low. Plan remaining fetches carefully."
+            )
         lines.append("")
 
     title = _clean_text(output.get("title"))
     url = _clean_text(output.get("url"))
     domain = _clean_text(output.get("domain"))
     published_at = _clean_text(output.get("published_at"))
-    excerpt = _clean_text(output.get("text_excerpt")) or _clean_text(output.get("untrusted_text"))
-    fetch_id = _clean_text(output.get("fetch_id")) or _clean_text(output.get("requested_result_id")) or _clean_text(output.get("result_id"))
+    excerpt = _clean_text(output.get("text_excerpt")) or _clean_text(
+        output.get("untrusted_text")
+    )
+    fetch_id = (
+        _clean_text(output.get("fetch_id"))
+        or _clean_text(output.get("requested_result_id"))
+        or _clean_text(output.get("result_id"))
+    )
     result_id = _clean_text(output.get("result_id"))
     requested_token = _clean_text(output.get("requested_result_id"))
-    artifact_id = _clean_text(output.get("body_artifact_id")) or _clean_text(output.get("artifact_id"))
+    artifact_id = _clean_text(output.get("body_artifact_id")) or _clean_text(
+        output.get("artifact_id")
+    )
     warnings = _normalize_string_list(output.get("warnings"))
 
     if title:
@@ -235,7 +261,9 @@ def _render_web_fetch_output(output: dict[str, Any]) -> str | None:
                 f"Note: inline web text is excerpt-only; use `artifact_read(artifact_id='{artifact_id}')` for the full fetched body."
             )
         else:
-            lines.append("Note: inline web text is excerpt-only; use the artifact for the full fetched body.")
+            lines.append(
+                "Note: inline web text is excerpt-only; use the artifact for the full fetched body."
+            )
 
     if warnings:
         lines.append("")

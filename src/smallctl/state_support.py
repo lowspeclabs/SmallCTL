@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .normalization import (
-    coerce_datetime as _coerce_datetime,
-    coerce_float as _coerce_float,
+    coerce_datetime as _coerce_datetime,  # noqa: F401
+    coerce_float as _coerce_float,  # noqa: F401
     coerce_int,
     coerce_json_dict_payload,
     coerce_string_list,
-    coerce_timestamp_string as _coerce_timestamp_string,
+    coerce_timestamp_string as _coerce_timestamp_string,  # noqa: F401
 )
 
 LOOP_STATE_SCHEMA_VERSION = 2
@@ -209,3 +209,33 @@ def clip_string_list(
         clipped = True
         normalized = normalized[-limit:] if keep_tail else normalized[:limit]
     return normalized, clipped
+
+
+def safe_scratchpad(obj: Any, *, create: bool = False) -> dict[str, Any] | None:
+    """Return ``state.scratchpad`` given a state object or a harness with a ``state`` attribute.
+
+    Avoids the common ``getattr(getattr(harness, 'state', None), 'scratchpad', None)``
+    dance.  When ``create`` is True, an empty dict is assigned if no scratchpad exists.
+    """
+    if obj is None:
+        return None
+    state = obj
+    if hasattr(obj, "state"):
+        state = getattr(obj, "state", None)
+    if state is None:
+        return {} if create else None
+    if isinstance(state, dict):
+        if create and "scratchpad" not in state:
+            state["scratchpad"] = {}
+        scratchpad = state.get("scratchpad")
+        return scratchpad if isinstance(scratchpad, dict) else ({} if create else None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        return scratchpad
+    if create:
+        try:
+            state.scratchpad = {}
+        except Exception:
+            return None
+        return state.scratchpad
+    return None

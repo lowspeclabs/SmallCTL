@@ -5,83 +5,17 @@ from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from ..logging_utils import RunLogger, log_kv
 from ..models.tool_result import ToolEnvelope
-from ..remote_scope import remote_scope_is_active
 from ..state import json_safe_value
 from ..challenge_progress import redundant_verifier_block
-from . import network
 from .dispatcher_normalization_flow import normalize_tool_request
 from .registry import ToolRegistry
-from .dispatcher_artifact_normalization import (
-    normalize_artifact_read_request as _normalize_artifact_read_request,
-    normalize_web_fetch_request as _normalize_web_fetch_request,
-)
-from .dispatcher_request_normalization import (
-    normalize_initial_tool_request as _normalize_initial_tool_request,
-    repair_ssh_exec_malformed_args as _repair_ssh_exec_malformed_args,
-    repair_write_session_path_from_state as _repair_write_session_path_from_state,
-)
-from .dispatcher_remote_paths import (
-    command_mentions_remote_absolute_path as _command_mentions_remote_absolute_path,
-    looks_like_remote_absolute_path as _looks_like_remote_absolute_path,
-    looks_like_remote_infrastructure_probe_command as _looks_like_remote_infrastructure_probe_command,
-)
 from .dispatcher_schema_helpers import (
     coerce_value as _coerce_value,
 )
 from .tool_call_repair import ToolCallValidationIssue, validate_tool_args
-from .dispatcher_shell_guards import (
-    guard_harness_tool_as_ssh_shell_command as _guard_harness_tool_as_ssh_shell_command,
-    guard_nested_raw_ssh_in_ssh_exec as _guard_nested_raw_ssh_in_ssh_exec,
-    looks_like_raw_ssh_shell_command as _looks_like_raw_ssh_shell_command,
-    raw_ssh_shell_block_envelope as _raw_ssh_shell_block_envelope,
-)
-from .dispatcher_ssh_auth import (
-    password_fingerprint as _password_fingerprint,
-    ssh_auth_debug_metadata as _ssh_auth_debug_metadata,
-    ssh_auth_recovery_entry_key as _ssh_auth_recovery_entry_key,
-)
-from .dispatcher_ssh_context import (
-    infer_ssh_user_from_state_context as _infer_ssh_user_from_state_context,
-    ssh_task_context_texts as _ssh_task_context_texts,
-)
-from .dispatcher_remote_detection import (
-    task_clearly_targets_remote_ssh_host as _task_clearly_targets_remote_ssh_host,
-    task_requests_ssh_connection_probe as _task_requests_ssh_connection_probe,
-)
-from .dispatcher_ssh_memory import (
-    explicit_ssh_password_matches_current_user_context as _explicit_ssh_password_matches_current_user_context,
-    infer_ssh_password as _infer_ssh_password,
-    infer_ssh_password_from_execution_records as _infer_ssh_password_from_execution_records,
-    infer_ssh_password_from_session_memory as _infer_ssh_password_from_session_memory,
-    infer_ssh_user_from_execution_records as _infer_ssh_user_from_execution_records,
-    infer_ssh_user_from_session_memory as _infer_ssh_user_from_session_memory,
-    session_ssh_target_record as _session_ssh_target_record,
-    ssh_record_likely_authenticated as _ssh_record_likely_authenticated,
-)
 from .dispatcher_policy_guards import (
     _fama_dispatch_block,
     _staged_tool_allowlist_error,
-)
-from .dispatcher_tool_guards import (
-    _guard_remote_file_tool_request,
-    _guard_remote_shell_tool_request,
-    _guard_ssh_auth_recovery,
-    _suggested_remote_file_tool,
-)
-from .dispatcher_tool_predicates import (
-    _escalation_recommends_local_shell,
-    _recent_ssh_auth_failure,
-    _ssh_exec_available,
-)
-from .dispatcher_ssh_recovery import (
-    _infer_ssh_host_from_context,
-    _pin_and_guard_ssh_credentials,
-    _recover_ssh_arguments_from_task_context,
-)
-from .dispatcher_scope_predicates import (
-    _has_single_confirmed_ssh_target,
-    _remote_scope_is_active,
-    _task_is_remote_execute,
 )
 
 _SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
@@ -169,11 +103,7 @@ class ToolDispatcher:
             log_kv(self.log, logging.WARNING, "tool_dispatch_unknown", tool_name=tool_name)
             if self.run_logger:
                 self.run_logger.log("tools", "unknown", "unknown tool", tool_name=tool_name)
-            return ToolEnvelope(
-                success=False,
-                error=f"Unknown tool: {tool_name}",
-                metadata={"tool_name": tool_name},
-            )
+            return ToolEnvelope.make_error(tool_name, f"Unknown tool: {tool_name}")
         staged_allowlist_error = _staged_tool_allowlist_error(self.state, tool_name)
         if staged_allowlist_error is not None:
             if self.run_logger:
@@ -260,11 +190,7 @@ class ToolDispatcher:
                     phase=self.phase,
                 )
             error = f"Tool '{tool_name}' is not allowed in phase '{self.phase}'"
-            return ToolEnvelope(
-                success=False,
-                error=error,
-                metadata={"tool_name": tool_name, "phase": self.phase},
-            )
+            return ToolEnvelope.make_blocked(tool_name, error, phase=self.phase)
 
         # Pre-dispatch validation for ssh_file_replace_between boundary overlap
         if tool_name == "ssh_file_replace_between":
@@ -291,15 +217,12 @@ class ToolDispatcher:
                         tool_name=tool_name,
                         error=validation_error,
                     )
-                return ToolEnvelope(
-                    success=False,
-                    error=validation_error,
-                    metadata={
-                        "tool_name": tool_name,
-                        "validation_kind": "invalid_boundary_overlap",
-                        "path": arguments.get("path"),
-                        "host": arguments.get("host"),
-                    },
+                return ToolEnvelope.make_error(
+                    tool_name,
+                    validation_error,
+                    reason="invalid_boundary_overlap",
+                    path=arguments.get("path"),
+                    host=arguments.get("host"),
                 )
 
         if intercepted_result is not None:
@@ -361,10 +284,10 @@ class ToolDispatcher:
                         error=validation_error,
                         arguments_preview=json_safe_value(args),
                     )
-                return ToolEnvelope(
-                    success=False,
-                    error=validation_error,
-                    metadata={"tool_name": tool_name, "validation_error": "empty_command"},
+                return ToolEnvelope.make_error(
+                    tool_name,
+                    validation_error,
+                    validation_error="empty_command",
                 )
 
         validation_issues = self._validate_arg_issues(spec.schema, args)
@@ -388,7 +311,6 @@ class ToolDispatcher:
                     validation_issues=self._serialize_validation_issues(validation_issues),
                 )
             metadata = {
-                "tool_name": tool_name,
                 "validation_error": "schema_validation",
                 "validation_issues": self._serialize_validation_issues(validation_issues),
             }
@@ -400,11 +322,7 @@ class ToolDispatcher:
                     validation_error += f" (Ignored unknown parameters: {', '.join(dropped_keys)})"
             if coerced_entries:
                 metadata["coerced_arguments"] = coerced_entries
-            return ToolEnvelope(
-                success=False,
-                error=validation_error,
-                metadata=metadata,
-            )
+            return ToolEnvelope.make_error(tool_name, validation_error, **metadata)
 
         try:
             result = await spec.invoke(**args)
@@ -426,11 +344,7 @@ class ToolDispatcher:
                     error=str(exc),
                     tier=spec.tier,
                 )
-            return ToolEnvelope(
-                success=False,
-                error=str(exc),
-                metadata={"tool_name": tool_name, "tier": spec.tier},
-            )
+            return ToolEnvelope.make_error(tool_name, str(exc), tier=spec.tier)
 
         if isinstance(result, dict) and {"success", "output", "error", "metadata"} <= set(
             result.keys()

@@ -246,9 +246,17 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         suffix = f": `{command}`" if command else ""
         return f"[harness] Verification reserved before step limit{suffix}"
     if event == "guard_trip_diagnosis":
-        guard_error = str(data.get("guard_error") or "guard tripped").strip()
+        guard_error = str(data.get("guard_error") or data.get("guard_reason") or "guard tripped").strip()
+        reason = str(data.get("guard_reason") or "").strip()
+        action = str(data.get("suggested_recovery_action") or "").strip()
         recent_count = data.get("recent_error_count", "?")
-        return f"[harness] Guard diagnosis: {guard_error} (recent errors: {recent_count})"
+        parts = [f"Guard diagnosis: {guard_error}"]
+        if reason:
+            parts.append(f"Reason: {reason}")
+        if action:
+            parts.append(f"Recovery: {action}")
+        parts.append(f"(recent errors: {recent_count})")
+        return " ".join(parts)
     if event == "context_lane_dropped":
         lane = str(data.get("lane") or data.get("context_lane") or "context").strip()
         reason = str(data.get("reason") or data.get("drop_reason") or "stale or over budget").strip()
@@ -337,9 +345,12 @@ def format_run_log_row(row: dict[str, Any]) -> str:
 def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
     """Build a compact status-bar banner for recovery state."""
     if event == "guard_trip_diagnosis":
-        guard_error = str(data.get("guard_error") or "guard tripped").strip()
+        reason = str(data.get("guard_reason") or data.get("guard_error") or "guard tripped").strip()
+        action = str(data.get("suggested_recovery_action") or "").strip()
+        if action:
+            return f"Guard tripped: {reason} | Recovery: {action}"
         recent_count = data.get("recent_error_count", "?")
-        return f"Guard tripped: {guard_error} (recent errors: {recent_count})"
+        return f"Guard tripped: {reason} (recent errors: {recent_count})"
     if event == "upstream_install_source_invalid_pivot":
         return "Blocked: installer source invalid or unavailable"
     if event == "verifier_loop_detected":

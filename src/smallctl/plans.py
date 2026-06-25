@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .state import ExecutionPlan, PlanStep, LoopState
@@ -29,7 +30,16 @@ def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None)
     ]
     if plan.summary:
         stage_lines.extend(["", "## Plan Summary", plan.summary.strip()])
-    if any([plan.inputs, plan.outputs, plan.constraints, plan.acceptance_criteria, plan.implementation_plan, plan.claim_refs]):
+    if any(
+        [
+            plan.inputs,
+            plan.outputs,
+            plan.constraints,
+            plan.acceptance_criteria,
+            plan.implementation_plan,
+            plan.claim_refs,
+        ]
+    ):
         stage_lines.append("")
         stage_lines.append("## Spec Contract")
         if plan.inputs:
@@ -53,7 +63,9 @@ def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None)
     if plan.requested_output_path:
         stage_lines.extend(["", f"Export target: {plan.requested_output_path}"])
     if state is not None and state.run_brief.original_task:
-        stage_lines.extend(["", "## Original Task", state.run_brief.original_task.strip()])
+        stage_lines.extend(
+            ["", "## Original Task", state.run_brief.original_task.strip()]
+        )
     stage_lines.extend(
         [
             "",
@@ -80,16 +92,29 @@ def render_plan_playbook(plan: ExecutionPlan, *, state: LoopState | None = None)
     return "\n".join(stage_lines).strip() + "\n"
 
 
-def write_plan_file(plan: ExecutionPlan, path: str | Path, *, format: str | None = None) -> str:
-    output_path, normalized_format = resolve_plan_export_target(path, format=format)
+def write_plan_file(
+    plan: ExecutionPlan,
+    path: str | Path,
+    *,
+    format: str | None = None,
+    cwd: str | Path | None = None,
+) -> str:
+    output_path, normalized_format = resolve_plan_export_target(
+        path, format=format, cwd=cwd
+    )
     content = render_plan(plan, format=normalized_format)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content, encoding="utf-8")
     return content
 
 
-def resolve_plan_export_target(path: str | Path, *, format: str | None = None) -> tuple[Path, str]:
-    output_path = Path(path)
+def resolve_plan_export_target(
+    path: str | Path,
+    *,
+    format: str | None = None,
+    cwd: str | Path | None = None,
+) -> tuple[Path, str]:
+    output_path = _resolve_plan_export_path(path, cwd=cwd)
     suffix = output_path.suffix.lower()
 
     if suffix not in _ALLOWED_PLAN_EXPORT_SUFFIXES:
@@ -109,6 +134,34 @@ def resolve_plan_export_target(path: str | Path, *, format: str | None = None) -
     return output_path, normalized_format
 
 
+def _resolve_plan_export_path(
+    path: str | Path, *, cwd: str | Path | None = None
+) -> Path:
+    """Resolve a plan export path relative to cwd and enforce workspace containment.
+
+    Plan exports are documents, not implementation files, so they must stay
+    within the active workspace. Absolute paths and paths that traverse above
+    the workspace are rejected to avoid permission errors (e.g. writing to
+    ``/plan/...``) and unexpected filesystem mutations.
+    """
+    base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+    candidate = Path(os.path.expanduser(str(path)))
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        resolved = (base / candidate).resolve()
+
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(
+            f"Plan export path '{path}' must be relative to the active workspace "
+            f"({base}). Use a workspace-relative path like 'plan.md' or "
+            f"'docs/plan.md'."
+        ) from exc
+    return resolved
+
+
 def _normalize_requested_plan_format(format: str | None) -> str | None:
     normalized = str(format or "").strip().lower()
     if not normalized:
@@ -117,9 +170,7 @@ def _normalize_requested_plan_format(format: str | None) -> str | None:
         return "markdown"
     if normalized in {"text", "txt"}:
         return "text"
-    raise ValueError(
-        "Unsupported plan export format. Use markdown/md or text/txt."
-    )
+    raise ValueError("Unsupported plan export format. Use markdown/md or text/txt.")
 
 
 def _normalize_plan_format(format: str | None) -> str:

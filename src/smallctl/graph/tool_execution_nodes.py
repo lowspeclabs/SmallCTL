@@ -19,10 +19,11 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
 from ..state import json_safe_value
+from ..state_support import safe_scratchpad
 from ..tools.dispatcher import normalize_tool_request
-from ..tools.planning import _refresh_plan_playbook_artifact
-from ..tools.fs import infer_write_session_intent, new_write_session_id
-from ..write_session_fsm import new_write_session, record_write_session_event
+from ..tools.planning import _refresh_plan_playbook_artifact  # noqa: F401
+from ..tools.fs import infer_write_session_intent, new_write_session_id  # noqa: F401
+from ..write_session_fsm import new_write_session, record_write_session_event  # noqa: F401
 from ..client.chunk_parser import format_tool_call_text
 from .display import format_tool_result_display
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
@@ -35,29 +36,29 @@ from .lifecycle_tool_validation import (
     _tool_call_repair_log_only,
 )
 from .tool_call_parser import (
-    _artifact_read_synthesis_hint,
+    _artifact_read_synthesis_hint,  # noqa: F401
     _detect_timeout_recovered_incomplete_tool_call,
     _detect_hallucinated_tool_call,
     _detect_patch_existing_stage_read_contract_violation,
     _detect_repeated_tool_loop,
-    _extract_artifact_id_from_args,
+    _extract_artifact_id_from_args,  # noqa: F401
     _record_tool_attempt,
     _undo_tool_attempt_if_cached,
 )
 from .tool_execution_recovery import handle_repeated_tool_loop
 from .escalation_triggers import _maybe_auto_trigger_escalation_for_same_tool_failures
-from .tool_execution_persistence import persist_tool_results
+from .tool_execution_persistence import persist_tool_results  # noqa: F401
 from ..fama.runtime import _handle_signal
 from ..fama.signals import FamaFailureKind, FamaSignal, current_step
 from .shell_outcomes import (
-    _shell_human_retry_hint,
-    _shell_ssh_retry_hint,
-    _shell_workspace_relative_retry_hint,
+    _shell_human_retry_hint,  # noqa: F401
+    _shell_ssh_retry_hint,  # noqa: F401
+    _shell_workspace_relative_retry_hint,  # noqa: F401
 )
 from .tool_execution_support import (
-    _conversation_message_from_dict,
+    _conversation_message_from_dict,  # noqa: F401
     _get_tool_execution_record,
-    _has_matching_tool_message,
+    _has_matching_tool_message,  # noqa: F401
     _store_tool_execution_record,
     _tool_envelope_from_dict,
 )
@@ -75,6 +76,37 @@ _TOOL_NOT_EXPOSED_REASON_LABELS = {
     "no_background_jobs": "no background jobs",
     "write_session_not_finalizable": "write session not finalizable",
 }
+
+
+async def _emit_tool_result_event(
+    harness: Any,
+    event_handler: Any,
+    pending: PendingToolCall,
+    result: ToolEnvelope,
+    *,
+    replayed: bool = False,
+) -> None:
+    """Emit a single TOOL_RESULT UI event with normalized display metadata."""
+    await harness._emit(
+        event_handler,
+        UIEvent(
+            event_type=UIEventType.TOOL_RESULT,
+            content=json.dumps(json_safe_value(result.to_dict()), ensure_ascii=True),
+            data={
+                "tool_name": pending.tool_name,
+                "tool_call_id": pending.tool_call_id,
+                "success": result.success,
+                "replayed": replayed,
+                "output": json_safe_value(result.output),
+                "error": result.error,
+                "display_text": format_tool_result_display(
+                    tool_name=pending.tool_name,
+                    result=result,
+                    request_text=harness.state.run_brief.original_task,
+                ),
+            },
+        ),
+    )
 
 async def _block_empty_file_write_before_dispatch(
     graph_state: GraphRunState,
@@ -375,8 +407,14 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     state=harness.state,
                     mode=graph_state.run_mode,
                 )
+                scratchpad = safe_scratchpad(harness.state) or {}
+                is_smalltalk_terminal_only = (
+                    graph_state.run_mode == "chat"
+                    and str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip()
+                    == "smalltalk_terminal_only"
+                )
                 retry_scheduled = False
-                if hidden_reason is None:
+                if hidden_reason is None and not is_smalltalk_terminal_only:
                     retry_scheduled = schedule_retry_tool_exposure(
                         harness.state,
                         mode=graph_state.run_mode,
@@ -445,18 +483,15 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         f"{error_message} Use artifact_read(artifact_id='{recovery_artifact_id}') "
                         "for the full fetched body."
                     )
-                result = ToolEnvelope(
-                    success=False,
-                    error=error_message,
-                    metadata={
-                        "reason": "tool_not_exposed_this_turn",
-                        "tool_name": pending.tool_name,
-                        "run_mode": graph_state.run_mode,
-                        "allowed_tools": allowed_tools,
-                        "hidden_reason": hidden_reason,
-                        "retry_scheduled": retry_scheduled,
-                        "recovery_artifact_id": recovery_artifact_id,
-                    },
+                result = ToolEnvelope.make_error(
+                    pending.tool_name,
+                    error_message,
+                    reason="tool_not_exposed_this_turn",
+                    run_mode=graph_state.run_mode,
+                    allowed_tools=allowed_tools,
+                    hidden_reason=hidden_reason,
+                    retry_scheduled=retry_scheduled,
+                    recovery_artifact_id=recovery_artifact_id,
                 )
                 harness._runlog(
                     "tool_blocked_not_exposed",
@@ -474,6 +509,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     tool_call_id=pending.tool_call_id,
                     tool_name=pending.tool_name,
                 )
+
                 _store_tool_execution_record(
                     harness,
                     operation_id=operation_id,
@@ -567,10 +603,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 else:
                     dispatch_fn = getattr(harness, "_dispatch_tool_call", None)
                     if not callable(dispatch_fn):
-                        result = ToolEnvelope(
-                            success=False,
-                            error="Tool dispatcher is unavailable in the current harness context.",
-                            metadata={"tool_name": pending.tool_name, "reason": "dispatcher_unavailable"},
+                        result = ToolEnvelope.make_error(
+                            pending.tool_name,
+                            "Tool dispatcher is unavailable in the current harness context.",
+                            reason="dispatcher_unavailable",
                         )
                         graph_state.last_tool_results.append(
                             ToolExecutionRecord(
@@ -610,24 +646,20 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         metadata={"interceptor_hit": True, "hallucinated_tool": pending.tool_name}
                     )
                 else:
-                    result = ToolEnvelope(
-                        success=False,
-                        error=f"Unknown tool: {pending.tool_name}",
-                        metadata={"tool_name": pending.tool_name}
+                    result = ToolEnvelope.make_error(
+                        pending.tool_name,
+                        f"Unknown tool: {pending.tool_name}",
                     )
             except Exception as exc:
                 elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
-                error_result = ToolEnvelope(
-                    success=False,
-                    error=f"Tool dispatch failed for `{pending.tool_name}`: {exc}",
-                    metadata={
-                        "reason": "tool_dispatch_exception",
-                        "tool_name": pending.tool_name,
-                        "tool_call_id": pending.tool_call_id,
-                        "args": json_safe_value(pending.args),
-                        "elapsed_sec": round(elapsed_sec, 3),
-                        "exception_type": exc.__class__.__name__,
-                    },
+                error_result = ToolEnvelope.make_error(
+                    pending.tool_name,
+                    f"Tool dispatch failed for `{pending.tool_name}`: {exc}",
+                    reason="tool_dispatch_exception",
+                    tool_call_id=pending.tool_call_id,
+                    args=json_safe_value(pending.args),
+                    elapsed_sec=round(elapsed_sec, 3),
+                    exception_type=exc.__class__.__name__,
                 )
                 log_kv(
                     harness.log,
@@ -646,25 +678,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     pending=pending,
                     result=error_result,
                 )
-                await harness._emit(
+                await _emit_tool_result_event(
+                    harness,
                     deps.event_handler,
-                    UIEvent(
-                        event_type=UIEventType.TOOL_RESULT,
-                        content=json.dumps(json_safe_value(error_result.to_dict()), ensure_ascii=True),
-                        data={
-                            "tool_name": pending.tool_name,
-                            "tool_call_id": pending.tool_call_id,
-                            "success": False,
-                            "replayed": False,
-                            "output": None,
-                            "error": error_result.error,
-                            "display_text": format_tool_result_display(
-                                tool_name=pending.tool_name,
-                                result=error_result,
-                                request_text=harness.state.run_brief.original_task,
-                            ),
-                        },
-                    ),
+                    pending,
+                    error_result,
+                    replayed=False,
                 )
                 graph_state.last_tool_results.append(
                     ToolExecutionRecord(
@@ -679,23 +698,20 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 continue
             except asyncio.CancelledError:
                 elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
-                cancelled_result = ToolEnvelope(
-                    success=False,
-                    status="cancelled",
-                    error=(
+                cancelled_result = ToolEnvelope.make_error(
+                    pending.tool_name,
+                    (
                         f"Tool dispatch cancelled while waiting for `{pending.tool_name}` "
                         f"after {elapsed_sec:.1f}s."
                     ),
-                    metadata={
-                        "reason": "tool_dispatch_cancelled",
-                        "tool_name": pending.tool_name,
-                        "tool_call_id": pending.tool_call_id,
-                        "args": json_safe_value(pending.args),
-                        "elapsed_sec": round(elapsed_sec, 3),
-                        "cancellation_source": str(
-                            getattr(harness, "_cancel_source", "") or "cancel_requested"
-                        ),
-                    },
+                    status="cancelled",
+                    reason="tool_dispatch_cancelled",
+                    tool_call_id=pending.tool_call_id,
+                    args=json_safe_value(pending.args),
+                    elapsed_sec=round(elapsed_sec, 3),
+                    cancellation_source=str(
+                        getattr(harness, "_cancel_source", "") or "cancel_requested"
+                    ),
                 )
                 _store_tool_execution_record(
                     harness,
@@ -767,25 +783,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             success=result.success,
             replayed=replayed,
         )
-        await harness._emit(
+        await _emit_tool_result_event(
+            harness,
             deps.event_handler,
-            UIEvent(
-                event_type=UIEventType.TOOL_RESULT,
-                content=json.dumps(json_safe_value(result.to_dict()), ensure_ascii=True),
-                data={
-                    "tool_name": pending.tool_name,
-                    "tool_call_id": pending.tool_call_id,
-                    "success": result.success,
-                    "replayed": replayed,
-                    "output": json_safe_value(result.output),
-                    "error": result.error,
-                    "display_text": format_tool_result_display(
-                        tool_name=pending.tool_name,
-                        result=result,
-                        request_text=harness.state.run_brief.original_task,
-                    ),
-                },
-            ),
+            pending,
+            result,
+            replayed=replayed,
         )
         graph_state.last_tool_results.append(
             ToolExecutionRecord(

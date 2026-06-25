@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sys
@@ -10,7 +9,12 @@ from typing import Any, Awaitable, Callable
 
 from ..guards import is_small_model_name
 from ..logging_utils import log_kv, synthetic_trace_id
-from ..models.events import UIEvent, UIEventType, UIStatusSnapshot, compute_activity_for_event
+from ..models.events import (
+    UIEvent,
+    UIEventType,
+    UIStatusSnapshot,
+    compute_activity_for_event,
+)
 from ..challenge_progress import challenge_progress_report
 from ..remote_scope import (
     has_any_session_ssh_target,
@@ -22,15 +26,11 @@ from ..models.tool_result import ToolEnvelope
 from ..state import (
     LOOP_STATE_SCHEMA_VERSION,
     ExperienceMemory,
-    align_memory_entries,
-    clip_string_list,
-    clip_text_value,
     json_safe_value,
 )
-from ..normalization import dedupe_keep_tail
+from ..state_support import safe_scratchpad
 from ..redaction import redact_sensitive_text
 from ..redaction import redact_sensitive_data
-from ..tools import build_registry
 from ..tools.profiles import (
     MUTATE_PROFILE,
     NETWORK_PROFILE,
@@ -39,12 +39,12 @@ from ..tools.profiles import (
     classify_tool_profiles,
 )
 from ..tools.control_phase_gates import task_involves_interactive_program
-from .task_intent import completion_next_action, extract_intent_state, next_action_for_task
 from .task_classifier_support import task_is_local_ssh_file_target
-from .tool_message_compaction import trim_recent_messages_window
 
 
-def _write_json_file(path: Path, payload: dict[str, Any], *, trailing_newline: bool = False) -> None:
+def _write_json_file(
+    path: Path, payload: dict[str, Any], *, trailing_newline: bool = False
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(redact_sensitive_data(payload), indent=2)
     if trailing_newline:
@@ -54,22 +54,42 @@ def _write_json_file(path: Path, payload: dict[str, Any], *, trailing_newline: b
 
 def _ssh_host_key_failure_causal_chain(state: Any, result: dict[str, Any]) -> str:
     texts: list[str] = []
-    texts.extend(str(item or "") for item in (getattr(state, "recent_errors", []) or []))
-    scratchpad = getattr(state, "scratchpad", None)
-    if isinstance(scratchpad, dict):
+    texts.extend(
+        str(item or "") for item in (getattr(state, "recent_errors", []) or [])
+    )
+    scratchpad = safe_scratchpad(state)
+    if scratchpad is not None:
         latest_blocker = scratchpad.get("_latest_execution_blocker")
         if isinstance(latest_blocker, dict):
-            texts.extend(str(latest_blocker.get(key) or "") for key in ("command", "salient_error", "reason"))
+            texts.extend(
+                str(latest_blocker.get(key) or "")
+                for key in ("command", "salient_error", "reason")
+            )
         recovery_state = scratchpad.get("_ssh_auth_recovery_state")
         if isinstance(recovery_state, dict):
             for record in recovery_state.values():
                 if isinstance(record, dict):
-                    texts.extend(str(record.get(key) or "") for key in ("last_error", "last_error_class", "last_command"))
-    texts.extend(str(result.get(key) or "") for key in ("reason", "message", "last_recent_error"))
+                    texts.extend(
+                        str(record.get(key) or "")
+                        for key in ("last_error", "last_error_class", "last_command")
+                    )
+    texts.extend(
+        str(result.get(key) or "") for key in ("reason", "message", "last_recent_error")
+    )
     combined = "\n".join(texts).lower()
-    if not any(marker in combined for marker in ("host key verification", "remote host identification has changed", "known_hosts")):
+    if not any(
+        marker in combined
+        for marker in (
+            "host key verification",
+            "remote host identification has changed",
+            "known_hosts",
+        )
+    ):
         return ""
-    blocked_recovery = any(marker in combined for marker in ("raw_ssh_shell_blocked", "ssh-keygen", "raw `ssh`"))
+    blocked_recovery = any(
+        marker in combined
+        for marker in ("raw_ssh_shell_blocked", "ssh-keygen", "raw `ssh`")
+    )
     if blocked_recovery:
         return (
             "ssh_exec failed due to host-key mismatch -> correct local ssh-keygen known_hosts recovery was blocked or required approval -> "
@@ -81,14 +101,18 @@ def _ssh_host_key_failure_causal_chain(state: Any, result: dict[str, Any]) -> st
     )
 
 
-def _write_checkpoint_file(path: Path, result: dict[str, Any], state_snapshot: dict[str, Any]) -> None:
-    payload = redact_sensitive_data({
-        "checkpoint_schema_version": 1,
-        "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "result": json_safe_value(result),
-        "state": state_snapshot,
-    })
+def _write_checkpoint_file(
+    path: Path, result: dict[str, Any], state_snapshot: dict[str, Any]
+) -> None:
+    payload = redact_sensitive_data(
+        {
+            "checkpoint_schema_version": 1,
+            "loop_state_schema_version": LOOP_STATE_SCHEMA_VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "result": json_safe_value(result),
+            "state": state_snapshot,
+        }
+    )
     _write_json_file(path, payload)
 
 
@@ -103,16 +127,24 @@ async def _emit(
         return
     scratchpad = getattr(self.state, "scratchpad", None)
     thread_id = str(getattr(self.state, "thread_id", "") or "").strip()
-    task_id = str(self.state.scratchpad.get("_active_task_id") or "").strip() if isinstance(scratchpad, dict) else ""
+    task_id = (
+        str(self.state.scratchpad.get("_active_task_id") or "").strip()
+        if isinstance(scratchpad, dict)
+        else ""
+    )
     if isinstance(scratchpad, dict):
         ledger = scratchpad.setdefault("_ui_event_ledger", [])
         if isinstance(ledger, list):
-            ledger.append({
-                "event_type": str(getattr(event.event_type, "value", event.event_type)),
-                "content": redact_sensitive_text(str(event.content or "")),
-                "trace_id": thread_id or "",
-                "task_id": task_id,
-            })
+            ledger.append(
+                {
+                    "event_type": str(
+                        getattr(event.event_type, "value", event.event_type)
+                    ),
+                    "content": redact_sensitive_text(str(event.content or "")),
+                    "trace_id": thread_id or "",
+                    "task_id": task_id,
+                }
+            )
             if len(ledger) > 80:
                 del ledger[:-80]
     if self.run_logger and hasattr(self.run_logger, "log"):
@@ -129,7 +161,9 @@ async def _emit(
         )
     if event.data.get("is_api_error"):
         if isinstance(scratchpad, dict):
-            scratchpad["_ui_api_error_count"] = int(scratchpad.get("_ui_api_error_count", 0) or 0) + 1
+            scratchpad["_ui_api_error_count"] = (
+                int(scratchpad.get("_ui_api_error_count", 0) or 0) + 1
+            )
     maybe = handler(event)
     if maybe is not None and hasattr(maybe, "__await__"):
         await maybe
@@ -184,16 +218,28 @@ def _task_summary_failed(item: dict[str, Any]) -> bool:
     )
     if status in {"failed", "aborted", "interrupted", "cancelled", "error", "stopped"}:
         return True
-    if status == "completed" and result_status in {"failed", "aborted", "interrupted", "cancelled", "error", "stopped"}:
+    if status == "completed" and result_status in {
+        "failed",
+        "aborted",
+        "interrupted",
+        "cancelled",
+        "error",
+        "stopped",
+    }:
         return True
     if "Guard tripped" in text:
         return True
-    if item.get("deliverable_verified") is False and item.get("diagnostic_only") is False:
+    if (
+        item.get("deliverable_verified") is False
+        and item.get("diagnostic_only") is False
+    ):
         return True
     return False
 
 
-def _session_objective_status(task_summaries: list[dict[str, Any]], latest_status: str) -> dict[str, Any]:
+def _session_objective_status(
+    task_summaries: list[dict[str, Any]], latest_status: str
+) -> dict[str, Any]:
     incomplete_ids: list[str] = []
     has_incomplete_prior = False
     latest_index = len(task_summaries)
@@ -218,17 +264,54 @@ def _session_objective_status(task_summaries: list[dict[str, Any]], latest_statu
     }
 
 
-def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status: str = "") -> dict[str, Any]:
-    task_text = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
-    no_op = task_text in {"hi", "hello", "hey", "thanks", "thank you"} and int(getattr(state, "step_count", 0) or 0) <= 1
-    code_changes = int(challenge_progress.get("code_change_count", 0) or 0) if challenge_progress else 0
-    deliverable_verified = bool(challenge_progress.get("verified_after_last_change")) if challenge_progress else False
+def _run_metric_flags(
+    state: Any, challenge_progress: dict[str, Any], *, status: str = ""
+) -> dict[str, Any]:
+    task_text = (
+        str(getattr(getattr(state, "run_brief", None), "original_task", "") or "")
+        .strip()
+        .lower()
+    )
+    no_op = (
+        task_text in {"hi", "hello", "hey", "thanks", "thank you"}
+        and int(getattr(state, "step_count", 0) or 0) <= 1
+    )
+    code_changes = (
+        int(challenge_progress.get("code_change_count", 0) or 0)
+        if challenge_progress
+        else 0
+    )
+    deliverable_verified = (
+        bool(challenge_progress.get("verified_after_last_change"))
+        if challenge_progress
+        else False
+    )
     task_category = str(challenge_progress.get("task_category") or "").strip().lower()
-    result_success = status in {"completed", "complete", "success", "succeeded", "chat_completed", "chat_success"}
-    if not deliverable_verified and result_success and code_changes <= 0 and challenge_progress:
-        last_verifier_verdict = str(challenge_progress.get("last_verifier_verdict") or "").strip().lower()
-        last_verifier_kind = str(challenge_progress.get("last_verifier_kind") or "").strip().lower()
-        if task_category == "coding" and last_verifier_verdict == "pass" and last_verifier_kind == "test_suite":
+    result_success = status in {
+        "completed",
+        "complete",
+        "success",
+        "succeeded",
+        "chat_completed",
+        "chat_success",
+    }
+    if (
+        not deliverable_verified
+        and result_success
+        and code_changes <= 0
+        and challenge_progress
+    ):
+        last_verifier_verdict = (
+            str(challenge_progress.get("last_verifier_verdict") or "").strip().lower()
+        )
+        last_verifier_kind = (
+            str(challenge_progress.get("last_verifier_kind") or "").strip().lower()
+        )
+        if (
+            task_category == "coding"
+            and last_verifier_verdict == "pass"
+            and last_verifier_kind == "test_suite"
+        ):
             deliverable_verified = True
     # If the run was cancelled, do not claim deliverable_verified=true unless the objective verifier
     # passed after the last failure.
@@ -236,11 +319,16 @@ def _run_metric_flags(state: Any, challenge_progress: dict[str, Any], *, status:
         last_verifier = getattr(state, "last_verifier_verdict", None)
         last_verifier_pass = False
         if isinstance(last_verifier, dict):
-            last_verifier_pass = str(last_verifier.get("verdict") or "").strip().lower() == "pass"
+            last_verifier_pass = (
+                str(last_verifier.get("verdict") or "").strip().lower() == "pass"
+            )
         if not last_verifier_pass:
             deliverable_verified = False
     diagnostic_only = code_changes <= 0 and not deliverable_verified and not no_op
-    if task_category in {"sysadmin", "install", "setup", "deploy", "configure"} and deliverable_verified:
+    if (
+        task_category in {"sysadmin", "install", "setup", "deploy", "configure"}
+        and deliverable_verified
+    ):
         diagnostic_only = False
     return {
         "no_op": no_op,
@@ -290,15 +378,26 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
         result["challenge_progress"] = challenge_progress
     result.update(_run_metric_flags(self.state, challenge_progress, status=status))
     unverified_change_warning = ""
-    terminal_not_success = status not in {"completed", "complete", "success", "succeeded", "chat_completed", "chat_success"}
+    terminal_not_success = status not in {
+        "completed",
+        "complete",
+        "success",
+        "succeeded",
+        "chat_completed",
+        "chat_success",
+    }
     if terminal_not_success and challenge_progress:
         code_changes = int(challenge_progress.get("code_change_count", 0) or 0)
-        verified_after_last_change = bool(challenge_progress.get("verified_after_last_change"))
+        verified_after_last_change = bool(
+            challenge_progress.get("verified_after_last_change")
+        )
         if code_changes > 0 and not verified_after_last_change:
             changed_paths = challenge_progress.get("last_code_change_paths")
             if not isinstance(changed_paths, list):
                 changed_paths = []
-            path_text = ", ".join(str(path) for path in changed_paths[:3] if str(path).strip())
+            path_text = ", ".join(
+                str(path) for path in changed_paths[:3] if str(path).strip()
+            )
             target_text = f" to {path_text}" if path_text else ""
             unverified_change_warning = f"Task ended with status {status or 'unknown'} after modifying files{target_text}. Changes were not verified after the latest edit."
             result["unverified_change_warning"] = unverified_change_warning
@@ -312,11 +411,15 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 if not postmortem_summary:
                     interrupt = result.get("interrupt")
                     if isinstance(interrupt, dict):
-                        postmortem_summary = str(interrupt.get("question") or "").strip()
+                        postmortem_summary = str(
+                            interrupt.get("question") or ""
+                        ).strip()
                 if not postmortem_summary:
                     message = result.get("message")
                     if isinstance(message, dict):
-                        postmortem_summary = str(message.get("question") or message.get("message") or "").strip()
+                        postmortem_summary = str(
+                            message.get("question") or message.get("message") or ""
+                        ).strip()
                     elif isinstance(message, str):
                         postmortem_summary = message.strip()
                 if not postmortem_summary:
@@ -349,8 +452,16 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "final_task_status": status,
                 "total_tool_calls": self.state.step_count,
                 "guard_trips": sum(
-                    1 for e in (getattr(self.state, "recent_errors", []) or [])
-                    if any(marker in str(e) for marker in ("Guard tripped", "file_read_hard_block", "human_resteer"))
+                    1
+                    for e in (getattr(self.state, "recent_errors", []) or [])
+                    if any(
+                        marker in str(e)
+                        for marker in (
+                            "Guard tripped",
+                            "file_read_hard_block",
+                            "human_resteer",
+                        )
+                    )
                 ),
                 "postmortem_summary": postmortem_summary,
                 "primary_blocker": primary_blocker,
@@ -371,13 +482,21 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
             summary_path = self.run_logger.run_dir / "task_summary.json"
             schedule = getattr(self, "_schedule_background_persistence", None)
             if callable(schedule):
-                schedule(_write_json_file, summary_path, summary_payload, trailing_newline=True)
+                schedule(
+                    _write_json_file,
+                    summary_path,
+                    summary_payload,
+                    trailing_newline=True,
+                )
             else:
                 _write_json_file(summary_path, summary_payload, trailing_newline=True)
             session_summary_path = self.run_logger.run_dir / "session_summary.json"
             tasks_dir = self.run_logger.run_dir / "tasks"
             task_summary_paths = (
-                [str(path) for path in sorted(tasks_dir.glob("task-*/task_summary.json"))]
+                [
+                    str(path)
+                    for path in sorted(tasks_dir.glob("task-*/task_summary.json"))
+                ]
                 if tasks_dir.exists()
                 else []
             )
@@ -391,32 +510,52 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                     task_summaries.append(payload)
             if isinstance(task_summary, dict) and task_summary:
                 current_summary = dict(task_summary)
-                current_summary.setdefault("step_count", summary_payload.get("total_tool_calls", 0))
+                current_summary.setdefault(
+                    "step_count", summary_payload.get("total_tool_calls", 0)
+                )
                 current_task_id = str(current_summary.get("task_id") or "").strip()
-                current_summary_path = str(current_summary.get("summary_path") or "").strip()
+                current_summary_path = str(
+                    current_summary.get("summary_path") or ""
+                ).strip()
                 matched_current_summary = False
                 for index, item in enumerate(task_summaries):
                     item_task_id = str(item.get("task_id") or "").strip()
                     item_summary_path = str(item.get("summary_path") or "").strip()
                     if (current_task_id and item_task_id == current_task_id) or (
-                        current_summary_path and item_summary_path == current_summary_path
+                        current_summary_path
+                        and item_summary_path == current_summary_path
                     ):
                         task_summaries[index] = {**item, **current_summary}
                         matched_current_summary = True
                         break
                 if not matched_current_summary:
                     task_summaries.append(current_summary)
-                current_summary_path = str(task_summary.get("summary_path") or "").strip()
-                if current_summary_path and current_summary_path not in task_summary_paths:
+                current_summary_path = str(
+                    task_summary.get("summary_path") or ""
+                ).strip()
+                if (
+                    current_summary_path
+                    and current_summary_path not in task_summary_paths
+                ):
                     task_summary_paths.append(current_summary_path)
                 # Ensure the latest task identity is always reflected, even when
                 # the current task was interrupted/replaced and not yet on disk.
-                summary_payload["latest_task_id"] = current_task_id or summary_payload.get("latest_task_id", "")
-                summary_payload["latest_task_summary_path"] = current_summary_path or summary_payload.get("latest_task_summary_path", "")
+                summary_payload["latest_task_id"] = (
+                    current_task_id or summary_payload.get("latest_task_id", "")
+                )
+                summary_payload["latest_task_summary_path"] = (
+                    current_summary_path
+                    or summary_payload.get("latest_task_summary_path", "")
+                )
             session_total_tool_calls = 0
             for item in task_summaries:
                 try:
-                    session_total_tool_calls += max(0, int(item.get("step_count") or item.get("total_tool_calls") or 0))
+                    session_total_tool_calls += max(
+                        0,
+                        int(
+                            item.get("step_count") or item.get("total_tool_calls") or 0
+                        ),
+                    )
                 except (TypeError, ValueError):
                     continue
             session_guard_trips = 0
@@ -428,7 +567,9 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 if "Guard tripped" in text:
                     session_guard_trips += 1
             prior_task_completed = any(
-                str(item.get("status") or item.get("result_status") or "").strip().lower()
+                str(item.get("status") or item.get("result_status") or "")
+                .strip()
+                .lower()
                 in {"completed", "success", "succeeded"}
                 for item in task_summaries[:-1]
             )
@@ -441,17 +582,21 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 **summary_payload,
                 **session_objective,
                 "final_task_status": status or summary_payload.get("status", ""),
-                "total_tool_calls": session_total_tool_calls or summary_payload.get("total_tool_calls", 0),
-                "guard_trips": session_guard_trips or summary_payload.get("guard_trips", 0),
+                "total_tool_calls": session_total_tool_calls
+                or summary_payload.get("total_tool_calls", 0),
+                "guard_trips": session_guard_trips
+                or summary_payload.get("guard_trips", 0),
                 "task_count": len(task_summary_paths),
                 "task_summary_paths": task_summary_paths,
                 "prior_task_completed": prior_task_completed,
                 "latest_task_cancelled": latest_task_cancelled,
                 "files_changed_after_latest_task_start": bool(
-                    challenge_progress and int(challenge_progress.get("code_change_count", 0) or 0) > 0
+                    challenge_progress
+                    and int(challenge_progress.get("code_change_count", 0) or 0) > 0
                 ),
                 "verification_after_latest_change": bool(
-                    challenge_progress and challenge_progress.get("verified_after_last_change")
+                    challenge_progress
+                    and challenge_progress.get("verified_after_last_change")
                 ),
             }
             run_summary_path = self.run_logger.run_dir / "run_summary.json"
@@ -460,14 +605,30 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
                 "summary_kind": "run",
                 "run_dir": str(self.run_logger.run_dir),
                 "session_summary_path": str(session_summary_path),
-                "latest_task_summary_path": summary_payload.get("latest_task_summary_path", ""),
+                "latest_task_summary_path": summary_payload.get(
+                    "latest_task_summary_path", ""
+                ),
             }
             if callable(schedule):
-                schedule(_write_json_file, session_summary_path, session_summary_payload, trailing_newline=True)
-                schedule(_write_json_file, run_summary_path, run_summary_payload, trailing_newline=True)
+                schedule(
+                    _write_json_file,
+                    session_summary_path,
+                    session_summary_payload,
+                    trailing_newline=True,
+                )
+                schedule(
+                    _write_json_file,
+                    run_summary_path,
+                    run_summary_payload,
+                    trailing_newline=True,
+                )
             else:
-                _write_json_file(session_summary_path, session_summary_payload, trailing_newline=True)
-                _write_json_file(run_summary_path, run_summary_payload, trailing_newline=True)
+                _write_json_file(
+                    session_summary_path, session_summary_payload, trailing_newline=True
+                )
+                _write_json_file(
+                    run_summary_path, run_summary_payload, trailing_newline=True
+                )
         except Exception:
             self.log.exception("failed to write finalization summaries")
 
@@ -483,7 +644,12 @@ def _rewrite_active_plan_export(self: Any) -> None:
     try:
         from ..plans import write_plan_file
 
-        write_plan_file(plan, plan.requested_output_path, format=plan.requested_output_format)
+        write_plan_file(
+            plan,
+            plan.requested_output_path,
+            format=plan.requested_output_format,
+            cwd=getattr(self.state, "cwd", None),
+        )
     except Exception as exc:
         self.log.warning("failed to rewrite active plan export: %s", exc)
 
@@ -509,7 +675,9 @@ def _build_subtask_result(
     request: Any,
     result: dict[str, Any],
 ) -> Any:
-    return self.subtasks.build_subtask_result(child=child, request=request, result=result)
+    return self.subtasks.build_subtask_result(
+        child=child, request=request, result=result
+    )
 
 
 def _persist_checkpoint(self: Any, result: dict[str, Any]) -> None:
@@ -522,7 +690,9 @@ def _persist_checkpoint(self: Any, result: dict[str, Any]) -> None:
     try:
         # Snapshot state on the event loop so the background writer does not
         # serialize the live object while it is being mutated.
-        state_snapshot = self.state.to_dict(artifact_store=getattr(self, "artifact_store", None))
+        state_snapshot = self.state.to_dict(
+            artifact_store=getattr(self, "artifact_store", None)
+        )
         schedule = getattr(self, "_schedule_background_persistence", None)
         if callable(schedule):
             schedule(_write_checkpoint_file, path, result_snapshot, state_snapshot)
@@ -550,13 +720,27 @@ def _failure(
     }
 
 
-def _runlog(self: Any, event: str, message: str, *, level: str = "info", subsystem: str | None = None, **data: Any) -> None:
+def _runlog(
+    self: Any,
+    event: str,
+    message: str,
+    *,
+    level: str = "info",
+    subsystem: str | None = None,
+    **data: Any,
+) -> None:
     if self.run_logger:
         if not self.run_logger.extra_fields.get("trace_id"):
-            self.run_logger.set_trace_id(synthetic_trace_id(self.state, suffix="harness"))
-        self.run_logger.log("harness", event, message, level=level, subsystem=subsystem, **data)
+            self.run_logger.set_trace_id(
+                synthetic_trace_id(self.state, suffix="harness")
+            )
+        self.run_logger.log(
+            "harness", event, message, level=level, subsystem=subsystem, **data
+        )
         if event.startswith("model_"):
-            self.run_logger.log("model_output", event, message, level=level, subsystem=subsystem, **data)
+            self.run_logger.log(
+                "model_output", event, message, level=level, subsystem=subsystem, **data
+            )
 
 
 def _stream_print(text: str) -> None:
@@ -564,7 +748,9 @@ def _stream_print(text: str) -> None:
         print(text, end="", flush=True)
     except UnicodeEncodeError:
         encoding = sys.stdout.encoding or "utf-8"
-        safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        safe = text.encode(encoding, errors="replace").decode(
+            encoding, errors="replace"
+        )
         print(safe, end="", flush=True)
 
 
@@ -601,7 +787,9 @@ async def _build_prompt_messages(
     *,
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
 ) -> list[dict[str, Any]]:
-    return await self.prompt_builder.build_messages(system_prompt, event_handler=event_handler)
+    return await self.prompt_builder.build_messages(
+        system_prompt, event_handler=event_handler
+    )
 
 
 async def _maybe_compact_context(
@@ -657,14 +845,21 @@ def switch_model(self: Any, model: str) -> None:
     config = self.config
     endpoint = str(config.endpoint or getattr(self.client, "base_url", "")).rstrip("/")
     api_key = config.api_key or getattr(self.client, "api_key", None)
-    provider_profile = str(config.provider_profile or getattr(self, "provider_profile", "generic"))
-    resolved_provider_profile = resolve_provider_profile(endpoint, model_name, provider_profile)
+    provider_profile = str(
+        config.provider_profile or getattr(self, "provider_profile", "generic")
+    )
+    resolved_provider_profile = resolve_provider_profile(
+        endpoint, model_name, provider_profile
+    )
 
     self.client = build_client(
         endpoint=endpoint,
         model=model_name,
         api_key=api_key,
-        chat_endpoint=str(config.chat_endpoint or getattr(self.client, "chat_endpoint", "/chat/completions")),
+        chat_endpoint=str(
+            config.chat_endpoint
+            or getattr(self.client, "chat_endpoint", "/chat/completions")
+        ),
         provider_profile=resolved_provider_profile,
         first_token_timeout_sec=config.first_token_timeout_sec,
         runtime_context_probe=bool(config.runtime_context_probe),
@@ -701,11 +896,17 @@ def _record_experience(
     )
 
 
-def _normalize_failure_mode(self: Any, error: Any, *, tool_name: str, success: bool) -> str:
-    return self.memory._normalize_failure_mode(error, tool_name=tool_name, success=success)
+def _normalize_failure_mode(
+    self: Any, error: Any, *, tool_name: str, success: bool
+) -> str:
+    return self.memory._normalize_failure_mode(
+        error, tool_name=tool_name, success=success
+    )
 
 
-def _reinforce_retrieved_experiences(self: Any, *, tool_name: str, success: bool) -> None:
+def _reinforce_retrieved_experiences(
+    self: Any, *, tool_name: str, success: bool
+) -> None:
     self.memory._reinforce_retrieved_experiences(tool_name=tool_name, success=success)
 
 
@@ -721,7 +922,10 @@ def _task_mentions_remote_web_continuation(state: Any, task: str) -> bool:
     text = " ".join(str(task or "").strip().lower().split())
     if not text:
         return False
-    if any(marker in text for marker in ("/home/", " local repo", " in this repo", " locally")):
+    if any(
+        marker in text
+        for marker in ("/home/", " local repo", " in this repo", " locally")
+    ):
         return False
     if any(marker in text for marker in ("/var/www/", "/etc/nginx", "/srv/", "/opt/")):
         return True
@@ -820,7 +1024,9 @@ def _state_signals_interactive_program(state: Any) -> bool:
         return False
 
 
-def _numeric_scratchpad_signal(scratchpad: dict[str, Any], keys: tuple[str, ...]) -> bool:
+def _numeric_scratchpad_signal(
+    scratchpad: dict[str, Any], keys: tuple[str, ...]
+) -> bool:
     for key in keys:
         try:
             if int(scratchpad.get(key, 0) or 0) > 0:
@@ -839,7 +1045,9 @@ def _state_signals_remote_install_recovery(state: Any) -> bool:
     diagnosis = scratchpad.get("_install_source_diagnosis")
     if isinstance(diagnosis, dict):
         if diagnosis.get("public_dns_nxdomain") and diagnosis.get("network_ok"):
-            if _numeric_scratchpad_signal(diagnosis, ("invalid_fetch_count", "resolve_fail_count")):
+            if _numeric_scratchpad_signal(
+                diagnosis, ("invalid_fetch_count", "resolve_fail_count")
+            ):
                 return True
         if diagnosis.get("install_context_resolve_failed"):
             return True
@@ -885,7 +1093,9 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
     else:
         profiles = classify_tool_profiles(task)
         handoff = self.state.scratchpad.get("_last_task_handoff")
-        prior_profiles = handoff.get("active_tool_profiles") if isinstance(handoff, dict) else None
+        prior_profiles = (
+            handoff.get("active_tool_profiles") if isinstance(handoff, dict) else None
+        )
         task_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
         if task_mode == "remote_execute":
             profiles.add(NETWORK_PROFILE)
@@ -899,24 +1109,28 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
         resolved_remote = self.state.scratchpad.get("_resolved_remote_followup")
         if isinstance(resolved_remote, dict) and resolved_remote:
             profiles.add(NETWORK_PROFILE)
-        elif handoff_supports_remote_continuation(self.state) and task_matches_remote_continuation(
-            self.state, task
-        ):
+        elif handoff_supports_remote_continuation(
+            self.state
+        ) and task_matches_remote_continuation(self.state, task):
             profiles.add(NETWORK_PROFILE)
             if isinstance(prior_profiles, list) and NETWORK_PROFILE in prior_profiles:
                 profiles.add(NETWORK_PROFILE)
-        elif has_any_session_ssh_target(self.state) and _task_mentions_remote_web_continuation(
-            self.state, task
-        ):
+        elif has_any_session_ssh_target(
+            self.state
+        ) and _task_mentions_remote_web_continuation(self.state, task):
             profiles.add(NETWORK_PROFILE)
 
         from ..remote_scope import remote_scope_is_active
+
         state_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
-        active_intent = str(getattr(self.state, "active_intent", "") or "").strip().lower()
+        active_intent = (
+            str(getattr(self.state, "active_intent", "") or "").strip().lower()
+        )
         if remote_scope_is_active(self.state) and (
             state_mode == "remote_execute"
             or active_intent == "requested_ssh_exec"
-            or isinstance(resolved_remote, dict) and resolved_remote
+            or isinstance(resolved_remote, dict)
+            and resolved_remote
         ):
             profiles.add(NETWORK_PROFILE)
         if active_intent in {
@@ -933,14 +1147,17 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
         if isinstance(prior_profiles, list) and NETWORK_READ_PROFILE in prior_profiles:
             if (
                 self.state.scratchpad.get("_task_boundary_previous_task")
-                or isinstance(resolved_remote, dict) and resolved_remote
+                or isinstance(resolved_remote, dict)
+                and resolved_remote
                 or task_matches_remote_continuation(self.state, task)
             ):
                 profiles.add(NETWORK_READ_PROFILE)
 
     task_mode = str(getattr(self.state, "task_mode", "") or "").strip().lower()
     if task_mode == "remote_execute":
-        if _looks_like_remote_install_task(task) or _state_signals_remote_install_recovery(self.state):
+        if _looks_like_remote_install_task(
+            task
+        ) or _state_signals_remote_install_recovery(self.state):
             if NETWORK_READ_PROFILE not in profiles:
                 profiles.add(NETWORK_READ_PROFILE)
                 self._runlog(
@@ -950,9 +1167,14 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
                     source="remote_install_recovery_network_read",
                 )
         if _looks_like_remote_install_task(task) and (
-            _looks_like_interactive_remote_installer(task) or _state_signals_interactive_program(self.state)
+            _looks_like_interactive_remote_installer(task)
+            or _state_signals_interactive_program(self.state)
         ):
-            scratchpad = self.state.scratchpad if isinstance(getattr(self.state, "scratchpad", None), dict) else {}
+            scratchpad = (
+                self.state.scratchpad
+                if isinstance(getattr(self.state, "scratchpad", None), dict)
+                else {}
+            )
             if not scratchpad.get("_expose_interactive_session_tools"):
                 scratchpad["_expose_interactive_session_tools"] = True
                 self._runlog(
@@ -984,7 +1206,9 @@ def bind_core_facade(cls: type[Any]) -> None:
     cls._failure = staticmethod(_failure)
     cls._runlog = _runlog
     cls._stream_print = staticmethod(_stream_print)
-    cls._rebuild_messages_after_context_overflow = _rebuild_messages_after_context_overflow
+    cls._rebuild_messages_after_context_overflow = (
+        _rebuild_messages_after_context_overflow
+    )
     cls._build_prompt_messages = _build_prompt_messages
     cls._maybe_compact_context = _maybe_compact_context
     cls._update_working_memory = _update_working_memory

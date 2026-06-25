@@ -20,10 +20,16 @@ _FENCED_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE 
 
 
 def _terminal_completion_suppressed_for_chat(harness: Any) -> bool:
-    """Return True when chat tools were explicitly suppressed for smalltalk."""
+    """Return True when no chat tools were exposed on this turn.
+
+    If terminal tools are exposed (including the smalltalk terminal-only set),
+    prose that looks like a completion may be auto-promoted into task_complete.
+    If nothing was exposed, the model should not be nudged toward terminal
+    completion.
+    """
     state = getattr(harness, "state", None)
     scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
-    return str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip() == "smalltalk_no_tools"
+    return not scratchpad.get("_chat_tools_exposed", True)
 
 
 def working_memory_signals_completion(harness: Any) -> bool:
@@ -94,6 +100,29 @@ def readonly_answer_can_complete(
     )
 
 
+def _extract_task_complete_message_from_inline_json(candidate: str) -> str:
+    """Recover the message from a malformed inline task_complete JSON object.
+
+    Some small models emit inline tool calls such as
+    ``{"name": "task_complete", "arguments": {"message": "..."}}`` but fail
+    to escape internal double quotes inside the message string. Standard JSON
+    parsing rejects this, so this helper extracts the message text with a
+    forgiving regex that anchors on the final ``"}}`` closing sequence.
+    """
+    candidate = str(candidate or "").strip()
+    if not (candidate.startswith("{") and candidate.endswith("}")):
+        return ""
+    lowered = candidate.lower()
+    if "task_complete" not in lowered:
+        return ""
+    if not any(key in candidate for key in ('"name"', '"tool_name"')):
+        return ""
+    match = re.search(r'"message"\s*:\s*"(.*?)"\s*\}\s*\}\s*$', candidate, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
 def raw_terminal_json_completion_message(text: str) -> str:
     candidates = []
     for match in _FENCED_JSON_BLOCK_RE.finditer(text):
@@ -117,6 +146,11 @@ def raw_terminal_json_completion_message(text: str) -> str:
             message = str(value.get("message") or "").strip()
             if message:
                 return message
+    # Fallback for malformed inline JSON emitted by small models.
+    for candidate in candidates:
+        message = _extract_task_complete_message_from_inline_json(candidate)
+        if message:
+            return message
     return ""
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from .normalization import collapse_model_name
 from .repeat_loop_policy import repeated_action_limit
 from .state import LoopState
 from typing import TYPE_CHECKING
@@ -27,8 +28,21 @@ _TRIPLE_ANSWER_META_MAX_WORDS = 20
 _TRIPLE_ANSWER_FUZZY_MIN_LENGTH_RATIO = 0.85
 
 
+def _canonicalize_model_name_for_size(model_name: str | None) -> str:
+    """Normalize a model name so size regexes can see the parameter count.
+
+    Collapses separators and maps Gemma-4 small MoE names like ``gemma-4-e4b``
+    to ``gemma-4b`` so the existing ``\\d+b`` regex recognizes them.
+    """
+    text = collapse_model_name(model_name)
+    if not text:
+        return ""
+    text = re.sub(r"gemma-4-(e2b|e4b)(?=-|$)", "gemma-4b", text)
+    return text
+
+
 def is_small_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
+    normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
         return False
 
@@ -47,7 +61,7 @@ def is_small_model_name(model_name: str | None) -> bool:
 
 
 def is_four_b_or_under_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
+    normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
         return False
 
@@ -63,7 +77,7 @@ def is_four_b_or_under_model_name(model_name: str | None) -> bool:
 
 
 def is_seven_b_or_under_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
+    normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
         return False
 
@@ -79,7 +93,7 @@ def is_seven_b_or_under_model_name(model_name: str | None) -> bool:
 
 
 def is_over_twenty_b_model_name(model_name: str | None) -> bool:
-    normalized = str(model_name or "").strip().lower()
+    normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
         return False
 

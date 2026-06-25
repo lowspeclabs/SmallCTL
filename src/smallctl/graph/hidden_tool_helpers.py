@@ -156,7 +156,11 @@ def _strip_hidden_chat_terminal_completion_calls(
     suppressed_reason = str(
         getattr(harness.state, "scratchpad", {}).get("_chat_tools_suppressed_reason") or ""
     ).strip()
-    if suppressed_reason not in {"non_lookup_chat_terminal_only", "smalltalk_no_tools"}:
+    if suppressed_reason not in {
+        "non_lookup_chat_terminal_only",
+        "smalltalk_no_tools",
+        "smalltalk_terminal_only",
+    }:
         return False
 
     model_calls = [

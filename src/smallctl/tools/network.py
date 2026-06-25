@@ -59,6 +59,7 @@ from .shell_support_curl_guards import _curl_fail_flag_guard
 from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
+    filter_ssh_known_hosts_warning as _filter_ssh_known_hosts_warning,
     ssh_command_is_package_manager_install as _ssh_command_is_package_manager_install,
     ssh_diagnostic_not_found as _ssh_diagnostic_not_found,
     ssh_error_class as _ssh_error_class,
@@ -582,9 +583,10 @@ async def run_ssh_command(
         exit_code: int | None,
         elapsed: float,
     ) -> dict[str, Any]:
-        return build_process_output(
+        filtered_stderr, had_known_hosts_warning = _filter_ssh_known_hosts_warning(stderr)
+        output = build_process_output(
             stdout=stdout,
-            stderr=stderr,
+            stderr=filtered_stderr,
             exit_code=exit_code,
             metrics={
                 "duration_sec": round(elapsed, 3) if isinstance(elapsed, (int, float)) else 0.0,
@@ -592,6 +594,10 @@ async def run_ssh_command(
                 "user": user,
             },
         )
+        if had_known_hosts_warning:
+            metadata = output.setdefault("metadata", {})
+            metadata["ssh_known_hosts_added"] = True
+        return output
 
     async def _run_ssh_process(command_text: str, stdin_payload: str | None = None) -> tuple[dict[str, Any], asyncio.subprocess.Process | None]:
         nonlocal last_process_output

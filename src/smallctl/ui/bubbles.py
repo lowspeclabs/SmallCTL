@@ -44,6 +44,145 @@ KIND_COLOR = {
     "ready": "#eab308",
 }
 
+_LITE_DIM_STYLE = "#9ca3af"
+_LITE_MARKER_STYLE = "bold #9ca3af"
+_LITE_HEADER_STYLE = "bold #ffffff"
+_LITE_CODE_STYLE = "italic #93c5fd"
+_LITE_QUOTE_STYLE = "#9ca3af"
+
+_EMPH_TOKENS_RE = re.compile(r"(\*\*|\*|~~)")
+
+
+def _make_style(styles: set[str]) -> str:
+    return " ".join(sorted(styles))
+
+
+def _style_emphasis(segment: str) -> Text:
+    result = Text()
+    active: set[str] = set()
+    last = 0
+    for match in _EMPH_TOKENS_RE.finditer(segment):
+        result.append(segment[last : match.start()], _make_style(active))
+        token = match.group(0)
+        if token == "**":
+            active.symmetric_difference_update({"bold"})
+        elif token == "*":
+            active.symmetric_difference_update({"italic"})
+        elif token == "~~":
+            active.symmetric_difference_update({"strike"})
+        last = match.end()
+    result.append(segment[last:], _make_style(active))
+    return result
+
+
+def _style_inline(line: str) -> Text:
+    result = Text()
+    parts: list[tuple[bool, str]] = []
+    in_code = False
+    code_run_len = 0
+    last = 0
+    for match in re.finditer(r"`+", line):
+        if not in_code:
+            parts.append((False, line[last : match.start()]))
+            code_run_len = len(match.group(0))
+            in_code = True
+        elif len(match.group(0)) == code_run_len:
+            parts.append((True, line[last : match.start()]))
+            in_code = False
+        last = match.end()
+    if in_code:
+        # Unclosed backtick: treat the whole line as plain text so we don't
+        # accidentally hide the remainder of a long code block while streaming.
+        return Text(line)
+    parts.append((False, line[last:]))
+    for is_code, segment in parts:
+        if is_code:
+            result.append(segment, _LITE_CODE_STYLE)
+        else:
+            result.append(_style_emphasis(segment))
+    return result
+
+
+def _style_line_lite(line: str, in_fence: bool, *, inline: bool = True) -> Text:
+    if in_fence:
+        return Text(line, style=_LITE_DIM_STYLE)
+    stripped = line.lstrip()
+    if stripped.startswith("```"):
+        return Text(line, style=_LITE_DIM_STYLE)
+    if re.fullmatch(r"\s*(?:---+|===+|\*\*\*+|___+)\s*", line):
+        return Text(line, style=_LITE_DIM_STYLE)
+
+    header_match = re.match(r"^(#{1,6})(\s+)(.*)$", line)
+    if header_match:
+        text = Text()
+        text.append(header_match.group(1), _LITE_DIM_STYLE)
+        text.append(header_match.group(2), "")
+        if inline:
+            text.append(_style_inline(header_match.group(3)))
+        else:
+            text.append(header_match.group(3))
+        text.stylize(_LITE_HEADER_STYLE, len(header_match.group(1)) + len(header_match.group(2)), len(line))
+        return text
+
+    bullet_match = re.match(r"^(\s*)[-*+](\s)(.*)$", line)
+    if bullet_match:
+        text = Text()
+        text.append(bullet_match.group(1), "")
+        text.append("•", _LITE_MARKER_STYLE)
+        text.append(bullet_match.group(2), "")
+        if inline:
+            text.append(_style_inline(bullet_match.group(3)))
+        else:
+            text.append(bullet_match.group(3))
+        return text
+
+    number_match = re.match(r"^(\s*)(\d+)\.(\s)(.*)$", line)
+    if number_match:
+        text = Text()
+        text.append(number_match.group(1), "")
+        text.append(number_match.group(2) + ".", _LITE_MARKER_STYLE)
+        text.append(number_match.group(3), "")
+        if inline:
+            text.append(_style_inline(number_match.group(4)))
+        else:
+            text.append(number_match.group(4))
+        return text
+
+    quote_match = re.match(r"^(\s*)>(\s?)(.*)$", line)
+    if quote_match:
+        text = Text()
+        text.append(quote_match.group(1) + ">", _LITE_QUOTE_STYLE)
+        text.append(quote_match.group(2), "")
+        if inline:
+            text.append(_style_inline(quote_match.group(3)))
+        else:
+            text.append(quote_match.group(3))
+        return text
+
+    if inline:
+        return _style_inline(line)
+    return Text(line)
+
+
+def _style_text_lite(text: str) -> Text:
+    result = Text()
+    in_fence = False
+    lines = text.splitlines()
+    ends_with_newline = text.endswith("\n")
+    for index, line in enumerate(lines):
+        is_last_line = index == len(lines) - 1
+        # Only apply inline (emphasis/code) styling to complete lines. The
+        # last line is incomplete if the input does not end with a newline;
+        # styling it while tokens are still arriving causes chunk-boundary
+        # artifacts such as `***CPU` being rendered as bold+italic.
+        inline_ok = not (is_last_line and not ends_with_newline)
+        result.append(_style_line_lite(line, in_fence, inline=inline_ok))
+        if index < len(lines) - 1 or ends_with_newline:
+            result.append("\n", "")
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+    return result
+
 
 def _looks_like_complete_pipe_table(text: str) -> bool:
     lines = [line.rstrip() for line in text.splitlines()]
@@ -53,11 +192,13 @@ def _looks_like_complete_pipe_table(text: str) -> bool:
         if "|" not in header or "|" not in separator:
             continue
         separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
-        if not separator_cells or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells):
+        if not separator_cells or not all(
+            re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells
+        ):
             continue
         expected_cells = len(separator_cells)
         body_count = 0
-        for row in lines[index + 2:]:
+        for row in lines[index + 2 :]:
             stripped = row.strip()
             if not stripped:
                 break
@@ -128,6 +269,13 @@ def _markdown_render_ready(text: str) -> bool:
         return True
     if "```" in text:
         return True
+    # Emphasis / strikethrough spans also benefit from full rendering.
+    if re.search(r"\*\*[^*\n]+\*\*", text):
+        return True
+    if re.search(r"(?<![*\w])\*[^*\n]+\*(?![*\w])", text):
+        return True
+    if re.search(r"~~[^~\n]+~~", text):
+        return True
     return False
 
 
@@ -154,7 +302,9 @@ def _format_full_printout_text(text: str) -> str:
     return "\n".join(f"  {line}" if line else "  " for line in text.splitlines())
 
 
-def _build_full_printout_bubble(*, text: str, artifact_id: str | None) -> "ArtifactBubbleWidget":
+def _build_full_printout_bubble(
+    *, text: str, artifact_id: str | None
+) -> "ArtifactBubbleWidget":
     title = "Full Artifact Contents"
     if artifact_id:
         title += f" ({artifact_id})"
@@ -169,9 +319,13 @@ def _command_status(success: bool | None, *, command_ran: bool = False) -> str:
     return "success"
 
 
-def _set_command_status_class(widget: Widget, success: bool | None, *, command_ran: bool = False) -> None:
+def _set_command_status_class(
+    widget: Widget, success: bool | None, *, command_ran: bool = False
+) -> None:
     status = _command_status(success, command_ran=command_ran)
-    widget.remove_class("tool-status-success", "tool-status-warning", "tool-status-error")
+    widget.remove_class(
+        "tool-status-success", "tool-status-warning", "tool-status-error"
+    )
     widget.add_class(f"tool-status-{status}")
     color_map = {"success": "#16a34a", "warning": "#eab308", "error": "#ef4444"}
     if hasattr(widget, "_title") and widget._title is not None:
@@ -216,13 +370,12 @@ class BubbleWidget(Static):
         content.append(self.text, style=color)
         self.update(content)
 
-
     def get_selection(self, selection: Any) -> Any:
         try:
             return super().get_selection(selection)
         except IndexError:
             # Fallback for wrapped text where UI rows > source lines
-            return ([self.text], "\n") if self.text else None
+            return (self.text, "\n") if self.text else None
 
 
 class TextBlockWidget(Static):
@@ -251,7 +404,9 @@ class TextBlockWidget(Static):
             return
         self.text = value
         self._markdown_finalized = False
-        self._plain_text_renderable = Text(value)
+        self._plain_text_renderable = (
+            _style_text_lite(value) if self.render_markdown else Text(value)
+        )
         self._refresh_content()
 
     def append_text(self, value: str) -> None:
@@ -259,7 +414,9 @@ class TextBlockWidget(Static):
             return
         self.text += value
         self._markdown_finalized = False
-        self._plain_text_renderable.append(value)
+        self._plain_text_renderable = (
+            _style_text_lite(self.text) if self.render_markdown else Text(self.text)
+        )
         self._refresh_content()
 
     def finalize_markdown_render(self) -> None:
@@ -282,9 +439,11 @@ class TextBlockWidget(Static):
                 # Malformed markdown can occasionally crash Rich's parser.
                 # Fall back to plain text so the UI never goes blank.
                 pass
-        # Use a plain Text object to avoid Rich markup parsing on arbitrary model output.
-        # Model responses may contain brackets like [task_complete(...)] that Rich
-        # would try to parse as markup tags, causing 'Expected markup value' crashes.
+        # Prefer cheap, live markdown styling while streaming; fall back to a
+        # plain Text object for non-markdown blocks or malformed content.
+        self._plain_text_renderable = (
+            _style_text_lite(self.text) if self.render_markdown else Text(self.text)
+        )
         self._rendered_content = self._plain_text_renderable
         self.update(self._plain_text_renderable)
 
@@ -293,7 +452,7 @@ class TextBlockWidget(Static):
             return super().get_selection(selection)
         except IndexError:
             # Fallback for wrapped text where UI rows > source lines
-            return ([self.text], "\n") if self.text else None
+            return (self.text, "\n") if self.text else None
 
     def has_content(self) -> bool:
         return bool(self.text.strip())
@@ -311,6 +470,7 @@ class AssistantDetailWidget(Collapsible):
         self._thinking_done_time: float | None = None
         if kind == "thinking":
             import time
+
             self._thinking_start_time = time.monotonic()
         super().__init__(
             self._body_widget,
@@ -343,6 +503,7 @@ class AssistantDetailWidget(Collapsible):
         """Call when thinking is done to show final duration."""
         if self.kind == "thinking" and self._thinking_start_time is not None:
             import time
+
             self._thinking_done_time = time.monotonic()
             new_title = self._build_title(self._text)
             if self.title != new_title:
@@ -365,12 +526,20 @@ class AssistantDetailWidget(Collapsible):
         if len(preview) > self.PREVIEW_LIMIT:
             preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
         preview = markup_escape(preview)
-        return f"[bold {color}]{preview}[/]" if preview else f"[bold {color}]{self.kind.upper()}[/]"
+        return (
+            f"[bold {color}]{preview}[/]"
+            if preview
+            else f"[bold {color}]{self.kind.upper()}[/]"
+        )
 
     def _build_thinking_title(self) -> str:
         import time
+
         color = KIND_COLOR.get("thinking", "#ca8a04")
-        if self._thinking_done_time is not None and self._thinking_start_time is not None:
+        if (
+            self._thinking_done_time is not None
+            and self._thinking_start_time is not None
+        ):
             duration = self._thinking_done_time - self._thinking_start_time
             return f"[bold {color}]Thought: {self._format_duration(duration)}[/]"
         if self._thinking_start_time is not None:
@@ -407,7 +576,7 @@ class ArtifactBubbleWidget(Collapsible):
             title=self._build_title(),
             collapsed=collapsed,
             id=id,
-            classes="bubble bubble-artifact"
+            classes="bubble bubble-artifact",
         )
 
     def _build_title(self) -> str:
@@ -463,7 +632,9 @@ class LiveOutputBubbleWidget(ArtifactBubbleWidget):
         self.title = self._build_title()
 
     def _set_content_color(self) -> None:
-        self._content_widget.styles.color = "#ef4444" if self.success is False else "#16a34a"
+        self._content_widget.styles.color = (
+            "#ef4444" if self.success is False else "#16a34a"
+        )
 
     def _build_title(self) -> str:
         if self.success is False and self.command_ran:
@@ -526,6 +697,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         id: str | None = None,
     ) -> None:
         import time
+
         self.tool_name = tool_name
         self.tool_call_id = tool_call_id
         self._args: dict[str, Any] = dict(args) if args else {}
@@ -536,12 +708,14 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self._start_time: float = time.monotonic()
         self._done_time: float | None = None
         super().__init__(kind="tool_call", text=text, id=id)
-        if self.tool_name == "ssh_exec":
-            self._text = ""
-            self._content_widget.set_text("")
-            self._content_widget.display = False
+        # The collapsible title already shows the tool call signature/status,
+        # so keep the body reserved for nested result widgets and avoid
+        # duplicating the signature below the title.
+        self._content_widget.display = False
         if self.tool_name in {"shell_exec", "ssh_exec"}:
-            _set_command_status_class(self, self._success, command_ran=self._command_ran)
+            _set_command_status_class(
+                self, self._success, command_ran=self._command_ran
+            )
 
     @property
     def has_result(self) -> bool:
@@ -555,6 +729,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             duration_str = f" ({_format_duration(duration)})"
         elif self._start_time is not None:
             import time
+
             elapsed = time.monotonic() - self._start_time
             duration_str = f" ({_format_duration(elapsed)})"
 
@@ -587,6 +762,7 @@ class ToolCallDetailWidget(AssistantDetailWidget):
     def finalize(self) -> None:
         if self._done_time is None:
             import time
+
             self._done_time = time.monotonic()
             self.title = self._build_title(self._text)
             self.refresh(layout=True)
@@ -598,12 +774,22 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                 self.title = new_title
                 self.refresh(layout=True)
 
-    async def add_result(self, text: str, *, tool_name: str | None = None, data: dict[str, Any] | None = None) -> Widget:
+    async def add_result(
+        self,
+        text: str,
+        *,
+        tool_name: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> Widget:
         if tool_name in {"shell_exec", "ssh_exec"}:
             output_dict = None
             if isinstance(data, dict):
                 output_dict = data.get("output")
-            if not isinstance(output_dict, dict) and isinstance(text, str) and text.strip().startswith("{"):
+            if (
+                not isinstance(output_dict, dict)
+                and isinstance(text, str)
+                and text.strip().startswith("{")
+            ):
                 try:
                     parsed = json.loads(text)
                     if isinstance(parsed, dict) and "output" in parsed:
@@ -611,11 +797,19 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                 except Exception:
                     pass
 
-            exit_code = output_dict.get("exit_code") if isinstance(output_dict, dict) else None
-            self._success = bool(data.get("success")) if isinstance(data, dict) else None
+            exit_code = (
+                output_dict.get("exit_code") if isinstance(output_dict, dict) else None
+            )
+            self._success = (
+                bool(data.get("success")) if isinstance(data, dict) else None
+            )
             self._command_ran = self._success is False and exit_code is not None
-            _set_command_status_class(self, self._success, command_ran=self._command_ran)
-            command = self._args.get("command") if isinstance(self._args, dict) else None
+            _set_command_status_class(
+                self, self._success, command_ran=self._command_ran
+            )
+            command = (
+                self._args.get("command") if isinstance(self._args, dict) else None
+            )
             live_bubble = await self.get_or_create_live_output_bubble(
                 command=command,
                 tool_name=tool_name,
@@ -641,17 +835,21 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                 clean_text = text
                 if isinstance(text, str) and "--- [PROGRESS] ---" in text:
                     parts = text.split("\n\n")
-                    non_progress_parts = [p for p in parts if not p.startswith("--- [PROGRESS] ---")]
+                    non_progress_parts = [
+                        p for p in parts if not p.startswith("--- [PROGRESS] ---")
+                    ]
                     clean_text = "\n\n".join(non_progress_parts)
-                
+
                 if current and clean_text.startswith(current.rstrip("\n")):
-                    suffix = clean_text[len(current.rstrip("\n")):]
+                    suffix = clean_text[len(current.rstrip("\n")) :]
                     if suffix:
                         live_bubble.append_text(suffix)
                 elif not current:
                     live_bubble.append_text(text)
                 else:
-                    exit_code_match = re.search(r"--- \[EXIT CODE: \d+\] ---", clean_text)
+                    exit_code_match = re.search(
+                        r"--- \[EXIT CODE: \d+\] ---", clean_text
+                    )
                     if exit_code_match and "EXIT CODE" not in current:
                         live_bubble.append_text(f"\n\n{exit_code_match.group(0)}")
 
@@ -663,23 +861,42 @@ class ToolCallDetailWidget(AssistantDetailWidget):
 
         data = data or {}
         artifact_id = data.get("artifact_id")
+        output_dict = data.get("output") if isinstance(data, dict) else None
+        if not isinstance(output_dict, dict):
+            output_dict = None
+        if not artifact_id and isinstance(output_dict, dict):
+            artifact_id = output_dict.get("artifact_id") or output_dict.get(
+                "body_artifact_id"
+            )
 
         # If it's a known artifact-generating tool or has an artifact_id, use the new bubble
         # Otherwise fall back to the standard detail block
-        if artifact_id or tool_name in {"file_read", "shell_exec", "artifact_read", "grep", "yaml_read"}:
+        if artifact_id or tool_name in {
+            "file_read",
+            "shell_exec",
+            "artifact_read",
+            "grep",
+            "yaml_read",
+            "web_search",
+            "web_fetch",
+        }:
             title = "File Content" if tool_name == "file_read" else "Command Output"
             if tool_name == "grep":
                 title = "Grep Matches"
+            elif tool_name == "web_search":
+                title = "Web Search Results"
+            elif tool_name == "web_fetch":
+                title = "Web Fetch Result"
             if artifact_id:
                 title += f" ({artifact_id})"
 
             path = data.get("source") or data.get("command") or data.get("path")
+            if not path and tool_name == "web_fetch" and isinstance(output_dict, dict):
+                path = output_dict.get("url") or output_dict.get("canonical_url")
+            if not path and tool_name == "web_search" and isinstance(self._args, dict):
+                path = self._args.get("query")
 
-            bubble = ArtifactBubbleWidget(
-                title=title,
-                path=path,
-                text=text
-            )
+            bubble = ArtifactBubbleWidget(title=title, path=path, text=text)
             bubble.add_class("assistant-detail-nested")
             await self.add_child_widget(bubble)
             self._result_widgets.append(bubble)
@@ -695,18 +912,15 @@ class ToolCallDetailWidget(AssistantDetailWidget):
         self.finalize()
         return detail
 
-    async def get_or_create_artifact_bubble(self, title: str, *, path: str | None = None) -> ArtifactBubbleWidget:
+    async def get_or_create_artifact_bubble(
+        self, title: str, *, path: str | None = None
+    ) -> ArtifactBubbleWidget:
         for w in self._result_widgets:
             if isinstance(w, ArtifactBubbleWidget) and w._title_base == title:
                 return w
 
         # Create a new one if not found
-        bubble = ArtifactBubbleWidget(
-            title=title,
-            path=path,
-            text="",
-            collapsed=True
-        )
+        bubble = ArtifactBubbleWidget(title=title, path=path, text="", collapsed=True)
         bubble.add_class("assistant-detail-nested")
         await self.add_child_widget(bubble)
         self._result_widgets.append(bubble)
@@ -731,14 +945,18 @@ class ToolCallDetailWidget(AssistantDetailWidget):
                     w.set_success(success, command_ran=command_ran)
                 return w
 
-        bubble = LiveOutputBubbleWidget(text="", command=command, tool_name=tool_name, success=success)
+        bubble = LiveOutputBubbleWidget(
+            text="", command=command, tool_name=tool_name, success=success
+        )
         bubble.set_success(success, command_ran=command_ran)
         bubble.add_class("assistant-detail-nested")
         await self.add_child_widget(bubble)
         self._result_widgets.append(bubble)
         return bubble
 
-    async def attach_or_queue_full_printout(self, text: str, *, artifact_id: str | None) -> None:
+    async def attach_or_queue_full_printout(
+        self, text: str, *, artifact_id: str | None
+    ) -> None:
         bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
         bubble.add_class("assistant-detail-nested")
         if self._result_widgets:
@@ -758,10 +976,12 @@ class ToolCallDetailWidget(AssistantDetailWidget):
             return
         await self.add_child_widget(bubble)
 
+
 class ToolCallsContainerWidget(Collapsible):
     def __init__(self, *, id: str | None = None) -> None:
         self._body_widget = Vertical(classes="tool-calls-container")
         import time
+
         self._start_time: float = time.monotonic()
         self._done_time: float | None = None
         super().__init__(
@@ -769,7 +989,7 @@ class ToolCallsContainerWidget(Collapsible):
             title=self._build_title(),
             collapsed=True,
             id=id,
-            classes="assistant-detail assistant-detail-tool_call bubble bubble-tool_call"
+            classes="assistant-detail assistant-detail-tool_call bubble bubble-tool_call",
         )
 
     def _build_title(self) -> str:
@@ -777,12 +997,14 @@ class ToolCallsContainerWidget(Collapsible):
             duration = self._done_time - self._start_time
             return f"[bold #16a34a]🛠️ Tool Calls ({_format_duration(duration)})[/]"
         import time
+
         elapsed = time.monotonic() - self._start_time
         return f"[bold #16a34a]🛠️ Tool Calls ({_format_duration(elapsed)})[/]"
 
     def finalize(self) -> None:
         if self._done_time is None:
             import time
+
             self._done_time = time.monotonic()
             self.title = self._build_title()
             self.refresh(layout=True)
@@ -806,7 +1028,7 @@ class LiveOutputContainerWidget(Collapsible):
             title="[bold #0891b2]Live Output[/]",
             collapsed=False,
             id=id,
-            classes="assistant-detail assistant-detail-liveoutput bubble bubble-liveoutput"
+            classes="assistant-detail assistant-detail-liveoutput bubble bubble-liveoutput",
         )
 
     async def add_stream_bubble(self, bubble: ArtifactBubbleWidget) -> None:
@@ -818,7 +1040,9 @@ class AssistantTurnWidget(Vertical):
         super().__init__(id=id, classes="assistant-turn bubble bubble-assistant")
         self.styles.height = "auto"
         self._speaker = _coerce_speaker(speaker)
-        self._label_widget = Static(self._build_label_text(), classes="assistant-turn-label")
+        self._label_widget = Static(
+            self._build_label_text(), classes="assistant-turn-label"
+        )
         self._body_widget = Vertical(classes="assistant-turn-body")
         self._body_widget.styles.height = "auto"
         self._content_widget = Vertical(classes="assistant-turn-content")
@@ -834,7 +1058,9 @@ class AssistantTurnWidget(Vertical):
     def has_assistant_text(self) -> bool:
         try:
             return any(
-                isinstance(child, TextBlockWidget) and child.display and child.has_content()
+                isinstance(child, TextBlockWidget)
+                and child.display
+                and child.has_content()
                 for child in self._content_body().children
             )
         except Exception:
@@ -859,7 +1085,9 @@ class AssistantTurnWidget(Vertical):
     async def add_meta_widget(self, widget: Widget) -> None:
         await self._content_widget.mount(widget)
 
-    async def set_task_checklist(self, text: str, *, title: str = "📋 Task Checklist") -> None:
+    async def set_task_checklist(
+        self, text: str, *, title: str = "📋 Task Checklist"
+    ) -> None:
         if self._task_checklist_widget is None:
             self._task_checklist_widget = TaskChecklistWidget(title=title, text=text)
             await self._content_widget.mount(self._task_checklist_widget)
@@ -946,9 +1174,16 @@ class AssistantTurnWidget(Vertical):
                     continue
                 if isinstance(child, TextBlockWidget) and child.has_content():
                     return True
-                if isinstance(child, (AssistantDetailWidget, ToolCallsContainerWidget,
-                                      ArtifactBubbleWidget, LiveOutputContainerWidget,
-                                      TaskChecklistWidget)):
+                if isinstance(
+                    child,
+                    (
+                        AssistantDetailWidget,
+                        ToolCallsContainerWidget,
+                        ArtifactBubbleWidget,
+                        LiveOutputContainerWidget,
+                        TaskChecklistWidget,
+                    ),
+                ):
                     return True
         except Exception:
             pass
@@ -961,7 +1196,10 @@ class AssistantTurnWidget(Vertical):
         if block is None:
             return
         cleaned = _trim_leading_blank_lines(text)
-        if cleaned.strip() == "[Previous assistant output was halted because it entered a repetition loop.]":
+        if (
+            cleaned.strip()
+            == "[Previous assistant output was halted because it entered a repetition loop.]"
+        ):
             cleaned = ""
         if not cleaned.strip():
             block.set_text("")
@@ -986,7 +1224,9 @@ class AssistantTurnWidget(Vertical):
                 break
 
         if target_detail is not None:
-            await target_detail.attach_or_queue_full_printout(text, artifact_id=artifact_id)
+            await target_detail.attach_or_queue_full_printout(
+                text, artifact_id=artifact_id
+            )
         else:
             bubble = _build_full_printout_bubble(text=text, artifact_id=artifact_id)
             bubble.add_class("assistant-detail-nested")
@@ -1038,7 +1278,9 @@ class AssistantTurnWidget(Vertical):
         if not text:
             return
 
-        detail = self._match_tool_call_detail(tool_name=tool_name, tool_call_id=tool_call_id)
+        detail = self._match_tool_call_detail(
+            tool_name=tool_name, tool_call_id=tool_call_id
+        )
         if detail is not None:
             bubble = await detail.get_or_create_live_output_bubble()
             bubble.append_text(text)
@@ -1086,7 +1328,9 @@ class AssistantTurnWidget(Vertical):
         tool_call_id: str | None = None,
         args: dict[str, Any] | None = None,
     ) -> ToolCallDetailWidget:
-        detail = ToolCallDetailWidget(text=text, tool_name=tool_name, tool_call_id=tool_call_id, args=args)
+        detail = ToolCallDetailWidget(
+            text=text, tool_name=tool_name, tool_call_id=tool_call_id, args=args
+        )
         container = self._current_tool_calls_container
         if container is None:
             container = ToolCallsContainerWidget()
@@ -1106,7 +1350,9 @@ class AssistantTurnWidget(Vertical):
         if bubble is None:
             return
         if isinstance(bubble, LiveOutputBubbleWidget):
-            command = detail._args.get("command") if isinstance(detail._args, dict) else None
+            command = (
+                detail._args.get("command") if isinstance(detail._args, dict) else None
+            )
             bubble.tool_name = detail.tool_name
             bubble.set_command(command)
             bubble.title = bubble._build_title()
@@ -1137,13 +1383,33 @@ class AssistantTurnWidget(Vertical):
         tool_call_id: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> bool:
-        detail = self._match_tool_call_detail(tool_name=tool_name, tool_call_id=tool_call_id)
+        detail = self._match_tool_call_detail(
+            tool_name=tool_name, tool_call_id=tool_call_id
+        )
         if detail is None:
             return False
         await detail.add_result(text, tool_name=tool_name, data=data)
         self._last_assistant_block = None
         self._last_thinking_detail = None
         return True
+
+    def find_tool_call_detail(
+        self,
+        *,
+        tool_name: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> ToolCallDetailWidget | None:
+        if not self._tool_call_details:
+            return None
+        if tool_call_id:
+            for detail in self._tool_call_details:
+                if detail.tool_call_id == tool_call_id:
+                    return detail
+        if tool_name:
+            for detail in self._tool_call_details:
+                if detail.tool_name == tool_name:
+                    return detail
+        return None
 
     def _match_tool_call_detail(
         self,

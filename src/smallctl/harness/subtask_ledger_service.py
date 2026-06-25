@@ -6,6 +6,7 @@ from typing import Any
 
 from ..recovery_metrics import increment_metric
 from ..recovery_schema import FailureEvent, Subtask, SubtaskLedger
+from ..logging_utils import runlog
 
 
 class SubtaskLedgerService:
@@ -397,30 +398,28 @@ def _status_from_plan_status(status: str) -> str:
 
 
 def _runlog(harness: Any, event: str, *, subtask: Subtask | None = None, count: int = 0) -> None:
-    runlog = getattr(harness, "_runlog", None)
-    if callable(runlog):
-        runlog(
-            event,
-            "Subtask ledger updated",
-            subtask_id=getattr(subtask, "subtask_id", ""),
-            title=getattr(subtask, "title", ""),
-            count=count,
-        )
+    runlog(
+        harness,
+        event,
+        "Subtask ledger updated",
+        subtask_id=getattr(subtask, "subtask_id", ""),
+        title=getattr(subtask, "title", ""),
+        count=count,
+    )
 
 
 def _log_transition(harness: Any, subtask: Subtask, old_status: str, new_status: str, *, reason: str = "") -> None:
     if old_status == new_status:
         return
-    runlog = getattr(harness, "_runlog", None)
-    if callable(runlog):
-        runlog(
-            "subtask_transition",
-            f"Subtask {subtask.subtask_id} {old_status} -> {new_status}",
-            subtask_id=subtask.subtask_id,
-            title=subtask.title,
-            old_status=old_status,
-            new_status=new_status,
-            reason=reason,
-            attempts=subtask.attempts,
-            blockers=subtask.blockers[-3:],
-        )
+    runlog(
+        harness,
+        "subtask_transition",
+        f"Subtask {subtask.subtask_id} {old_status} -> {new_status}",
+        subtask_id=subtask.subtask_id,
+        title=subtask.title,
+        old_status=old_status,
+        new_status=new_status,
+        reason=reason,
+        attempts=subtask.attempts,
+        blockers=subtask.blockers[-3:],
+    )

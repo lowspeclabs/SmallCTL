@@ -13,10 +13,12 @@ from textual.widgets import Button, Static
 from ..chat_sessions import load_chat_session_state, load_chat_session_summaries, load_chat_session_ui_transcript
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
+from ..provider_profiles import supported_provider_profiles
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
 from .console import ConsolePane
 from .display import _build_backend_rca_strip, format_tool_call_for_display
-from .model_selector import ModelSelectScreen
+from .model_selector import ModelSelectScreen, ProviderSelectButton, ProviderSelectScreen
+from .statusbar import StatusBar
 
 
 def _restored_speaker_data(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -89,12 +91,35 @@ class SmallctlAppActionsMixin:
             self.harness.cancel(source="ui_stop_button")
         active_task = self.active_task
         if active_task is not None and not active_task.done():
-            await asyncio.sleep(0.05)
-            if active_task is not self.active_task or active_task.done():
-                active_task = self.active_task
-            if active_task is not None and not active_task.done():
-                active_task.cancel()
-                log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")
+            current = asyncio.current_task()
+            is_cancelling = bool(
+                callable(getattr(active_task, "cancelling", None))
+                and active_task.cancelling()
+            )
+            if active_task is current or is_cancelling:
+                log_kv(
+                    self._app_logger,
+                    logging.WARNING,
+                    "ui_cancel_skipped_self_or_cancelling",
+                    task_id=id(active_task),
+                    task_name=getattr(active_task, "get_name", lambda: "?")(),
+                )
+            else:
+                await asyncio.sleep(0.05)
+                if active_task is not self.active_task or active_task.done():
+                    active_task = self.active_task
+                if active_task is not None and not active_task.done():
+                    try:
+                        active_task.cancel()
+                        log_kv(self._app_logger, logging.INFO, "ui_task_cancelled")
+                    except RecursionError:
+                        log_kv(
+                            self._app_logger,
+                            logging.ERROR,
+                            "ui_cancel_recursion_error",
+                            task_id=id(active_task),
+                            task_name=getattr(active_task, "get_name", lambda: "?")(),
+                        )
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Active task cancelled.")
@@ -158,6 +183,12 @@ class SmallctlAppActionsMixin:
                 self.query_one(selector, Button).label = label
             except Exception:
                 pass
+        try:
+            for bar in self.query(StatusBar):
+                bar._refresh_display()
+                bar.refresh(layout=True)
+        except Exception:
+            pass
 
     async def action_open_model_selector(self) -> None:
         if self.active_task and not self.active_task.done():
@@ -209,6 +240,9 @@ class SmallctlAppActionsMixin:
     async def _handle_chat_menu_result(self, choice: str | None) -> None:
         if choice == "new":
             await self.action_new_conversation()
+            return
+        if choice == "provider":
+            await self.action_open_provider_selector()
             return
         if choice != "resume":
             return
@@ -446,6 +480,74 @@ class SmallctlAppActionsMixin:
         await self._switch_model(selected)
         await self._append_system_line(f"Model switched to {selected}.", force=True)
 
+    async def action_open_provider_selector(self) -> None:
+        if self.active_task and not self.active_task.done():
+            message = "Provider can be changed after the active task finishes."
+            self.notify(message, title="Provider Selector", timeout=2.5, markup=False)
+            await self._append_system_line(message, force=True)
+            return
+
+        harness = self.harness
+        client = getattr(harness, "client", None)
+        current_profile = str(
+            getattr(client, "provider_profile", None)
+            or getattr(harness, "provider_profile", None)
+            or self.harness_config.provider_profile
+            or "auto"
+        ).strip()
+        current_endpoint = str(
+            getattr(client, "base_url", None) or self.harness_config.endpoint or ""
+        ).strip()
+        current_api_key = getattr(client, "api_key", None) or self.harness_config.api_key
+
+        profiles = supported_provider_profiles()
+        screen = ProviderSelectScreen(
+            profiles=profiles,
+            current_profile=current_profile,
+            current_endpoint=current_endpoint,
+            current_api_key=current_api_key,
+        )
+        await self.push_screen(
+            screen,
+            callback=lambda choice: asyncio.create_task(
+                self._handle_provider_selection_result(choice)
+            ),
+        )
+
+    async def _handle_provider_selection_result(self, choice: dict[str, str] | None) -> None:
+        if not choice:
+            return
+        profile = str(choice.get("profile") or "").strip()
+        endpoint = str(choice.get("endpoint") or "").strip()
+        api_key = str(choice.get("api_key") or "").strip() or None
+        if not profile:
+            return
+
+        self.harness_config.provider_profile = profile
+        if endpoint:
+            self.harness_config.endpoint = endpoint
+        if api_key is not None:
+            self.harness_config.api_key = api_key
+
+        harness = self.harness
+        if harness is not None:
+            old_state = harness.state
+            await self._shutdown_harness()
+            await self._create_harness()
+            if self.harness is not None:
+                self.harness.state = old_state
+                self.harness.state.scratchpad["_provider_profile"] = profile
+                if endpoint:
+                    self.harness.state.scratchpad["_provider_endpoint"] = endpoint
+                self.harness._sync_run_logger_session_id()
+        await self._append_system_line(
+            f"Provider switched to {profile}" + (f" at {endpoint}" if endpoint else "."),
+            force=True,
+        )
+        self._capture_status_snapshot_from_harness()
+        self._refresh_status()
+        await self.action_open_model_selector()
+
     async def action_interrupt_or_quit(self) -> None:
         if self.active_task and not self.active_task.done():
             await self.action_cancel_task()
@@ -536,6 +638,12 @@ class SmallctlAppActionsMixin:
             f"Tool calls {'ON' if self._show_tool_calls else 'OFF'}.",
             force=True,
         )
+        active_task = getattr(self, "active_task", None)
+        if active_task is not None and not active_task.done():
+            return
+        if getattr(self, "harness", None) is None:
+            return
+        await self._render_restored_chat()
 
     def _scroll_console(self, delta: int) -> None:
         console = self._get_console()

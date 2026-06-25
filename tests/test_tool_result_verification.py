@@ -702,3 +702,75 @@ def test_stagnation_nudge_uses_latest_noninteractive_blocker() -> None:
 
     assert 'The account "fogproject" already exists' in nudge
     assert "Do not keep applying stale interactive-prompt/stdin advice" in nudge
+
+
+def test_diagnostic_health_analysis_task_is_classified_as_diagnostic() -> None:
+    from smallctl.diagnostic_tasks import diagnostic_failure_task
+
+    state = LoopState()
+    state.run_brief.original_task = (
+        "ssh root@192.168.1.89 and perform Task 1: System Health & Resource Analysis. "
+        "The server is reported as slow. Determine current CPU, memory, and disk utilization."
+    )
+
+    assert diagnostic_failure_task(state) is True
+
+
+def test_diagnostic_task_failed_probe_does_not_enter_repair_phase() -> None:
+    """Pure diagnostic tasks should not enter repair phase when a probe fails."""
+    state = LoopState()
+    state.run_brief.original_task = (
+        "System Health & Resource Analysis: determine CPU, memory, and disk utilization on 192.168.1.89"
+    )
+    failed = ToolEnvelope(
+        success=False,
+        output={"exit_code": 2, "stdout": "", "stderr": "bash: syntax error"},
+        error="Remote SSH command exited with code 2",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=failed,
+        arguments={"host": "192.168.1.89", "command": "uptime && vmstat 1 5"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert state.repair_cycle_id == ""
+    assert state.scratchpad.get("_contract_phase") != "repair"
+
+
+def test_diagnostic_task_later_probe_overwrites_failed_diagnostic_verifier() -> None:
+    """A different successful diagnostic probe should not be rejected as 'insufficient'."""
+    state = LoopState()
+    state.run_brief.original_task = (
+        "System Health & Resource Analysis: determine CPU, memory, and disk utilization on 192.168.1.89"
+    )
+    failed = ToolEnvelope(
+        success=False,
+        output={"exit_code": 2, "stdout": "", "stderr": "bash: syntax error"},
+        error="Remote SSH command exited with code 2",
+    )
+    _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=failed,
+        arguments={"host": "192.168.1.89", "command": "uptime && vmstat 1 5"},
+    )
+
+    success = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": " 20:14:55 up 51 days\n", "stderr": ""},
+    )
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=success,
+        arguments={"host": "192.168.1.89", "command": "free -h"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict.get("insufficient_verifier") is not True
+    assert state.repair_cycle_id == ""

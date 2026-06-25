@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from ..guards import is_seven_b_or_under_model_name
@@ -87,6 +88,91 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
         raw_task=task,
         resolved_task=resolved_task[:80] if resolved_task else "",
     )
+
+
+_MAX_GUARD_TRIP_RESTEER_ATTEMPTS = 3
+
+
+def _is_guard_trip_recovery_continuation(harness: Any) -> bool:
+    recent_errors = getattr(harness.state, "recent_errors", None) or []
+    if any("Guard tripped:" in str(item or "") for item in recent_errors[-6:]):
+        return True
+    scratchpad = getattr(harness.state, "scratchpad", {}) or {}
+    if scratchpad.get("_guard_trip_recovery_capsule") or scratchpad.get("_continued_after_guard_trip"):
+        return True
+    return False
+
+
+def _apply_guard_trip_resteer_or_escalate(
+    harness: Any,
+    graph_state: GraphRunState,
+    *,
+    task: str,
+    resolved_task: str,
+) -> bool:
+    """Limit automatic guard-trip resteers before escalating to ask_human.
+
+    Returns True if the task should continue normally, and False if escalation
+    to ask_human was set.
+    """
+    is_guard_recovery = _is_guard_trip_recovery_continuation(harness)
+    if not is_guard_recovery:
+        _apply_continue_task_state_reset(harness, task=task, resolved_task=resolved_task)
+        return True
+
+    scratchpad = harness.state.scratchpad
+    counter = scratchpad.setdefault("_guard_trip_resteer_count", 0)
+    if not isinstance(counter, int):
+        counter = 0
+    counter += 1
+    scratchpad["_guard_trip_resteer_count"] = counter
+
+    if counter <= _MAX_GUARD_TRIP_RESTEER_ATTEMPTS:
+        harness._runlog(
+            "guard_trip_resteer_count",
+            "guard-trip automatic resteer allowed",
+            attempt=counter,
+            max_attempts=_MAX_GUARD_TRIP_RESTEER_ATTEMPTS,
+        )
+        _apply_continue_task_state_reset(harness, task=task, resolved_task=resolved_task)
+        return True
+
+    # Escalate to ask_human instead of allowing another automatic resteer.
+    question = (
+        f"The task has hit the guard-trip limit after {counter} automatic recovery attempts. "
+        "Please provide a concrete next step or clarification to continue."
+    )
+    payload = {
+        "kind": "ask_human",
+        "question": question,
+        "current_phase": getattr(harness.state, "current_phase", ""),
+        "active_profiles": list(getattr(harness.state, "active_tool_profiles", []) or []),
+        "thread_id": getattr(graph_state, "thread_id", "") or getattr(harness.state, "thread_id", ""),
+        "created_at": time.time(),
+        "escalation_reason": "guard_trip_resteer_limit_exceeded",
+        "resteer_count": counter,
+    }
+    harness.state.pending_interrupt = payload
+    graph_state.pending_interrupt = payload
+    graph_state.interrupt_payload = payload
+    graph_state.final_result = harness._failure(
+        question,
+        error_type="guard",
+        details={
+            "escalation_reason": "guard_trip_resteer_limit_exceeded",
+            "resteer_count": counter,
+            "max_attempts": _MAX_GUARD_TRIP_RESTEER_ATTEMPTS,
+        },
+    )
+    graph_state.error = graph_state.final_result.get("error") if isinstance(graph_state.final_result, dict) else None
+    harness._runlog(
+        "guard_trip_resteer_limit_exceeded",
+        "guard-trip automatic resteer limit exceeded; escalating to ask_human",
+        resteer_count=counter,
+        max_attempts=_MAX_GUARD_TRIP_RESTEER_ATTEMPTS,
+        question=question,
+    )
+    return False
 
 
 def _resolve_followup_task(harness: Any, task: str) -> tuple[str, bool]:

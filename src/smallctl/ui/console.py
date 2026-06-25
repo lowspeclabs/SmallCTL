@@ -255,6 +255,15 @@ class ConsolePane(VerticalScroll):
             return None
         return None
 
+    def _all_assistant_turns(self) -> list[AssistantTurnWidget]:
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+            return [
+                child for child in stack.children if isinstance(child, AssistantTurnWidget)
+            ]
+        except Exception:
+            return []
+
     async def _append_full_printout(self, text: str, *, artifact_id: str | None) -> None:
         turn = await self._ensure_assistant_turn()
         await turn.add_full_printout(text, artifact_id=artifact_id)
@@ -296,15 +305,29 @@ class ConsolePane(VerticalScroll):
         tool_call_id: str | None,
         data: dict[str, Any] | None = None,
     ) -> bool:
-        if self._active_assistant_turn is None:
-            return False
-        nested = await self._active_assistant_turn.add_tool_result(
-            text,
-            tool_name=tool_name,
-            tool_call_id=tool_call_id,
-            data=data,
-        )
-        return nested
+        turn = self._active_assistant_turn
+        if turn is not None and turn.find_tool_call_detail(
+            tool_name=tool_name, tool_call_id=tool_call_id
+        ):
+            await turn.add_tool_result(
+                text,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                data=data,
+            )
+            return True
+        for turn in reversed(self._all_assistant_turns()):
+            if turn.find_tool_call_detail(
+                tool_name=tool_name, tool_call_id=tool_call_id
+            ):
+                await turn.add_tool_result(
+                    text,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    data=data,
+                )
+                return True
+        return False
 
     async def _add_bubble(self, kind: str, text: str) -> BubbleWidget:
         bubble = BubbleWidget(kind=kind, text=text)

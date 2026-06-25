@@ -28,6 +28,18 @@ def test_normalize_backend_model_name_strips_provider_prefixes() -> None:
     assert OpenAICompatClient.normalize_backend_model_name("local/qwen2.5-4b-instruct-q4_k_m") == "qwen2.5-4b"
 
 
+def test_normalize_backend_model_name_handles_windows_gguf_paths() -> None:
+    from smallctl.client import OpenAICompatClient
+
+    windows_path = (
+        r"C:\Users\svaye\.lmstudio\models\lmstudio-community"
+        r"\gemma-4-E4B-it-GGUF\gemma-4-E4B-it-Q4_K_M.gguf"
+    )
+    assert OpenAICompatClient.normalize_backend_model_name(windows_path) == "gemma-4b"
+    assert OpenAICompatClient.normalize_backend_model_name("/home/user/models/gemma-4-e4b-it-q4_k_m.gguf") == "gemma-4b"
+    assert OpenAICompatClient.normalize_backend_model_name("gemma-4-e4b-it-q4_k_m.gguf") == "gemma-4b"
+
+
 def test_apply_backend_model_profile_only_when_context_below_32k() -> None:
     from smallctl.client import OpenAICompatClient
 

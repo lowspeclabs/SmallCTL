@@ -11,7 +11,7 @@ from .tool_model_rules import (
     _model_is_lfm25_8b_a1b,
     _parse_raw_function_call,
     _raw_function_call_pattern,
-    _strip_exact_small_gemma_4_protocol_noise,
+    _strip_gemma_4_protocol_noise,
 )
 
 
@@ -281,7 +281,7 @@ def _extract_inline_tool_calls(
 
     results: list[PendingToolCall] = []
     cleaned_text = _normalize_gemma_quote_tokens(
-        _strip_exact_small_gemma_4_protocol_noise(
+        _strip_gemma_4_protocol_noise(
             text,
             model_name=model_name,
         )
@@ -712,7 +712,7 @@ def _extract_inline_tool_calls(
     matches = list(re.finditer(standalone_line_regex, cleaned_text))
     offset = 0
     for match in matches:
-        line_body = _strip_exact_small_gemma_4_protocol_noise(
+        line_body = _strip_gemma_4_protocol_noise(
             match.group("body"),
             model_name=model_name,
         )

@@ -9,6 +9,7 @@ from ..docker_retry_normalization import (
     docker_retry_key,
     extract_docker_command_target,
 )
+from ..diagnostic_tasks import diagnostic_failure_task
 from ..models.tool_result import ToolEnvelope
 
 
@@ -106,6 +107,14 @@ def _update_repair_cycle_state(
         return
 
     if verdict == "needs_human":
+        return
+
+    # Pure diagnostic/observation tasks (e.g. "System Health & Resource Analysis")
+    # do not have a binary pass/fail outcome; the gathered output is the deliverable.
+    # Do not force them into the repair phase when a probe fails or returns
+    # negative intelligence, otherwise task_complete becomes unavailable and the
+    # model loops forever.
+    if diagnostic_failure_task(state):
         return
 
     docker_retry = docker_retry if isinstance(docker_retry, dict) else {}

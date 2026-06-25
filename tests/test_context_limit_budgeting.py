@@ -387,6 +387,19 @@ def test_server_context_limit_takes_precedence_over_model_name_ceiling() -> None
     assert effective == 28_672
 
 
+def test_gemma_4_model_name_ceiling_caps_explicit_budget() -> None:
+    from smallctl.harness.context_limits import resolve_effective_prompt_budget
+
+    effective = resolve_effective_prompt_budget(
+        configured_max_prompt_tokens=200_000,
+        configured_max_prompt_tokens_explicit=True,
+        server_context_limit=None,
+        model_name="Gemma 4 e4b",
+    )
+
+    assert effective == 128_000
+
+
 def test_unknown_model_name_does_not_clamp_explicit_budget() -> None:
     from smallctl.harness.context_limits import resolve_effective_prompt_budget
 

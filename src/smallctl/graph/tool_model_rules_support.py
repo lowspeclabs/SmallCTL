@@ -7,15 +7,9 @@ from typing import Any
 from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
 from .state import PendingToolCall
 from .tool_model_rules_model_detection import (
-    _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES,
-    _EXACT_QWEN_25_7B_INSTRUCT_MODELS,
-    _GEMMA_MODEL_MARKERS,
-    _GLM_BOX_MODEL_MARKERS,
-    _GPT_OSS_MODEL_MARKERS,
-    _QWEN_MODEL_MARKERS,
-    _model_is_lfm25_8b_a1b,
     _model_is_exact_qwen_25_7b_instruct,
     _model_is_exact_small_gemma_4_it,
+    _model_is_gemma_4,
     _model_uses_gemma_rules,
     _model_uses_glm_box_rules,
     _model_uses_gpt_oss_rules,
@@ -275,15 +269,33 @@ def _strip_gpt_oss_channel_prefix(text: str) -> str:
     return stripped
 
 
-def _strip_exact_small_gemma_4_protocol_noise(text: str, *, model_name: str | None) -> str:
-    if not _model_is_exact_small_gemma_4_it(model_name):
+def _strip_gemma_4_protocol_noise(text: str, *, model_name: str | None) -> str:
+    """Remove Gemma-4 channel/thought control markers from visible text.
+
+    Gemma-4 checkpoints (including e2b/e4b small, 12b, 27b, etc.) emit the
+    reasoning stream with an unclosed channel switch such as
+    ``<|channel>thought`` before the actual thinking content.  Strip that
+    prefix along with any remaining channel/thought control tags so the
+    reasoning text and any recovered inline tool calls stay clean.
+    """
+    if not _model_is_gemma_4(model_name):
         return text
-    return re.sub(
-        r"</?\|?(?:channel|thought)\|?>",
+    cleaned = str(text or "")
+    # Strip unclosed channel-switch markers that open the reasoning stream.
+    cleaned = re.sub(
+        r"^\s*<\|channel>\s*(?:thought|thinking|analysis|reasoning)\b\s*",
         "",
-        str(text or ""),
+        cleaned,
         flags=re.IGNORECASE,
     )
+    # Strip any remaining channel/thought control tags.
+    cleaned = re.sub(
+        r"</?\|?(?:channel|thought)\|?>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned
 
 
 def _strip_gemma_control_token_fragments(text: str) -> str:
@@ -323,7 +335,7 @@ def _normalize_model_specific_text(text: str, *, model_name: str | None) -> str:
     if _model_uses_gemma_rules(model_name):
         for tag in _GEMMA_TAGS:
             normalized = normalized.replace(tag, "")
-        normalized = _strip_exact_small_gemma_4_protocol_noise(
+        normalized = _strip_gemma_4_protocol_noise(
             normalized,
             model_name=model_name,
         )

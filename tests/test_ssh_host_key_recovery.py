@@ -12,6 +12,7 @@ from smallctl.state import ExperienceMemory, LoopState
 from smallctl.tools.dispatcher_shell_guards import raw_ssh_shell_block_envelope
 from smallctl.tools.fs import file_write
 from smallctl.tools.network_ssh_helpers import (
+    filter_ssh_known_hosts_warning,
     ssh_command_is_package_manager_install,
     ssh_timeout_suggests_verify,
 )
@@ -32,6 +33,31 @@ def test_ssh_timeout_suggests_verify_for_installer() -> None:
 
 def test_ssh_timeout_suggests_verify_empty_for_non_installer() -> None:
     assert ssh_timeout_suggests_verify("systemctl status webmin") == ""
+
+
+def test_filter_ssh_known_hosts_warning_removes_noise() -> None:
+    stderr = (
+        "Warning: Permanently added '192.168.1.89' (ED25519) to the list of known hosts.\r\n"
+        "actual error\n"
+    )
+    filtered, had_warning = filter_ssh_known_hosts_warning(stderr)
+    assert had_warning is True
+    assert "Permanently added" not in filtered
+    assert "actual error" in filtered
+
+
+def test_filter_ssh_known_hosts_warning_empty_when_only_warning() -> None:
+    stderr = "Warning: Permanently added '192.168.1.89' (ED25519) to the list of known hosts.\r\n"
+    filtered, had_warning = filter_ssh_known_hosts_warning(stderr)
+    assert had_warning is True
+    assert filtered.strip() == ""
+
+
+def test_filter_ssh_known_hosts_warning_no_false_positive() -> None:
+    stderr = "some unrelated warning about hosts\n"
+    filtered, had_warning = filter_ssh_known_hosts_warning(stderr)
+    assert had_warning is False
+    assert filtered == stderr
 
 
 def test_raw_ssh_keygen_non_removal_guides_to_known_hosts_removal() -> None:

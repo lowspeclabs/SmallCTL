@@ -697,6 +697,21 @@ def test_harness_core_facade_restores_small_model_name_helper() -> None:
     assert harness._is_small_model_name("gpt-oss-120b") is False
 
 
+def test_guards_recognize_gemma_4_small_moe_names_with_spaces() -> None:
+    from smallctl.guards import (
+        is_four_b_or_under_model_name,
+        is_seven_b_or_under_model_name,
+        is_small_model_name,
+    )
+
+    assert is_four_b_or_under_model_name("Gemma 4 e4b") is True
+    assert is_four_b_or_under_model_name("Gemma 4 e2b") is True
+    assert is_four_b_or_under_model_name("gemma-4-e4b-it") is True
+    assert is_four_b_or_under_model_name("gemma-4-26b-a4b-it") is False
+    assert is_seven_b_or_under_model_name("Gemma 4 e4b") is True
+    assert is_small_model_name("Gemma 4 e4b") is True
+
+
 def test_artifact_visibility_respects_hidden_flag() -> None:
     from smallctl.context.artifact_visibility import is_retrieval_visible_artifact
 

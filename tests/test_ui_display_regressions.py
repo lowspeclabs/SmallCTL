@@ -8,6 +8,7 @@ from smallctl.state import LoopState
 from smallctl.tools import control
 from smallctl.ui.app_flow import _terminal_status_detail
 from smallctl.ui.bubbles import LiveOutputBubbleWidget, ToolCallDetailWidget
+from smallctl.ui.bubbles import _style_text_lite
 from smallctl.ui.console import ConsolePane
 from smallctl.ui.display import (
     _build_backend_rca_strip,
@@ -638,3 +639,97 @@ def test_guard_trip_diagnosis_recovery_banner() -> None:
     assert "guard tripped" in banner.lower()
     assert "max_steps exceeded" in banner
     assert "5" in banner
+
+
+def test_text_block_lite_markdown_styles_headers_and_lists() -> None:
+    rendered = _style_text_lite("# Title\n- item 1\n- item `code`\n\n**bold** and *italic*\n")
+    assert rendered.plain == "# Title\n• item 1\n• item code\n\nbold and italic\n"
+    assert any(
+        span.style == "bold #ffffff" and rendered.plain[span.start : span.end] == "Title"
+        for span in rendered.spans
+    )
+    assert any(
+        "bold #9ca3af" in span.style and "•" in rendered.plain[span.start : span.end]
+        for span in rendered.spans
+    )
+    assert any(
+        span.style == "italic #93c5fd" and rendered.plain[span.start : span.end] == "code"
+        for span in rendered.spans
+    )
+    assert any(
+        span.style == "bold" and rendered.plain[span.start : span.end] == "bold"
+        for span in rendered.spans
+    )
+    assert any(
+        span.style == "italic" and rendered.plain[span.start : span.end] == "italic"
+        for span in rendered.spans
+    )
+
+
+def test_text_block_lite_markdown_styles_numbered_lists_and_quotes() -> None:
+    rendered = _style_text_lite("1. first\n2. second\n\n> quote")
+    assert "1." in rendered.plain
+    assert "2." in rendered.plain
+    assert "> quote" in rendered.plain
+    assert any(
+        "bold #9ca3af" in span.style and "1." in rendered.plain[span.start : span.end]
+        for span in rendered.spans
+    )
+    assert any(
+        span.style == "#9ca3af" and rendered.plain[span.start : span.end] == ">"
+        for span in rendered.spans
+    )
+
+
+def test_text_block_lite_markdown_fences_are_dim() -> None:
+    rendered = _style_text_lite("```python\nx = 1\n```")
+    assert rendered.plain == "```python\nx = 1\n```"
+    assert all(
+        span.style == "#9ca3af" or not span.style for span in rendered.spans
+    )
+
+
+def test_text_block_unclosed_inline_code_falls_back_to_plain() -> None:
+    rendered = _style_text_lite("start `unclosed")
+    assert rendered.plain == "start `unclosed"
+    assert not rendered.spans
+
+
+def test_text_block_lite_markdown_preserves_plain_text() -> None:
+    rendered = _style_text_lite("plain text without markup")
+    assert rendered.plain == "plain text without markup"
+    assert not rendered.spans
+
+
+def test_text_block_lite_markdown_handles_strikethrough() -> None:
+    rendered = _style_text_lite("~~deleted~~\n")
+    assert rendered.plain == "deleted\n"
+    assert any(
+        span.style == "strike" and rendered.plain[span.start : span.end] == "deleted"
+        for span in rendered.spans
+    )
+
+
+def test_text_block_lite_markdown_skips_inline_on_incomplete_last_line() -> None:
+    rendered = _style_text_lite("**bold** and `code`")
+    assert rendered.plain == "**bold** and `code`"
+    assert not rendered.spans
+
+
+def test_text_block_lite_markdown_streaming_chunk_boundary_safe() -> None:
+    # Simulate chunks that split a bullet + bold line. Block-level markers
+    # (like bullets) are styled even on incomplete lines, but inline emphasis
+    # and code are left plain until the line completes.
+    chunks = ["*   ", "**CPU", ":** root", " PID `4117806`"]
+    acc = ""
+    for chunk in chunks:
+        acc += chunk
+    rendered = _style_text_lite(acc)
+    assert rendered.plain == "•   **CPU:** root PID `4117806`"
+    # Bullet marker styled, inline markers not styled yet.
+    assert any("bold #9ca3af" in span.style for span in rendered.spans)
+    assert not any(span.style == "bold" for span in rendered.spans)
+
+    rendered = _style_text_lite(acc + "\n")
+    assert "•   CPU:" in rendered.plain
+    assert any(span.style == "bold" for span in rendered.spans)

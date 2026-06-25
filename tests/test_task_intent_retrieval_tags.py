@@ -65,6 +65,44 @@ After creating it, report whether the file exists locally."""
     assert extract_task_target_paths(task) == ["./temp/scope-tests/local-only.txt"]
 
 
+def test_single_file_html_dashboard_is_not_complex_task() -> None:
+    """Regression for run 9a0bd681.
+
+    A single-file HTML creation task with requirement-list words such as
+    DEBUG and "fake server log" must not be misclassified as a complex
+    remote+local task and escalated to planning mode.
+    """
+    task = """Create a single self-contained HTML file at ./temp/log-inspector.html.
+
+Build an interactive “Log Inspector” dashboard for a fake server log.
+
+Requirements:
+- Use only HTML, CSS, and vanilla JavaScript.
+- Everything must be inside one HTML file.
+- No external libraries, CDNs, images, or network calls.
+- Include at least 30 fake log entries directly in the file.
+- Each log entry should have:
+  - timestamp
+  - level: INFO, WARN, ERROR, DEBUG
+  - service name
+  - message
+- Add filter buttons for each log level.
+- Add a search box that filters logs by message or service name.
+- Add a “clear filters” button.
+- Add a small stats panel showing:
+  - total visible logs
+  - visible errors
+  - visible warnings
+- Highlight ERROR logs visually.
+- Layout should look like a modern dark terminal/admin dashboard.
+- The page should work immediately when opened in a browser.
+
+After creating the file, do not explain. Just make sure the file exists."""
+
+    assert looks_like_complex_task(task) is False
+    assert classify_task_mode(task) == "local_execute"
+
+
 def test_local_temp_log_recovery_task_ignores_config_hosts_for_remote_mode() -> None:
     task = """You are working only inside ./temp.
 

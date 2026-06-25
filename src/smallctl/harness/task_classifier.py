@@ -7,7 +7,6 @@ from typing import Callable, Iterable
 from ..interrupt_replies import is_interrupt_response
 from ..models.conversation import ConversationMessage
 from .task_classifier_constants import (
-    ANALYSIS_MARKERS,
     AUTHORING_TARGET_MARKERS,
     AUTHORING_TARGET_RE,
     CAPABILITY_QUERY_CONTEXTUAL_MARKERS,
@@ -15,16 +14,12 @@ from .task_classifier_constants import (
     CAPABILITY_QUERY_STRONG_MARKERS,
     CAPABILITY_QUERY_TARGETS,
     CODE_TARGET_RE,
-    DEBUG_MARKERS,
     EXECUTION_ACTION_MARKERS,
     IP_ADDRESS_PATTERN,
     LOCAL_SHELL_OVERRIDE_RE,
     OPERATIONAL_ACTION_TARGETS,
     OPERATIONAL_ACTION_VERBS,
-    PLAN_ONLY_PHRASES,
-    READONLY_FILE_TARGETS,
     READONLY_SUGGESTION_MARKERS,
-    REMOTE_HINTS_WORD_BOUNDARIES_RE,
     SSH_AUTH_MARKERS,
     TOOL_PLAN_EVIDENCE_MARKERS,
     WEB_LOOKUP_MARKERS,
@@ -40,7 +35,6 @@ from .task_classifier_support import (
     looks_like_execution_followup,
     looks_like_plan_only_request,
     looks_like_readonly_chat_request,
-    task_has_local_scope_markers,
     task_is_local_coding_target,
     task_is_local_ssh_file_target,
     task_is_local_system_target,
@@ -542,6 +536,27 @@ def needs_contextual_loop_escalation(
     return recent_assistant_referenced_tool_name(messages, "shell_exec")
 
 
+_LOG_LEVEL_LABELS_RE = re.compile(
+    r"\b(?:info|warn|warning|error|debug|trace|fatal)\b",
+    re.IGNORECASE,
+)
+_LOG_LEVEL_SPEC_RE = re.compile(
+    r"levels?\s*[:=]\s*[^\n]*" + _LOG_LEVEL_LABELS_RE.pattern,
+    re.IGNORECASE,
+)
+
+
+def _text_without_log_level_specs(text: str) -> str:
+    """Remove lines/segments that enumerate log levels.
+
+    Requirement lists often contain words like DEBUG as a severity label, not
+    as an operational verb. Stripping those segments prevents false-positive
+    complexity classification (e.g. an HTML dashboard spec listing log
+    levels INFO/WARN/ERROR/DEBUG).
+    """
+    return _LOG_LEVEL_SPEC_RE.sub("", text)
+
+
 def looks_like_complex_task(task: str) -> bool:
     """Return True when a task implies multiple steps, cross-file work, or
     mixed local/remote operations that benefit from structured planning."""
@@ -577,25 +592,27 @@ def looks_like_complex_task(task: str) -> bool:
         "implement", "write", "create", "build",
         "test", "verify", "validate", "check",
     )
-    verb_hits = sum(1 for v in operational_verbs if v in text)
+    verb_search_text = _text_without_log_level_specs(text)
+    verb_hits = sum(1 for v in operational_verbs if v in verb_search_text)
     if verb_hits >= 3:
         return True
 
     # Both remote and local targets
-    has_remote = bool(REMOTE_HINTS_WORD_BOUNDARIES_RE.search(text)) or bool(IP_ADDRESS_PATTERN.search(text))
+    has_remote = has_remote_execution_target(text)
     has_local = any(m in text for m in ("file", "files", "code", "script", "patch", "edit", "module", "repo"))
     if has_remote and has_local:
         return True
 
     # Multiple file targets
-    file_extensions = re.findall(r"[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|go|rs|java|kt|cpp|c|h|rb|php)", text)
+    file_extensions = re.findall(r"[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|go|rs|java|kt|cpp|c|html|htm|h|rb|php)", text)
     if len(set(file_extensions)) >= 3:
         return True
 
     # Debug-investigate-fix-verify chain
-    if any(m in text for m in ("debug", "investigate", "find", "trace", "diagnose")) and any(
-        m in text for m in ("fix", "patch", "repair", "resolve", "solve")
-    ) and any(m in text for m in ("test", "verify", "validate", "check")):
+    chain_search_text = _text_without_log_level_specs(text)
+    if any(m in chain_search_text for m in ("debug", "investigate", "find", "trace", "diagnose")) and any(
+        m in chain_search_text for m in ("fix", "patch", "repair", "resolve", "solve")
+    ) and any(m in chain_search_text for m in ("test", "verify", "validate", "check")):
         return True
 
     return False

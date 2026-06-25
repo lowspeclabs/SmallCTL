@@ -190,8 +190,11 @@ def build_task_prompt(challenge: dict, creds: dict | None = None, is_sysadmin: b
         if "@" in host_line:
             user, host = host_line.split("@", 1)
         parts.append(
-            f"\nRemote credentials for this sysadmin challenge are available directly here: "
-            f"target={host_line}, user={user}, host={host}, password={password}. "
+            f"\nRemote credentials for this sysadmin challenge are available directly here:\n"
+            f"- target={host_line}\n"
+            f"- user={user}\n"
+            f"- host={host}\n"
+            f"- password={password}\n\n"
             f"Use these values directly in ssh_exec or ssh file tools; do not spend time searching for the challenge file."
         )
 

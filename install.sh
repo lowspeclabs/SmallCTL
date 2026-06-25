@@ -336,7 +336,7 @@ install_smallctl() {
     echo "smallctl installed in editable mode with dev tools (SMALLCTL_DEV_MODE)."
   else
     "$VENV_DIR/bin/python" -m pip install "$BUNDLE_ROOT"
-    "$VENV_DIR/bin/python" -m pip install pytest
+    "$VENV_DIR/bin/python" -m pip install pytest ruff
     echo "smallctl installed."
   fi
 }

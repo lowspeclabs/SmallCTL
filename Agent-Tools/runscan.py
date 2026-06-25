@@ -140,16 +140,16 @@ def _classify_run(
         return "harness_circuit_breaker_false_positive"
     if detect_apt_deb822_guard_misfire(harness_records):
         return "guard_misfire"
+    if events.get("tool_blocked_not_exposed"):
+        return "policy_block"
+    if events.get("fama_tool_call_blocked"):
+        return "fama_block"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
     if events.get("action_stall") or events.get("no_tool_recovery"):
         return "model_tool_loop_stall"
     if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
         return "runtime_exception"
-    if events.get("tool_blocked_not_exposed"):
-        return "policy_block"
-    if events.get("fama_tool_call_blocked"):
-        return "fama_block"
     if events.get("recovery_failure_event_recorded"):
         return "recovery_failure"
     if overall == "incomplete" and session.get("deliverable_verified") is False:

@@ -52,6 +52,7 @@ from .router import route_signal
 from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state, push_fama_signal
 from .state import activate_mitigations, active_mitigations, clear_mitigations, expire_mitigations
 from ..recovery_metrics import increment_metric, increment_metric_bucket
+from ..logging_utils import runlog as _runlog
 
 logger = logging.getLogger("smallctl.fama")
 
@@ -918,9 +919,3 @@ def _extract_ssh_host_key_failure_host(signal: FamaSignal) -> str:
     if marker in evidence:
         return evidence.rsplit(marker, 1)[-1].split(";", 1)[0].strip()
     return ""
-
-
-def _runlog(harness: Any, event: str, message: str, **data: Any) -> None:
-    runlog = getattr(harness, "_runlog", None)
-    if callable(runlog):
-        runlog(event, message, **data)

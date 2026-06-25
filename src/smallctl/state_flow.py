@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .experience_tags import normalize_experience_tags
@@ -40,21 +38,6 @@ def _coerce_datetime(value: Any) -> datetime | None:
 
 class LoopStateFlowMixin:
     _normalize_paths = staticmethod(normalize_paths)
-
-    @staticmethod
-    def _text_matches_any_path(text: str, paths: list[str]) -> bool:
-        normalized: list[str] = []
-        for path in paths or []:
-            text = str(path or "").strip()
-            if not text:
-                continue
-            normalized.append(Path(text).as_posix().lower())
-        deduped: list[str] = []
-        for path in normalized:
-            if path not in deduped:
-                deduped.append(path)
-        return deduped
-
     _text_matches_any_path = staticmethod(text_matches_any_path)
 
     @staticmethod

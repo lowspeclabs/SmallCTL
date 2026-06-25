@@ -142,39 +142,55 @@ class StatusBar(Static):
         return " | ".join(parts)
 
     def _build_vertical_status_text(self) -> str:
+        tw = 28
         lines = []
         if getattr(self, "_show_model", True):
-            lines.extend(["[bold #93c5fd]Model[/]", f"{self._model}", ""])
+            lines.extend(
+                [
+                    "[bold #93c5fd]Model[/]",
+                    self._truncate_line(str(self._model), tw),
+                    "",
+                ]
+            )
 
         lines.extend(
             [
                 "[bold #93c5fd]Usage[/]",
-                f"cumulative: {self._token_total:,}",
-                self._context_usage_text(),
+                self._truncate_line(f"cumulative: {self._token_total:,}", tw),
+                self._truncate_line(self._context_usage_text(), tw),
                 "",
                 "[bold #93c5fd]Run[/]",
-                f"phase: {self._phase}",
-                f"step: {self._step}",
-                f"mode: {self._mode}",
+                self._truncate_line(f"phase: {self._phase}", tw),
+                self._truncate_line(f"step: {self._step}", tw),
+                self._truncate_line(f"mode: {self._mode}", tw),
             ]
         )
         if self._activity:
-            lines.append(f"activity: {self._activity}")
+            lines.append(self._truncate_line(f"activity: {self._activity}", tw))
         if self._contract_phase:
-            lines.append(f"contract: {self._contract_phase}")
+            lines.append(self._truncate_line(f"contract: {self._contract_phase}", tw))
         if self._acceptance_progress:
-            lines.append(f"acceptance: {self._acceptance_progress}")
+            lines.append(
+                self._truncate_line(f"acceptance: {self._acceptance_progress}", tw)
+            )
         if self._latest_verdict:
-            lines.append(f"verdict: {escape(self._latest_verdict)}")
+            lines.append(
+                self._truncate_line(f"verdict: {escape(self._latest_verdict)}", tw)
+            )
         if self._recovery_banner:
-            lines.append(f"[bold yellow]{self._recovery_banner}[/]")
+            banner = self._truncate_line(self._recovery_banner, tw)
+            lines.append(f"[bold yellow]{banner}[/]")
         if self._api_errors > 0:
-            lines.append(f"[bold red]API ERRORS: {self._api_errors}[/]")
+            lines.append(
+                self._truncate_line(f"[bold red]API ERRORS: {self._api_errors}[/]", tw)
+            )
         if getattr(self, "_fama_off", False):
-            lines.append("[bold #ffb000]FAMA:OFF[/]")
+            lines.append(self._truncate_line("[bold #ffb000]FAMA:OFF[/]", tw))
         fama_mitigation = getattr(self, "_fama_mitigation", "")
         if fama_mitigation:
-            lines.append(f"[bold #ffb000]FAMA:{fama_mitigation}[/]")
+            lines.append(
+                self._truncate_line(f"[bold #ffb000]FAMA:{fama_mitigation}[/]", tw)
+            )
 
         return "\n".join(lines)
 
@@ -197,6 +213,14 @@ class StatusBar(Static):
         elif percent >= 70:
             color = "#fbbf24"
         return f"context: [bold {color}]{circle} {percent}%[/] ({used:,}/{limit:,})"
+
+    @staticmethod
+    def _truncate_line(text: str, width: int = 28) -> str:
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[: width - 3].rstrip() + "..."
 
     def _refresh_display(self) -> None:
         self.update(self._build_status_text())

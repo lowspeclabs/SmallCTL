@@ -88,6 +88,7 @@ async def test_tool_dispatch_exception_becomes_recoverable_error() -> None:
     assert harness.state.recent_errors
 
 
+
 @pytest.mark.asyncio
 async def test_tool_dispatch_normalizes_none_metadata() -> None:
     from smallctl.graph.tool_execution_nodes import dispatch_tools

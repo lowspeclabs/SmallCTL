@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ..client.request_budget import build_request_budget
+from ..normalization import collapse_model_name
 
 
 _PROVIDER_REQUEST_BUDGET_PROFILES = {"llamacpp"}
@@ -18,6 +19,7 @@ _MODEL_NAME_CONTEXT_CEILINGS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"llama[-_]?3(\.[123])?\b", re.IGNORECASE), 128_000),
     (re.compile(r"llama[-_]?3\b", re.IGNORECASE), 8_192),
     (re.compile(r"gemma[-_]?(2|3)\b", re.IGNORECASE), 128_000),
+    (re.compile(r"gemma[-_]?4\b", re.IGNORECASE), 128_000),
     (re.compile(r"phi[-_]?(3|4)\b", re.IGNORECASE), 128_000),
     (re.compile(r"mistral[-_]?(small|large)?\b", re.IGNORECASE), 32_768),
     (re.compile(r"mixtral\b", re.IGNORECASE), 32_768),
@@ -30,7 +32,9 @@ _MODEL_NAME_CONTEXT_CEILINGS: list[tuple[re.Pattern[str], int]] = [
 def _derive_context_limit_from_model_name(model_name: str | None) -> int | None:
     if not model_name:
         return None
-    text = str(model_name)
+    text = collapse_model_name(model_name)
+    if not text:
+        return None
     for pattern, limit in _MODEL_NAME_CONTEXT_CEILINGS:
         if pattern.search(text):
             return limit

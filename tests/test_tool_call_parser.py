@@ -3,9 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from smallctl.client import OpenAICompatClient
 from smallctl.graph.tool_call_parser import ToolCallParseResult, parse_tool_calls
 from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
+from smallctl.graph.tool_model_rules_support import _strip_gemma_4_protocol_noise
 from smallctl.tools.base import ToolSpec, build_tool_schema
 from smallctl.tools.registry import ToolRegistry
 
@@ -547,6 +550,30 @@ def test_non_gemma_reasoning_field_strips_tool_call_wrappers() -> None:
     assert result.pending_tool_calls == []
     assert "<tool_call>" not in stream.thinking_text
     assert "</tool_call>" not in stream.thinking_text
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gemma-4-e2b-it",
+        "gemma-4-12b-it",
+        "Gemma 4 12b",
+        "google/gemma-4-27b-it",
+    ],
+)
+def test_gemma_4_protocol_noise_strips_channel_thought_prefix(model_name: str) -> None:
+    """Gemma-4 checkpoints emit an unclosed ``<|channel>thought`` marker at the
+    start of reasoning.  The cleaner must remove it for all Gemma-4 sizes."""
+    raw = "<|channel>thought\nThe user wants to list tasks."
+    cleaned = _strip_gemma_4_protocol_noise(raw, model_name=model_name)
+    assert cleaned == "The user wants to list tasks."
+
+
+def test_gemma_4_protocol_noise_preserves_non_gemma_text() -> None:
+    """Non-Gemma models must not have ``<|channel>thought`` stripped."""
+    raw = "<|channel>thought\nThe user wants to list tasks."
+    cleaned = _strip_gemma_4_protocol_noise(raw, model_name="qwen/qwen-2.5-7b-instruct")
+    assert cleaned == raw
 
 
 def test_flat_inline_json_preserves_argument_key_matching_tool_name() -> None:

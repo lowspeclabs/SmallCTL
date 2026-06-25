@@ -153,7 +153,6 @@ from smallctl.tools.shell_support import (
     _apt_deb822_preflight_guard,
     _foreground_command_guard,
     _interactive_installer_yes_pipe_guard,
-    _is_deb822_preflight_clean,
     _looks_like_deb822_validator,
     _mark_deb822_preflight_clean,
     _remote_installer_preflight_guard,
@@ -777,6 +776,26 @@ def test_apt_deb822_preflight_respects_host_user_isolation() -> None:
     )
     assert result2 is not None
     assert result2["success"] is False
+
+
+def test_apt_deb822_preflight_allows_network_failures() -> None:
+    state = LoopState(cwd="/tmp")
+    record_apt_update_result(
+        state,
+        command="apt-get update",
+        success=False,
+        stderr="Warning: Failed to fetch https://repo.guacamole.org/debian/dists/stable/InRelease  Could not resolve 'repo.guacamole.org'",
+        host="remote",
+        user="root",
+    )
+    result = _apt_deb822_preflight_guard(
+        "apt-get install -y vikunja",
+        tool_name="ssh_exec",
+        state=state,
+        host="remote",
+        user="root",
+    )
+    assert result is None, "DNS/network failures should not trigger the deb822 gate"
 
 
 def test_looks_like_deb822_validator() -> None:
@@ -1537,6 +1556,34 @@ def test_post_change_html_verifier_accepts_dom_based_game(tmp_path: Path) -> Non
         "let lives = 3;\n"
         "function gameOver() {}\n"
         "function restart() {}\n"
+        "</script>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = False
+    state.challenge_progress.last_code_change_paths = [str(target)]
+
+    block = post_change_verification_block(state)
+    assert block is not None
+    assert block["reason"] == "post_change_verification_required"
+    command = block["next_required_action"]["required_arguments"]["command"]
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_post_change_html_verifier_accepts_generic_interactive_app(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    target = tmp_path / "mini-kanban.html"
+    target.write_text(
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head><title>Mini Kanban</title></head>\n"
+        "<body>\n"
+        '<div id="board"></div>\n'
+        '<form id="add-task"><input name="title"><button type="submit">Add</button></form>\n'
+        "<script>\n"
+        'document.getElementById("add-task").addEventListener("submit", function () {});\n'
         "</script>\n"
         "</body>\n"
         "</html>\n"

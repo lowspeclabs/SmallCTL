@@ -13,6 +13,7 @@ from .tool_result_verification_constants import (
     _ZERO_TESTS_RAN_RE,
 )
 from .tool_result_verification_helpers import snip_text as _snip_text, verifier_kind_for_command, verifier_strength
+from ..diagnostic_tasks import diagnostic_failure_task
 
 
 _DOCKER_INVENTORY_HEADERS = (
@@ -203,6 +204,11 @@ def _passing_verifier_is_weaker_than_prior_failure(
     current_command: str,
     current_kind: str,
 ) -> bool:
+    # Pure diagnostic/observation tasks gather multiple distinct read-only checks.
+    # A later diagnostic command should not be considered "weaker" than an earlier
+    # failed diagnostic command; each probe contributes independent evidence.
+    if diagnostic_failure_task(state):
+        return False
     current_strength = verifier_strength(current_kind)
     prior_command = _prior_failed_verifier_command(state)
     if not prior_command:

@@ -337,6 +337,7 @@
 #model-sidebar {
   width: 28;
   height: 100%;
+  overflow-y: auto;
   border: round #4b5563;
   background: #121212;
   padding: 0 1;
@@ -544,8 +545,15 @@
   margin-right: 1;
 }
 
+#chat-menu-overlay {
+  width: 100%;
+  height: 100%;
+  align: center middle;
+}
+
 #chat-menu-shell,
-#chat-session-shell {
+#chat-session-shell,
+#model-select-shell {
   width: 88;
   max-width: 90%;
   padding: 1 2;
@@ -554,34 +562,104 @@
   color: #e5e7eb;
 }
 
+#provider-select-shell {
+  width: 66;
+  max-width: 72%;
+  padding: 1 2;
+  border: round #d1d5db;
+  background: #121212;
+  color: #e5e7eb;
+  opacity: 70%;
+}
+
 #chat-menu,
-#chat-session {
+#chat-session,
+#provider-select,
+#model-select {
   layout: vertical;
   width: 100%;
   height: auto;
 }
 
 #chat-menu-title,
-#chat-session-title {
+#chat-session-title,
+#provider-select-title,
+#model-select-title {
   width: 100%;
   text-style: bold;
   color: #e5e7eb;
+  text-align: center;
 }
 
 #chat-menu-message,
-#chat-session-message {
+#chat-session-message,
+#provider-select-message,
+#model-select-message {
   width: 100%;
   color: #d1d5db;
+  text-align: center;
+}
+
+#provider-select-overlay {
+  width: 100%;
+  height: 100%;
+  align: center middle;
+  background: #000000 0%;
+}
+
+#provider-select-backend-row,
+#provider-select-profile-row {
+  width: 100%;
+  height: auto;
+  margin-top: 1;
+}
+
+#provider-select-backend,
+#provider-select-profile {
+  width: 100%;
+  background: #1f2937;
+  color: #e5e7eb;
+}
+
+#provider-select-endpoint,
+#provider-select-api-key {
+  width: 100%;
+  margin-top: 1;
+  background: #1f2937;
+  color: #e5e7eb;
+  border: solid #4b5563;
+}
+
+#provider-select-buttons {
+  width: 100%;
+  height: auto;
+  padding-top: 1;
+  align: center middle;
+}
+
+#chat-menu-buttons {
+  width: 100%;
+  height: auto;
+  padding-top: 1;
+  align: center middle;
 }
 
 #chat-menu-resume,
 #chat-menu-new,
-#chat-menu-cancel {
-  width: 28;
-  margin-top: 1;
+#chat-menu-provider,
+#chat-menu-cancel,
+#provider-select-confirm,
+#provider-select-cancel {
+  width: 16;
+  margin-right: 1;
 }
 
-#chat-session-list {
+#chat-menu-cancel,
+#provider-select-cancel {
+  margin-right: 0;
+}
+
+#provider-select-list {
   width: 100%;
   height: 12;
   margin-top: 1;
@@ -589,20 +667,8 @@
   border: none;
 }
 
-#chat-session-list:focus {
+#provider-select-list:focus {
   border: none;
-}
-
-#chat-session-buttons {
-  width: 100%;
-  height: auto;
-  padding-top: 1;
-}
-
-#chat-session-confirm,
-#chat-session-cancel {
-  width: 14;
-  margin-right: 1;
 }
 
 #input {

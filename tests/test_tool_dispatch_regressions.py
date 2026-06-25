@@ -233,3 +233,97 @@ async def _async_dispatcher_marks_legacy_coercion_on_success() -> None:
 
 def test_dispatcher_marks_legacy_coercion_on_success() -> None:
     asyncio.run(_async_dispatcher_marks_legacy_coercion_on_success())
+
+
+async def _async_dispatcher_non_object_shell_args_return_validation_error() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="shell_exec",
+            description="run shell command",
+            schema=build_tool_schema(properties={"command": {"type": "string"}}, required=["command"]),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    dispatcher = ToolDispatcher(registry, phase="execute")
+
+    result = await dispatcher.dispatch("shell_exec", "pytest")
+
+    assert result.success is False
+    assert result.error == "Tool arguments must be an object."
+    assert result.metadata["validation_error"] == "schema_validation"
+    assert result.metadata["validation_issues"][0]["kind"] == "type"
+
+
+def test_dispatcher_non_object_shell_args_return_validation_error() -> None:
+    asyncio.run(_async_dispatcher_non_object_shell_args_return_validation_error())
+
+
+async def _async_dispatcher_non_object_ssh_args_return_validation_error() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    dispatcher = ToolDispatcher(registry, phase="execute")
+
+    result = await dispatcher.dispatch("ssh_exec", "whoami")
+
+    assert result.success is False
+    assert result.error == "Tool arguments must be an object."
+    assert result.metadata["validation_error"] == "schema_validation"
+    assert result.metadata["validation_issues"][0]["actual"] == "str"
+
+
+def test_dispatcher_non_object_ssh_args_return_validation_error() -> None:
+    asyncio.run(_async_dispatcher_non_object_ssh_args_return_validation_error())
+
+
+async def _async_dispatcher_empty_ssh_command_names_ssh_exec() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={"command": {"type": "string"}, "host": {"type": "string"}},
+                required=["command", "host"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    dispatcher = ToolDispatcher(registry, phase="execute")
+
+    result = await dispatcher.dispatch("ssh_exec", {"host": "192.0.2.10", "command": ""})
+
+    assert result.success is False
+    assert result.error == "ssh_exec requires a non-empty command string"
+    assert result.metadata["validation_error"] == "empty_command"
+
+
+def test_dispatcher_empty_ssh_command_names_ssh_exec() -> None:
+    asyncio.run(_async_dispatcher_empty_ssh_command_names_ssh_exec())
+
+
+async def _async_harness_dispatch_non_object_args_return_validation_error() -> None:
+    state = LoopState()
+    harness = _make_fake_harness(state)
+
+    result = await dispatch_tool_call(harness, "shell_exec", "pytest")
+
+    assert result.success is False
+    assert result.error == "Tool arguments must be an object."
+    assert result.metadata["tool_name"] == "shell_exec"
+    assert result.metadata["validation_error"] == "schema_validation"
+    assert result.metadata["validation_issues"][0]["actual"] == "str"
+
+
+def test_harness_dispatch_non_object_args_return_validation_error() -> None:
+    asyncio.run(_async_harness_dispatch_non_object_args_return_validation_error())

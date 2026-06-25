@@ -242,6 +242,56 @@ def extract_thinking_from_tags(
     )
 
 
+_LARGE_CODE_BLOCK_MIN_CHARS = 1000
+_LARGE_CODE_BLOCK_ABSOLUTE_CHARS = 3000
+_LARGE_CODE_BLOCK_DOMINANCE_RATIO = 0.5
+
+
+def _collapse_large_file_code_blocks(text: str) -> str:
+    """Collapse oversized markdown code fences that look like file dumps.
+
+    Some models emit the contents of a file as a markdown code block instead
+    of using the file_write/file_patch tool. Keeping the full dump in the
+    assistant message bloats the transcript and conversation history, so
+    replace it with a compact placeholder while preserving a short preview.
+    """
+    if not text or len(text) < 500:
+        return text
+
+    stripped = str(text).strip()
+    pattern = re.compile(r"```(\w*)\s*\n(.*?)\n\s*```", re.DOTALL)
+    if not pattern.search(stripped):
+        return text
+
+    total_len = len(stripped)
+
+    def _replace(match: re.Match[str]) -> str:
+        language = match.group(1).strip().lower() or "code"
+        body = match.group(2)
+        block_len = len(match.group(0))
+        body_len = len(body)
+        if body_len <= _LARGE_CODE_BLOCK_MIN_CHARS:
+            return match.group(0)
+        if (
+            body_len <= _LARGE_CODE_BLOCK_ABSOLUTE_CHARS
+            and block_len / total_len < _LARGE_CODE_BLOCK_DOMINANCE_RATIO
+        ):
+            return match.group(0)
+        first_line = next(
+            (line.strip() for line in body.splitlines() if line.strip()), ""
+        )
+        preview = first_line[:80]
+        placeholder = (
+            f"[{body_len}-char {language} block omitted; "
+            "use file tools to read or modify files]"
+        )
+        if preview:
+            placeholder += f"\n```\n{preview}...\n```"
+        return placeholder
+
+    return pattern.sub(_replace, text)
+
+
 def sanitize_assistant_content_for_history(
     text: str,
     *,
@@ -252,7 +302,8 @@ def sanitize_assistant_content_for_history(
 
     Returns ``(cleaned_assistant_text, extracted_thinking_text)``. Handles
     ``<think>``/``<thinking>``/``<thought>`` blocks, ``<reasoning>`` blocks,
-    and channel protocol wrappers such as ``<|channel>...</channel|>``.
+    channel protocol wrappers such as ``<|channel>...</channel|>``, and
+    collapses oversized file-dump code fences so they do not leak into chat.
     """
     if not text or not str(text).strip():
         return str(text or ""), ""
@@ -290,7 +341,7 @@ def sanitize_assistant_content_for_history(
     if extracted_thinking:
         thinking_parts.append(normalize_sentencepiece_whitespace(extracted_thinking))
 
-    return assistant_text.strip(), normalize_sentencepiece_whitespace("".join(thinking_parts)).strip()
+    return _collapse_large_file_code_blocks(assistant_text).strip(), normalize_sentencepiece_whitespace("".join(thinking_parts)).strip()
 
 
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:

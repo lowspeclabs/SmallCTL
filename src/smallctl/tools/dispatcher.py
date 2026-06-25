@@ -122,6 +122,21 @@ class ToolDispatcher:
 
     async def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> ToolEnvelope:
         requested_tool_name = tool_name
+        if not isinstance(arguments, dict):
+            return ToolEnvelope.make_error(
+                tool_name,
+                "Tool arguments must be an object.",
+                validation_error="schema_validation",
+                validation_issues=[
+                    {
+                        "path": [],
+                        "kind": "type",
+                        "expected": "object",
+                        "actual": type(arguments).__name__,
+                        "message": "tool arguments must be an object",
+                    }
+                ],
+            )
         tool_name, arguments, intercepted_result, normalization_metadata = normalize_tool_request(
             self.registry,
             tool_name,
@@ -326,10 +341,10 @@ class ToolDispatcher:
             )
 
         # Reject empty shell/ssh commands before dispatch
-        if tool_name in {"shell_exec", "ssh_exec"}:
+        if tool_name in {"shell_exec", "ssh_exec"} and isinstance(args, dict):
             cmd = str(args.get("command") or "").strip()
             if not cmd:
-                validation_error = "shell_exec requires a non-empty command string"
+                validation_error = f"{tool_name} requires a non-empty command string"
                 log_kv(
                     self.log,
                     logging.WARNING,

@@ -101,3 +101,47 @@ def test_record_assistant_message_does_not_strip_thinking_from_tool_calls() -> N
     msg = state.recent_messages[-1]
     assert msg.content == "Done."
     assert msg.tool_calls == tool_calls
+
+
+def test_record_assistant_message_collapses_large_file_code_block() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _make_harness(state)
+    html_dump = "```html\n<!DOCTYPE html>\n<html>\n<body>\n" + "\n".join(f"<p>line {i}</p>" for i in range(500)) + "\n</body>\n</html>\n```"
+    record_assistant_message(
+        harness,
+        assistant_text=html_dump,
+        tool_calls=[],
+    )
+    msg = state.recent_messages[-1]
+    assert msg.role == "assistant"
+    assert "<p>line 0</p>" not in msg.content
+    assert "block omitted" in msg.content
+    assert "html" in msg.content
+
+
+def test_record_assistant_message_preserves_small_code_block() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _make_harness(state)
+    code = "```python\nprint('hello')\n```"
+    record_assistant_message(
+        harness,
+        assistant_text=code,
+        tool_calls=[],
+    )
+    msg = state.recent_messages[-1]
+    assert msg.content == code
+
+
+def test_record_assistant_message_preserves_large_block_with_explanation() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _make_harness(state)
+    explanation = "Here is the helper function you requested:\n"
+    code = "```python\n" + "\n".join(f"x = {i}" for i in range(60)) + "\n```"
+    text = explanation + code
+    record_assistant_message(
+        harness,
+        assistant_text=text,
+        tool_calls=[],
+    )
+    msg = state.recent_messages[-1]
+    assert msg.content == text

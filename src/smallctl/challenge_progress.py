@@ -405,6 +405,32 @@ def _no_change_after_write_block(state: Any, *, tool_name: str) -> ToolEnvelope 
     )
 
 
+def _pending_file_mutation_intent(state: Any) -> bool:
+    """Return True when the current task/intent still requires a file mutation.
+
+    This keeps the terminal-readiness breaker from blocking reads that are
+    meant to prepare a pending patch/write.
+    """
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if active_intent in {"requested_file_patch", "requested_write_file"}:
+        return True
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    texts.append(str(getattr(run_brief, "original_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            texts.append(str(handoff.get("effective_task") or ""))
+            texts.append(str(handoff.get("current_goal") or ""))
+    task_text = " ".join(texts).lower()
+    return "patch" in task_text and any(
+        marker in task_text for marker in ("file", ".html", "/var/www", "do not do a direct overwrite")
+    )
+
+
 def terminal_readiness_state(state: Any) -> dict[str, Any] | None:
     progress = getattr(state, "challenge_progress", None)
     if progress is None:

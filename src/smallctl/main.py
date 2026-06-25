@@ -10,7 +10,7 @@ from .cleanup import run_cleanup
 from .config import resolve_config
 from .harness import Harness, HarnessConfig
 from .logging_utils import create_run_logger, log_kv, setup_logging
-from .memory_cli import build_memory_parser, handle_memory_command, memory_cli
+from .memory_cli import build_memory_parser, handle_memory_command
 from .presets import list_presets
 
 
@@ -469,11 +469,13 @@ def _resolve_session_id(harness: object | None, fallback: str | None = None) -> 
     return ""
 
 
-def _print_shutdown_alert(session_id: str, status: str = "alert", *, include_message: bool = True) -> None:
+def _print_shutdown_alert(session_id: str, status: str = "alert", *, reason: str | None = None, include_message: bool = True) -> None:
     payload = {
         "status": status,
         "session_id": session_id or "unknown",
     }
+    if reason:
+        payload["reason"] = reason
     if include_message:
         payload["message"] = (
             "smallctl closed via Ctrl+C"
@@ -546,7 +548,7 @@ def cli(argv: list[str] | None = None) -> int:
     if args.tui:
         show_system_setting = getattr(config, "show_system_messages", None)
         show_system_messages = bool(show_system_setting) if show_system_setting is not None else False
-        include_shutdown_message = bool(show_system_setting)
+        include_shutdown_message = show_system_setting is not False
         if show_system_messages and not sys.stdin.isatty():
             print(
                 json.dumps(
@@ -586,6 +588,7 @@ def cli(argv: list[str] | None = None) -> int:
                     getattr(app, "harness", None),
                     fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
                 ),
+                reason="keyboard_interrupt",
                 include_message=include_shutdown_message,
             )
             return 130
@@ -609,6 +612,7 @@ def cli(argv: list[str] | None = None) -> int:
                     fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
                 ),
                 status="exited",
+                reason="user_quit_confirmed",
                 include_message=include_shutdown_message,
             )
             return 130
@@ -665,7 +669,7 @@ def cli(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 log.warning("Harness teardown failed: %s", exc)
         if interrupted:
-            _print_shutdown_alert(_resolve_session_id(harness))
+            _print_shutdown_alert(_resolve_session_id(harness), reason="keyboard_interrupt")
             return 130
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

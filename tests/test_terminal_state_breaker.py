@@ -6,6 +6,7 @@ from smallctl.challenge_progress import (
     terminal_readiness_state,
     record_code_change,
     record_verifier_result,
+    _pending_file_mutation_intent,
 )
 from smallctl.graph.model_call_nodes import _conclusion_signature, _apply_terminal_conclusion_tracking
 from smallctl.state import LoopState
@@ -197,3 +198,31 @@ def test_apply_terminal_conclusion_tracking_uses_readiness_nudge_when_verified()
 
     assert len(state.recent_messages) == 1
     assert "Call task_complete now" in state.recent_messages[0].content
+
+
+def test_pending_file_mutation_intent_from_active_intent() -> None:
+    state = LoopState()
+    state.active_intent = "requested_file_patch"
+    assert _pending_file_mutation_intent(state) is True
+
+    state.active_intent = "requested_write_file"
+    assert _pending_file_mutation_intent(state) is True
+
+    state.active_intent = "general_task"
+    assert _pending_file_mutation_intent(state) is False
+
+    state.active_intent = ""
+    assert _pending_file_mutation_intent(state) is False
+
+
+def test_pending_file_mutation_intent_from_task_text() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Patch the existing file at `./temp/example.py`."
+    assert _pending_file_mutation_intent(state) is True
+
+    state.run_brief.original_task = "Create a new file at `./temp/example.py`."
+    assert _pending_file_mutation_intent(state) is False
+
+    state.run_brief.original_task = ""
+    state.working_memory.current_goal = "patch file.html without overwriting"
+    assert _pending_file_mutation_intent(state) is True

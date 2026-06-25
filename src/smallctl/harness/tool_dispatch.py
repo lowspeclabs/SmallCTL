@@ -376,22 +376,28 @@ def chat_mode_tools(harness: Any) -> list[dict[str, Any]]:
             runtime_intent_label = "remote_handoff"
             task_mode = "remote_execute"
         elif runtime_intent_label == "smalltalk":
-            # Smalltalk is pure conversation; the runtime policy already says
-            # chat_requires_tools=False. Exposing task_complete/task_fail here
-            # causes small models to immediately terminate the chat instead of
-            # replying naturally. Return no tools and let the smalltalk bypass
-            # finalize from assistant prose.
-            _scratchpad(harness)["_chat_tools_exposed"] = False
-            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_no_tools"
+            # Smalltalk greetings confuse small models when no terminal tool is
+            # available; they repeatedly try ask_human/task_complete, get blocked,
+            # and then loop on recovery nudges. Expose only the terminal tools
+            # (task_complete/task_fail) so the model can cleanly complete the
+            # greeting instead of getting stuck.
+            terminal_tools = _chat_terminal_tools(harness)
+            _scratchpad(harness)["_chat_tools_exposed"] = bool(terminal_tools)
+            _scratchpad(harness)["_chat_tools_suppressed_reason"] = "smalltalk_terminal_only"
+            tool_names = [
+                str(entry["function"]["name"])
+                for entry in terminal_tools
+                if isinstance(entry, dict) and isinstance(entry.get("function"), dict)
+            ]
             harness._runlog(
                 "chat_tool_selection",
-                "chat tool exposure disabled for smalltalk",
+                "chat tool exposure reduced to terminal tools for smalltalk",
                 task=task,
-                reason="smalltalk_no_tools",
-                tool_names=[],
+                reason="smalltalk_terminal_only",
+                tool_names=tool_names,
                 runtime_intent=runtime_intent_label,
             )
-            return []
+            return terminal_tools
         if not chat_mode_requires_tools(harness, task_for_intent):
             # Safety valve: if the task looks like an implementation follow-up,
             # do not reduce the model to terminal-only tools. Let it attempt the
@@ -500,6 +506,22 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
         scratchpad = getattr(harness.state, "scratchpad", None)
         if isinstance(scratchpad, dict):
             scratchpad["_tools_dispatched"] = int(scratchpad.get("_tools_dispatched", 0)) + 1
+    if not isinstance(args, dict):
+        return ToolEnvelope.make_error(
+            tool_name,
+            "Tool arguments must be an object.",
+            validation_error="schema_validation",
+            validation_issues=[
+                {
+                    "path": [],
+                    "kind": "type",
+                    "expected": "object",
+                    "actual": type(args).__name__,
+                    "message": "tool arguments must be an object",
+                }
+            ],
+        )
+
     # Hard block: SSH tools are never valid for local coding tasks.
     task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
     if (
@@ -569,19 +591,20 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
         return patch_first
 
     # Terminal-state breaker: block exploratory read-only tools when terminal readiness is reached
-    from ..challenge_progress import terminal_readiness_state
+    from ..challenge_progress import terminal_readiness_state, _pending_file_mutation_intent
     if terminal_readiness_state(harness.state):
-        if tool_name in {"dir_list", "file_read", "loop_status", "artifact_read", "artifact_grep", "artifact_print"}:
-            return ToolEnvelope(
-                success=False,
-                status="blocked",
-                error="Terminal readiness reached. The required artifact exists and is verified. Stop exploratory reads and call task_complete or task_fail.",
-                metadata={
-                    "tool_name": tool_name,
-                    "reason": "terminal_readiness_breaker",
-                    "active_mitigation": "terminal_state_block",
-                },
-            )
+        if not _pending_file_mutation_intent(harness.state):
+            if tool_name in {"dir_list", "file_read", "loop_status", "artifact_read", "artifact_grep", "artifact_print"}:
+                return ToolEnvelope(
+                    success=False,
+                    status="blocked",
+                    error="Terminal readiness reached. The required artifact exists and is verified. Stop exploratory reads and call task_complete or task_fail.",
+                    metadata={
+                        "tool_name": tool_name,
+                        "reason": "terminal_readiness_breaker",
+                        "active_mitigation": "terminal_state_block",
+                    },
+                )
 
     # Timeout override: cap at harness limit
     timeout_override_metadata: dict[str, Any] = {}

@@ -310,7 +310,7 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
     monkeypatch.setattr(
         main_module,
         "_print_shutdown_alert",
-        lambda session_id, status="alert", include_message=True: alerts.append(
+        lambda session_id, status="alert", include_message=True, **kwargs: alerts.append(
             (session_id, status, include_message)
         ),
     )
@@ -327,7 +327,7 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
     result = main_module.cli(["--tui"])
 
     assert result == 130
-    assert alerts == [("thread-123", "exited", False)]
+    assert alerts == [("thread-123", "exited", True)]
 
     alerts.clear()
     config.show_system_messages = False

@@ -242,6 +242,94 @@ class _LfmProgressingReasoningClient(_ProgressingReasoningClient):
     model = "lfm2.5-8b-a1b"
 
 
+class _Gemma4TwoRetryReasoningClient:
+    """Reasons on calls 1 and 2, then produces content on call 3."""
+
+    model = "Gemma 4 12b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        if len(self.calls) >= 3:
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "Retrying the shell command with corrected flag order."
+                            }
+                        }
+                    ]
+                },
+            }
+            return
+        for _ in range(3):
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "still thinking"
+                            }
+                        }
+                    ]
+                },
+            }
+
+
+class _Gemma4AlwaysReasoningClient:
+    """Always emits reasoning chunks; used to verify extra retry budget is consumed."""
+
+    model = "Gemma 4 12b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        for _ in range(3):
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "still thinking"
+                            }
+                        }
+                    ]
+                },
+            }
+
+class _DegenerateReasoningClient:
+    """Emits a repetitive reasoning stream that should trigger the degenerate loop guard."""
+
+    model = "Gemma 4 12b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        for _ in range(60):
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "Actually_ll"
+                            }
+                        }
+                    ]
+                },
+            }
+
+
 
 def _incident_native_tool_call_chunks(*, wrapped: bool = True) -> list[dict[str, object]]:
     raw_chunks: list[dict[str, object]] = [
@@ -536,6 +624,112 @@ def test_lfm_progressing_reasoning_only_stream_retries_without_hard_budget(monke
     assert not any(event[0][0] == "reasoning_only_stream_progress_defer" for event in harness.runlog_events)
     assert result["stream_completed_cleanly"] is False
     assert result["stream_ended_without_done_details"]["reason"] == "reasoning_only_stream_stall"
+
+
+def test_gemma_4_reasoning_only_stream_gets_extra_retry_and_recovers(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    state.recent_errors = [
+        "shell_exec: command failed: python3 ./temp/vikunja-9b.py projects list --url http://192.168.1.4:3456"
+    ]
+    harness = _Harness(state)
+    harness.client = _Gemma4TwoRetryReasoningClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+
+    # Keep limits tight so the test runs fast; Gemma-4 should still get 2 retries.
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+    monkeypatch.setattr(model_stream_loop_module, "_GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "list vikunja tasks"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert graph_state.final_result is None
+    assert len(harness.client.calls) == 3
+    last_nudge = harness.client.calls[1]["messages"][-1]["content"]
+    assert "most recent issue" in last_nudge.lower()
+    assert "shell_exec" in last_nudge
+    assert result["stream_completed_cleanly"] is True
+
+
+def test_gemma_4_reasoning_only_stream_halts_after_extra_retries_exhausted(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _Gemma4AlwaysReasoningClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+    monkeypatch.setattr(model_stream_loop_module, "_GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS", 2)
+    monkeypatch.setattr(model_stream_loop_module, "_GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS", 9999.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "list vikunja tasks"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert len(harness.client.calls) == 3
+    assert result["stream_completed_cleanly"] is False
+    assert result["stream_ended_without_done_details"]["reason"] == "reasoning_only_stream_stall"
+
+
+def test_degenerate_reasoning_loop_is_halted() -> None:
+    """Repetitive reasoning content must trigger the same degenerate-loop halt as assistant content."""
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _DegenerateReasoningClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "fix task_counter.py"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert result["stream_completed_cleanly"] is False
+    assert result["stream_ended_without_done"] is True
+    details = result["stream_ended_without_done_details"]
+    assert details["reason"] == "model_output_degenerate_loop"
+    assert "actually_ll" in details["repeated_phrase"].lower()
+    assert details["repeat_count"] >= 6
+    assert any(event[0][0] == "model_output_degenerate_loop" for event in harness.runlog_events)
 
 
 def test_stream_chunk_error_schedules_one_auto_resume_for_recoverable_write_session() -> None:

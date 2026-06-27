@@ -316,17 +316,9 @@ def task_is_local_coding_target(task: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    has_py_target = bool(re.search(r'(?:\.\/)?[^\s\'"]+\.py', text))
-    if not has_py_target:
-        return False
-    # Extract .py paths and check if any point to a local filesystem location
-    py_paths = re.findall(r'[^\s\'"]+\.py', text)
-    has_local_style_path = any(
-        p.startswith(('./', '../')) or (not p.startswith('/') and not p.startswith('~/'))
-        for p in py_paths
-    )
-    # Strong coding indicators that should override any SSH mentions in instructions
-    strong_coding_markers = (
+    has_explicit_remote = has_remote_execution_target(text)
+    # Strong local coding markers that explicitly anchor the work to the local repo
+    strong_local_coding_markers = (
         "build a self-contained python script",
         "build a self-contained python",
         "python script at `./temp/",
@@ -337,21 +329,54 @@ def task_is_local_coding_target(task: str) -> bool:
         "embedded sample list",
         "unittest",
     )
-    has_strong_coding = any(m in lowered for m in strong_coding_markers)
-    has_explicit_remote = has_remote_execution_target(text)
-    if has_strong_coding and not has_explicit_remote:
-        # Don't let SSH credential instructions in the prompt override a clear coding task
+    has_strong_local_coding = any(m in lowered for m in strong_local_coding_markers)
+    if has_strong_local_coding and not has_explicit_remote:
         return True
     # If the task is clearly asking for analysis/suggestions, don't treat as coding
     if any(marker in lowered for marker in READONLY_SUGGESTION_MARKERS):
         return False
-    # Local-style paths override weak remote hints (e.g. "fake hosts" in task description)
-    if has_local_style_path and not has_explicit_remote:
-        return True
-    # Fallback: any local .py path without remote indicators is a coding target
+    # Detect local code targets by extension.
+    code_exts = r"py|sh|bash|js|ts|tsx|jsx|rb|pl|lua|html|htm|css"
+    code_paths = re.findall(rf"[^\s'\"]+\.(?:{code_exts})", text)
+    if not code_paths:
+        return False
+    # If the user explicitly points at a remote host/IP, this is a remote task even
+    # if the target file is a source file.
     if has_explicit_remote:
         return False
-    # Additional weak coding markers
-    weak_coding_markers = ("unittest", "python script", "py script", ".py file", "python3")
+    # Local-style paths (relative or bare repo filenames) override weak remote hints.
+    has_local_style_path = any(
+        p.startswith(("./", "../")) or (not p.startswith("/") and not p.startswith("~"))
+        for p in code_paths
+    )
+    if has_local_style_path:
+        return True
+    # Absolute paths inside temp/scratch/working directories are local too.
+    local_working_dirs = (
+        "/tmp/",
+        "/temp/",
+        "/scratch/",
+        "temp/",
+        "scratch/",
+    )
+    if any(p.startswith(local_working_dirs) for p in code_paths):
+        return True
+    # Fallback: any code path without remote indicators is a local coding target.
+    weak_coding_markers = (
+        "unittest",
+        "python script",
+        "py script",
+        ".py file",
+        "python3",
+        "html file",
+        "css file",
+        "js file",
+        "script",
+        "patch",
+        "edit",
+        "modify",
+        "fix",
+        "refactor",
+    )
     has_weak_coding = any(m in lowered for m in weak_coding_markers)
-    return has_py_target and has_weak_coding
+    return has_weak_coding

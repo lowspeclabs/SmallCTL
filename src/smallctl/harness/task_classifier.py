@@ -79,6 +79,11 @@ _TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
         "hybrid_execute",
     ),
     TaskClassificationRule(
+        "remote_coding_target",
+        lambda t: has_remote_execution_target(t) and has_code_target(t),
+        "remote_execute",
+    ),
+    TaskClassificationRule(
         "local_system_target", task_is_local_system_target, "local_execute"
     ),
     TaskClassificationRule(
@@ -118,6 +123,13 @@ _TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
         "analysis", looks_like_analysis_request, "analysis"
     ),
 ]
+
+
+def has_code_target(task: str) -> bool:
+    text = str(task or "").strip()
+    if not text:
+        return False
+    return bool(CODE_TARGET_RE.search(text.lower()))
 
 
 def classify_task_mode(task: str) -> str:

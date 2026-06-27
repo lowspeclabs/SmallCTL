@@ -887,19 +887,20 @@ def test_loop_guard_decision_and_emit_block() -> None:
 def test_task_classification_rules_table_preserves_precedence() -> None:
     from smallctl.harness.task_classifier import _TASK_CLASSIFICATION_RULES, classify_task_mode
 
-    # Precedence: local_execute > hybrid_execute > chat > plan_only > remote_execute > debug_inspect > analysis
+    # Precedence: local_execute > hybrid_execute > remote_execute > chat > plan_only > debug_inspect > analysis
     assert _TASK_CLASSIFICATION_RULES[0].mode == "local_execute"
     assert _TASK_CLASSIFICATION_RULES[1].mode == "local_execute"
     assert _TASK_CLASSIFICATION_RULES[2].mode == "local_execute"
     assert _TASK_CLASSIFICATION_RULES[3].mode == "hybrid_execute"
-    assert _TASK_CLASSIFICATION_RULES[4].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[5].mode == "chat"
-    assert _TASK_CLASSIFICATION_RULES[6].mode == "plan_only"
-    assert _TASK_CLASSIFICATION_RULES[7].mode == "remote_execute"
-    assert _TASK_CLASSIFICATION_RULES[8].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[9].mode == "debug_inspect"
-    assert _TASK_CLASSIFICATION_RULES[10].mode == "local_execute"
-    assert _TASK_CLASSIFICATION_RULES[11].mode == "analysis"
+    assert _TASK_CLASSIFICATION_RULES[4].mode == "remote_execute"
+    assert _TASK_CLASSIFICATION_RULES[5].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[6].mode == "chat"
+    assert _TASK_CLASSIFICATION_RULES[7].mode == "plan_only"
+    assert _TASK_CLASSIFICATION_RULES[8].mode == "remote_execute"
+    assert _TASK_CLASSIFICATION_RULES[9].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[10].mode == "debug_inspect"
+    assert _TASK_CLASSIFICATION_RULES[11].mode == "local_execute"
+    assert _TASK_CLASSIFICATION_RULES[12].mode == "analysis"
     # Default fallback
     assert classify_task_mode("") == "chat"
     assert classify_task_mode("hi") == "chat"

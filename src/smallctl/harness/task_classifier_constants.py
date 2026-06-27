@@ -83,7 +83,7 @@ READONLY_SUGGESTION_MARKERS = (
 )
 
 CODE_TARGET_RE = re.compile(
-    r"\b(?:file|script|code|source|module|repo|repository)\b|(?:^|[\s`'\"(])[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json)\b",
+    r"\b(?:file|script|code|source|module|repo|repository)\b|(?:^|[\s`'\"(])[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|html|htm|css)\b",
     re.IGNORECASE,
 )
 

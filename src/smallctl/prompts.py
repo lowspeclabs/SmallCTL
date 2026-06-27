@@ -55,8 +55,7 @@ from .prompts_support import (
     _render_plan_step,
     _state_has_remote_cleanup_intent,
 )
-from .harness.task_classifier_support import task_has_local_scope_markers
-from .context.retrieval_state_helpers import effective_current_goal
+from .context.retrieval_state_helpers import effective_current_goal, state_target_paths
 from .tools.fs_loop_guard import build_loop_guard_prompt
 from .tools.fs_write_sessions import write_session_contract
 
@@ -90,6 +89,11 @@ def build_system_prompt(
         response_structure = _RESPONSE_STRUCTURE_GEMMA
         if exact_small_gemma_mode:
             response_structure += _RESPONSE_STRUCTURE_SMALL_GEMMA
+    elif large_model:
+        response_structure = (
+            "RESPONSE STRUCTURE: Use a concise <think> block for task planning when needed. "
+            "Do not restate the full user task every turn; keep the current goal implicit unless it changed. "
+        )
     else:
         response_structure = _RESPONSE_STRUCTURE_THINK
     if exact_large_gemma_26b_mode:
@@ -120,7 +124,7 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "PRIMARY RULE: Solve the current user task only. Keep the task goal in view and avoid side quests. ",
-                "GOAL ACCOUNTABILITY: Start your response by stating your current goal and the specific task you are working on. If the task changed from a previous turn, acknowledge the change. ",
+                "GOAL ACCOUNTABILITY: Keep the current task in view. If the task changed from a previous turn, acknowledge the change. ",
                 _DELIVERABLE_VERIFICATION,
                 _DOCKER_INSPECT_HINT,
                 _INSTALLER_TIMEOUT_RECOVERY,
@@ -151,7 +155,7 @@ def build_system_prompt(
                 "You are smallctl, an autonomous execution agent. ",
                 response_structure,
                 "GOAL RETENTION: The user's original task is your primary obligation throughout all turns. Intermediate tool results, assist messages, and artifact reads do NOT satisfy the task unless you have fully answered what was asked. Keep the task goal in view at all times. ",
-                "GOAL ACCOUNTABILITY: Start your response by stating your current goal and the specific task you are working on. If the task changed from a previous turn, acknowledge the change. ",
+                "GOAL ACCOUNTABILITY: Keep the current task in view. If the task changed from a previous turn, acknowledge the change. ",
                 _DELIVERABLE_VERIFICATION,
                 _DOCKER_INSPECT_HINT,
                 _INSTALLER_TIMEOUT_RECOVERY,
@@ -246,6 +250,9 @@ def build_system_prompt(
         )
     if _task_has_local_scope(state):
         parts.append(_LOCAL_SCOPE_PREFERENCE)
+    mutation_focus = _mutation_task_focus(state)
+    if mutation_focus:
+        parts.append(mutation_focus)
     if state.contract_phase() == "repair":
         repair_bits = []
         if state.last_failure_class:
@@ -429,7 +436,18 @@ def build_system_prompt(
             suffix = " [truncated]" if clipped else ""
             verifier_bits.append(f"output={verifier_output}{suffix}")
         parts.append("LATEST VERIFIER: " + " | ".join(verifier_bits) + ". ")
-        if str(verifier_verdict.get("verdict") or "").strip() not in {"", "pass"} and not state.acceptance_waived:
+        verdict_value = str(verifier_verdict.get("verdict") or "").strip()
+        if verdict_value == "pass":
+            verifier_command = str(verifier_verdict.get("command") or verifier_verdict.get("target") or "").strip().lower()
+            for target in state_target_paths(state):
+                target_norm = str(target).strip().lower()
+                if target_norm and target_norm in verifier_command:
+                    parts.append(
+                        "VERIFIER PASSED: The deliverable file has been verified. "
+                        "Do not read the file again. Call `task_complete` now with a concise summary."
+                    )
+                    break
+        if verdict_value not in {"", "pass"} and not state.acceptance_waived:
             rejection_count = int(state.scratchpad.get("_verifier_rejection_count", 0) or 0)
             required_classes = state.scratchpad.get("_verifier_loop_required_action_classes")
             if isinstance(required_classes, list) and required_classes and rejection_count >= 3:
@@ -787,6 +805,10 @@ def build_planning_prompt(
 
 
 def _task_has_local_scope(state: LoopState) -> bool:
+    from .harness.task_classifier_support import task_has_local_scope_markers
+
+    if str(getattr(state, "task_mode", "") or "").strip().lower() == "local_execute":
+        return True
     texts: list[str] = []
     if state.run_brief.original_task:
         texts.append(state.run_brief.original_task)
@@ -794,3 +816,23 @@ def _task_has_local_scope(state: LoopState) -> bool:
         texts.append(state.working_memory.current_goal)
     combined = " ".join(texts)
     return task_has_local_scope_markers(combined)
+
+
+def _mutation_task_focus(state: LoopState) -> str | None:
+    """Return a strong mutation directive when the task is a local file edit.
+
+    This prevents models from falling into an read-only evidence spiral on
+    tasks that explicitly ask for a bug fix or patch.
+    """
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode != "local_execute":
+        return None
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if active_intent not in {"requested_file_patch", "requested_write_file"}:
+        return None
+    return (
+        "MUTATION TASK: The user asked you to modify a local file. "
+        "Read the target once if you do not already have its content, identify the fix, "
+        "then emit ONE concrete mutation (`file_patch`, `ast_patch`, or `file_write`) this turn. "
+        "Do not keep grepping or re-reading the file for additional context once you have enough information to make the change."
+    )

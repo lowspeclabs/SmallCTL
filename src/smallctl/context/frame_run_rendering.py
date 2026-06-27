@@ -89,6 +89,11 @@ def coding_anchor_lines(state: LoopState) -> list[str]:
     if not is_coding_mode:
         return anchors
 
+    active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
+    if task_mode == "local_execute" and active_intent in {"requested_file_patch", "requested_write_file"}:
+        anchors.append("mode=local_mutation")
+        anchors.append("directive=read_once_then_patch")
+
     if state.write_session is not None:
         session = state.write_session
         if session.write_target_path:

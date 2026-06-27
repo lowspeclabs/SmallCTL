@@ -180,12 +180,6 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     if not target:
         return None
 
-    from ..harness.task_classifier import task_is_local_coding_target
-
-    task_text = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
-    if task_is_local_coding_target(task_text):
-        return None
-
     existing = _active_write_session_for_target(harness, target)
     if existing is not None:
         return existing
@@ -196,6 +190,14 @@ def _ensure_chunk_write_session(harness: Any, target_path: str) -> WriteSession 
     if not is_small_model_name(model_name):
         return None
     if not _task_forces_chunk_mode(harness, target):
+        return None
+
+    from ..harness.task_classifier import task_is_local_coding_target
+
+    task_text = getattr(getattr(harness.state, "run_brief", None), "original_task", "") or ""
+    # Local coding tasks should use direct file tools; chunk mode is only for
+    # plan-driven authoring where the model needs staged sections.
+    if task_is_local_coding_target(task_text) and not _task_forces_chunk_mode(harness, target):
         return None
 
     from ..tools.fs import infer_write_session_intent, new_write_session_id

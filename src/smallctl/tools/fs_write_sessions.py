@@ -15,6 +15,7 @@ from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
     _infer_next_suggested_section,
+    _is_finalization_marker,
     _looks_like_complete_html_document,
     _suggested_chunk_sections,
     infer_write_session_intent,
@@ -375,7 +376,8 @@ def maybe_create_implicit_write_session(
 
     strategy = str(replace_strategy or "auto").strip().lower()
     normalized_section = str(section_name or "").strip()
-    has_next = bool(str(next_section_name or "").strip())
+    raw_next = str(next_section_name or "").strip()
+    has_next = bool(raw_next) and not _is_finalization_marker(raw_next)
     content_len = len(str(content or ""))
 
     # A present section label (other than a full-file marker) implies chunked authoring.
@@ -412,13 +414,16 @@ def maybe_create_implicit_write_session(
     intent = infer_write_session_intent(path, cwd)
     suggestions = _suggested_chunk_sections(path)
     first_section = normalized_section or (suggestions[0] if suggestions else "full_file")
+    session_next = str(next_section_name or "").strip()
+    if _is_finalization_marker(session_next):
+        session_next = ""
     session = new_write_session(
         session_id=new_write_session_id(),
         target_path=path,
         intent=intent,
         mode="chunked_author",
         suggested_sections=suggestions,
-        next_section=str(next_section_name or "").strip(),
+        next_section=session_next,
     )
     session.write_current_section = first_section
     if not session.write_next_section and suggestions:

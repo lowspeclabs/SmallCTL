@@ -198,6 +198,31 @@ def _sanitize_task_for_intent_routing(task: str) -> str:
     if _TRACEBACK_HEADER_RE.search(task):
         return _TERMINAL_PROMPT_RE.sub("", task)
     return task
+def _task_implies_local_file_mutation(task: str) -> bool:
+    """Return True when the task clearly asks to mutate a local file.
+
+    Catches phrases like "fix the bug in foo.html" that contain both a
+    mutation verb and a file target, even when the task also uses read
+    keywords such as "read" or "inspect".
+    """
+    text = str(task or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    mutation_verbs = ("patch", "fix", "repair", "update", "modify", "edit")
+    if not any(verb in lowered for verb in mutation_verbs):
+        return False
+    file_target = bool(
+        re.search(
+            r"(?:^|[\s`'\"(])[.\/\\A-Za-z0-9_-]+\.(?:html?|py|sh|bash|ps1|js|ts|tsx|jsx|css|scss|md|txt|json|yaml|yml|toml|go|rs|java|kt|cpp|c|h|rb|php)",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    file_target = file_target or any(marker in lowered for marker in ("file", "files"))
+    return file_target
+
+
 def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[str]]:
     text = (task or "").lower()
     secondary: list[str] = []
@@ -234,6 +259,10 @@ def extract_intent_state(harness: Any, task: str) -> tuple[str, list[str], list[
             secondary.append("call_zero_arg_tool")
         if requested_tool in {"task_complete", "task_fail", "ask_human"}:
             secondary.append("control_tool")
+    elif _task_implies_local_file_mutation(task):
+        primary = "requested_file_patch"
+        secondary.extend(["mutate_repo", "complete_validation_task"])
+        tags.append("file_patch")
     elif any(token in text for token in {"inspect", "read", "grep", "find", "search", "list"}):
         primary = "inspect_repo"
         secondary.append("read_artifacts")

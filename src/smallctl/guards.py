@@ -23,6 +23,14 @@ class GuardConfig:
 
 _SMALL_MODEL_SIZE_RE = re.compile(r"(?<![xX])\b(?P<size>\d+(?:\.\d+)?)b\b", re.IGNORECASE)
 _SMALL_MODEL_HINTS = ("tiny", "mini", "small", "compact")
+_KNOWN_LARGE_MODEL_RE = re.compile(
+    r"(?:^|-)(?:"
+    r"deepseek-(?:v3|v4|r1)"
+    r"|kimi(?:-code)?"
+    r"|glm-(?:4-5|4-plus|z1)"
+    r")(?:-|$)",
+    re.IGNORECASE,
+)
 _TRIPLE_ANSWER_META_MAX_CHARS = 120
 _TRIPLE_ANSWER_META_MAX_WORDS = 20
 _TRIPLE_ANSWER_FUZZY_MIN_LENGTH_RATIO = 0.85
@@ -41,9 +49,31 @@ def _canonicalize_model_name_for_size(model_name: str | None) -> str:
     return text
 
 
+def _model_has_size_at_or_under(normalized: str, limit: float) -> bool:
+    for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
+        try:
+            size = float(match.group("size"))
+        except ValueError:
+            continue
+        if size <= limit:
+            return True
+    return False
+
+
+def _is_known_large_model_name(normalized: str) -> bool:
+    if not normalized:
+        return False
+    if _model_has_size_at_or_under(normalized, 20.0):
+        return False
+    return bool(_KNOWN_LARGE_MODEL_RE.search(normalized))
+
+
 def is_small_model_name(model_name: str | None) -> bool:
     normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
+        return False
+
+    if _is_known_large_model_name(normalized):
         return False
 
     if any(hint in normalized for hint in _SMALL_MODEL_HINTS):
@@ -96,6 +126,9 @@ def is_over_twenty_b_model_name(model_name: str | None) -> bool:
     normalized = _canonicalize_model_name_for_size(model_name)
     if not normalized:
         return False
+
+    if _is_known_large_model_name(normalized):
+        return True
 
     for match in _SMALL_MODEL_SIZE_RE.finditer(normalized):
         try:

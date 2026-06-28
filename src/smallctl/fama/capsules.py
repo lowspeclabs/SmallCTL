@@ -22,6 +22,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
     "repair_debug_scaffold": "REPAIR MODE: You have already read the failing file. The bugs are in code you wrote. Do NOT read the file again. Emit ONE mutation (file_patch/file_write/ast_patch) this turn, then run the verifier.",
+    "mutation_loop_breaker": "MUTATION REQUIRED: You have already read enough. Stop gathering evidence. Emit ONE concrete mutation (`file_patch`, `file_write`, or `ast_patch`) this turn, then run a focused verifier or continue.",
     "preflight_contradiction_capsule": "A preflight validation passed but the gate is still blocking. Do not retry the same validator; escalate or ask for human guidance.",
     "repeated_remote_installer_failure_capsule": "The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
     "debian_13_installer_readiness_capsule": "Debian 13 (trixie) installer readiness issues detected. Before running apt or curl-based installs, ensure /etc/apt/keyrings/debian-archive-keyring.gpg exists, /etc/apt/sources.list.d/debian.sources uses valid deb822 format, apt-key is not relied on, and trixie-security 404s are avoided. Repair these first; do not retry the same failing command.",

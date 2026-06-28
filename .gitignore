@@ -24,6 +24,10 @@ src/smallctl.egg-info/
 .smallctl.yaml
 .ssh/
 
+# Build artifacts
+build/
+dist/
+
 # Logs, temp, scratch
 logs/
 scratch/
@@ -54,11 +58,6 @@ hello.sh
 
 # Evals - keep structure but ignore contents except specific dirs
 evals/
-!evals/tool_plan/
-!evals/tool_plan/*.yaml
-!evals/tool_plan/*.yml
-!evals/tool_plan/*.jsonl
-!evals/tool_plan/README.md
 !evals/test_time_scaling/
 !evals/test_time_scaling/*.yaml
 !evals/test_time_scaling/*.yml
@@ -74,6 +73,8 @@ evals/
 interactive-tool-use.md
 cleanup_plan.md
 bug_report.md
+path_test_plan.md
+/PY
 
 # Generated artifacts
 *.swp

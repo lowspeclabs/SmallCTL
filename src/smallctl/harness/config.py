@@ -71,6 +71,7 @@ class HarnessConfig:
     artifact_start_index: int | None = None
     tool_result_inline_token_limit: int = 250
     artifact_read_inline_token_limit: int = 1024
+    allow_artifact_read_large_context: bool = False
     strategy_prompt: str | None = None
     strategy: dict[str, Any] | None = None
     indexer: bool = False
@@ -127,7 +128,7 @@ class HarnessConfig:
     min_exploration_steps: int = 1
     chunk_mode_min_bytes: int = 4096
     chunk_mode_new_file_only: bool = True
-    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3"])
+    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"])
     small_model_soft_write_chars: int = 2000
     small_model_hard_write_chars: int = 4000
     new_file_chunk_mode_line_estimate: int = 100
@@ -183,4 +184,3 @@ class HarnessConfig:
     escalation_require_tool_plan_evidence: bool = True
     escalation_redact_secrets: bool = True
     verbose: bool = False
-

@@ -378,6 +378,144 @@ ENV_BLOCKER_PATTERNS = (
 )
 
 
+# Patterns used to detect tool-call protocol mismatches in model output.
+CONTROL_TOKEN_PATTERN = re.compile(r"^\s*\|>[a-z_]+<\|\s*$", re.IGNORECASE)
+TOOL_CALL_WRAPPER_PATTERN = re.compile(
+    r"<[/|]?\s*tool_call\b|<\|tool_call\||</tool_call\|>"
+    r"|<function\s*=|<call\b",
+    re.IGNORECASE,
+)
+
+
+def _native_tool_call_traces(tools_records: Iterable[dict[str, Any]]) -> set[str]:
+    """Return trace_ids that have a real tool dispatch recorded in tools.jsonl."""
+    traces: set[str] = set()
+    for rec in tools_records:
+        if rec.get("event") in {"dispatch_start", "dispatch_complete"}:
+            tid = extract_trace_id(rec)
+            if tid:
+                traces.add(tid)
+    return traces
+
+
+def has_control_token_fragment(records: Iterable[dict[str, Any]]) -> bool:
+    """Detect Gemma/Qwen-style control-token fragments in assistant text."""
+    for rec in records:
+        data = rec.get("data") or {}
+        text = str(data.get("assistant_text") or "")
+        if text and CONTROL_TOKEN_PATTERN.match(text):
+            return True
+    return False
+
+
+def has_reasoning_tool_call_wrapper(
+    records: Iterable[dict[str, Any]],
+    tools_records: Iterable[dict[str, Any]],
+) -> bool:
+    """Detect tool-call wrappers in reasoning/assistant text without a dispatch."""
+    dispatched_traces = _native_tool_call_traces(tools_records)
+    for rec in records:
+        data = rec.get("data") or {}
+        text = str(data.get("assistant_text") or "")
+        thinking = str(data.get("thinking_text") or "")
+        if not TOOL_CALL_WRAPPER_PATTERN.search(f"{text}\n{thinking}"):
+            continue
+        tid = extract_trace_id(rec) or ""
+        if tid not in dispatched_traces:
+            return True
+    return False
+
+
+def has_tool_call_protocol_mismatch(
+    records: Iterable[dict[str, Any]],
+    tools_records: Iterable[dict[str, Any]],
+) -> bool:
+    """Detect control-token fragments or reasoning-channel tool-call wrappers."""
+    return has_control_token_fragment(records) or has_reasoning_tool_call_wrapper(
+        records, tools_records
+    )
+
+
+def has_inline_tool_call_recovery_without_dispatch(
+    harness_records: Iterable[dict[str, Any]],
+    tools_records: Iterable[dict[str, Any]],
+) -> bool:
+    """Detect harness recovery of inline tool calls from thinking that did not dispatch."""
+    dispatched_traces = _native_tool_call_traces(tools_records)
+    for rec in harness_records:
+        if rec.get("event") != "inline_tool_call_recovered_from_thinking":
+            continue
+        tid = extract_trace_id(rec) or ""
+        if tid not in dispatched_traces:
+            return True
+    return False
+
+
+def has_continue_prompt_budget_loop(
+    records: Iterable[dict[str, Any]],
+    chat_records: Iterable[dict[str, Any]],
+    threshold: int = 2,
+) -> bool:
+    """Detect 'continue/proceed' retries that repeatedly hit prompt-budget overflow.
+
+    The harness records and chat conversation snapshots are scanned in timestamp
+    order. A cycle counts when a user message containing 'continue' or 'proceed'
+    (after a terminal task_fail) is followed by a 'PROMPT BUDGET OVERFLOW' error.
+    """
+    continue_re = re.compile(r"\b(continue|proceed)\b", re.IGNORECASE)
+    overflow_re = re.compile(r"PROMPT\s+BUDGET\s+OVERFLOW", re.IGNORECASE)
+
+    # Collect user message records from chat conversation snapshots.
+    user_message_times: list[tuple[str, str]] = []
+    for rec in chat_records:
+        data = rec.get("data") or {}
+        for key in ("history", "recent_messages"):
+            messages = data.get(key) or []
+            if not isinstance(messages, list):
+                continue
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = str(msg.get("content") or "")
+                    if continue_re.search(content):
+                        ts = str(rec.get("timestamp") or "")
+                        user_message_times.append((ts, content))
+
+    # Count task_fail events.
+    saw_task_fail = False
+    task_fail_times: list[str] = []
+    for rec in records:
+        event = rec.get("event", "")
+        data = rec.get("data") or {}
+        if event == "dispatch_complete" and data.get("tool_name") == "task_fail" and data.get("success") is True:
+            saw_task_fail = True
+            ts = str(rec.get("timestamp") or "")
+            task_fail_times.append(ts)
+
+    if not saw_task_fail:
+        return False
+
+    # Count prompt budget overflow events.
+    overflow_count = 0
+    for rec in records:
+        message = str(rec.get("message") or "")
+        data = rec.get("data") or {}
+        data_text = json.dumps(data, default=str, ensure_ascii=False)
+        if overflow_re.search(message) or overflow_re.search(data_text):
+            overflow_count += 1
+
+    # Count continue/proceed messages that occur after a task_fail.
+    continue_after_fail = 0
+    # Simple heuristic: if there is at least one task_fail and the number of
+    # continue messages is at least the threshold, treat it as the loop pattern.
+    if task_fail_times and user_message_times:
+        first_fail = min(task_fail_times)
+        continue_after_fail = sum(
+            1 for ts, _ in user_message_times if ts >= first_fail
+        )
+
+    return continue_after_fail >= threshold and overflow_count >= threshold
+
+
 def detect_primary_blockers(
     harness_records: Iterable[dict[str, Any]],
     failed_dispatches: Iterable[dict[str, Any]],

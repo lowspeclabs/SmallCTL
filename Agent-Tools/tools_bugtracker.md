@@ -23,8 +23,6 @@ moving on.
 
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
-| BUG-014 | model_output_lint.py | minor | Reports `missing_tool_calls` for assistant turns that use native function calling (`tool_calls` in the API response). The `assistant_text` contains explanatory prose while the actual tool calls live in separate `tool_calls` fields, so the heuristic that looks for inline `tool_name(` patterns is noisy for native-tooling runs. | `python3 Agent-Tools/model_output_lint.py e19cdf4c --json` shows 4 `missing_tool_calls` entries even though each turn emitted valid `tool_calls`. | open |
-| BUG-015 | tui_screenshot.py | major | `pilot.exit(0)` triggers an `asyncio` `RecursionError` (`Task.task_wakeup` -> `child.cancel` repeated ~990 times). The screenshot and PNG are produced, but the exception indicates a shutdown/cancellation lifecycle bug in the UI/harness boundary that may also affect real TUI sessions. | `.venv/bin/python Agent-Tools/tui_screenshot.py --task "what is 2+2" --timeout 30 --json` or any task that completes. Observed on runs `55f2c1f0-20260625-172955` and `92eaaaf3-20260625-173043`. | open |
 
 ## Fixed Bugs
 
@@ -32,6 +30,8 @@ Move resolved bugs here and keep the original ID for reference.
 
 | ID | Tool | Fix Summary | Fixed Date |
 |----|------|-------------|------------|
+| BUG-015 | tui_screenshot.py | Removed the explicit `pilot.exit(0)` call, added graceful cancellation of the active harness task before Textual tears the app down, and added a logging filter that suppresses the benign asyncio `Task.task_wakeup` RecursionError logged during shutdown. | 2026-06-25 |
+| BUG-014 | model_output_lint.py | Skip the `missing_tool_calls` heuristic when the record (or matching tools-channel dispatch) shows native tool_calls. Added explicit detection for control-token fragments and reasoning-channel tool-call wrappers. | 2026-06-25 |
 | BUG-013 | run_diagnose.py, runscan.py | Moved `policy_block` and `fama_block` classification checks ahead of `model_tool_loop_stall` so done-gate / not-exposed tool blocks are surfaced before generic stall labels. Added regression tests. | 2026-06-22 |
 | BUG-012 | model_output_lint.py | Added `thinking_text` to the thinking-tag leak scan so literal `<think>`/`<thinking>` tags inside recorded reasoning are surfaced. | 2026-06-21 |
 | BUG-011 | run_diagnose.py | Detect `stderr_signature_circuit_breaker` trips and classify as `harness_circuit_breaker_false_positive` instead of `model_degeneration`. | 2026-06-19 |

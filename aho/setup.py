@@ -389,7 +389,7 @@ def create_harness(
         min_exploration_steps=cfg.get("min_exploration_steps", 1),
         chunk_mode_min_bytes=cfg.get("chunk_mode_min_bytes", 4096),
         chunk_mode_new_file_only=cfg.get("chunk_mode_new_file_only", True),
-        chunk_mode_supported_models=cfg.get("chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3"]),
+        chunk_mode_supported_models=cfg.get("chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"]),
         small_model_soft_write_chars=cfg.get("small_model_soft_write_chars", 2000),
         small_model_hard_write_chars=cfg.get("small_model_hard_write_chars", 4000),
         new_file_chunk_mode_line_estimate=cfg.get("new_file_chunk_mode_line_estimate", 100),

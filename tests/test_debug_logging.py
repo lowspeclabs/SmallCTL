@@ -75,6 +75,28 @@ def test_run_logger_token_sampling_disabled_includes_all_tokens(tmp_path: Path) 
     assert len(token_events) == 10
 
 
+def test_run_logger_token_sampling_does_not_write_fragmented_text_stream(tmp_path: Path) -> None:
+    logger = RunLogger(tmp_path / "run", debug_tokens=False)
+    logger.set_call_count(1)
+    for i in range(150):
+        logger.log("model_output", "model_token", "token", token=f"tok{i} ")
+
+    text = (logger.run_dir / "model_output.log").read_text(encoding="utf-8")
+    # Sampled tokens must not be concatenated into a misleading continuous
+    # stream; the text log should contain no token fragments at all.
+    assert "tok0" not in text
+    assert "tok120" not in text
+
+
+def test_run_logger_token_sampling_writes_complete_model_output_events(tmp_path: Path) -> None:
+    logger = RunLogger(tmp_path / "run", debug_tokens=False)
+    logger.log("model_output", "model_output", "assistant output complete", assistant_text="hello world")
+
+    text = (logger.run_dir / "model_output.log").read_text(encoding="utf-8")
+    assert "assistant output complete" in text
+    assert "hello world" in text
+
+
 def test_run_logger_size_cap_rotates(tmp_path: Path) -> None:
     logger = RunLogger(tmp_path / "run", log_max_mb=0)
     logger.log("harness", "big_event", "x" * 1000)

@@ -228,8 +228,9 @@ async def _handle_write_session_finalize_success(
         ConversationMessage(
             role="system",
             content=(
-                f"Write Session `{session.write_session_id}` for `{target_path}` is complete. "
-                f"Please VERIFY the promoted file at `{target_path}` now (e.g. run a linter, test, or `file_read`). "
+                f"Write Session `{session.write_session_id}` for `{target_path}` is complete and the file has been promoted. "
+                f"The deliverable is ready. If you need verification, run ONE quick shell command (e.g. `wc -l`, `head -n 5 {target_path}`, or `grep -c`) rather than reading the whole file. "
+                "After that single verification, call `task_complete`. Do not re-read the file repeatedly. "
                 "If errors are found, you may continue making small repairs. "
                 "If you hit a loop of errors, I will suggest a fallback strategy.\n"
                 + format_write_session_status_block(

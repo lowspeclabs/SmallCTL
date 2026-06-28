@@ -1,6 +1,8 @@
 import json
 import inspect
+import logging
 import re
+import time
 from typing import Any, TYPE_CHECKING
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -13,6 +15,11 @@ from textual.widgets import Collapsible, Static
 
 if TYPE_CHECKING:
     pass
+
+
+logger = logging.getLogger("smallctl.ui.bubbles")
+
+_RICH_MARKDOWN_MAX_CHARS = 8192
 
 
 KIND_LABEL = {
@@ -395,6 +402,8 @@ class TextBlockWidget(Static):
         self.render_markdown = render_markdown
         self._markdown_finalized = False
         self._rendered_content: object | None = None
+        self._rich_markdown_renderable: object | None = None
+        self._rich_markdown_text: str | None = None
         self._plain_text_renderable = Text(text)
         self.text = text
         self._refresh_content()
@@ -404,6 +413,8 @@ class TextBlockWidget(Static):
             return
         self.text = value
         self._markdown_finalized = False
+        self._rich_markdown_renderable = None
+        self._rich_markdown_text = None
         self._plain_text_renderable = (
             _style_text_lite(value) if self.render_markdown else Text(value)
         )
@@ -414,6 +425,8 @@ class TextBlockWidget(Static):
             return
         self.text += value
         self._markdown_finalized = False
+        self._rich_markdown_renderable = None
+        self._rich_markdown_text = None
         self._plain_text_renderable = (
             _style_text_lite(self.text) if self.render_markdown else Text(self.text)
         )
@@ -426,26 +439,57 @@ class TextBlockWidget(Static):
         self._refresh_content()
 
     def _refresh_content(self) -> None:
-        if (
-            self.render_markdown
-            and self._markdown_finalized
-            and _markdown_render_ready(self.text)
-        ):
-            try:
-                self._rendered_content = RichMarkdown(self.text)
-                self.update(self._rendered_content)
-                return
-            except Exception:
-                # Malformed markdown can occasionally crash Rich's parser.
-                # Fall back to plain text so the UI never goes blank.
-                pass
-        # Prefer cheap, live markdown styling while streaming; fall back to a
-        # plain Text object for non-markdown blocks or malformed content.
-        self._plain_text_renderable = (
-            _style_text_lite(self.text) if self.render_markdown else Text(self.text)
-        )
-        self._rendered_content = self._plain_text_renderable
-        self.update(self._plain_text_renderable)
+        started = time.perf_counter()
+        text_len = len(self.text)
+        try:
+            if (
+                self.render_markdown
+                and self._markdown_finalized
+                and text_len <= _RICH_MARKDOWN_MAX_CHARS
+                and _markdown_render_ready(self.text)
+            ):
+                try:
+                    if (
+                        self._rich_markdown_renderable is None
+                        or self._rich_markdown_text != self.text
+                    ):
+                        self._rich_markdown_renderable = RichMarkdown(self.text)
+                        self._rich_markdown_text = self.text
+                    self._rendered_content = self._rich_markdown_renderable
+                    self.update(self._rendered_content)
+                    return
+                except Exception:
+                    # Malformed markdown can occasionally crash Rich's parser.
+                    # Fall back to plain text so the UI never goes blank.
+                    self._rich_markdown_renderable = None
+                    self._rich_markdown_text = None
+                    pass
+            # Prefer cheap, live markdown styling while streaming; fall back to a
+            # plain Text object for non-markdown blocks or malformed content.
+            self._plain_text_renderable = (
+                _style_text_lite(self.text) if self.render_markdown else Text(self.text)
+            )
+            self._rendered_content = self._plain_text_renderable
+            self.update(self._plain_text_renderable)
+        finally:
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            if elapsed_ms > 5 or text_len > 10000:
+                segment_count = 0
+                rendered = self._rendered_content
+                if rendered is not None:
+                    segs = getattr(rendered, "_segments", None) or getattr(rendered, "segments", None)
+                    if isinstance(segs, list):
+                        segment_count = len(segs)
+                logger.debug(
+                    "text_block_refresh %s",
+                    {
+                        "elapsed_ms": elapsed_ms,
+                        "text_len": text_len,
+                        "markdown_finalized": self._markdown_finalized,
+                        "render_markdown": self.render_markdown,
+                        "segment_count": segment_count,
+                    },
+                )
 
     def get_selection(self, selection: Any) -> Any:
         try:
@@ -519,18 +563,27 @@ class AssistantDetailWidget(Collapsible):
                 self.refresh(layout=True)
 
     def _build_title(self, text: str) -> str:
-        color = KIND_COLOR.get(self.kind, "#9ca3af")
-        if self.kind == "thinking":
-            return self._build_thinking_title()
-        preview = " ".join(text.split())
-        if len(preview) > self.PREVIEW_LIMIT:
-            preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
-        preview = markup_escape(preview)
-        return (
-            f"[bold {color}]{preview}[/]"
-            if preview
-            else f"[bold {color}]{self.kind.upper()}[/]"
-        )
+        started = time.perf_counter()
+        try:
+            color = KIND_COLOR.get(self.kind, "#9ca3af")
+            if self.kind == "thinking":
+                return self._build_thinking_title()
+            preview = " ".join(text.split())
+            if len(preview) > self.PREVIEW_LIMIT:
+                preview = preview[: self.PREVIEW_LIMIT - 3].rstrip() + "..."
+            preview = markup_escape(preview)
+            return (
+                f"[bold {color}]{preview}[/]"
+                if preview
+                else f"[bold {color}]{self.kind.upper()}[/]"
+            )
+        finally:
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            if elapsed_ms > 5 or len(text) > 10000:
+                logger.debug(
+                    "assistant_detail_build_title %s",
+                    {"elapsed_ms": elapsed_ms, "text_len": len(text), "kind": self.kind},
+                )
 
     def _build_thinking_title(self) -> str:
         import time
@@ -1134,23 +1187,41 @@ class AssistantTurnWidget(Vertical):
     async def append_assistant_text(self, text: str) -> None:
         if not text:
             return
-        if self._last_thinking_detail is not None:
-            self._last_thinking_detail.finalize_thinking()
-        if self._current_tool_calls_container is not None:
-            self._current_tool_calls_container.finalize()
-            self._current_tool_calls_container = None
-        if self._last_assistant_block is None:
-            text = _trim_leading_blank_lines(text)
-            if not text:
-                return
-            self._last_assistant_block = TextBlockWidget(
-                classes="assistant-turn-text",
-                render_markdown=True,
-            )
-            await self._content_body().mount(self._last_assistant_block)
-            await self._ensure_checklist_at_bottom()
-        self._last_assistant_block.append_text(text)
-        self._last_thinking_detail = None
+        started = time.perf_counter()
+        text_len = len(text)
+        try:
+            if self._last_thinking_detail is not None:
+                self._last_thinking_detail.finalize_thinking()
+            if self._current_tool_calls_container is not None:
+                self._current_tool_calls_container.finalize()
+                self._current_tool_calls_container = None
+            if self._last_assistant_block is None:
+                text = _trim_leading_blank_lines(text)
+                if not text:
+                    return
+                self._last_assistant_block = TextBlockWidget(
+                    classes="assistant-turn-text",
+                    render_markdown=True,
+                )
+                body = self._content_body()
+                if not body.is_mounted:
+                    self._last_assistant_block = None
+                    return
+                await body.mount(self._last_assistant_block)
+                await self._ensure_checklist_at_bottom()
+            self._last_assistant_block.append_text(text)
+            self._last_thinking_detail = None
+        finally:
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            if elapsed_ms > 5 or text_len > 10000:
+                logger.debug(
+                    "assistant_turn_append_text %s",
+                    {
+                        "elapsed_ms": elapsed_ms,
+                        "chunk_len": text_len,
+                        "content_widget_children": len(self._content_widget.children),
+                    },
+                )
 
     def finalize_assistant_render(self) -> None:
         block = self._last_assistant_block or self._latest_assistant_text_block()
@@ -1243,8 +1314,11 @@ class AssistantTurnWidget(Vertical):
             self._current_tool_calls_container.finalize()
             self._current_tool_calls_container = None
         if self._last_thinking_detail is None:
+            body = self._content_body()
+            if not body.is_mounted:
+                return
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
-            await self._content_body().mount(self._last_thinking_detail)
+            await body.mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.append_text(text)
         self._last_thinking_detail.update_thinking_timer()
@@ -1259,8 +1333,11 @@ class AssistantTurnWidget(Vertical):
         if self._last_thinking_detail is None:
             if not text:
                 return
+            body = self._content_body()
+            if not body.is_mounted:
+                return
             self._last_thinking_detail = AssistantDetailWidget(kind="thinking", text="")
-            await self._content_body().mount(self._last_thinking_detail)
+            await body.mount(self._last_thinking_detail)
             await self._ensure_checklist_at_bottom()
         self._last_thinking_detail.set_text(text)
         self._last_thinking_detail.update_thinking_timer()

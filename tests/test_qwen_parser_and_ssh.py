@@ -1456,6 +1456,96 @@ def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
     assert metadata["ssh_password_recovered"] is True
 
 
+def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = (
+        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        "then install nginx"
+    )
+
+    # Small models sometimes echo the redaction hash suffix they see in the prompt
+    # instead of the real password. The sha256 prefix of "@S02v1735" is "d0efcff6".
+    hash_suffix = "d0efcff6"
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.63",
+            "user": "root",
+            "password": hash_suffix,
+            "command": "whoami && pwd",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["password"] == "@S02v1735"
+    assert metadata["recovered_ssh_password"] is True
+    assert metadata["recovered_ssh_password_source"] == "task_context"
+    assert metadata["ssh_password_hash_suffix_corrected"] is True
+    assert metadata["ssh_password_origin"] == "task_context"
+    assert metadata["ssh_password_recovered"] is True
+
+
+def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = (
+        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        "then install nginx"
+    )
+
+    hash_suffix = "d0efcff6"
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_file_read",
+        {
+            "host": "192.168.1.63",
+            "user": "root",
+            "password": hash_suffix,
+            "path": "/etc/nginx/nginx.conf",
+        },
+        phase="explore",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_file_read"
+    assert args["password"] == "@S02v1735"
+    assert metadata["recovered_ssh_password"] is True
+    assert metadata["recovered_ssh_password_source"] == "task_context"
+    assert metadata["ssh_password_hash_suffix_corrected"] is True
+
+
+def test_ssh_exec_preserves_explicit_password_that_does_not_match_task_hash() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = (
+        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        "then install nginx"
+    )
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_exec",
+        {
+            "host": "192.168.1.63",
+            "user": "root",
+            "password": "some-other-password",
+            "command": "whoami && pwd",
+        },
+        phase="execute",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_exec"
+    assert args["password"] == "some-other-password"
+    assert metadata.get("recovered_ssh_password") is not True
+    assert metadata.get("ssh_password_hash_suffix_corrected") is None
+    assert metadata["ssh_password_origin"] == "explicit"
+
+
 def test_ssh_exec_recovers_missing_password_from_prior_authenticated_ssh_exec() -> None:
     state = LoopState(cwd=".")
     state.tool_execution_records["ssh-1"] = {

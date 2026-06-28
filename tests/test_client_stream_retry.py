@@ -9,6 +9,7 @@ import pytest
 
 from smallctl.client import OpenAICompatClient
 from smallctl.client import client_transport
+from smallctl.client.streaming import SSEStreamer
 
 
 class _RunLogger:
@@ -36,6 +37,47 @@ def _http_status_error(
     request = httpx.Request("POST", url)
     response = httpx.Response(status_code, request=request, headers=headers, text=text)
     return httpx.HTTPStatusError(f"http {status_code}", request=request, response=response)
+
+
+def test_nonstream_chat_fallback_handles_plain_httpx_response() -> None:
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    response = httpx.Response(
+        200,
+        request=request,
+        json={"choices": [{"message": {"content": "fallback ok"}}]},
+    )
+
+    class _FakeAsyncClient:
+        async def post(self, *args, **kwargs):
+            del args, kwargs
+            return response
+
+    async def _collect() -> list[dict[str, object]]:
+        streamer = SSEStreamer(run_logger=_RunLogger())
+        return [
+            event
+            async for event in streamer.nonstream_chat(
+                _FakeAsyncClient(),
+                "https://example.test/v1/chat/completions",
+                {},
+                {"messages": [], "stream": True, "stream_options": {"include_usage": True}},
+            )
+        ]
+
+    events = asyncio.run(_collect())
+
+    assert events == [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {"message": {"content": "fallback ok"}, "delta": {"content": "fallback ok"}}
+                ]
+            },
+        },
+        {"type": "done"},
+    ]
+    assert response.is_closed
 
 
 def test_llamacpp_transport_guard_repairs_late_system_messages() -> None:
@@ -428,7 +470,7 @@ def test_openrouter_metadata_completion_tokens_equal_context_length_is_capped(mo
                                 "id": "qwen/qwen3.5-9b",
                                 "context_length": 262144,
                                 "supported_parameters": ["temperature", "max_tokens"],
-                                "top_provider": {"max_completion_tokens": 262144},
+                                "top_provider": {"max_completion_tokens": 262140},
                             }
                         ]
                     },
@@ -443,7 +485,7 @@ def test_openrouter_metadata_completion_tokens_equal_context_length_is_capped(mo
     limit = asyncio.run(client.fetch_model_context_limit())
 
     assert limit == 262144
-    assert client.model_max_completion_tokens == 262144
+    assert client.model_max_completion_tokens == 262140
     # Without messages the metadata value is ignored (OpenRouter fallback is 2048).
     assert client._request_max_completion_tokens([]) == 2048
     # With messages the cap is also prompt-aware and stays under the context window.

@@ -207,44 +207,64 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
             lines.append(colorize("--- assistant ---", Colors.DIM))
             lines.append(assistant_texts[-1])
 
-    # Tool call and result details
-    tool_start = None
-    tool_complete = None
-    for rec in grouped.get("tools", []):
-        if rec.get("event") == "dispatch_start":
-            tool_start = rec
-        elif rec.get("event") == "dispatch_complete":
-            tool_complete = rec
-    if tool_start or tool_complete:
+    # Tool call and result details (support multiple dispatches per trace)
+    tools_recs = grouped.get("tools", [])
+    starts_by_tid: dict[str, list[dict[str, Any]]] = {}
+    paired: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+    for rec in tools_recs:
+        event = rec.get("event", "")
+        tid = extract_trace_id(rec) or ""
+        if event == "dispatch_start":
+            starts_by_tid.setdefault(tid, []).append(rec)
+        elif event == "dispatch_complete":
+            start = starts_by_tid.get(tid, []).pop(0) if starts_by_tid.get(tid) else None
+            if start and not starts_by_tid[tid]:
+                starts_by_tid.pop(tid, None)
+            paired.append((start, rec))
+
+    # UI event kinds for this trace from harness debug records
+    ui_event_kinds: list[str] = []
+    for rec in grouped.get("harness", []):
+        if rec.get("event") == "ui_event":
+            event_type = (rec.get("data") or {}).get("event_type")
+            if event_type:
+                ui_event_kinds.append(str(event_type))
+
+    if paired:
         lines.append("")
         lines.append(colorize("Tool call details", Colors.BOLD + Colors.GREEN))
-        if tool_start:
-            data = tool_start.get("data", {})
-            lines.append(f"  tool: {data.get('tool_name')}")
-            lines.append(f"  arguments: {json.dumps(data.get('arguments'), indent=2)}")
-        if tool_complete:
-            data = tool_complete.get("data", {})
-            lines.append(f"  success: {data.get('success')}")
-            if data.get("error"):
-                lines.append(colorize(f"  error: {data['error']}", Colors.RED))
-            output = data.get("output")
-            if output is not None:
-                snippet = str(output)
-                if len(snippet) > 800:
-                    snippet = snippet[:800] + "\n... [truncated]"
-                lines.append(f"  output snippet:\n{snippet}")
-            if tool_start and data.get("success") is False:
-                start_data = tool_start.get("data", {})
-                tool_name = str(start_data.get("tool_name") or "")
-                if tool_name in {"file_write", "ssh_file_write"}:
-                    args = start_data.get("arguments") or {}
-                    content = args.get("content") or args.get("text") or args.get("value") or ""
-                    if content:
-                        preview = str(content)
-                        if len(preview) > 400:
-                            preview = preview[:400] + "\n... [truncated]"
-                        lines.append(colorize("  blocked content preview:", Colors.YELLOW))
-                        lines.append(preview)
+        for idx, (tool_start, tool_complete) in enumerate(paired, start=1):
+            if len(paired) > 1:
+                lines.append(f"  --- dispatch {idx} ---")
+            if tool_start:
+                data = tool_start.get("data", {})
+                lines.append(f"  tool: {data.get('tool_name')}")
+                lines.append(f"  arguments: {json.dumps(data.get('arguments'), indent=2)}")
+            if tool_complete:
+                data = tool_complete.get("data", {})
+                lines.append(f"  success: {data.get('success')}")
+                if data.get("error"):
+                    lines.append(colorize(f"  error: {data['error']}", Colors.RED))
+                output = data.get("output")
+                if output is not None:
+                    snippet = str(output)
+                    if len(snippet) > 800:
+                        snippet = snippet[:800] + "\n... [truncated]"
+                    lines.append(f"  output snippet:\n{snippet}")
+                if tool_start and data.get("success") is False:
+                    start_data = tool_start.get("data", {})
+                    tool_name = str(start_data.get("tool_name") or "")
+                    if tool_name in {"file_write", "ssh_file_write"}:
+                        args = start_data.get("arguments") or {}
+                        content = args.get("content") or args.get("text") or args.get("value") or ""
+                        if content:
+                            preview = str(content)
+                            if len(preview) > 400:
+                                preview = preview[:400] + "\n... [truncated]"
+                            lines.append(colorize("  blocked content preview:", Colors.YELLOW))
+                            lines.append(preview)
+        if ui_event_kinds:
+            lines.append(f"  ui_event kinds: {', '.join(ui_event_kinds[:10])}")
 
     return "\n".join(lines)
 

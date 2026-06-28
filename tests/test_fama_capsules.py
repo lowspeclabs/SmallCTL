@@ -68,6 +68,17 @@ def test_fama_capsules_render_tool_plan_evidence_line() -> None:
     ]
 
 
+def test_fama_capsules_render_mutation_loop_breaker() -> None:
+    state = LoopState()
+    _activate(state, "mutation_loop_breaker")
+
+    lines = render_fama_capsules(state, token_budget=180)
+
+    assert lines == [
+        "MUTATION REQUIRED: You have already read enough. Stop gathering evidence. Emit ONE concrete mutation (`file_patch`, `file_write`, or `ast_patch`) this turn, then run a focused verifier or continue."
+    ]
+
+
 def test_fama_capsules_respect_disabled_config() -> None:
     state = LoopState()
     state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}

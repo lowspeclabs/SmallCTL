@@ -327,3 +327,39 @@ async def _async_harness_dispatch_non_object_args_return_validation_error() -> N
 
 def test_harness_dispatch_non_object_args_return_validation_error() -> None:
     asyncio.run(_async_harness_dispatch_non_object_args_return_validation_error())
+
+
+def test_verifier_loop_hard_stop_blocks_verifiers_and_task_complete() -> None:
+    from smallctl.tools.dispatcher_policy_guards import _verifier_loop_dispatch_block
+
+    state = LoopState()
+    state.scratchpad["_verifier_loop_required_action_classes"] = [
+        "research",
+        "mutation",
+        "ask_user",
+        "stop_blocked",
+    ]
+    state.scratchpad["_verifier_loop_rejection_count"] = 3
+
+    assert _verifier_loop_dispatch_block(state, "shell_exec") is not None
+    assert _verifier_loop_dispatch_block(state, "ssh_exec") is not None
+    assert _verifier_loop_dispatch_block(state, "task_complete") is not None
+    assert _verifier_loop_dispatch_block(state, "file_read") is None
+    assert _verifier_loop_dispatch_block(state, "file_patch") is None
+    assert _verifier_loop_dispatch_block(state, "ask_human") is None
+    assert _verifier_loop_dispatch_block(state, "task_fail") is None
+
+
+def test_verifier_loop_dispatch_block_ignored_when_rejection_count_low() -> None:
+    from smallctl.tools.dispatcher_policy_guards import _verifier_loop_dispatch_block
+
+    state = LoopState()
+    state.scratchpad["_verifier_loop_required_action_classes"] = [
+        "research",
+        "mutation",
+        "ask_user",
+        "stop_blocked",
+    ]
+    state.scratchpad["_verifier_loop_rejection_count"] = 2
+
+    assert _verifier_loop_dispatch_block(state, "shell_exec") is None

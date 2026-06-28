@@ -13,16 +13,17 @@ from .fs_paths import _same_target_path
 from .fs_sessions import (
     _append_unique_section,
     _clone_section_ranges,
-    _normalize_replace_strategy,
-    _normalize_section_name,
-    _repair_cycle_session_id_failure,
-    _mark_repeat_patch,
+    _infer_next_suggested_section,
+    _is_finalization_marker,
     _looks_like_complete_html_document,
     _looks_like_full_script_content,
+    _mark_repeat_patch,
+    _normalize_replace_strategy,
+    _normalize_section_name,
     _record_file_change,
+    _repair_cycle_session_id_failure,
     _section_matches_any_suggestion,
     _section_name_allows_full_file_finalization,
-    _infer_next_suggested_section,
     _write_session_should_finalize,
 )
 from .fs_write_sessions import (
@@ -195,6 +196,8 @@ def handle_file_write_session(
 
     normalized_section_name = _normalize_section_name(section_name, section_id)
     normalized_next_section = str(next_section_name or "").strip()
+    if _is_finalization_marker(normalized_next_section):
+        normalized_next_section = ""
     strategy = _normalize_replace_strategy(replace_strategy)
     if (
         strategy == "overwrite"
@@ -543,7 +546,14 @@ def handle_file_write_session(
         else:
             msg += f" Waiting for next section: `{normalized_next_section}`."
     elif final_chunk:
-        msg += " Final section candidate recorded. Awaiting verifier."
+        if normalized_section_name.lower() in {"full_file", "final_content", "complete_file", "entire_file", "final_file"}:
+            msg += (
+                " Single-section full-file write is complete; the staged file will be promoted automatically."
+                " The deliverable is ready. If needed, run ONE quick shell command (e.g. `wc -l` or `head -n 5`) instead of re-reading the file."
+                " After that, call `task_complete`. Do not re-read the file repeatedly."
+            )
+        else:
+            msg += " Final section candidate recorded. Awaiting verifier."
     else:
         msg += " Session remains active for local repair."
     msg += f" Staged copy: `{staging_path}`."

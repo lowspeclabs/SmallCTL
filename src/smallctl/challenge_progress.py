@@ -528,5 +528,13 @@ def _set_phase(progress: Any, phase: str, *, step: int) -> None:
 
 
 def _command_fingerprint(command: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(command or "").strip())
+    """Return a stable fingerprint for a verifier command.
+
+    Normalizes trivial variations such as ``python3`` vs ``python`` and
+    collapses whitespace so the redundant-verifier guard catches the same
+    check expressed in slightly different shells.
+    """
+    normalized = re.sub(r"\s+", " ", str(command or "").strip()).lower()
+    # Treat python3 and python as equivalent for the purpose of "same check".
+    normalized = re.sub(r"\bpython3?\b", "python", normalized)
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()

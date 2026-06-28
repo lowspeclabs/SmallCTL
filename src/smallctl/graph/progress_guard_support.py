@@ -23,7 +23,12 @@ def _current_task_requires_file_mutation(state: Any | None) -> bool:
             texts.append(str(handoff.get("effective_task") or ""))
             texts.append(str(handoff.get("current_goal") or ""))
     task_text = " ".join(texts).lower()
-    return "patch" in task_text and any(marker in task_text for marker in ("file", ".html", "/var/www", "do not do a direct overwrite"))
+    mutation_verb = any(verb in task_text for verb in ("patch", "fix", "repair", "update", "modify"))
+    file_target = any(
+        marker in task_text
+        for marker in ("file", "file_patch", ".html", ".py", ".js", ".ts", "/var/www", "do not do a direct overwrite")
+    )
+    return mutation_verb and file_target
 
 
 def _prior_turn_verdict(harness: Any) -> str:

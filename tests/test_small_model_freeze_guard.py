@@ -15,7 +15,6 @@ from smallctl.graph.progress_guard import (
     _check_progress_stagnation,
     _build_progress_stagnation_nudge,
     _next_unread_artifact_line,
-    _turn_has_actionable_progress,
 )
 from smallctl.harness.tool_visibility import filter_tools_for_runtime_state
 from smallctl.models.tool_result import ToolEnvelope
@@ -552,6 +551,137 @@ def test_file_line_read_after_complete_read_and_failed_verifier_is_no_progress()
     _update_progress_tracking(harness, graph_state)
 
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_grep_does_not_reset_progress_for_mutation_task() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("grep", {"path": "./temp/game.html", "pattern": "startGame"})]
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_fix_html_task_requires_file_mutation() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = (
+        "rca and fix startup bug in /repo/temp/chronoshift-labyrinth.html; use file_patch only"
+    )
+
+    graph_state = _make_graph_state(
+        tool_results=[_make_record("artifact_grep", {"artifact_id": "A0006", "query": "startGame|onclick"})]
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_mutation_task_file_read_budget_exhaustion_is_no_progress() -> None:
+    harness = _FakeHarness()
+    harness.state.active_intent = "requested_file_patch"
+    path = "./temp/chronoshift-labyrinth.html"
+    harness.state.scratchpad["_progress_read_history"] = [
+        {"tool_name": "file_read", "path": path, "start_line": index * 100 + 1, "end_line": (index + 1) * 100}
+        for index in range(5)
+    ]
+
+    graph_state = _make_graph_state(
+        tool_results=[
+            _make_record(
+                "file_read",
+                {"path": path, "start_line": 501, "end_line": 650},
+                metadata={"path": path, "line_start": 501, "line_end": 650, "total_lines": 2226},
+            )
+        ]
+    )
+    _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_consecutive_read_only_turns_tracked_for_mutation_task() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+
+    for i in range(3):
+        graph_state = _make_graph_state(
+            tool_results=[_make_record("file_read", {"path": f"temp/file{i}.html"})]
+        )
+        _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters["consecutive_read_only_turns"] == 3
+
+
+def test_consecutive_read_only_turns_reset_on_mutation() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+
+    graph_state1 = _make_graph_state(
+        tool_results=[_make_record("file_read", {"path": "temp/chronoshift-labyrinth.html"})]
+    )
+    _update_progress_tracking(harness, graph_state1)
+    assert harness.state.stagnation_counters["consecutive_read_only_turns"] == 1
+    assert not harness.state.scratchpad.get("_read_only_loop_gate_active")
+
+    graph_state2 = _make_graph_state(
+        tool_results=[_make_record("file_patch", {"path": "temp/chronoshift-labyrinth.html"}, changed=True)]
+    )
+    _update_progress_tracking(harness, graph_state2)
+    assert harness.state.stagnation_counters["consecutive_read_only_turns"] == 0
+    assert not harness.state.scratchpad.get("_read_only_loop_gate_active")
+
+
+def test_read_only_loop_gate_activates_after_threshold() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+    harness.state.current_phase = "execute"
+
+    for i in range(6):
+        graph_state = _make_graph_state(
+            tool_results=[_make_record("file_read", {"path": f"temp/file{i}.html"})]
+        )
+        _update_progress_tracking(harness, graph_state)
+        if i < 5:
+            assert not harness.state.scratchpad.get("_read_only_loop_gate_active")
+
+    assert harness.state.scratchpad.get("_read_only_loop_gate_active")
+    assert harness.state.stagnation_counters["consecutive_read_only_turns"] == 6
+
+
+def test_read_only_loop_guard_trips_before_stagnation_for_mutation_task() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+    harness.state.current_phase = "execute"
+
+    # Six novel file reads: each counts as actionable progress, so stagnation counter stays low,
+    # but consecutive_read_only_turns reaches the read-only loop threshold.
+    for i in range(6):
+        graph_state = _make_graph_state(
+            tool_results=[_make_record("file_read", {"path": f"temp/file{i}.html"})]
+        )
+        _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 0
+    guard = _check_progress_stagnation(harness, _make_graph_state())
+    assert guard is not None
+    assert "Read-only loop guard tripped" in guard
+
+
+def test_consecutive_read_only_turns_not_tracked_for_non_mutation_task() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "explain how temp/chronoshift-labyrinth.html works"
+
+    for i in range(6):
+        graph_state = _make_graph_state(
+            tool_results=[_make_record("file_read", {"path": f"temp/file{i}.html"})]
+        )
+        _update_progress_tracking(harness, graph_state)
+
+    assert harness.state.stagnation_counters.get("consecutive_read_only_turns", 0) == 0
+    assert not harness.state.scratchpad.get("_read_only_loop_gate_active")
 
 
 def test_repeated_eof_overread_is_no_progress() -> None:

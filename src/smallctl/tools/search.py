@@ -28,7 +28,8 @@ async def grep(
         )
     results: list[dict[str, Any]] = []
 
-    for file_path in root.rglob("*"):
+    candidates = [root] if root.is_file() else root.rglob("*")
+    for file_path in candidates:
         if not file_path.is_file():
             continue
         try:
@@ -63,10 +64,11 @@ async def find_files(
             metadata={"pattern": pattern, "regex": True, "error_kind": "invalid_regex"},
         )
     use_glob = not regex and any(char in pattern for char in "*?[]")
-    for file_path in root.rglob("*"):
+    candidates = [root] if root.is_file() else root.rglob("*")
+    for file_path in candidates:
         if not file_path.is_file():
             continue
-        rel = str(file_path.relative_to(root))
+        rel = file_path.name if root.is_file() else str(file_path.relative_to(root))
         if rx:
             matched = bool(rx.search(rel))
         elif use_glob:

@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .config import default_ttl_steps
+from .detector_classifiers import _READ_LOOP_TOOLS
 from .signals import ActiveMitigation, FamaFailureKind, FamaSignal, current_step
 from ..logging_utils import log_kv, synthetic_trace_id
 
@@ -72,6 +73,36 @@ _REMOTE_INSTALL_MARKERS = (
 )
 
 
+def _task_requires_file_mutation(state: Any) -> bool:
+    """Mirror of progress_guard_support._current_task_requires_file_mutation.
+
+    Kept local to avoid a circular import from graph.progress_guard_support.
+    """
+    if state is None:
+        return False
+    active_intent = str(getattr(state, "active_intent", "") or "").strip()
+    if active_intent in {"requested_file_patch", "requested_write_file"}:
+        return True
+    texts: list[str] = []
+    run_brief = getattr(state, "run_brief", None)
+    texts.append(str(getattr(run_brief, "original_task", "") or ""))
+    working_memory = getattr(state, "working_memory", None)
+    texts.append(str(getattr(working_memory, "current_goal", "") or ""))
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            texts.append(str(handoff.get("effective_task") or ""))
+            texts.append(str(handoff.get("current_goal") or ""))
+    task_text = " ".join(texts).lower()
+    mutation_verb = any(verb in task_text for verb in ("patch", "fix", "repair", "update", "modify"))
+    file_target = any(
+        marker in task_text
+        for marker in ("file", "file_patch", ".html", ".py", ".js", ".ts", "/var/www", "do not do a direct overwrite")
+    )
+    return mutation_verb and file_target
+
+
 def _is_remote_install_failure(signal: FamaSignal, state: Any) -> bool:
     if str(getattr(state, "task_mode", "") or "").strip().lower() != "remote_execute":
         return False
@@ -116,6 +147,20 @@ def route_signal(signal: FamaSignal, *, state: Any, config: Any) -> list[ActiveM
             names.append("rewrite_suggestion_capsule")
     if not names:
         return []
+    # Mutation-required read-loop breaker: when the model is looping on read
+    # tools for a task that requires a file mutation, stop telling it to gather
+    # more evidence and force a concrete patch/action instead.
+    if (
+        signal.kind == FamaFailureKind.LOOPING
+        and signal.source == "loop_guard"
+        and str(signal.tool_name or "").strip() in _READ_LOOP_TOOLS
+        and _task_requires_file_mutation(state)
+    ):
+        state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
+        if state_phase in {"execute", "author", "repair"}:
+            names = [n for n in names if n != "evidence_gathering_needed"]
+            if "mutation_loop_breaker" not in names:
+                names.append("mutation_loop_breaker")
     # P1.2: when source is loop_guard, ensure tool_exposure_narrowing is present
     # to break the repeat cycle directly
     if signal.source == "loop_guard" and "tool_exposure_narrowing" not in names:

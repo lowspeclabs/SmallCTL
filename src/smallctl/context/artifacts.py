@@ -132,6 +132,12 @@ class ArtifactStore:
                 max_depth=2,
                 max_children=max(8, len(result.output)),
             )
+        elif tool_name == "file_read" and isinstance(result.output, dict):
+            content = self._file_read_text_output(result.output)
+            if isinstance(content, str):
+                txt_content = content
+            else:
+                txt_content = json.dumps(result.output, ensure_ascii=True, default=str, indent=2)
         elif tool_name == "ssh_file_read" and isinstance(result.output, dict):
             content = result.output.get("content")
             if isinstance(content, str):
@@ -346,6 +352,14 @@ class ArtifactStore:
                 return f"{tool_name} text ({len(output)} chars)"
             return compact[:160] or tool_name
         if isinstance(output, dict):
+            if tool_name == "file_read" and isinstance(source, str) and source:
+                total_lines = metadata.get("total_lines")
+                complete_file = bool(metadata.get("complete_file"))
+                if complete_file and isinstance(total_lines, int) and total_lines > 0:
+                    return f"{Path(source).name} full file ({total_lines} lines)"
+                content = ArtifactStore._file_read_text_output(output)
+                if isinstance(content, str):
+                    return f"{Path(source).name} text ({len(content)} chars)"
             if ArtifactStore._is_shell_output(output):
                 if isinstance(source, str) and source:
                     return source[:160]
@@ -501,6 +515,11 @@ class ArtifactStore:
             preview = preview[:limit].strip()
             return preview or None
         if isinstance(output, dict):
+            if tool_name == "file_read":
+                content = ArtifactStore._file_read_text_output(output)
+                if isinstance(content, str):
+                    preview = content[:limit].strip()
+                    return preview or None
             plain_preview = ArtifactStore._structured_plain_text(output)
             if plain_preview is not None:
                 preview = plain_preview[:limit].strip()
@@ -564,6 +583,14 @@ class ArtifactStore:
     @staticmethod
     def _structured_plain_text(output: dict[str, Any]) -> str | None:
         return structured_plain_text(output)
+
+    @staticmethod
+    def _file_read_text_output(output: dict[str, Any]) -> str | None:
+        for key in ("content", "text", "output"):
+            value = output.get(key)
+            if isinstance(value, str):
+                return value
+        return None
 
 
 def artifact_storage_id(*, run_id: str, session_id: str = "") -> str:

@@ -520,7 +520,9 @@ class ConsolePane(VerticalScroll):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        callback = lambda: asyncio.create_task(self.flush_stream_buffers(finalize_assistant=False))
+        def callback() -> None:
+            asyncio.create_task(self.flush_stream_buffers(finalize_assistant=False))
+
         if self._stream_flush_soon_once:
             self._stream_flush_soon_once = False
             self._stream_flush_handle = loop.call_soon(callback)
@@ -585,15 +587,59 @@ class ConsolePane(VerticalScroll):
                     turn.finalize_assistant_render()
                 except Exception:
                     pass
-        if groups:
+        if groups and logger.isEnabledFor(logging.DEBUG):
+            widget_count = self._bubble_stack_widget_count()
+            segment_count = self._estimate_bubble_stack_segments()
             logger.debug(
                 "ui_stream_flush %s",
                 {
                     "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 2),
                     "group_count": len(groups),
                     "flushed_chars": flushed_chars,
+                    "bubble_widget_count": widget_count,
+                    "estimated_segment_count": segment_count,
                 },
             )
+
+    def _bubble_stack_widget_count(self) -> int:
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+            return len(stack.children)
+        except Exception:
+            return 0
+
+    def _estimate_bubble_stack_segments(self) -> int:
+        """Rough segment count across nested rendered TextBlockWidget contents."""
+        try:
+            stack = self.query_one("#bubble-stack", Vertical)
+        except Exception:
+            return 0
+        try:
+            from rich.console import Console as RichConsole
+
+            rc = RichConsole(width=80, no_color=True, force_terminal=False)
+            options = rc.options
+        except Exception:
+            rc = None
+            options = None
+
+        def _count(widget: Any) -> int:
+            rendered = getattr(widget, "_rendered_content", None)
+            total = 0
+            if rendered is not None:
+                segs = getattr(rendered, "_segments", None) or getattr(rendered, "segments", None)
+                if isinstance(segs, list):
+                    total += len(segs)
+                elif rc is not None and options is not None and hasattr(rendered, "__rich_console__"):
+                    try:
+                        total += len(list(rc.render(rendered, options)))
+                    except Exception:
+                        pass
+            for child in getattr(widget, "children", ()):
+                total += _count(child)
+            return total
+
+        return sum(_count(child) for child in stack.children)
 
     def _cancel_stream_flush(self) -> None:
         handle = self._stream_flush_handle

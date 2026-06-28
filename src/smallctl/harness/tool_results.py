@@ -6,7 +6,10 @@ from ..models.conversation import ConversationMessage
 from ..models.tool_result import ToolEnvelope
 from .tool_dispatch import maybe_reuse_file_read as _maybe_reuse_file_read
 from .tool_message_compaction import compact_oversized_tool_messages as _compact_oversized_tool_messages
-from .tool_result_flow import record_result as _record_result
+from .tool_result_flow import (
+    _persist_artifact_early as _persist_artifact_early_helper,
+    record_result as _record_result,
+)
 from .tool_result_verification import _store_verifier_verdict
 
 if TYPE_CHECKING:
@@ -33,6 +36,21 @@ class ToolResultService:
             result=result,
             arguments=arguments,
             operation_id=operation_id,
+        )
+
+    def persist_artifact_early(
+        self,
+        *,
+        tool_name: str,
+        result: ToolEnvelope,
+        tool_call_id: str | None,
+    ) -> Any | None:
+        """Persist the artifact before graph state serialization compacts the result."""
+        return _persist_artifact_early_helper(
+            self,
+            tool_name=tool_name,
+            result=result,
+            tool_call_id=tool_call_id,
         )
 
     def maybe_reuse_file_read(self, *, tool_name: str, args: dict[str, Any]) -> ToolEnvelope | None:

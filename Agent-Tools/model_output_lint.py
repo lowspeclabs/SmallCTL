@@ -35,6 +35,26 @@ TOOL_CALL_PATTERN = re.compile(
 
 THINKING_TAGS_PATTERN = re.compile(r"(?:</?think(?:ing)?>|\[thinking\]|\[assistant\])")
 
+# Gemma/Qwen-style control tokens that leak into the assistant channel.
+CONTROL_TOKEN_PATTERN = re.compile(r"^\s*\|>[a-z_]+<\|\s*$", re.IGNORECASE)
+
+# Tool-call wrappers that appear in reasoning/assistant text but were not
+# dispatched as proper native/JSON tool calls.
+TOOL_CALL_WRAPPER_PATTERN = re.compile(
+    r"<[/|]?\s*tool_call\b|<\|tool_call\||</tool_call\|>"
+    r"|<function\s*=|<call\b",
+    re.IGNORECASE,
+)
+
+
+def _has_recorded_native_tool_calls(data: dict[str, Any]) -> bool:
+    """Return True when the model_output record itself carries native tool_calls."""
+    for key in ("tool_calls", "function_calls"):
+        value = data.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -61,6 +81,17 @@ def _parse_args() -> argparse.Namespace:
 
 def _lint(run_dir: Path) -> dict[str, Any]:
     records = list(iter_records(run_dir, "model_output"))
+    tools_records = list(iter_records(run_dir, "tools"))
+
+    # A model_output record may carry native tool_calls, or the actual calls may
+    # be recorded in the tools channel under the same trace_id.
+    native_tool_traces: set[str] = set()
+    for rec in tools_records:
+        if rec.get("event") in {"dispatch_start", "dispatch_complete"}:
+            tid = extract_trace_id(rec)
+            if tid:
+                native_tool_traces.add(tid)
+
     results: dict[str, Any] = {
         "total_records": len(records),
         "degenerate_loops": [],
@@ -68,6 +99,8 @@ def _lint(run_dir: Path) -> dict[str, Any]:
         "thinking_tags_in_thinking": [],
         "missing_tool_calls": [],
         "tool_call_syntax_suspected": [],
+        "control_token_fragments": [],
+        "reasoning_tool_call_wrappers": [],
         "empty_outputs": [],
         "repeated_phrases": [],
     }
@@ -77,6 +110,9 @@ def _lint(run_dir: Path) -> dict[str, Any]:
         data = rec.get("data") or {}
         tid = extract_trace_id(rec) or ""
         text = str(data.get("assistant_text") or "")
+        thinking_text = str(data.get("thinking_text") or "")
+
+        has_native_tool_call = _has_recorded_native_tool_calls(data) or tid in native_tool_traces
 
         if (
             event == "model_output_degenerate_loop"
@@ -101,7 +137,6 @@ def _lint(run_dir: Path) -> dict[str, Any]:
                 }
             )
 
-        thinking_text = str(data.get("thinking_text") or "")
         if THINKING_TAGS_PATTERN.search(thinking_text):
             results["thinking_tags_in_thinking"].append(
                 {
@@ -116,6 +151,7 @@ def _lint(run_dir: Path) -> dict[str, Any]:
                 len(text) > 20
                 and not event.startswith("model_token")
                 and event != "model_thinking"
+                and not has_native_tool_call
             ):
                 results["missing_tool_calls"].append(
                     {
@@ -131,6 +167,25 @@ def _lint(run_dir: Path) -> dict[str, Any]:
                     "timestamp": rec.get("timestamp"),
                     "trace_id": tid,
                     "text_preview": text[:200],
+                }
+            )
+
+        if CONTROL_TOKEN_PATTERN.match(text):
+            results["control_token_fragments"].append(
+                {
+                    "timestamp": rec.get("timestamp"),
+                    "trace_id": tid,
+                    "text_preview": text[:80],
+                }
+            )
+
+        combined_text = f"{text}\n{thinking_text}"
+        if TOOL_CALL_WRAPPER_PATTERN.search(combined_text) and not has_native_tool_call:
+            results["reasoning_tool_call_wrappers"].append(
+                {
+                    "timestamp": rec.get("timestamp"),
+                    "trace_id": tid,
+                    "text_preview": thinking_text[:200] or text[:200],
                 }
             )
 
@@ -188,6 +243,12 @@ def _render_text(
     lines.append(
         f"  tool call syntax detected:        {len(results['tool_call_syntax_suspected'])}"
     )
+    lines.append(
+        f"  control token fragments:          {len(results['control_token_fragments'])}"
+    )
+    lines.append(
+        f"  reasoning tool-call wrappers:     {len(results['reasoning_tool_call_wrappers'])}"
+    )
     lines.append(f"  empty outputs:                    {len(results['empty_outputs'])}")
 
     if results["degenerate_loops"]:
@@ -219,6 +280,25 @@ def _render_text(
         )
         for t in results["thinking_tags_in_thinking"][:5]:
             lines.append(f"  {t['timestamp']}  [{t['trace_id']}]")
+
+    if results["control_token_fragments"]:
+        lines.append("")
+        lines.append(
+            colorize("Control-token fragments in assistant text", Colors.BOLD + Colors.YELLOW)
+        )
+        for c in results["control_token_fragments"][:5]:
+            lines.append(f"  {c['timestamp']}  {c['text_preview'][:60]}  [{c['trace_id']}]")
+
+    if results["reasoning_tool_call_wrappers"]:
+        lines.append("")
+        lines.append(
+            colorize(
+                "Tool-call wrappers in reasoning/assistant text (no dispatch)",
+                Colors.BOLD + Colors.YELLOW,
+            )
+        )
+        for r in results["reasoning_tool_call_wrappers"][:5]:
+            lines.append(f"  {r['timestamp']}  {r['text_preview'][:80]}  [{r['trace_id']}]")
 
     if show_repeated and results["repeated_phrases"]:
         lines.append("")

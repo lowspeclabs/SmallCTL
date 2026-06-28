@@ -649,15 +649,32 @@ class SmallctlAppActionsMixin:
         console = self._get_console()
         if console is None:
             return
-        log_kv(
-            self._app_logger,
-            logging.DEBUG,
-            "ui_scroll_event",
-            delta=delta,
-            scroll_y=getattr(console, "scroll_y", None),
-            max_scroll_y=getattr(console, "max_scroll_y", None),
-        )
-        console.scroll_relative(y=delta, animate=False)
+        started = time.perf_counter()
+        try:
+            console.scroll_relative(y=delta, animate=False)
+        finally:
+            elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            if elapsed_ms > 5:
+                log_kv(
+                    self._app_logger,
+                    logging.DEBUG,
+                    "ui_scroll_event",
+                    delta=delta,
+                    scroll_y=getattr(console, "scroll_y", None),
+                    max_scroll_y=getattr(console, "max_scroll_y", None),
+                    elapsed_ms=elapsed_ms,
+                    bubble_widget_count=getattr(console, "_bubble_stack_widget_count", lambda: 0)(),
+                )
+            else:
+                log_kv(
+                    self._app_logger,
+                    logging.DEBUG,
+                    "ui_scroll_event",
+                    delta=delta,
+                    scroll_y=getattr(console, "scroll_y", None),
+                    max_scroll_y=getattr(console, "max_scroll_y", None),
+                    elapsed_ms=elapsed_ms,
+                )
 
     def action_scroll_up(self) -> None:
         log_kv(self._app_logger, logging.DEBUG, "ui_scroll_key", key="ctrl+up", direction="up")

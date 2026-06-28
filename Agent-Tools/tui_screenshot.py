@@ -145,12 +145,59 @@ def _build_cli_config(args: argparse.Namespace) -> dict[str, Any]:
     return cfg
 
 
+class _TaskWakeupRecursionFilter(logging.Filter):
+    """Drop the asyncio RecursionError logged during Textual shutdown.
+
+    Textual's test runner cancels a deep task tree on exit; on some runs this
+    walks enough nested tasks to hit Python's recursion limit. The resulting
+    ``Task.task_wakeup`` RecursionError is logged by asyncio but does not
+    affect the screenshot or run log, so we suppress it to keep the tool's
+    output usable.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if "Task.task_wakeup" in record.getMessage():
+            exc_info = record.exc_info
+            if exc_info and exc_info[0] is RecursionError:
+                return False
+        return True
+
+
 def _setup_logging() -> None:
     # Suppress noisy smallctl logging during screenshot capture
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+    logging.getLogger("asyncio").addFilter(_TaskWakeupRecursionFilter())
+
+
+async def _shutdown_app(app: Any) -> None:
+    """Cancel the active harness task and tear the harness down before the
+    Textual test runner tries to cancel everything at once.
+
+    Textual's run_test context manager cancels all pending tasks on exit.
+    If the harness is still retrying model calls in the background, that
+    cancellation can walk a deep task tree and hit asyncio's recursion limit.
+    Stopping the harness explicitly here avoids the cascade.
+    """
+    active_task = getattr(app, "active_task", None)
+    if active_task is not None and not active_task.done():
+        active_task.cancel()
+        try:
+            await active_task
+        except asyncio.CancelledError:
+            pass
+
+    harness = getattr(app, "harness", None)
+    if harness is not None:
+        try:
+            await harness.teardown()
+        except Exception:
+            pass
+
+    # Let any stray callbacks drain before the context manager cleans up.
+    await asyncio.sleep(0)
 
 
 async def _run_tui_and_capture(args: argparse.Namespace, output_dir: Path, base_name: str) -> dict[str, str]:
@@ -217,7 +264,8 @@ async def _run_tui_and_capture(args: argparse.Namespace, output_dir: Path, base_
             actual_svg.unlink()
             _log(args, "Removed intermediate SVG")
 
-        await pilot.exit(0)
+        # Stop the harness cleanly before run_test tears tasks down.
+        await _shutdown_app(app)
 
     return {
         "png": str(png_path),
@@ -234,11 +282,18 @@ def main() -> int:
 
     base_name = args.name or f"tui_{time.strftime('%Y%m%d_%H%M%S')}"
 
+    # Textual's run_test shutdown can walk a deep task tree when cancelling
+    # background model-call retries. Raise the recursion limit so the
+    # cancellation cascade does not crash the screenshot tool.
+    old_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old_recursion_limit, 5000))
     try:
         result = asyncio.run(_run_tui_and_capture(args, output_dir, base_name))
     except Exception as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}), file=sys.stderr)
         return 1
+    finally:
+        sys.setrecursionlimit(old_recursion_limit)
 
     if args.json:
         print(json.dumps(result, indent=2))

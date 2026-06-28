@@ -609,6 +609,9 @@ def test_over_twenty_b_model_name_helper_is_strictly_greater_than_twenty_b() -> 
     assert is_over_twenty_b_model_name("gpt-oss-120b") is True
     assert is_over_twenty_b_model_name("openai/gpt-oss-20b") is False
     assert is_over_twenty_b_model_name("wrench-9b") is False
+    assert is_over_twenty_b_model_name("deepseek/deepseek-v4-flash-20260423") is True
+    assert is_over_twenty_b_model_name("openrouter/moonshotai/kimi-k2") is True
+    assert is_over_twenty_b_model_name("openrouter/z-ai/glm-4.5-air") is True
 
 
 def test_refined_retrieval_query_filters_legacy_generic_memory_tags() -> None:

@@ -20,9 +20,28 @@ _READ_TOOLS = {
 _PATCH_META_TOOLS = {
     "artifact_grep",
     "artifact_print",
+    "grep",
     "log_note",
     "memory_update",
 }
+_READ_ONLY_LOOP_TOOLS = {
+    "artifact_read",
+    "artifact_grep",
+    "artifact_print",
+    "file_read",
+    "ssh_file_read",
+    "grep",
+    "find_files",
+    "dir_list",
+    "git_diff",
+    "git_status",
+    "web_fetch",
+    "web_search",
+    "search",
+    "long_context_lookup",
+}
+_MUTATION_TASK_READ_BUDGET_PER_FILE = 5
+_MUTATION_TASK_READ_ONLY_LOOP_THRESHOLD = 6
 _DETERMINISTIC_READ_FAILURES_KEY = "_deterministic_read_failures"
 _FAILED_MUTATION_REPAIR_PROGRESS_KEY = "_failed_mutation_repair_progress"
 _FAILED_MUTATION_REPAIR_PROGRESS_BUDGET = 3

@@ -528,6 +528,9 @@ class TaskBoundaryLifecycleMixin:
         self.harness.state.repair_cycle_id = ""
         self.harness.state.stagnation_counters = {}
         self.harness.state.scratchpad.pop("_confabulation_nudged", None)
+        self.harness.state.scratchpad.pop("_read_only_loop_gate_active", None)
+        self.harness.state.scratchpad.pop("_read_only_loop_gate_triggered_at", None)
+        self.harness.state.scratchpad.pop("_read_only_loop_gate_nudged", None)
         # Preserve an approved plan across same-scope task replacements so that
         # follow-up approvals like "fix 1 approved, proceed" do not lose the
         # spec contract required for shell execution.

@@ -1601,6 +1601,57 @@ def test_post_change_html_verifier_accepts_generic_interactive_app(tmp_path: Pat
     assert result.returncode == 0, result.stderr
 
 
+def test_post_change_html_verifier_allows_static_report_when_task_is_report(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "Inspect the remote system and write a short health report to ./temp/report.html"
+    target = tmp_path / "report.html"
+    target.write_text(
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\">\n"
+        "<head><title>Health Report</title></head>\n"
+        "<body>\n"
+        "<h1>System Health Report</h1>\n"
+        "<p>The system is healthy. CPU usage is low, memory is abundant, and all critical services are running normally.</p>\n"
+        "<p>Disk usage is under 20% and no errors were found in the system logs during the inspection window.</p>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = False
+    state.challenge_progress.last_code_change_paths = [str(target)]
+
+    block = post_change_verification_block(state)
+    assert block is not None
+    assert block["reason"] == "post_change_verification_required"
+    command = block["next_required_action"]["required_arguments"]["command"]
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_post_change_html_verifier_requires_interactivity_for_game_task(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "Build an interactive canvas game at ./temp/game.html"
+    target = tmp_path / "game.html"
+    target.write_text(
+        "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head><title>Game</title></head>\n"
+        "<body>\n"
+        "<h1>Game</h1>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    state.challenge_progress.code_change_count = 1
+    state.challenge_progress.verified_after_last_change = False
+    state.challenge_progress.last_code_change_paths = [str(target)]
+
+    block = post_change_verification_block(state)
+    assert block is not None
+    command = block["next_required_action"]["required_arguments"]["command"]
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    assert result.returncode != 0
+
+
 def test_control_phase_gates_block_zero_change_and_weak_verifier() -> None:
     state = LoopState(cwd="/tmp")
     state.challenge_progress.task_category = "coding"

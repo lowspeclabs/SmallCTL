@@ -264,6 +264,14 @@ class OpenAICompatClient:
         if value <= 0:
             return None
         limit = _request_budget_client_context_limit(self)
+        if limit:
+            budget = build_request_budget(limit)
+            unsafe_ceiling = max(1, limit - budget.safety_margin_tokens - budget.tokenizer_slop_tokens)
+            if value >= unsafe_ceiling:
+                # Provider metadata sometimes reports context_length (or nearly
+                # context_length) as max_completion_tokens. Trusting that would
+                # request an output window that leaves no room for the prompt.
+                return None
         if limit and value >= limit:
             # Provider metadata sometimes reports context_length as max_completion_tokens.
             # Trusting that would request an output window that leaves no room for the prompt,
@@ -293,7 +301,7 @@ class OpenAICompatClient:
             budget = build_request_budget(limit)
             safe_max = max(
                 1,
-                budget.effective_prompt_budget - estimated_prompt_tokens,
+                limit - estimated_prompt_tokens - budget.safety_margin_tokens - budget.tokenizer_slop_tokens,
             )
             base = min(base, safe_max)
 

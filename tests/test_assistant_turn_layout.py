@@ -19,6 +19,7 @@ from smallctl.ui.bubbles import (
     TextBlockWidget,
     ToolCallDetailWidget,
     ToolCallsContainerWidget,
+    _RICH_MARKDOWN_MAX_CHARS,
 )
 from smallctl.ui.console import ConsolePane
 
@@ -255,6 +256,74 @@ def test_complete_assistant_markdown_list_renders_as_markdown() -> None:
             block = content.children[0]
             assert isinstance(block, TextBlockWidget)
             assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
+def test_finalized_markdown_renderable_is_reused() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+            await console.append_event(
+                UIEvent(UIEventType.ASSISTANT, "**Done**\n\n- first\n- second")
+            )
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            first_renderable = block._rendered_content
+
+            block.finalize_markdown_render()
+
+            assert isinstance(first_renderable, RichMarkdown)
+            assert block._rendered_content is first_renderable
+
+    asyncio.run(_run())
+
+
+def test_oversized_assistant_markdown_stays_on_lite_renderer() -> None:
+    async def _run() -> None:
+        oversized = "## Large block\n\n" + (
+            "- **item** with `code`\n" * ((_RICH_MARKDOWN_MAX_CHARS // 24) + 20)
+        )
+        assert len(oversized) > _RICH_MARKDOWN_MAX_CHARS
+
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, oversized))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, Text)
+            assert block._rich_markdown_renderable is None
+
+    asyncio.run(_run())
+
+
+def test_console_segment_estimate_counts_nested_assistant_markdown() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            await console.append_event(
+                UIEvent(UIEventType.ASSISTANT, "**Done**\n\n- first\n- second")
+            )
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            assert console._estimate_bubble_stack_segments() > 0
 
     asyncio.run(_run())
 

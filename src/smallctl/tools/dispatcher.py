@@ -16,6 +16,7 @@ from .tool_call_repair import ToolCallValidationIssue, validate_tool_args
 from .dispatcher_policy_guards import (
     _fama_dispatch_block,
     _staged_tool_allowlist_error,
+    _verifier_loop_dispatch_block,
 )
 
 _SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
@@ -157,6 +158,19 @@ class ToolDispatcher:
                     mode=self.phase,
                 )
             return blocked_by_fama
+        blocked_by_verifier_loop = _verifier_loop_dispatch_block(self.state, tool_name)
+        if blocked_by_verifier_loop is not None:
+            if self.run_logger:
+                self.run_logger.log(
+                    "tools",
+                    "verifier_loop_tool_call_blocked",
+                    "verifier loop hard stop blocked tool call",
+                    tool_name=tool_name,
+                    active_mitigation=blocked_by_verifier_loop.metadata.get("active_mitigation"),
+                    reason=blocked_by_verifier_loop.metadata.get("reason"),
+                    rejection_count=blocked_by_verifier_loop.metadata.get("rejection_count"),
+                )
+            return blocked_by_verifier_loop
         blocked_by_challenge_progress = redundant_verifier_block(
             self.state,
             tool_name=tool_name,

@@ -153,6 +153,87 @@ def test_select_loop_tools_exposes_runtime_gated_tools_when_ready(tmp_path) -> N
     assert exposure["names"] == _tool_names(tools)
 
 
+def test_artifact_read_hidden_above_32k_context_window(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.artifacts = {"A0001": object()}
+    state.task_exposed_tools = {"artifact_read"}
+    events: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="qwen2.5-4b-instruct"),
+        config=SimpleNamespace(allow_artifact_read_large_context=False),
+        server_context_limit=65536,
+        state=state,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("dir_list"),
+                _tool_schema("artifact_read"),
+            ],
+            get=lambda name: None,
+        ),
+        _runlog=lambda *args, **kwargs: events.append((args, kwargs)),
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+
+    assert exposure["names"] == ["dir_list"]
+    assert "artifact_read" not in exposure["names"]
+    assert any(args and args[0] == "artifact_read_exposure_disabled" for args, _kwargs in events)
+
+
+def test_artifact_read_hidden_for_large_model_name(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.artifacts = {"A0001": object()}
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="deepseek-v4-flash"),
+        config=SimpleNamespace(allow_artifact_read_large_context=False),
+        state=state,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("dir_list"),
+                _tool_schema("artifact_read"),
+            ],
+            get=lambda name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+
+    assert exposure["names"] == ["dir_list"]
+
+
+def test_artifact_read_large_context_override_keeps_tool(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.artifacts = {"A0001": object()}
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="deepseek-v4-flash"),
+        config=SimpleNamespace(allow_artifact_read_large_context=True),
+        server_context_limit=65536,
+        state=state,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("dir_list"),
+                _tool_schema("artifact_read"),
+            ],
+            get=lambda name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+
+    assert exposure["names"] == ["dir_list", "artifact_read"]
+
+
 def test_chat_mode_tools_hides_index_queries_until_an_index_exists(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"

@@ -71,24 +71,37 @@ def _ssh_result_requires_artifact(service: Any, *, result: ToolEnvelope) -> bool
     )
 
 
+def _inline_token_limit(service: Any, base_default: int = 325) -> int:
+    inline_limit = int(
+        getattr(service.harness.context_policy, "tool_result_inline_token_limit", base_default)
+        or base_default
+    )
+    if _prompt_pressure_requires_artifact(service):
+        inline_limit = max(80, inline_limit // 2)
+    return inline_limit
+
+
+def _result_text_fits_inline(service: Any, result: ToolEnvelope, *, base_default: int = 325) -> bool:
+    output_text = result.output if isinstance(result.output, str) else str(result.output or "")
+    return estimate_text_tokens(output_text) <= _inline_token_limit(service, base_default=base_default)
+
+
 def _should_persist_tool_artifact(
     service: Any,
     *,
     tool_name: str,
     result: ToolEnvelope,
 ) -> bool:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("force_artifact"):
+        return True
     if tool_name == "file_read":
-        metadata = result.metadata if isinstance(result.metadata, dict) else {}
         total_lines = metadata.get("total_lines")
         if total_lines is None:
             output_text = str(result.output or "")
             total_lines = len(output_text.splitlines()) if output_text else 0
-        if metadata.get("requested_start_line") is not None or metadata.get("requested_end_line") is not None:
-            return True
         output_text = result.output if isinstance(result.output, str) else str(result.output or "")
-        inline_limit = int(getattr(service.harness.context_policy, "tool_result_inline_token_limit", 325) or 325)
-        if _prompt_pressure_requires_artifact(service):
-            inline_limit = max(80, inline_limit // 2)
+        inline_limit = _inline_token_limit(service)
         # Small file reads can stay inline, but only when the full rendered text fits
         # comfortably in the tool-result budget. Otherwise keep a file_read artifact
         # available so later artifact searches target the file content, not a nearby
@@ -98,9 +111,51 @@ def _should_persist_tool_artifact(
         return True
     if tool_name == "ssh_file_read":
         return False
+    if tool_name in {"grep", "artifact_grep"}:
+        # Search results are usually small and self-referential artifact searches
+        # against them create read-only loops. Only persist when they are large
+        # enough to need paging or when explicitly forced.
+        return not _result_text_fits_inline(service, result)
     if tool_name != "ssh_exec":
         return True
     return _ssh_result_requires_artifact(service, result=result)
+
+
+def _persist_artifact_early(
+    service: Any,
+    *,
+    tool_name: str,
+    result: ToolEnvelope,
+    tool_call_id: str | None,
+) -> Any | None:
+    """Persist the artifact while the result still contains the full output.
+
+    Graph state serialization compacts large tool outputs between nodes. If a
+    file_read/shell_exec result is only artifacted in ``persist_tool_results``,
+    that node receives a compacted preview instead of the original content. This
+    helper creates the artifact immediately after dispatch (before any graph
+    serialization) so the on-disk artifact and its metadata stay consistent.
+    """
+    if not result.success:
+        return None
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    existing_artifact_id = str(metadata.get("artifact_id") or "").strip()
+    if existing_artifact_id:
+        existing = service.harness.state.artifacts.get(existing_artifact_id)
+        if existing is not None:
+            return existing
+    if not _should_persist_tool_artifact(service, tool_name=tool_name, result=result):
+        return None
+    artifact = service.harness.artifact_store.persist_tool_result(
+        tool_name=tool_name,
+        result=result,
+        session_id=str(getattr(service.harness.state, "thread_id", "") or ""),
+        tool_call_id=str(tool_call_id or ""),
+    )
+    if artifact is not None:
+        service.harness.state.artifacts[artifact.artifact_id] = artifact
+        result.metadata["artifact_id"] = artifact.artifact_id
+    return artifact
 
 
 async def _persist_artifact_result(
@@ -115,7 +170,10 @@ async def _persist_artifact_result(
     artifact = None
     skip_artifact_persist = tool_name == "artifact_read" and not result.success
     reusable_artifact_id = None
-    if tool_name in {"artifact_read", "web_fetch"} and result.success and result.metadata.get("artifact_id"):
+    # Reuse an artifact that was already created earlier in the dispatch path
+    # (e.g. by _persist_artifact_early) or that is referenced by the result
+    # metadata (e.g. artifact_read/web_fetch pointing at a source artifact).
+    if result.success and result.metadata.get("artifact_id"):
         reusable_artifact_id = str(result.metadata["artifact_id"])
     if reusable_artifact_id:
         artifact_id = reusable_artifact_id

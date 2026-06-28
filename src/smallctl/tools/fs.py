@@ -446,6 +446,49 @@ async def file_write(
         except Exception:
             pass  # Best-effort guard; don't block if we can't read the file
 
+    # Fix 5b: Break repeat-patch loops on the same file.
+    # If the model has already overwritten this file twice in the current task and
+    # is attempting another full overwrite, force a read/patch workflow instead of
+    # allowing another blind rewrite. This prevents the model from spiraling on
+    # small local fixes (e.g. HTML/JS tweaks) without inspecting the current state.
+    if (
+        state is not None
+        and target.exists()
+        and target.is_file()
+        and not write_session_id
+        and not _has_completed_session
+        and _normalize_replace_strategy(replace_strategy) == "overwrite"
+    ):
+        counters = state.stagnation_counters if isinstance(state.stagnation_counters, dict) else {}
+        repeat_patch = int(counters.get("repeat_patch", 0) or 0)
+        if repeat_patch >= 2:
+            normalized_target = str(target.resolve())
+            files_changed_this_cycle = getattr(state, "files_changed_this_cycle", None) or []
+            if normalized_target in {
+                str(Path(str(p)).resolve()) if p else ""
+                for p in files_changed_this_cycle
+            }:
+                return fail(
+                    f"file_write to `{path}` was rejected because this file has already been "
+                    f"overwritten {repeat_patch} time(s) in the current task. "
+                    "To break the rewrite loop, read the current file with `file_read` and then "
+                    "use `file_patch` for a targeted change, or run a verifier and call "
+                    "`task_complete` if the file is already correct.",
+                    metadata={
+                        "path": str(target),
+                        "error_kind": "repeat_patch_loop_guard",
+                        "repeat_patch": repeat_patch,
+                        "next_required_tool": {
+                            "tool_name": "file_read",
+                            "required_arguments": {"path": path},
+                            "notes": [
+                                "Read the current file to verify its contents.",
+                                "Then use file_patch for targeted changes, or run a verifier and call task_complete.",
+                            ],
+                        },
+                    },
+                )
+
     risk_decision = evaluate_risk_policy(
         state if state is not None else LoopState(cwd=str(Path.cwd())),
         tool_name="file_write",

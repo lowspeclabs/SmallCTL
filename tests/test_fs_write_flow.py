@@ -206,29 +206,44 @@ def test_handle_file_write_session_rejects_terminal_session(tmp_path: Path) -> N
     assert result["metadata"]["error_kind"] == "write_session_already_terminal"
 
 
-def test_handle_file_write_session_final_chunk_without_next_section(tmp_path: Path) -> None:
+def test_handle_file_write_session_html_without_scripts_is_final_chunk(tmp_path: Path) -> None:
     state = _make_state(tmp_path)
-    target = tmp_path / "script.py"
+    target = tmp_path / "report.html"
     session = new_write_session(
-        session_id="ws-final",
+        session_id="ws-html-report",
         target_path=str(target),
         intent="replace_file",
     )
     state.write_session = session
 
+    html = (
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\">\n"
+        "<head>\n"
+        "    <meta charset=\"UTF-8\">\n"
+        "    <title>Report</title>\n"
+        "    <style>body { font-family: sans-serif; }</style>\n"
+        "</head>\n"
+        "<body>\n"
+        "    <h1>Report</h1>\n"
+        "    <p>This is a complete HTML report with no JavaScript.</p>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
     result = handle_file_write_session(
         path=str(target),
-        content="print('done')\n",
+        content=html,
         cwd=str(tmp_path),
         encoding="utf-8",
         state=state,
         session_id=None,
         write_session_id=session.write_session_id,
-        section_name="full_file",
+        section_name="header",
         section_id=None,
         section_role=None,
         next_section_name=None,
-        replace_strategy="overwrite",
+        replace_strategy="auto",
         expected_followup_verifier=None,
         session=session,
     )

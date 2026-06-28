@@ -92,6 +92,49 @@ def test_context_drift_routes_tool_plan_evidence_capsule() -> None:
     assert "evidence_gathering_needed" in {item.name for item in mitigations}
 
 
+def test_looping_read_loop_on_mutation_task_routes_mutation_breaker() -> None:
+    state = LoopState(step_count=5)
+    state.current_phase = "execute"
+    state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+    signal = FamaSignal(
+        kind=FamaFailureKind.LOOPING,
+        severity=2,
+        source="loop_guard",
+        evidence="repeated_tool=file_read",
+        step=5,
+        tool_name="file_read",
+        failure_class="repeated_action",
+    )
+
+    mitigations = route_signal(signal, state=state, config=_Config())
+    names = {item.name for item in mitigations}
+
+    assert "mutation_loop_breaker" in names
+    assert "evidence_gathering_needed" not in names
+    assert "tool_exposure_narrowing" in names
+
+
+def test_looping_read_loop_in_explore_keeps_evidence_gathering() -> None:
+    state = LoopState(step_count=5)
+    state.current_phase = "explore"
+    state.run_brief.original_task = "fix the blackscreen in temp/chronoshift-labyrinth.html"
+    signal = FamaSignal(
+        kind=FamaFailureKind.LOOPING,
+        severity=2,
+        source="loop_guard",
+        evidence="repeated_tool=file_read",
+        step=5,
+        tool_name="file_read",
+        failure_class="repeated_action",
+    )
+
+    mitigations = route_signal(signal, state=state, config=_Config())
+    names = {item.name for item in mitigations}
+
+    assert "evidence_gathering_needed" in names
+    assert "mutation_loop_breaker" not in names
+
+
 def test_fama_suppressed_signal_is_logged() -> None:
     state = LoopState(step_count=4)
     events: list[tuple[str, dict[str, object]]] = []

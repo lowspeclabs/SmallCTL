@@ -25,6 +25,7 @@ _MODEL_NAME_CONTEXT_CEILINGS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"mixtral\b", re.IGNORECASE), 32_768),
     (re.compile(r"deepseek[-_]?v3\b", re.IGNORECASE), 64_000),
     (re.compile(r"deepseek[-_]?r1\b", re.IGNORECASE), 64_000),
+    (re.compile(r"deepseek[-_]?v4\b", re.IGNORECASE), 1_000_000),
     (re.compile(r"command[-_]?r\b", re.IGNORECASE), 128_000),
 ]
 

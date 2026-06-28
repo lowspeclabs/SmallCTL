@@ -97,6 +97,7 @@ def build_harness_config_kwargs(
         "max_summary_items": config.max_summary_items,
         "max_artifact_snippets": config.max_artifact_snippets,
         "artifact_snippet_token_limit": config.artifact_snippet_token_limit,
+        "allow_artifact_read_large_context": getattr(config, "allow_artifact_read_large_context", False),
         "artifact_summarization_threshold": getattr(config, "artifact_summarization_threshold", 1200),
         "multi_file_artifact_snippet_limit": config.multi_file_artifact_snippet_limit,
         "multi_file_primary_file_limit": config.multi_file_primary_file_limit,
@@ -130,7 +131,7 @@ def build_harness_config_kwargs(
         "min_exploration_steps": getattr(config, "min_exploration_steps", 1),
         "chunk_mode_min_bytes": getattr(config, "chunk_mode_min_bytes", 4096),
         "chunk_mode_new_file_only": getattr(config, "chunk_mode_new_file_only", True),
-        "chunk_mode_supported_models": getattr(config, "chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3"]),
+        "chunk_mode_supported_models": getattr(config, "chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"]),
         "small_model_soft_write_chars": getattr(config, "small_model_soft_write_chars", 2000),
         "small_model_hard_write_chars": getattr(config, "small_model_hard_write_chars", 4000),
         "new_file_chunk_mode_line_estimate": getattr(config, "new_file_chunk_mode_line_estimate", 100),
@@ -425,6 +426,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--artifact-snippet-token-limit",
         type=int,
         help="Approximate token cap for each retrieved artifact snippet",
+    )
+    parser.add_argument(
+        "--allow-artifact-read-large-context",
+        action="store_true",
+        default=None,
+        help="Expose artifact_read even for context windows above 32k or large-model names",
     )
     parser.add_argument(
         "--min-exploration-steps",

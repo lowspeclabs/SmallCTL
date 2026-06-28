@@ -7,6 +7,7 @@ from ..guards import is_seven_b_or_under_model_name
 from ..models.events import UIEvent, UIEventType
 from ..state import WorkingMemory
 from ..write_session_fsm import archive_terminal_write_session
+from .state import GraphRunState
 
 
 def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: str) -> None:
@@ -65,6 +66,9 @@ def _apply_continue_task_state_reset(harness: Any, *, task: str, resolved_task: 
     harness.state.tool_history = []
     harness.state.stagnation_counters = {}
     harness.state.scratchpad.pop("_tool_attempt_history", None)
+    harness.state.scratchpad.pop("_read_only_loop_gate_active", None)
+    harness.state.scratchpad.pop("_read_only_loop_gate_triggered_at", None)
+    harness.state.scratchpad.pop("_read_only_loop_gate_nudged", None)
 
     recent_messages = list(getattr(harness.state, "recent_messages", []) or [])
     if len(recent_messages) > 2:

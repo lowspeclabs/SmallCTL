@@ -181,6 +181,7 @@ class SmallctlConfig:
     max_summary_items: int = 3
     max_artifact_snippets: int = 4
     artifact_snippet_token_limit: int = 400
+    allow_artifact_read_large_context: bool = False
     multi_file_artifact_snippet_limit: int = 8
     multi_file_primary_file_limit: int = 3
     remote_task_artifact_snippet_limit: int = 8
@@ -194,7 +195,7 @@ class SmallctlConfig:
     artifact_summarization_threshold: int = 1200
     chunk_mode_min_bytes: int = 4096
     chunk_mode_new_file_only: bool = True
-    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3"])
+    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"])
     small_model_soft_write_chars: int = 2000
     small_model_hard_write_chars: int = 4000
     new_file_chunk_mode_line_estimate: int = 100

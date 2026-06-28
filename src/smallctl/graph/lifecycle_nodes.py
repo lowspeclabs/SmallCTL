@@ -1207,6 +1207,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             or "loop detected" in guard_error
             or "repeated tool call loop" in guard_error
             or "Progress stagnation guard tripped" in guard_error
+            or "Read-only loop guard tripped" in guard_error
         ):
             _dispatch_stagnation_recovery(harness, guard_error)
             guard_error = None

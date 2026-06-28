@@ -8,6 +8,89 @@ from ..recovery_metrics import record_terminal_success_metrics
 from ..state import clip_text_value
 from .state import GraphRunState, PendingToolCall, ToolExecutionRecord
 
+_TERMINAL_READINESS_AUTO_COMPLETE_KEY = "_terminal_readiness_auto_completed"
+
+
+async def maybe_auto_complete_terminal_readiness(
+    graph_state: GraphRunState,
+    harness: Any,
+    event_handler: Any,
+) -> bool:
+    """Auto-complete the task when the harness detects terminal readiness.
+
+    This moves the completion check from the model to the harness: if the
+    required artifact exists, the latest verifier passed, and there are no
+    open write sessions, the run is finalized without waiting for the model
+    to emit `task_complete`.
+    """
+    if graph_state.final_result is not None:
+        return False
+    if graph_state.pending_tool_calls:
+        return False
+    if graph_state.interrupt_payload is not None:
+        return False
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    if getattr(state, "plan_execution_mode", False) and getattr(state, "active_step_id", None):
+        return False
+    session = getattr(state, "write_session", None)
+    if session is not None and str(getattr(session, "status", "") or "").strip().lower() != "complete":
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        scratchpad = {}
+        state.scratchpad = scratchpad
+    if scratchpad.get(_TERMINAL_READINESS_AUTO_COMPLETE_KEY):
+        return False
+    from ..challenge_progress import terminal_readiness_state
+    readiness = terminal_readiness_state(state)
+    if not readiness:
+        return False
+    existing_paths = readiness.get("existing_paths") or []
+    if existing_paths:
+        message = f"Task auto-completed: required artifact `{existing_paths[-1]}` is ready and verified."
+    else:
+        message = "Task auto-completed: required artifact is ready and verified."
+    scratchpad[_TERMINAL_READINESS_AUTO_COMPLETE_KEY] = {
+        "readiness": readiness,
+        "message": message,
+        "step_count": getattr(state, "step_count", 0),
+    }
+    scratchpad["_task_complete"] = True
+    scratchpad["_task_complete_message"] = message
+    state.touch()
+    record_terminal_success_metrics(state)
+    graph_state.final_result = {
+        "status": "completed",
+        "message": {"status": "complete", "message": message},
+        "assistant": str(graph_state.last_assistant_text or "").strip() or message,
+        "thinking": graph_state.last_thinking_text,
+        "usage": graph_state.last_usage,
+    }
+    emit = getattr(harness, "_emit", None)
+    if callable(emit):
+        maybe_awaitable = emit(
+            event_handler,
+            UIEvent(
+                event_type=UIEventType.SYSTEM,
+                content=message,
+                data={"status_activity": "terminal_readiness_auto_completed"},
+            ),
+        )
+        if hasattr(maybe_awaitable, "__await__"):
+            await maybe_awaitable
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "terminal_readiness_auto_completed",
+            "auto-completed task after harness detected terminal readiness",
+            readiness=readiness,
+            message=message,
+        )
+    return True
+
+
 _REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
 _REMOTE_VERIFIER_PENDING_COMPLETE_KEY = "_task_complete_remote_mutation_verifier_pending_complete"
 _REMOTE_VERIFIER_TOOLS = {"ssh_file_read", "ssh_exec"}

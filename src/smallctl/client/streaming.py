@@ -371,7 +371,7 @@ class SSEStreamer:
             pool=self.STREAM_POOL_TIMEOUT_SEC,
         )
         response = await client.post(url, headers=headers, json=fallback_payload, timeout=timeout)
-        async with response:
+        try:
             response.raise_for_status()
             obj = response.json()
             if self.run_logger:
@@ -383,6 +383,8 @@ class SSEStreamer:
                 )
             yield {"type": "chunk", "data": _nonstream_response_to_chunk(obj)}
             yield {"type": "done"}
+        finally:
+            await response.aclose()
 
 
 def _nonstream_response_to_chunk(payload: dict[str, Any]) -> dict[str, Any]:

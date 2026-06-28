@@ -289,6 +289,14 @@ class RunLogger:
         fragment = self._token_stream_fragment(event, message, raw_data)
         with text_path.open("a", encoding="utf-8") as tf:
             if fragment is not None:
+                # When token sampling is active the text stream would be a
+                # jagged subset of the actual model output, producing lines
+                # where words appear to run together with missing spaces.
+                # Only build a continuous token stream when every token is
+                # being logged.
+                if not self.debug_tokens:
+                    self._flush_text_stream(text_path, tf)
+                    return
                 kind, token = fragment
                 state = self._text_streams.get(text_path)
                 if state is None or state.kind != kind:

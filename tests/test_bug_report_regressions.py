@@ -76,6 +76,28 @@ def test_search_tools_return_failure_for_invalid_regex(tmp_path: Path) -> None:
     assert find_result["metadata"]["error_kind"] == "invalid_regex"
 
 
+def test_grep_searches_file_path_directly(tmp_path: Path) -> None:
+    target = tmp_path / "chronoshift-labyrinth.html"
+    target.write_text("<canvas id='game'></canvas>\n<script>function startGame() {}</script>\n", encoding="utf-8")
+
+    result = asyncio.run(grep("canvas", path=str(target), case_sensitive=True))
+
+    assert result["success"] is True
+    assert result["metadata"]["count"] == 1
+    assert result["output"] == [{"path": str(target), "line": 1, "text": "<canvas id='game'></canvas>"}]
+
+
+def test_find_files_matches_file_path_directly(tmp_path: Path) -> None:
+    target = tmp_path / "chronoshift-labyrinth.html"
+    target.write_text("content\n", encoding="utf-8")
+
+    result = asyncio.run(find_files("chronoshift", path=str(target)))
+
+    assert result["success"] is True
+    assert result["metadata"]["count"] == 1
+    assert result["output"] == [str(target)]
+
+
 def test_tool_plan_allow_git_env_config_is_normalized(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SMALLCTL_TOOL_PLAN_ALLOW_GIT", "true")

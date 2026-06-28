@@ -21,10 +21,13 @@ from .progress_guard_constants import (
     _FAILED_MUTATION_REPAIR_PROGRESS_BUDGET,
     _FAILED_MUTATION_REPAIR_PROGRESS_KEY,
     _LAST_FAILED_VERIFIER_KEY,
+    _MUTATION_TASK_READ_BUDGET_PER_FILE,
+    _MUTATION_TASK_READ_ONLY_LOOP_THRESHOLD,
     _MUTATION_TOOLS,
     _PATCH_META_TOOLS,
     _PATCH_TARGET_NOT_FOUND_COUNTS_KEY,
     _PATCH_TARGET_NOT_FOUND_SUPPRESS_AFTER,
+    _READ_ONLY_LOOP_TOOLS,
     _READ_TOOLS,
     _STALE_VERIFIER_KEY,
 )
@@ -81,6 +84,23 @@ def _is_shell_read_command(record: Any) -> bool:
     return _is_read_only_shell_evidence_action(command)
 
 
+def _turn_is_read_only(last_tool_results: list[Any]) -> bool:
+    """Return True if every tool result this turn is a read/search operation."""
+    if not last_tool_results:
+        return False
+    saw_read_tool = False
+    for record in last_tool_results:
+        tool_name = str(getattr(record, "tool_name", "") or "")
+        if tool_name in _MUTATION_TOOLS or tool_name in {"task_complete", "task_fail"}:
+            return False
+        if tool_name in {"shell_exec", "ssh_exec"}:
+            if not _is_shell_read_command(record):
+                return False
+        if tool_name in _READ_ONLY_LOOP_TOOLS:
+            saw_read_tool = True
+    return saw_read_tool
+
+
 def _record_deterministic_read_failure(harness: Any, record: Any) -> None:
     if getattr(record, "tool_name", "") != "ssh_file_read":
         return
@@ -110,6 +130,34 @@ def _record_deterministic_read_failure(harness: Any, record: Any) -> None:
         failures = []
     failures.append(key)
     scratchpad[_DETERMINISTIC_READ_FAILURES_KEY] = failures[-16:]
+
+
+def _mutation_task_read_budget_exhausted(harness: Any, record: Any) -> bool:
+    if str(getattr(record, "tool_name", "") or "") != "file_read":
+        return False
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    args = getattr(record, "args", None)
+    if not isinstance(args, dict):
+        args = {}
+    path = str(args.get("path") or "").strip()
+    if not path:
+        return False
+    history = scratchpad.get("_progress_read_history")
+    if not isinstance(history, list):
+        return False
+    prior_same_file_reads = 0
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        tool_name = str(item.get("tool_name") or "")
+        if tool_name in _MUTATION_TOOLS or tool_name in {"shell_exec", "ssh_exec"}:
+            break
+        if tool_name == "file_read" and str(item.get("path") or "").strip() == path:
+            prior_same_file_reads += 1
+    return prior_same_file_reads >= _MUTATION_TASK_READ_BUDGET_PER_FILE
 
 
 def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
@@ -179,6 +227,8 @@ def _turn_has_actionable_progress(harness: Any, graph_state: Any) -> bool:
                 return True
         if record.tool_name == "file_read" and record.result.success:
             if _read_repeats_fully_read_target_after_failed_verifier(harness, record):
+                continue
+            if mutation_required and _mutation_task_read_budget_exhausted(harness, record):
                 continue
             if _file_read_result_is_new_range(harness, record):
                 return True
@@ -578,9 +628,24 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     is_progress = _turn_has_actionable_progress(harness, graph_state)
 
     scratchpad = getattr(state, "scratchpad", {})
+    mutation_required = _current_task_requires_file_mutation(state)
+    read_only_turn = _turn_is_read_only(getattr(graph_state, "last_tool_results", []) or [])
+    if mutation_required and read_only_turn:
+        counters["consecutive_read_only_turns"] = int(counters.get("consecutive_read_only_turns", 0)) + 1
+    else:
+        counters["consecutive_read_only_turns"] = 0
+
     for record in getattr(graph_state, "last_tool_results", []) or []:
         if record.tool_name in _MUTATION_TOOLS and record.result.success and (record.result.metadata or {}).get("changed") is True:
             _mark_verifier_stale_after_mutation(state, record)
+            if isinstance(scratchpad, dict) and scratchpad.get("_read_only_loop_gate_active"):
+                scratchpad.pop("_read_only_loop_gate_active", None)
+                scratchpad.pop("_read_only_loop_gate_triggered_at", None)
+                scratchpad.pop("_read_only_loop_gate_nudged", None)
+                harness._runlog(
+                    "read_only_loop_gate_cleared",
+                    "cleared read-only loop hard gate after successful mutation",
+                )
         _record_failed_verifier(state, record)
         _maybe_suppress_file_patch_after_target_not_found(state, record)
     _maybe_inject_verifier_success_nudge(state, graph_state)
@@ -615,6 +680,23 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
     else:
         counters["no_actionable_progress"] = int(counters.get("no_actionable_progress", 0)) + 1
 
+    # Activate the read-only loop hard gate for mutation-required tasks that have
+    # done too many consecutive read/search turns, even if individual reads were
+    # novel enough to count as actionable progress.
+    if (
+        mutation_required
+        and int(counters.get("consecutive_read_only_turns", 0)) >= _MUTATION_TASK_READ_ONLY_LOOP_THRESHOLD
+        and isinstance(scratchpad, dict)
+        and not scratchpad.get("_read_only_loop_gate_active")
+    ):
+        scratchpad["_read_only_loop_gate_active"] = True
+        scratchpad["_read_only_loop_gate_triggered_at"] = int(getattr(state, "step_count", 0) or 0)
+        harness._runlog(
+            "read_only_loop_gate_activated",
+            "activated read-only loop hard gate for mutation-required task",
+            consecutive_read_only_turns=counters["consecutive_read_only_turns"],
+        )
+
     # Update remote-install stall counter
     _update_remote_install_stall_counter(state, graph_state, counters)
 
@@ -642,6 +724,16 @@ def _check_progress_stagnation(harness: Any, graph_state: Any) -> str | None:
         return None
 
     counters = state.stagnation_counters if isinstance(getattr(state, "stagnation_counters", None), dict) else {}
+    consecutive_read_only = int(counters.get("consecutive_read_only_turns", 0))
+    if (
+        consecutive_read_only >= _MUTATION_TASK_READ_ONLY_LOOP_THRESHOLD
+        and _current_task_requires_file_mutation(state)
+    ):
+        return (
+            f"Read-only loop guard tripped: {consecutive_read_only} consecutive read/search turns "
+            "on a task that requires a file mutation. Stop reading and apply a concrete patch or write."
+        )
+
     cycle_count = int(counters.get("no_actionable_progress", 0))
     nudge_start, trip_threshold = _stagnation_thresholds_for_phase(harness)
 

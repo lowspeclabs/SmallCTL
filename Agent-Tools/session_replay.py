@@ -80,21 +80,46 @@ def _parse_dispatches(
     tools_records: list[dict[str, Any]],
     harness_records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Pair dispatch_start and dispatch_complete by trace_id ordering."""
-    starts: dict[str, dict[str, Any]] = {}
+    """Pair dispatch_start/dispatch_complete by trace_id, preserving order.
+
+    A single model call can trigger more than one dispatch (for example an
+    auto-triggered read after a primary tool call). Each pair gets its own
+    ``sub_trace_id`` so the replay can distinguish them.
+    """
+    starts: dict[str, list[dict[str, Any]]] = {}
     dispatches: list[dict[str, Any]] = []
+    subindex_by_trace: dict[str, int] = {}
+
+    # Surface UI event kinds (tool_call, tool_result, system, etc.) when they
+    # were logged at debug level.
+    ui_event_kinds: dict[str, list[str]] = {}
+    for rec in harness_records:
+        if rec.get("event") != "ui_event":
+            continue
+        tid = extract_trace_id(rec) or ""
+        if not tid:
+            continue
+        event_type = (rec.get("data") or {}).get("event_type") or ""
+        if event_type:
+            ui_event_kinds.setdefault(tid, []).append(str(event_type))
 
     for rec in tools_records:
         event = rec.get("event", "")
         tid = extract_trace_id(rec) or ""
         if event == "dispatch_start":
-            starts[tid] = rec
+            starts.setdefault(tid, []).append(rec)
         elif event == "dispatch_complete":
-            start = starts.pop(tid, None)
+            start = starts.get(tid, []).pop(0) if starts.get(tid) else None
+            if start and not starts[tid]:
+                starts.pop(tid, None)
             start_data = (start.get("data") or {}) if start else {}
             complete_data = rec.get("data") or {}
+            subindex_by_trace[tid] = subindex_by_trace.get(tid, 0) + 1
+            subindex = subindex_by_trace[tid]
+            sub_trace_id = f"{tid}:dispatch-{subindex}"
             dispatches.append({
                 "trace_id": tid,
+                "sub_trace_id": sub_trace_id,
                 "timestamp": rec.get("timestamp"),
                 "index": len(dispatches) + 1,
                 "tool_name": complete_data.get("tool_name") or start_data.get("tool_name", "?"),
@@ -105,6 +130,7 @@ def _parse_dispatches(
                 "phase": _phase_at_trace(harness_records, tid),
                 "mode": _mode_at_trace(harness_records, tid),
                 "profiles": _profiles_at_trace(harness_records, tid),
+                "ui_event_kinds": ui_event_kinds.get(tid, []),
             })
 
     return dispatches
@@ -143,13 +169,19 @@ def _render_text(
         tool = d["tool_name"]
         success = d.get("success")
         status = colorize("OK", Colors.GREEN) if success else colorize("FAIL", Colors.RED) if success is False else "?"
-        tid = d["trace_id"]
+        sub_tid = d.get("sub_trace_id") or d.get("trace_id", "")
         error = d.get("error", "")
         phase = d.get("phase", "?")
         mode = d.get("mode", "?")
+        ui_kinds = d.get("ui_event_kinds", [])
+        ui_kind_text = ",".join(ui_kinds[:3]) if ui_kinds else ""
 
-        line = f"  #{idx:>3}  {status}  {tool:<20}  phase={phase:<10}  mode={mode:<10}  [{tid.split(':')[-2:]}]"
+        tail = ":".join(sub_tid.split(":")[-2:]) if ":" in sub_tid else sub_tid
+        line = f"  #{idx:>3}  {status}  {tool:<20}  phase={phase:<10}  mode={mode:<10}  [{tail}]"
+
         lines.append(line)
+        if ui_kind_text:
+            lines.append(f"         ui_events: {ui_kind_text}")
         if success is False and error:
             lines.append(f"         error: {error[:200]}")
         if show_policy:

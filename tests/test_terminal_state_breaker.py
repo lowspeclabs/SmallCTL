@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from smallctl.challenge_progress import (
     terminal_readiness_state,
     record_code_change,
@@ -9,7 +11,13 @@ from smallctl.challenge_progress import (
     _pending_file_mutation_intent,
 )
 from smallctl.graph.model_call_nodes import _conclusion_signature, _apply_terminal_conclusion_tracking
+from smallctl.graph.state import GraphRunState
+from smallctl.graph.task_completion_outcomes import maybe_auto_complete_terminal_readiness
 from smallctl.state import LoopState
+
+
+async def _noop_emit(*_args, **_kwargs):
+    pass
 
 
 def test_terminal_readiness_with_written_and_verified_file() -> None:
@@ -226,3 +234,98 @@ def test_pending_file_mutation_intent_from_task_text() -> None:
     state.run_brief.original_task = ""
     state.working_memory.current_goal = "patch file.html without overwriting"
     assert _pending_file_mutation_intent(state) is True
+
+
+@pytest.mark.anyio
+async def test_auto_complete_terminal_readiness_finalizes_when_ready(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."
+    target = tmp_path / "example.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('ok')", encoding="utf-8")
+    record_code_change(state, tool_name="file_write", path="./temp/example.py")
+    record_verifier_result(
+        state,
+        tool_name="shell_exec",
+        command="python3 ./temp/example.py",
+        verifier_kind="run_target",
+        verdict="pass",
+        exit_code=0,
+    )
+
+    harness = type(
+        "Harness",
+        (),
+        {
+            "state": state,
+            "_runlog": lambda *args, **kwargs: None,
+            "_emit": _noop_emit,
+        },
+    )()
+    graph_state = GraphRunState(loop_state=state, thread_id="test", run_mode="loop")
+    graph_state.last_assistant_text = "Done."
+
+    completed = await maybe_auto_complete_terminal_readiness(graph_state, harness, None)
+    assert completed is True
+    assert graph_state.final_result is not None
+    assert graph_state.final_result["status"] == "completed"
+    assert state.scratchpad["_task_complete"] is True
+
+
+@pytest.mark.anyio
+async def test_auto_complete_terminal_readiness_skips_when_not_ready(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."
+    target = tmp_path / "example.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('ok')", encoding="utf-8")
+    record_code_change(state, tool_name="file_write", path="./temp/example.py")
+
+    harness = type(
+        "Harness",
+        (),
+        {
+            "state": state,
+            "_runlog": lambda *args, **kwargs: None,
+            "_emit": _noop_emit,
+        },
+    )()
+    graph_state = GraphRunState(loop_state=state, thread_id="test", run_mode="loop")
+
+    completed = await maybe_auto_complete_terminal_readiness(graph_state, harness, None)
+    assert completed is False
+    assert graph_state.final_result is None
+
+
+@pytest.mark.anyio
+async def test_auto_complete_terminal_readiness_skips_with_open_write_session(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = "Build a self-contained Python script at `./temp/example.py`."
+    target = tmp_path / "example.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('ok')", encoding="utf-8")
+    record_code_change(state, tool_name="file_write", path="./temp/example.py")
+    record_verifier_result(
+        state,
+        tool_name="shell_exec",
+        command="python3 ./temp/example.py",
+        verifier_kind="run_target",
+        verdict="pass",
+        exit_code=0,
+    )
+    state.write_session = type("WS", (), {"status": "open"})()
+
+    harness = type(
+        "Harness",
+        (),
+        {
+            "state": state,
+            "_runlog": lambda *args, **kwargs: None,
+            "_emit": _noop_emit,
+        },
+    )()
+    graph_state = GraphRunState(loop_state=state, thread_id="test", run_mode="loop")
+
+    completed = await maybe_auto_complete_terminal_readiness(graph_state, harness, None)
+    assert completed is False
+    assert graph_state.final_result is None

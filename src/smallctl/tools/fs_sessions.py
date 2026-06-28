@@ -39,6 +39,31 @@ def _section_name_allows_full_file_finalization(section_name: str) -> bool:
     }
 
 
+_FINALIZATION_MARKERS = {
+    "final",
+    "finalize",
+    "finalise",
+    "done",
+    "complete",
+    "completed",
+    "end",
+    "ending",
+    "closing",
+    "__final__",
+    "__finalize__",
+    "__finalise__",
+    "__done__",
+    "__complete__",
+    "__end__",
+    "__closing__",
+}
+
+
+def _is_finalization_marker(value: str | None) -> bool:
+    normalized = _normalize_chunk_section_label(value or "")
+    return normalized in _FINALIZATION_MARKERS
+
+
 def _normalize_chunk_section_label(value: str) -> str:
     normalized = str(value or "").strip().lower()
     for token in ("-", " ", "/", "\\"):
@@ -128,7 +153,7 @@ def _write_session_should_finalize(
     replace_strategy: str,
     content: str,
 ) -> bool:
-    if next_section_name:
+    if next_section_name and not _is_finalization_marker(next_section_name):
         return False
     if not _write_session_can_finalize(session):
         return False
@@ -212,12 +237,9 @@ def _looks_like_complete_html_document(content: str) -> bool:
     if len(text) < 300 or text.count("\n") < 12:
         return False
     lowered = text.lower()
-    return (
-        "<html" in lowered
-        and "</html" in lowered
-        and ("<!doctype html" in lowered or "<body" in lowered)
-        and ("<script" in lowered or "</script" in lowered)
-    )
+    has_html_tag = "<html" in lowered and "</html>" in lowered
+    has_doctype_or_body = "<!doctype html" in lowered or "<body" in lowered
+    return has_html_tag and has_doctype_or_body
 
 
 def _append_unique_section(completed_sections: list[str], section_name: str) -> bool:
@@ -299,14 +321,13 @@ def _repair_cycle_allows_patch(state: LoopState | None, path: Path) -> bool:
     normalized = str(path.resolve()) if hasattr(path, "resolve") else str(path)
     if normalized in reads:
         return True
-    # If the target file does not exist BUT was previously recorded as read,
-    # the repair-cycle read requirement is likely stale state carried over from
-    # a prior failed task. Clear it and allow the write/patch to proceed.
-    # For files that were never read, the normal read requirement still applies.
+    # If the target file does not exist, there is no stale on-disk content to
+    # patch, so creation writes (e.g. file_write with replace_strategy='overwrite')
+    # are safe. Record the missing state as observed so later patch operations in
+    # the same repair cycle can proceed without forcing another read.
     try:
-        if not path.exists() and normalized in reads:
-            reads.discard(normalized)
-            state.scratchpad["_repair_cycle_reads"] = list(reads)
+        if not path.exists():
+            _record_repair_cycle_read(state, path)
             return True
     except OSError:
         pass

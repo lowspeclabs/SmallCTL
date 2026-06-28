@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..remote_scope import remote_scope_is_active
@@ -59,6 +60,75 @@ _RETRYABLE_HIDDEN_TOOL_NAMES = {
     "task_fail",
     "web_fetch",
 }
+_READ_ONLY_LOOP_HIDDEN_TOOLS = {
+    "file_read",
+    "artifact_read",
+    "artifact_grep",
+    "artifact_print",
+    "grep",
+    "find_files",
+    "dir_list",
+    "git_diff",
+    "git_status",
+    "web_fetch",
+    "web_search",
+    "long_context_lookup",
+    "search",
+}
+
+
+def _read_only_loop_gate_is_active(state: Any) -> bool:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    if not scratchpad.get("_read_only_loop_gate_active"):
+        return False
+    if getattr(state, "files_changed_this_cycle", None):
+        return False
+    return True
+
+
+def _filter_read_only_loop_tools(
+    harness: Any,
+    schemas: list[dict[str, Any]],
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
+    from ..graph.progress_guard_support import _current_task_requires_file_mutation
+
+    if mode not in _LOOPISH_TOOL_MODES or not schemas:
+        return schemas
+    if not _read_only_loop_gate_is_active(harness.state):
+        return schemas
+    if not _current_task_requires_file_mutation(harness.state):
+        return schemas
+    allowed = {
+        "file_patch",
+        "ast_patch",
+        "file_write",
+        "file_append",
+        "shell_exec",
+        "ask_human",
+        "task_complete",
+        "task_fail",
+        "loop_status",
+        "memory_update",
+    }
+    # Preserve any tool already exposed so a manually-triggered retry or verifier
+    # that happens to be read-only is not lost, but hide the read/search tools
+    # that fuel the loop.
+    kept = [s for s in schemas if _tool_name(s) not in _READ_ONLY_LOOP_HIDDEN_TOOLS or _tool_name(s) in allowed]
+    dropped = sorted(set(_tool_names(schemas)) - set(_tool_names(kept)))
+    if dropped:
+        harness._runlog(
+            "read_only_loop_tool_exposure_reduced",
+            "hidden read/search tools because mutation task stagnated in a read-only loop",
+            mode=mode,
+            dropped_tools=dropped,
+            kept_tools=_tool_names(kept),
+        )
+    return kept
+
 _REMOTE_ONLY_CONTINUE_ESSENTIAL_TOOLS = {
     "ask_human",
     "loop_status",
@@ -68,6 +138,15 @@ _REMOTE_ONLY_CONTINUE_ESSENTIAL_TOOLS = {
     "task_complete",
     "task_fail",
 }
+_ARTIFACT_READ_CONTEXT_WINDOW_THRESHOLD = 32768
+_LARGE_MODEL_NAME_RE = re.compile(
+    r"(\b|[-_:])(?:26|27|30|32|34|40|65|70|72|90|100|120|180|200|405|671)b(?:\b|[-_:])"
+    r"|deepseek[-_:]?v[34]"
+    r"|gpt[-_:]?4"
+    r"|claude[-_:]?(?:3|4)"
+    r"|qwen[-_:]?(?:2\.5|3)[-_:]?(?:32|72|235)b",
+    re.IGNORECASE,
+)
 
 
 def recent_hidden_tool_recovery_artifact_id(
@@ -138,6 +217,8 @@ def _export_registry_tools(
 
 
 def _retry_tool_schema(harness: Any, *, tool_name: str) -> dict[str, Any] | None:
+    if tool_name == "artifact_read" and not _artifact_read_allowed_for_run(harness):
+        return None
     if tool_name in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"} and not remote_scope_is_active(getattr(harness, "state", None)):
         return None
     registry = getattr(harness, "registry", None)
@@ -447,6 +528,7 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         state=harness.state,
         mode=normalized_mode,
     )
+    schemas = _filter_artifact_read_for_run(harness, schemas, mode=normalized_mode)
     schemas = _filter_remote_only_continue_tools(harness, schemas, mode=normalized_mode)
     if _has_recent_tool_evidence(harness.state):
         existing_names = set(_tool_names(schemas))
@@ -469,6 +551,7 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
             if schema is not None:
                 schemas.append(schema)
                 current_names.add(tool_name)
+    schemas = _filter_artifact_read_for_run(harness, schemas, mode=normalized_mode)
 
     # Fix 2: Expose shell_exec in planning mode for local debug tasks
     if normalized_mode == "planning" and is_local_coding:
@@ -478,9 +561,13 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
             if "shell_exec" not in existing_names:
                 schemas = list(schemas) + [shell_schema]
 
+    schemas = _filter_read_only_loop_tools(harness, schemas, mode=normalized_mode)
+
     exposed_names = set(_tool_names(schemas))
     hidden_names = sorted(all_exported_names - exposed_names)
     hidden_reasons = {name: hidden_tool_reason(name, state=harness.state, mode=normalized_mode) or "filtered" for name in hidden_names}
+    if "artifact_read" in all_exported_names and "artifact_read" not in exposed_names:
+        hidden_reasons["artifact_read"] = _artifact_read_hidden_reason(harness) or hidden_reasons.get("artifact_read", "filtered")
 
     if not is_local_coding:
         hidden_tools = fama_hidden_tools_for_exposure(
@@ -516,6 +603,81 @@ def resolve_turn_tool_exposure(harness: Any, mode: str) -> dict[str, list[Any]]:
         "schemas": schemas,
         "names": _tool_names(schemas),
     }
+
+
+def _mutation_task_allows_artifact_read(harness: Any) -> bool:
+    from ..graph.progress_guard_support import _current_task_requires_file_mutation
+
+    return _current_task_requires_file_mutation(getattr(harness, "state", None))
+
+
+def _artifact_read_allowed_for_run(harness: Any) -> bool:
+    config = getattr(harness, "config", None)
+    if bool(getattr(config, "allow_artifact_read_large_context", False)):
+        return True
+    if _mutation_task_allows_artifact_read(harness):
+        return True
+    return _artifact_read_hidden_reason(harness) == ""
+
+
+def _artifact_read_hidden_reason(harness: Any) -> str:
+    limit = _effective_context_window(harness)
+    if limit is not None and limit > _ARTIFACT_READ_CONTEXT_WINDOW_THRESHOLD:
+        return "large_context_window"
+    model = _model_name(harness)
+    if model and _LARGE_MODEL_NAME_RE.search(model):
+        return "large_model"
+    return ""
+
+
+def _effective_context_window(harness: Any) -> int | None:
+    candidates: list[int] = []
+    for value in (
+        getattr(harness, "server_context_limit", None),
+        getattr(getattr(harness, "config", None), "context_limit", None),
+        getattr(getattr(harness, "client", None), "runtime_context_limit", None),
+        getattr(getattr(harness, "client", None), "context_limit", None),
+    ):
+        try:
+            normalized = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            normalized = 0
+        if normalized > 0:
+            candidates.append(normalized)
+    return min(candidates) if candidates else None
+
+
+def _model_name(harness: Any) -> str:
+    return str(
+        getattr(getattr(harness, "config", None), "model", None)
+        or getattr(getattr(harness, "client", None), "model", None)
+        or ""
+    ).strip().lower()
+
+
+def _filter_artifact_read_for_run(
+    harness: Any,
+    schemas: list[dict[str, Any]],
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
+    if not schemas or _artifact_read_allowed_for_run(harness):
+        return schemas
+    reason = _artifact_read_hidden_reason(harness) or "disabled"
+    hidden_names: set[str] = {"artifact_read"}
+    filtered = [schema for schema in schemas if _tool_name(schema) not in hidden_names]
+    if len(filtered) != len(schemas):
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "artifact_read_exposure_disabled",
+                "artifact_read hidden for large-context or large-model run",
+                mode=mode,
+                reason=reason,
+                context_window=_effective_context_window(harness),
+                model=_model_name(harness),
+            )
+    return filtered
 
 
 def _is_remote_only_continue_task(harness: Any) -> bool:

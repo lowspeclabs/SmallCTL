@@ -766,6 +766,30 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 result = _tool_envelope_from_dict(result)
             elif isinstance(result, ToolEnvelope) and not isinstance(result.metadata, dict):
                 result.metadata = {}
+            # Persist the artifact immediately while the result still holds the
+            # full tool output. Graph state serialization between nodes compacts
+            # large outputs, so delaying artifact creation until
+            # persist_tool_results produces artifacts whose on-disk content
+            # disagrees with their metadata (e.g. a "complete" file_read that
+            # only contains a 4k preview).
+            if not replayed and result.success:
+                tool_results_service = getattr(harness, "tool_results", None)
+                if tool_results_service is not None and callable(getattr(tool_results_service, "persist_artifact_early", None)):
+                    try:
+                        tool_results_service.persist_artifact_early(
+                            tool_name=pending.tool_name,
+                            result=result,
+                            tool_call_id=pending.tool_call_id,
+                        )
+                    except Exception as exc:
+                        log_kv(
+                            harness.log,
+                            logging.WARNING,
+                            "early_artifact_persistence_failed",
+                            tool_name=pending.tool_name,
+                            tool_call_id=pending.tool_call_id,
+                            error=str(exc),
+                        )
             _store_tool_execution_record(
                 harness,
                 operation_id=operation_id,

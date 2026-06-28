@@ -116,17 +116,10 @@ def artifact_grep(
 
         canonical_artifact_id = str(getattr(artifact, "artifact_id", "") or artifact_id).strip() or artifact_id
 
+        regex_inferred = False
         if not regex and _looks_like_regex(query):
-            return fail(
-                f"Query '{query}' looks like a regex, but artifact_grep uses literal "
-                "substring matching by default. Either break the query into separate literal "
-                "searches, or set regex=True to use regex mode.",
-                metadata={
-                    "artifact_id": canonical_artifact_id,
-                    "query": query,
-                    "hint": "Use regex=True if you intended a regex search.",
-                },
-            )
+            regex = True
+            regex_inferred = True
 
         lines = content.splitlines()
         matches = []
@@ -138,7 +131,7 @@ def artifact_grep(
             except re.error as exc:
                 return fail(
                     f"Invalid regex pattern: {exc}",
-                    metadata={"query": query, "error_kind": "invalid_regex"},
+                    metadata={"query": query, "error_kind": "invalid_regex", "regex_inferred": regex_inferred},
                 )
             for i, line in enumerate(lines):
                 if compiled.search(line):
@@ -167,6 +160,7 @@ def artifact_grep(
                     {
                         "artifact_id": canonical_artifact_id,
                         "query": query,
+                        "regex_inferred": regex_inferred,
                         "match_count": 0,
                         "total_lines": len(lines),
                     },
@@ -182,6 +176,7 @@ def artifact_grep(
             {
                 "artifact_id": canonical_artifact_id,
                 "query": query,
+                "regex_inferred": regex_inferred,
                 "match_count": len(matches),
                 "total_lines": len(lines),
             },
@@ -194,36 +189,65 @@ def artifact_grep(
         return fail(f"Error searching artifact {artifact_id}: {exc}")
 
 
-def _artifact_grep_kind_mismatch(artifact: Any, *, query: str) -> dict[str, Any] | None:
+_SEARCH_RESULT_ARTIFACT_TOOLS = {"grep", "artifact_grep", "find_files"}
+
+
+def _artifact_tool_name(artifact: Any) -> str:
     metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
-    tool_name = str(
+    return str(
         metadata.get("_original_tool_name")
         or metadata.get("tool_name")
         or getattr(artifact, "tool_name", "")
         or getattr(artifact, "kind", "")
         or ""
     ).strip()
-    if tool_name != "dir_list":
-        return None
-    if not _query_looks_like_file_content_search(query):
-        return None
+
+
+def _artifact_grep_kind_mismatch(artifact: Any, *, query: str) -> dict[str, Any] | None:
+    metadata = artifact.metadata if isinstance(getattr(artifact, "metadata", None), dict) else {}
+    tool_name = _artifact_tool_name(artifact)
     artifact_id = str(getattr(artifact, "artifact_id", "") or "").strip()
     source = str(getattr(artifact, "source", "") or metadata.get("path") or "").strip()
-    return {
-        "message": (
-            f"Artifact {artifact_id} is from `dir_list`, so it contains a directory listing, not file contents. "
-            f"The query {query!r} looks like a file-content search. Use `file_read(path='...')` for the target file "
-            "or grep the target path directly instead of searching this directory-list artifact."
-        ),
-        "metadata": {
-            "artifact_id": artifact_id,
-            "artifact_tool_name": tool_name,
-            "artifact_source": source,
-            "query": query,
-            "error_kind": "artifact_kind_mismatch",
-            "next_recommended_tool": "file_read",
-        },
-    }
+
+    if tool_name == "dir_list":
+        if not _query_looks_like_file_content_search(query):
+            return None
+        return {
+            "message": (
+                f"Artifact {artifact_id} is from `dir_list`, so it contains a directory listing, not file contents. "
+                f"The query {query!r} looks like a file-content search. Use `file_read(path='...')` for the target file "
+                "or grep the target path directly instead of searching this directory-list artifact."
+            ),
+            "metadata": {
+                "artifact_id": artifact_id,
+                "artifact_tool_name": tool_name,
+                "artifact_source": source,
+                "query": query,
+                "error_kind": "artifact_kind_mismatch",
+                "next_recommended_tool": "file_read",
+            },
+        }
+
+    if tool_name in _SEARCH_RESULT_ARTIFACT_TOOLS:
+        if not _query_looks_like_file_content_search(query):
+            return None
+        return {
+            "message": (
+                f"Artifact {artifact_id} is itself a search-result artifact (`{tool_name}`), so searching it again "
+                f"for {query!r} is unlikely to yield new evidence. Use `file_read(path='...')` on the source file, "
+                "or run `grep`/`artifact_grep` against the original file artifact instead."
+            ),
+            "metadata": {
+                "artifact_id": artifact_id,
+                "artifact_tool_name": tool_name,
+                "artifact_source": source,
+                "query": query,
+                "error_kind": "artifact_kind_mismatch",
+                "next_recommended_tool": "file_read",
+            },
+        }
+
+    return None
 
 
 def _query_looks_like_file_content_search(query: str) -> bool:
@@ -301,7 +325,7 @@ def artifact_read(
     if end_line is not None and requested_end_line is None:
         return fail("end_line must be a positive integer.")
     if requested_end_line is not None and requested_end_line < requested_start_line:
-        return fail("end_line must be greater than or equal to start_line.")
+        requested_start_line, requested_end_line = requested_end_line, requested_start_line
 
     if not artifact.content_path:
         # Fallback to inline content if no file path exists

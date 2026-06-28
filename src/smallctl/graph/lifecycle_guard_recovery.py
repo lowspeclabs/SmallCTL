@@ -9,6 +9,7 @@ from .state import PendingToolCall
 
 def _dispatch_stagnation_recovery(harness: Any, guard_error: str) -> None:
     """Inject stagnation recovery nudge and reset counters."""
+    from ..graph.progress_guard_support import _current_task_requires_file_mutation
     from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
 
     state = getattr(harness, "state", None)
@@ -18,11 +19,15 @@ def _dispatch_stagnation_recovery(harness: Any, guard_error: str) -> None:
     tx_note = (" " + " ".join(tx_lines)) if tx_lines else ""
     phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     active_intent = str(getattr(state, "active_intent", "") or "").strip().lower()
-    if phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}:
+    mutation_required = _current_task_requires_file_mutation(state)
+    if mutation_required or (phase == "repair" and active_intent in {"requested_file_patch", "requested_write_file"}):
         repair_directive = (
             " You MUST now call a concrete mutation tool (`file_patch`, `file_write`, or `ast_patch`) "
             "or run a focused verifier (`shell_exec`). Do not read, analyze, or plan further."
         )
+        if isinstance(scratchpad, dict):
+            scratchpad["_read_only_loop_gate_active"] = True
+            scratchpad["_read_only_loop_gate_triggered_at"] = int(getattr(state, "step_count", 0) or 0)
     else:
         repair_directive = " Try a different tool, check permissions, or rethink your approach instead of repeating the same action."
     harness._runlog(

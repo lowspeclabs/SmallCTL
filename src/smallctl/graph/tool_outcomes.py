@@ -70,6 +70,7 @@ _maybe_schedule_task_complete_remote_mutation_verifier = _task_completion_outcom
 _maybe_schedule_task_complete_verifier_loop_status = _task_completion_outcomes._maybe_schedule_task_complete_verifier_loop_status
 _maybe_schedule_task_complete_repair_loop_status = _task_completion_outcomes._maybe_schedule_task_complete_repair_loop_status
 _maybe_emit_task_complete_verifier_nudge = _task_completion_outcomes._maybe_emit_task_complete_verifier_nudge
+_maybe_auto_complete_terminal_readiness = _task_completion_outcomes.maybe_auto_complete_terminal_readiness
 
 
 _REMOTE_TASK_HOST_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -126,6 +127,9 @@ async def apply_tool_outcomes(
         _update_subtask_ledger_from_record(harness, record)
         _maybe_auto_complete_plan_step_for_mutation(harness, record)
 
+    if await _maybe_auto_complete_terminal_readiness(graph_state, harness, deps.event_handler):
+        return LoopRoute.FINALIZE
+
     await _maybe_auto_trigger_escalation_for_patch_stall(
         harness=harness,
         graph_state=graph_state,
@@ -175,6 +179,9 @@ async def apply_chat_tool_outcomes(
 
         if await maybe_apply_terminal_tool_outcome(graph_state, deps, record, chat_mode=True):
             return LoopRoute.FINALIZE
+
+    if await _maybe_auto_complete_terminal_readiness(graph_state, harness, deps.event_handler):
+        return LoopRoute.FINALIZE
 
     _update_progress_tracking(harness, graph_state)
     _record_chat_progress_outcome(harness, graph_state.last_tool_results)

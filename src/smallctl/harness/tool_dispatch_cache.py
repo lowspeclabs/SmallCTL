@@ -6,7 +6,7 @@ from ..models.tool_result import ToolEnvelope
 from ..state import json_safe_value
 from .artifact_tracking import file_read_cache_key, ssh_file_read_cache_key
 
-_READ_ONLY_DEDUP_TOOLS = {"dir_list", "grep", "find_files", "artifact_read"}
+_READ_ONLY_DEDUP_TOOLS = {"dir_list", "grep", "find_files", "artifact_read", "artifact_grep"}
 
 
 def maybe_reuse_file_read(harness: Any, *, tool_name: str, args: dict[str, Any]) -> ToolEnvelope | None:

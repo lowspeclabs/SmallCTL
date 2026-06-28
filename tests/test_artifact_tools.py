@@ -9,7 +9,14 @@ from smallctl.context.artifacts import ArtifactStore
 from smallctl.context.assembler import PromptAssembler
 from smallctl.context.messages import format_compact_tool_message
 from smallctl.context.policy import ContextPolicy
+from smallctl.graph.state import (
+    GraphRunState,
+    ToolExecutionRecord,
+    inflate_graph_state,
+    serialize_graph_state,
+)
 from smallctl.harness.tool_result_flow import record_result
+from smallctl.harness.tool_results import ToolResultService
 from smallctl.models.conversation import ConversationMessage
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import ArtifactRecord, LoopState
@@ -142,15 +149,14 @@ def test_shell_exec_failure_message_caps_long_error_text() -> None:
     assert len(message) < 1900
 
 
-def test_artifact_grep_rejects_regex_looking_query_in_literal_mode(tmp_path: Path) -> None:
-    state = _state_with_artifact(tmp_path, content="host one up\nhost two down\n")
+def test_artifact_grep_infers_regex_for_regex_looking_query(tmp_path: Path) -> None:
+    state = _state_with_artifact(tmp_path, content="host one up\nhost two down\nserver ready\n")
 
     result = artifact_grep(state, artifact_id="A0001", query="host|server")
 
-    assert result["success"] is False
-    assert "looks like a regex" in result["error"]
-    assert "regex=True" in result["error"]
-    assert result["metadata"]["hint"] == "Use regex=True if you intended a regex search."
+    assert result["success"] is True
+    assert "Found 3 matches" in result["output"]
+    assert result["metadata"]["regex_inferred"] is True
 
 
 def test_artifact_grep_regex_mode_matches_pattern(tmp_path: Path) -> None:
@@ -326,6 +332,40 @@ def test_record_result_persists_budget_exceeding_file_read_artifact(tmp_path: Pa
     assert message.metadata["complete_file"] is True
 
 
+def test_file_read_artifact_pages_dict_content_as_file_text(tmp_path: Path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    content = "\n".join(f"line {idx}" for idx in range(1, 901))
+    store = ArtifactStore(tmp_path / "artifacts", "run-test", session_id="thread-test")
+
+    artifact = store.persist_tool_result(
+        tool_name="file_read",
+        result=ToolEnvelope(
+            success=True,
+            output={"content": content, "path": "large.html"},
+            metadata={
+                "path": "large.html",
+                "complete_file": True,
+                "truncated": False,
+                "line_start": 1,
+                "line_end": 900,
+                "total_lines": 900,
+            },
+        ),
+        session_id="thread-test",
+        tool_call_id="call-1",
+    )
+    state.artifacts[artifact.artifact_id] = artifact
+
+    page = artifact_read(state, artifact_id=artifact.artifact_id, start_line=601, end_line=900)
+
+    assert Path(artifact.content_path).read_text(encoding="utf-8") == content
+    assert page["success"] is True
+    assert page["metadata"]["total_lines"] == 900
+    assert "line 601" in page["output"]
+    assert "line 900" in page["output"]
+    assert "content:" not in page["output"]
+
+
 def test_record_result_reused_file_read_preserves_completion_metadata(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.thread_id = "thread-test"
@@ -473,3 +513,91 @@ def test_record_result_keeps_ssh_file_reads_inline_without_artifacts(tmp_path: P
     assert "FILE READ STATUS:" in message.content
     assert "alpha\nbeta\n" in message.content
     assert "artifact_id" not in message.metadata
+
+
+def test_large_file_read_artifact_survives_graph_state_serialization(tmp_path: Path) -> None:
+    """Regression: graph state serialization compacts large tool outputs, so
+    artifacts must be persisted before serialization. Otherwise the artifact
+    ends up containing only a preview while its metadata claims it is a
+    complete file.
+    """
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-test"
+    harness = SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path / "artifacts", "run-test", session_id=state.thread_id),
+        context_policy=ContextPolicy(tool_result_inline_token_limit=64, artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        client=SimpleNamespace(model="qwen3.5:4b"),
+        _runlog=lambda *args, **kwargs: None,
+        _current_user_task=lambda: "inspect a local file",
+    )
+    harness.tool_results = ToolResultService(harness)
+    service = SimpleNamespace(harness=harness)
+
+    output = "\n".join(
+        f"line {i}: some content here that makes each line reasonably long for byte counting purposes"
+        for i in range(1, 2300)
+    )
+    result = ToolEnvelope(
+        success=True,
+        output=output,
+        metadata={
+            "path": str(tmp_path / "large.html"),
+            "complete_file": True,
+            "truncated": False,
+            "line_start": 1,
+            "line_end": 2300,
+            "total_lines": 2300,
+            "bytes": len(output.encode("utf-8")),
+        },
+    )
+
+    # Simulate dispatch_tools: persist artifact early with full content
+    harness.tool_results.persist_artifact_early(
+        tool_name="file_read",
+        result=result,
+        tool_call_id="call-1",
+    )
+    early_artifact_id = result.metadata["artifact_id"]
+    early_artifact = state.artifacts[early_artifact_id]
+    assert Path(early_artifact.content_path).read_text(encoding="utf-8") == output
+
+    # Simulate the record that dispatch_tools adds to last_tool_results
+    graph_state = GraphRunState(loop_state=state, thread_id="thread-test", run_mode="loop")
+    graph_state.last_tool_results.append(
+        ToolExecutionRecord(
+            operation_id="op1",
+            tool_name="file_read",
+            args={"path": str(tmp_path / "large.html")},
+            tool_call_id="call-1",
+            result=result,
+        )
+    )
+
+    # Serialization between graph nodes compacts the result
+    payload = serialize_graph_state(graph_state)
+    graph_state2 = inflate_graph_state(payload)
+    compacted_result = graph_state2.last_tool_results[0].result
+    assert len(compacted_result.output) < len(output)
+    assert "[output compacted" in compacted_result.output
+
+    # persist_tool_results receives the compacted result but reuses the early artifact
+    message = asyncio.run(
+        record_result(
+            service,
+            tool_name="file_read",
+            tool_call_id="call-1",
+            result=compacted_result,
+            arguments={"path": str(tmp_path / "large.html")},
+        )
+    )
+
+    assert message.metadata["artifact_id"] == early_artifact_id
+    artifact = state.artifacts[early_artifact_id]
+    assert Path(artifact.content_path).read_text(encoding="utf-8") == output
+    assert artifact.metadata["complete_file"] is True
+    assert artifact.metadata["total_lines"] == 2300
+    assert artifact.metadata["truncated"] is False
+

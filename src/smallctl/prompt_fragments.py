@@ -207,7 +207,8 @@ _REMOTE_CLEANUP_TASK_KEYWORDS = (
 
 _DELIVERABLE_VERIFICATION = (
     "DELIVERABLE VERIFICATION: Before calling `task_complete`, verify every file, path, or artifact explicitly requested in the task. "
-    "If the task says to create a report at `/path/to/file`, use the appropriate read tool (e.g., `file_read` or `ssh_file_read`) to confirm the file exists and contains the expected content. "
+    "Prefer a lightweight shell command (e.g., `wc -l`, `head -n 5`, `grep -c`) over reading the entire file. "
+    "For large files, never read the full content more than once; a quick existence/line-count/checksum verifier is sufficient. "
     "Do not call `task_complete` based on the successful infrastructure step alone if a required deliverable is still missing. "
 )
 

@@ -33,9 +33,11 @@ from agent_tools_lib import (
     get_run_objective,
     has_ask_human_resume_terminal_stall,
     has_chat_terminal_repetition_stall,
+    has_continue_prompt_budget_loop,
     has_patch_first_policy_loop,
     has_stderr_signature_circuit_breaker,
     has_strong_environment_blocker,
+    has_tool_call_protocol_mismatch,
     has_write_overwrite_guard_failures,
     iter_records,
     load_summaries,
@@ -62,6 +64,8 @@ FAILURE_CLASS_LABELS = {
     "chat_terminal_repetition_stall": "chat_terminal_repetition_stall",
     "write_session_overwrite_guard_loop": "write_session_overwrite_guard_loop",
     "ask_human_resume_terminal_tool_stall": "ask_human_resume_terminal_tool_stall",
+    "continue_prompt_budget_loop": "continue_prompt_budget_loop",
+    "tool_call_protocol_mismatch": "tool_call_protocol_mismatch",
     "recovery_failure": "recovery_failure",
     "incomplete_unverified": "incomplete_unverified",
 }
@@ -105,6 +109,9 @@ def _classify_run(
     task_summary: dict[str, Any],
     failed_dispatches: list[dict[str, Any]],
     harness_records: list[dict[str, Any]],
+    *,
+    model_output_records: list[dict[str, Any]] | None = None,
+    chat_records: list[dict[str, Any]] | None = None,
 ) -> str:
     overall = session.get("overall_objective_status")
     final = task_summary.get("final_task_status")
@@ -150,6 +157,10 @@ def _classify_run(
         return "model_tool_loop_stall"
     if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
         return "runtime_exception"
+    if has_continue_prompt_budget_loop(harness_records, chat_records or [], threshold=2):
+        return "continue_prompt_budget_loop"
+    if has_tool_call_protocol_mismatch(model_output_records or [], []):
+        return "tool_call_protocol_mismatch"
     if events.get("recovery_failure_event_recorded"):
         return "recovery_failure"
     if overall == "incomplete" and session.get("deliverable_verified") is False:
@@ -165,6 +176,8 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
 
     harness_records = list(iter_records(run_dir, "harness"))
     tools_records = list(iter_records(run_dir, "tools"))
+    model_output_records = list(iter_records(run_dir, "model_output"))
+    chat_records = list(iter_records(run_dir, "chat"))
     events = event_counter(harness_records)
     errors = error_records(harness_records)
     warnings = warning_records(harness_records)
@@ -186,7 +199,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "failed_dispatch_count": len(failed_dispatches),
         "error_count": len(errors),
         "warning_count": len(warnings),
-        "classification": _classify_run(events, errors, session, task_summary, failed_dispatches, harness_records),
+        "classification": _classify_run(events, errors, session, task_summary, failed_dispatches, harness_records, model_output_records=model_output_records, chat_records=chat_records),
         "top_events": dict(events.most_common(5)),
     }
 
@@ -211,6 +224,8 @@ def _status_color(status: str | None) -> str:
         "environment_blocker",
         "harness_circuit_breaker_false_positive",
         "guard_misfire",
+        "continue_prompt_budget_loop",
+        "tool_call_protocol_mismatch",
     }:
         return Colors.RED
     if status in {"model_tool_loop_stall", "incomplete_unverified", "unknown"}:

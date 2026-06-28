@@ -33,9 +33,11 @@ from agent_tools_lib import (
     get_run_objective,
     has_ask_human_resume_terminal_stall,
     has_chat_terminal_repetition_stall,
+    has_continue_prompt_budget_loop,
     has_patch_first_policy_loop,
     has_stderr_signature_circuit_breaker,
     has_strong_environment_blocker,
+    has_tool_call_protocol_mismatch,
     has_write_overwrite_guard_failures,
     iter_records,
     load_summaries,
@@ -81,6 +83,10 @@ def _classify_failure(
     session: dict[str, Any],
     failed_dispatches: list[dict[str, Any]],
     harness_records: list[dict[str, Any]],
+    *,
+    model_output_records: list[dict[str, Any]] | None = None,
+    tools_records: list[dict[str, Any]] | None = None,
+    chat_records: list[dict[str, Any]] | None = None,
 ) -> str:
     overall = session.get("overall_objective_status")
     deliverable_verified = session.get("deliverable_verified")
@@ -122,6 +128,14 @@ def _classify_failure(
         return "model_tool_loop_stall"
     if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
         return "runtime_exception"
+    if has_continue_prompt_budget_loop(
+        harness_records, chat_records or [], threshold=2
+    ):
+        return "continue_prompt_budget_loop"
+    if has_tool_call_protocol_mismatch(
+        model_output_records or [], tools_records or []
+    ):
+        return "tool_call_protocol_mismatch"
     if events.get("recovery_failure_event_recorded"):
         return "recovery_failure"
     if overall == "incomplete" and session.get("deliverable_verified") is False:
@@ -137,6 +151,8 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
 
     harness_records = list(iter_records(run_dir, "harness"))
     tools_records = list(iter_records(run_dir, "tools"))
+    model_output_records = list(iter_records(run_dir, "model_output"))
+    chat_records = list(iter_records(run_dir, "chat"))
     events = event_counter(harness_records)
     errors = error_records(harness_records)
     warnings = warning_records(harness_records)
@@ -159,7 +175,7 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "objective": get_run_objective(session, task_summary, task_summaries),
         "session_summary": session,
         "task_summary": task_summary,
-        "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records),
+        "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
         "primary_blockers": primary_blockers,
         "apt_deb822_guard_misfires": [format_record_summary(r) for r in apt_deb822_misfires],
         "event_counts": dict(events),
@@ -171,7 +187,7 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "tool_failures_by_name": dict(tool_failures_by_name),
         "task_count": len(task_summaries),
         "task_statuses": [{"task_id": t.get("task_id"), "status": t.get("status"), "reason": t.get("reason")} for t in task_summaries],
-        "recommended_next_steps": _recommend_next_steps(events, errors, session, failed_dispatches, harness_records),
+        "recommended_next_steps": _recommend_next_steps(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
     }
     return diagnosis
 
@@ -182,6 +198,10 @@ def _recommend_next_steps(
     session: dict[str, Any],
     failed_dispatches: list[dict[str, Any]],
     harness_records: list[dict[str, Any]],
+    *,
+    model_output_records: list[dict[str, Any]] | None = None,
+    tools_records: list[dict[str, Any]] | None = None,
+    chat_records: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     steps: list[str] = []
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
@@ -210,6 +230,10 @@ def _recommend_next_steps(
         steps.append("ask_human resume fell into terminal-only tool exposure; preserve original task context and expose file mutation tools after affirmative replies.")
     if _has_chat_terminal_repetition_stall(harness_records, session):
         steps.append("Chat-mode terminal-only tool exposure caused a repetition loop. Route implementation follow-ups to loop mode and expose file mutation tools.")
+    if has_continue_prompt_budget_loop(harness_records, chat_records or [], threshold=2):
+        steps.append("Continue/proceed loop repeatedly overflowed the prompt budget; reset context (new task or fresh run) instead of appending more 'continue' messages.")
+    if has_tool_call_protocol_mismatch(model_output_records or [], tools_records or []):
+        steps.append("Tool-call protocol mismatch detected; review reasoning-channel tool-call recovery and ensure the model emits proper JSON/native tool calls rather than markup fragments.")
     if events.get("action_stall") or events.get("no_tool_recovery"):
         steps.append("Model is struggling to emit valid tool calls; inspect recent prompts and tool schemas.")
     if events.get("tool_blocked_not_exposed"):

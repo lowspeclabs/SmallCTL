@@ -488,17 +488,8 @@ async def file_read(
     requested_start = start_line
     requested_end = end_line
     if start_line is not None and end_line is not None and end_line < start_line:
-        return fail(
-            f"Invalid line range: start_line ({start_line}) cannot be greater than end_line ({end_line})",
-            metadata={
-                "path": str(target),
-                "bytes": len(raw),
-                "requested_start_line": requested_start,
-                "requested_end_line": requested_end,
-                "max_bytes": max_bytes,
-                "total_lines": total_lines,
-            },
-        )
+        # Normalize reversed ranges by swapping the bounds rather than failing.
+        start_line, end_line = end_line, start_line
     s = 0 if start_line is None else max(start_line - 1, 0)
     e = len(lines) if end_line is None else min(end_line, len(lines))
     sliced = "\n".join(lines[s:e])

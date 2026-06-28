@@ -712,6 +712,40 @@ def test_guards_recognize_gemma_4_small_moe_names_with_spaces() -> None:
     assert is_small_model_name("Gemma 4 e4b") is True
 
 
+def test_guards_recognize_deepseek_v4_flash_as_large_model() -> None:
+    from smallctl.guards import is_over_twenty_b_model_name, is_small_model_name
+
+    assert is_small_model_name("deepseek-v4-flash") is False
+    assert is_small_model_name("DeepSeek/V4-Flash") is False
+    assert is_small_model_name("deepseek/deepseek-v4-flash-20260423") is False
+    assert is_over_twenty_b_model_name("deepseek-v4-flash") is True
+    assert is_over_twenty_b_model_name("DeepSeek/V4-Flash") is True
+    assert is_over_twenty_b_model_name("deepseek/deepseek-v4-flash-20260423") is True
+    assert is_small_model_name("deepseek-v4") is False
+    assert is_small_model_name("deepseek-v3") is False
+
+
+def test_guards_recognize_kimi_and_glm_family_slugs_as_large_models() -> None:
+    from smallctl.guards import is_over_twenty_b_model_name, is_small_model_name
+
+    large_names = [
+        "moonshotai/kimi-k2",
+        "openrouter/moonshotai/kimi-k2:free",
+        "kimi-k2-0711-preview",
+        "kimi-code",
+        "moonshot/kimi-latest",
+        "z-ai/glm-4.5-air",
+        "openrouter/z-ai/glm-4.5",
+        "THUDM/glm-4-plus",
+    ]
+    for name in large_names:
+        assert is_small_model_name(name) is False, name
+        assert is_over_twenty_b_model_name(name) is True, name
+
+    assert is_small_model_name("glm-4-9b-chat") is True
+    assert is_over_twenty_b_model_name("glm-4-9b-chat") is False
+
+
 def test_artifact_visibility_respects_hidden_flag() -> None:
     from smallctl.context.artifact_visibility import is_retrieval_visible_artifact
 

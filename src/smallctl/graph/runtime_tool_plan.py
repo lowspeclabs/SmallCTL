@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.graph import END
 
 from ..models.conversation import ConversationMessage
+from ..models.events import UIEvent, UIEventType
 from ..context.rewoo_lanes import ReWOOLaneCompiler
 from ..context.policy import estimate_text_tokens
 from ..recovery_metrics import increment_metric, recovery_metrics
@@ -38,7 +39,7 @@ from .tool_plan_observations import (
     summarize_tool_plan_observations,
     render_tool_plan_observations,
 )
-from .tool_plan_parser import parse_tool_plan
+from .tool_plan_parser import parse_tool_plan, summarize_tool_plan_json
 from .tool_plan_prompts import build_tool_plan_planner_prompt, build_tool_plan_solver_system_suffix
 from .tool_plan_helpers import (
     _MUTATING_SOLVER_TOOLS,
@@ -278,7 +279,13 @@ class ToolPlanRuntime(LoopGraphRuntime):
         graph_state = load_runtime_state(self, payload)
         messages = graph_state.loop_state.scratchpad.pop("_compiled_prompt_messages", [])
         started = perf_counter()
-        result = await process_model_stream(graph_state, self.deps, messages=messages, tools=[])
+        result = await process_model_stream(
+            graph_state,
+            self.deps,
+            messages=messages,
+            tools=[],
+            suppress_ui_events=True,
+        )
         _add_latency_metric(graph_state, "planner_latency_sec", perf_counter() - started)
         if graph_state.final_result is None:
             usage_payload = result.usage if isinstance(result.usage, dict) else {}
@@ -309,6 +316,10 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 "Planner output was not valid bounded ToolPlan JSON.",
             ):
                 return serialize_runtime_state(graph_state)
+            await self._emit_rejected_planner_summary(
+                graph_state,
+                "ToolPlan planner returned invalid evidence JSON; continuing in normal mode.",
+            )
             self._fallback_to_loop(
                 graph_state,
                 "ToolPlan planner did not return valid bounded JSON.",
@@ -333,6 +344,10 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 "Unsafe ToolPlan evidence steps were rejected: " + " ".join(errors),
             ):
                 return serialize_runtime_state(graph_state)
+            await self._emit_rejected_planner_summary(
+                graph_state,
+                "ToolPlan planner proposed steps that are not safe read-only evidence; continuing in normal mode.",
+            )
             self._fallback_to_loop(
                 graph_state,
                 "ToolPlan rejected unsafe evidence steps: " + " ".join(errors),
@@ -349,6 +364,18 @@ class ToolPlanRuntime(LoopGraphRuntime):
             graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = "No read-only evidence steps were required for this task."
             graph_state.loop_state.scratchpad["_tool_plan_observations"] = []
         return serialize_runtime_state(graph_state)
+
+    async def _emit_rejected_planner_summary(self, graph_state: GraphRunState, heading: str) -> None:
+        summary = summarize_tool_plan_json(graph_state.last_assistant_text)
+        if not summary:
+            return
+        await self.deps.harness._emit(
+            self.deps.event_handler,
+            UIEvent(
+                event_type=UIEventType.ASSISTANT,
+                content=f"{heading}\n\n{summary}",
+            ),
+        )
 
     async def _prepare_tool_plan_dispatch_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         graph_state = load_runtime_state(self, payload)

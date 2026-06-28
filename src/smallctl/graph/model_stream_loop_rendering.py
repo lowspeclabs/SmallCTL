@@ -80,6 +80,7 @@ async def _emit_stream_text(
     echo_to_stdout: bool,
     stream_state: StreamTagState,
     suppress_duplicate_thinking: bool = False,
+    suppress_ui_events: bool = False,
 ) -> None:
     text = normalize_sentencepiece_whitespace(str(text or ""))
     if not text:
@@ -103,12 +104,22 @@ async def _emit_stream_text(
         harness._runlog("model_token", "assistant token", token=text)
     batch = stream_state.batch
     if batch.kind is not None and batch.kind != kind:
-        await _flush_stream_batch(harness=harness, deps=deps, stream_state=stream_state)
+        await _flush_stream_batch(
+            harness=harness,
+            deps=deps,
+            stream_state=stream_state,
+            suppress_ui_events=suppress_ui_events,
+        )
     batch = stream_state.batch
     batch.kind = kind
     batch.text += text
     if len(batch.text) >= 512 or (time.monotonic() - batch.last_emit_at) >= 0.05:
-        await _flush_stream_batch(harness=harness, deps=deps, stream_state=stream_state)
+        await _flush_stream_batch(
+            harness=harness,
+            deps=deps,
+            stream_state=stream_state,
+            suppress_ui_events=suppress_ui_events,
+        )
 
 
 async def _flush_stream_batch(
@@ -116,6 +127,7 @@ async def _flush_stream_batch(
     harness: Any,
     deps: Any,
     stream_state: StreamTagState,
+    suppress_ui_events: bool = False,
 ) -> None:
     batch = stream_state.batch
     if batch.kind is None or not batch.text:
@@ -125,6 +137,8 @@ async def _flush_stream_batch(
     batch.kind = None
     batch.text = ""
     batch.last_emit_at = time.monotonic()
+    if suppress_ui_events:
+        return
     if kind == "thinking":
         if harness.thinking_visibility:
             await harness._emit(
@@ -155,6 +169,7 @@ async def _route_stream_content(
     end_tag: str,
     echo_to_stdout: bool,
     stream_state: StreamTagState,
+    suppress_ui_events: bool = False,
 ) -> None:
     wrapper_pairs = _stream_wrapper_pairs(start_tag=start_tag, end_tag=end_tag)
     start_map = [(start.lower(), end, kind) for start, end, kind in wrapper_pairs]
@@ -202,6 +217,7 @@ async def _route_stream_content(
                 echo_to_stdout=echo_to_stdout,
                 stream_state=stream_state,
                 suppress_duplicate_thinking=current_kind == "thinking" and stream_state.field_reasoning_seen,
+                suppress_ui_events=suppress_ui_events,
             )
             stream_state.pending = suffix
             return
@@ -216,6 +232,7 @@ async def _route_stream_content(
             echo_to_stdout=echo_to_stdout,
             stream_state=stream_state,
             suppress_duplicate_thinking=current_kind == "thinking" and stream_state.field_reasoning_seen,
+            suppress_ui_events=suppress_ui_events,
         )
         pending = pending[index + len(matched_tag):]
 
@@ -244,6 +261,7 @@ async def handle_model_stream_chunk(
     chunks: list[dict[str, Any]],
     stream_state: StreamTagState,
     first_token_time: float | None,
+    suppress_ui_events: bool = False,
 ) -> tuple[StreamTagState, float | None]:
     data = event.get("data", {})
     choices = data.get("choices") or []
@@ -268,6 +286,7 @@ async def handle_model_stream_chunk(
             echo_to_stdout=echo_to_stdout,
             stream_state=stream_state,
             suppress_duplicate_thinking=False,
+            suppress_ui_events=suppress_ui_events,
         )
 
     if content_field:
@@ -279,6 +298,7 @@ async def handle_model_stream_chunk(
             end_tag=end_tag,
             echo_to_stdout=echo_to_stdout,
             stream_state=stream_state,
+            suppress_ui_events=suppress_ui_events,
         )
 
     chunks.append(event)
@@ -293,6 +313,7 @@ async def flush_model_stream_buffer(
     start_tag: str = "<think>",
     end_tag: str = "</think>",
     echo_to_stdout: bool,
+    suppress_ui_events: bool = False,
 ) -> None:
     if stream_state.pending:
         known_tags = [
@@ -315,6 +336,12 @@ async def flush_model_stream_buffer(
                 echo_to_stdout=echo_to_stdout,
                 stream_state=stream_state,
                 suppress_duplicate_thinking=current_kind == "thinking" and stream_state.field_reasoning_seen,
+                suppress_ui_events=suppress_ui_events,
             )
             stream_state.pending = ""
-    await _flush_stream_batch(harness=harness, deps=deps, stream_state=stream_state)
+    await _flush_stream_batch(
+        harness=harness,
+        deps=deps,
+        stream_state=stream_state,
+        suppress_ui_events=suppress_ui_events,
+    )

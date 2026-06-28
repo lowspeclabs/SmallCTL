@@ -51,6 +51,7 @@ async def process_model_stream(
     *,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    suppress_ui_events: bool = False,
 ) -> StreamProcessingResult:
     """Stream a model call, process chunks, and return assembled results."""
     harness = deps.harness
@@ -59,7 +60,7 @@ async def process_model_stream(
         if isinstance(scratchpad, dict):
             scratchpad["_model_calls"] = int(scratchpad.get("_model_calls", 0)) + 1
     event_handler = getattr(harness, "event_handler", None)
-    echo_to_stdout = event_handler is None
+    echo_to_stdout = event_handler is None and not suppress_ui_events
     graph_state.pending_tool_calls = []
     graph_state.last_tool_results = []
     graph_state.last_assistant_text = ""
@@ -81,6 +82,7 @@ async def process_model_stream(
         start_tag=start_tag,
         end_tag=end_tag,
         start_time=start_time,
+        suppress_ui_events=suppress_ui_events,
     )
     if graph_state.final_result is not None:
         # Preserve provider-classified failures from the stream loop. Resolution

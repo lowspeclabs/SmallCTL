@@ -422,6 +422,7 @@ async def run_model_stream_loop(
     start_tag: str,
     end_tag: str,
     start_time: float,
+    suppress_ui_events: bool = False,
 ) -> dict[str, Any]:
     run_logger = getattr(harness, "run_logger", None)
     set_trace_id = getattr(run_logger, "set_trace_id", None)
@@ -796,6 +797,7 @@ async def run_model_stream_loop(
                         chunks=chunks,
                         stream_state=stream_state,
                         first_token_time=first_token_time,
+                        suppress_ui_events=suppress_ui_events,
                     )
                     delta = _chunk_delta(event)
                     content = delta.get("content")
@@ -829,6 +831,7 @@ async def run_model_stream_loop(
                     start_tag=start_tag,
                     end_tag=end_tag,
                     echo_to_stdout=echo_to_stdout,
+                    suppress_ui_events=suppress_ui_events,
                 )
                 _stream_completed_cleanly = True
                 break

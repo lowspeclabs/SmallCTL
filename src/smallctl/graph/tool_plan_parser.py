@@ -56,6 +56,49 @@ def _load_plan_payload(text: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def summarize_tool_plan_json(text: str, *, max_steps: int = 12) -> str:
+    """Return a human-readable summary for ToolPlan-shaped JSON, even if invalid.
+
+    This is intentionally looser than parse_tool_plan: it is for UI diagnostics
+    and fallback chat, not for execution.
+    """
+    payload = _load_plan_payload(text)
+    if not payload or payload.get("mode") != "tool_plan":
+        return ""
+    objective = str(payload.get("objective") or "").strip()
+    raw_steps = payload.get("steps")
+    lines: list[str] = []
+    if objective:
+        lines.append(f"ToolPlan objective: {objective}")
+    if isinstance(raw_steps, list) and raw_steps:
+        lines.append("Proposed steps:")
+        for index, raw_step in enumerate(raw_steps[:max_steps], start=1):
+            if not isinstance(raw_step, dict):
+                lines.append(f"{index}. Invalid step payload")
+                continue
+            tool = str(raw_step.get("tool") or "unknown_tool").strip() or "unknown_tool"
+            args = raw_step.get("args")
+            target = ""
+            if isinstance(args, dict):
+                for key in ("path", "target_path", "target", "url", "query", "pattern"):
+                    value = args.get(key)
+                    if isinstance(value, str) and value.strip():
+                        target = value.strip()
+                        break
+            reason = str(raw_step.get("reason") or "").strip()
+            detail = f"{tool}"
+            if target:
+                detail += f" on {target}"
+            if reason:
+                detail += f" - {reason}"
+            lines.append(f"{index}. {detail}")
+        if len(raw_steps) > max_steps:
+            lines.append(f"... {len(raw_steps) - max_steps} more step(s) omitted")
+    elif isinstance(raw_steps, list):
+        lines.append("Proposed steps: none")
+    return "\n".join(lines).strip()
+
+
 def _normalize_step_id(raw: Any, index: int) -> str:
     text = str(raw or "").strip().upper()
     if re.fullmatch(r"E[1-9][0-9]*", text):
@@ -127,4 +170,3 @@ def parse_tool_plan(text: str, *, max_steps: int = 6) -> ToolPlan | None:
         steps=steps,
         max_steps=max_steps,
     )
-

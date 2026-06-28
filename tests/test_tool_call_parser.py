@@ -40,6 +40,27 @@ def _make_registry() -> ToolRegistry:
     return registry
 
 
+def _make_ssh_registry() -> ToolRegistry:
+    registry = _make_registry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "password": {"type": "string"},
+                    "command": {"type": "string"},
+                },
+                required=["host", "command"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    return registry
+
+
 class _Harness:
     def __init__(self, registry: ToolRegistry | None = None) -> None:
         self.registry = registry or _make_registry()
@@ -156,6 +177,33 @@ def test_extract_inline_json_tool_call_with_tool_call_key() -> None:
     assert calls[0].tool_name == "artifact_read"
     assert calls[0].args == {"artifact_id": "A0001"}
     assert cleaned == ""
+
+
+def test_bare_ssh_argument_json_recovers_ssh_exec_when_allowed() -> None:
+    text = '{"host":"192.168.1.64","user":"root","password":"secret","command":"cat /root/backup.sh"}'
+
+    result = _parse(text, registry=_make_ssh_registry())
+
+    assert len(result.pending_tool_calls) == 1
+    call = result.pending_tool_calls[0]
+    assert call.tool_name == "ssh_exec"
+    assert call.args == {
+        "host": "192.168.1.64",
+        "user": "root",
+        "password": "secret",
+        "command": "cat /root/backup.sh",
+    }
+    assert call.parser_metadata["bare_json_args_tool_inferred"] == "ssh_exec"
+    assert result.cleaned_text == ""
+
+
+def test_bare_ssh_argument_json_is_not_recovered_when_ssh_exec_not_allowed() -> None:
+    text = '{"host":"192.168.1.64","user":"root","command":"cat /root/backup.sh"}'
+
+    result = _parse(text)
+
+    assert result.pending_tool_calls == []
+    assert result.cleaned_text == text
 
 
 def test_parse_tool_calls_recovers_tool_call_key_from_thinking_text() -> None:

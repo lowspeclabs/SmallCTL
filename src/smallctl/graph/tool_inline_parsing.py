@@ -199,6 +199,51 @@ def _infer_tool_name_from_orphan_parameters(
     return ""
 
 
+def _try_infer_tool_call_from_bare_args(
+    data: Any,
+    *,
+    allowed_raw_function_names: set[str] | None,
+) -> PendingToolCall | None:
+    """Recover a bare argument object when the intended tool is unambiguous.
+
+    Gemma-4-e2b-it sometimes emits only the arguments for an SSH tool call, for
+    example {"host": "1.2.3.4", "user": "root", "command": "ls"}. Recovering
+    this is safe only when it has a command plus a remote target and ssh_exec is
+    exposed; otherwise plain JSON assistant output should remain prose/data.
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+    keys = {str(key).strip().lower() for key in data}
+    if any(key in keys for key in _INLINE_TOOL_SCHEMA_KEYS):
+        return None
+
+    def _tool_allowed(name: str) -> bool:
+        if allowed_raw_function_names is None:
+            return True
+        return name in allowed_raw_function_names
+
+    remote_keys = {
+        "host",
+        "target",
+        "user",
+        "username",
+        "password",
+        "port",
+        "identity_file",
+    }
+    if "command" not in keys or not keys.intersection(remote_keys) or not _tool_allowed("ssh_exec"):
+        return None
+
+    args = {str(key): value for key, value in data.items()}
+    pending = PendingToolCall(
+        tool_name="ssh_exec",
+        args=args,
+        raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+    )
+    pending.parser_metadata["bare_json_args_tool_inferred"] = "ssh_exec"
+    return pending
+
+
 def _normalize_gemma_quote_tokens(text: str) -> str:
     """Replace Gemma-4-e2b-it quote control tokens with regular quotes."""
     return str(text or "").replace('<|"|>', '"')
@@ -661,6 +706,11 @@ def _extract_inline_tool_calls(
                 try:
                     data = json.loads(cleaned_text[start:end])
                     pending = _try_parse_data(data)
+                    if pending is None:
+                        pending = _try_infer_tool_call_from_bare_args(
+                            data,
+                            allowed_raw_function_names=allowed_raw_function_names,
+                        )
                     if pending:
                         results.append(pending)
                         cleaned_text = cleaned_text[:start] + cleaned_text[end:]

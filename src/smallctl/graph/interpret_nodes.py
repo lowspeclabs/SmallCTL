@@ -77,6 +77,7 @@ from .hidden_tool_helpers import (
     _strip_hidden_chat_terminal_completion_calls,
     _validation_handoff_hint_for_blocked_tool,
 )
+from .tool_model_rules import _model_is_gemma_4
 
 
 def _is_readonly_lookup_intent(harness: Any) -> bool:
@@ -1083,8 +1084,11 @@ async def interpret_model_output(
         return LoopRoute.NEXT_STEP
 
     if stream_halted or _nodes._looks_like_freeze_or_hang(harness, assistant_text):
+        model_name = _nodes._harness_model_name(harness)
+        gemma_stream_halt = stream_halted and _model_is_gemma_4(model_name)
         freeze_nudges = int(harness.state.scratchpad.get("_small_model_continue_nudges", 0))
-        if freeze_nudges < 2:
+        max_freeze_nudges = 5 if gemma_stream_halt else 2
+        if freeze_nudges < max_freeze_nudges:
             harness.state.scratchpad["_small_model_continue_nudges"] = freeze_nudges + 1
             halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "")
             msg = _nodes._build_small_model_continue_message(
@@ -1098,6 +1102,13 @@ async def interpret_model_output(
                     f"{build_goal_recap(harness)} Continue from the last concrete step within that objective. "
                     "Do not restart the task; either call the next tool or emit the next JSON tool call immediately."
                 )
+            if gemma_stream_halt and halt_reason == "reasoning_only_stream_stall":
+                msg = (
+                    "Gemma stream auto-continue: the prior response stayed in reasoning without emitting a tool call. "
+                    f"{build_goal_recap(harness)} Continue from the exact last state now. "
+                    "Do not summarize or restart. Emit exactly one available tool call, or call `task_complete(message='...')` "
+                    "only if the objective is fully verified."
+                )
             harness.state.append_message(
                 ConversationMessage(
                     role="user",
@@ -1105,7 +1116,9 @@ async def interpret_model_output(
                     metadata={
                         "is_recovery_nudge": True,
                         "recovery_kind": "model_halt" if stream_halted or not _nodes._is_small_model(harness) else "small_model_freeze",
+                        "recovery_mode": "gemma_stream_autocontinue" if gemma_stream_halt else "stream_continue_nudge",
                         "retry_count": freeze_nudges + 1,
+                        "max_retry_count": max_freeze_nudges,
                     },
                 )
             )
@@ -1113,13 +1126,37 @@ async def interpret_model_output(
                 "small_model_freeze_recovery",
                 "injected continuation nudge for a stalled model",
                 retry_count=freeze_nudges + 1,
+                max_retry_count=max_freeze_nudges,
                 model_name=_nodes._harness_model_name(harness),
                 stream_halted=stream_halted,
+                gemma_stream_autocontinue=gemma_stream_halt,
             )
             harness.state.scratchpad.pop("_last_stream_halted_without_done", None)
             harness.state.scratchpad.pop("_last_stream_halt_reason", None)
             harness.state.scratchpad.pop("_last_stream_halt_details", None)
             return LoopRoute.NEXT_STEP
+
+    if stream_halted and not graph_state.pending_tool_calls:
+        halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "model_stream_stall")
+        halt_details = harness.state.scratchpad.get("_last_stream_halt_details")
+        details = halt_details if isinstance(halt_details, dict) else {}
+        message = "Model stream halted repeatedly without a tool call or final actionable answer."
+        if halt_reason:
+            message = f"{message} Halt reason: {halt_reason}."
+        harness._runlog(
+            "model_stream_halt_exhausted",
+            "exhausted stream-halt recovery before no-tool finalization",
+            halt_reason=halt_reason,
+            details=details,
+            assistant_preview=str(graph_state.last_assistant_text or "")[:200],
+        )
+        graph_state.final_result = harness._failure(
+            message,
+            error_type="model_stream_stall",
+            details={"halt_reason": halt_reason, **details},
+        )
+        graph_state.error = graph_state.final_result.get("error")
+        return LoopRoute.FINALIZE
 
     if nudges >= 4 and graph_state.last_assistant_text and (
         harness.state.current_phase == "execute"

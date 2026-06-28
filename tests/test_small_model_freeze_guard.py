@@ -133,6 +133,105 @@ def test_stream_halt_without_done_gets_goal_recap_nudge_for_any_model() -> None:
     assert "explore: wait for scan output" in message.content
 
 
+def test_exhausted_stream_halt_does_not_finalize_as_no_tool_calls() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "gpt-4.1"
+        harness.state.scratchpad["_model_name"] = "gpt-4.1"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 3}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 2
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="Remote file not found.",
+            last_thinking_text="I should continue repairing the remote script.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    _harness, graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.FINALIZE
+    assert graph_state.final_result["error_type"] == "model_stream_stall"
+    assert graph_state.final_result["details"]["halt_reason"] == "reasoning_only_stream_stall"
+    assert graph_state.final_result.get("reason") != "no_tool_calls"
+
+
+def test_gemma_stream_halt_gets_extra_bounded_autocontinue() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "Gemma 4 e2b"
+        harness.state.scratchpad["_model_name"] = "Gemma 4 e2b"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 3}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 2
+        harness.state.run_brief.original_task = "Fix the remote backup script"
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="Remote file not found.",
+            last_thinking_text="I can continue from the last verifier failure.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    harness, graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.NEXT_STEP
+    assert graph_state.final_result is None
+    assert harness.state.scratchpad["_small_model_continue_nudges"] == 3
+    message = harness.state.recent_messages[-1]
+    assert message.metadata["recovery_mode"] == "gemma_stream_autocontinue"
+    assert message.metadata["max_retry_count"] == 5
+    assert "Gemma stream auto-continue" in message.content
+
+
+def test_gemma_stream_halt_still_stops_after_autocontinue_budget() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "Gemma 4 e2b"
+        harness.state.scratchpad["_model_name"] = "Gemma 4 e2b"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 6}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 5
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="Remote file not found.",
+            last_thinking_text="Still reasoning without action.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    _harness, graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.FINALIZE
+    assert graph_state.final_result["error_type"] == "model_stream_stall"
+    assert graph_state.final_result["details"]["halt_reason"] == "reasoning_only_stream_stall"
+
+
 def test_declared_file_read_without_tool_call_is_synthesized() -> None:
     async def _run() -> tuple[object, object, object]:
         harness = _FakeHarness()

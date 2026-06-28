@@ -137,6 +137,52 @@ def _relevant_text_excerpt(text: str, *, hint_text: str, max_chars: int) -> str:
     return _bounded_text(text, limit=max_chars)
 
 
+def _extract_text_from_output(output: Any) -> str:
+    """Extract human-readable text from structured tool output without JSON-dumping."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        for key in ("content", "stdout", "text", "output", "result", "message"):
+            value = output.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        matches = output.get("matches")
+        if isinstance(matches, list):
+            pieces: list[str] = []
+            for item in matches:
+                if isinstance(item, dict):
+                    pieces.append(
+                        " | ".join(
+                            f"{k}={v}"
+                            for k, v in item.items()
+                            if isinstance(v, (str, int, float))
+                        )
+                    )
+                elif isinstance(item, str):
+                    pieces.append(item)
+            joined = "\n".join(pieces)
+            if joined.strip():
+                return joined
+        return ""
+    if isinstance(output, list):
+        pieces = []
+        for item in output:
+            if isinstance(item, dict):
+                pieces.append(
+                    " | ".join(
+                        f"{k}={v}"
+                        for k, v in item.items()
+                        if isinstance(v, (str, int, float))
+                    )
+                )
+            elif isinstance(item, str):
+                pieces.append(item)
+        joined = "\n".join(pieces)
+        if joined.strip():
+            return joined
+    return ""
+
+
 def _output_excerpt(record: ToolExecutionRecord, *, max_chars: int, hint_text: str = "") -> str:
     result = record.result
     output = result.output
@@ -158,9 +204,14 @@ def _output_excerpt(record: ToolExecutionRecord, *, max_chars: int, hint_text: s
         summary = output.get("summary")
         if summary not in (None, "", [], {}):
             return _bounded_text(summary, limit=max_chars)
-    if isinstance(output, str) and hint_text:
-        return _relevant_text_excerpt(output, hint_text=hint_text, max_chars=max_chars)
-    return _bounded_text(output, limit=max_chars)
+    text = _extract_text_from_output(output)
+    if text:
+        if hint_text:
+            return _relevant_text_excerpt(text, hint_text=hint_text, max_chars=max_chars)
+        return _bounded_text(text, limit=max_chars)
+    # Avoid leaking raw JSON for leftover structured outputs; the summary/error
+    # fields already carry the signal.
+    return ""
 
 
 def _stderr_has_error(output: Any) -> tuple[bool, str]:

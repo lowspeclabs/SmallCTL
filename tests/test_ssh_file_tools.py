@@ -123,9 +123,24 @@ def test_network_profile_registers_typed_ssh_file_tools(tmp_path) -> None:
 
     registry = build_registry(harness, registry_profiles={NETWORK_PROFILE})
 
-    assert {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"} <= set(
+    assert {"ssh_exec", "ssh_file_read", "ssh_dir_list", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"} <= set(
         registry.names()
     )
+
+
+def test_ssh_dir_list_registered_in_network_profile(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    harness = SimpleNamespace(
+        state=state,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    registry = build_registry(harness, registry_profiles={NETWORK_PROFILE})
+
+    spec = registry.get("ssh_dir_list")
+    assert spec is not None
+    assert "path" in spec.schema.get("properties", {})
+    assert "path" in spec.schema.get("required", [])
 
 
 def test_remote_file_guard_suggests_typed_read_tool() -> None:

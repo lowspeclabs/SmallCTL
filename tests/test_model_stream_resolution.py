@@ -963,6 +963,60 @@ def test_resolve_model_stream_result_reports_reasoning_only_stall() -> None:
     assert graph_state.error["type"] == "model_stream_stall"
 
 
+def test_resolve_model_stream_result_salvages_reasoning_only_stall_with_content() -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    chunks = [
+        {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning": "I have enough evidence and should write the report now."
+                        }
+                    }
+                ]
+            },
+        }
+    ]
+    details = {
+        "reason": "reasoning_only_stream_stall",
+        "retrying": False,
+        "attempt": 3,
+        "reasoning_only_chunks": 604,
+    }
+
+    async def _run():
+        return await resolve_model_stream_result(
+            graph_state,
+            SimpleNamespace(event_handler=None, harness=harness),
+            harness=harness,
+            chunks=chunks,
+            salvage_partial_stream=None,
+            last_chunk_error_details=None,
+            stream_ended_without_done=True,
+            stream_ended_without_done_details=details,
+            trigger_early_4b_fallback=False,
+            stream_completed_cleanly=False,
+            echo_to_stdout=False,
+            messages=[],
+            start_time=time.perf_counter(),
+            first_token_time=None,
+        )
+
+    result = asyncio.run(_run())
+
+    assert result is not None
+    assert result.halted is True
+    assert result.halt_reason == "reasoning_only_stream_stall"
+    assert result.stream is not None
+    assert "write the report" in result.stream.thinking_text
+    assert graph_state.final_result is None
+    assert any(event[0][0] == "reasoning_only_stream_salvaged" for event in harness.runlog_events)
+
+
 def test_resolve_model_stream_result_salvages_partial_tool_call_from_degenerate_loop() -> None:
     state = LoopState(cwd="/tmp")
     harness = _Harness(state)

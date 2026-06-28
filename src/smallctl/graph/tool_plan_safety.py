@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from .tool_plan_schema import MUTATING_TOOL_PLAN_BLOCKLIST, READONLY_TOOL_PLAN_TOOLS, ToolPlan, ToolPlanStep
 
 _LOCAL_PATH_TOOLS = {"file_read", "dir_list", "grep", "find_files", "read_log", "git_status", "git_diff"}
-_REMOTE_PATH_TOOLS = {"ssh_file_read"}
+_REMOTE_PATH_TOOLS = {"ssh_file_read", "ssh_dir_list"}
 _PATH_ARG_KEYS = ("path", "target_path")
 _STRING_LIMITS = {
     "path": 600,
@@ -55,6 +55,21 @@ def _path_within_cwd(raw_path: str, *, cwd: Path) -> bool:
     return True
 
 
+def _path_is_safe_remote(raw_path: str) -> bool:
+    """Remote paths may be absolute, but block traversal and local-only schemes."""
+    if not raw_path or not isinstance(raw_path, str):
+        return False
+    if _is_remote_looking(raw_path):
+        return True
+    if raw_path.startswith(".."):
+        return False
+    # Absolute remote paths are allowed; relative ones are allowed too.
+    try:
+        return not any(part == ".." for part in Path(raw_path).parts)
+    except Exception:
+        return False
+
+
 def _url_is_safe(raw_url: str) -> bool:
     parsed = urlparse(raw_url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
@@ -77,9 +92,19 @@ def _validate_args(step: ToolPlanStep, *, harness: Any, allow_web: bool, allow_a
             if target is not None and (not isinstance(target, str) or not _path_within_cwd(target, cwd=cwd)):
                 errors.append(f"{step.id}: target must be a relative path inside the workspace.")
     if step.tool in _REMOTE_PATH_TOOLS:
-        value = step.args.get("path")
-        if not isinstance(value, str) or not value.strip():
-            errors.append(f"{step.id}: ssh_file_read requires a non-empty remote path.")
+        has_path_arg = False
+        for key in _PATH_ARG_KEYS:
+            value = step.args.get(key)
+            if value is None:
+                continue
+            has_path_arg = True
+            if not _path_is_safe_remote(value):
+                errors.append(f"{step.id}: {key} must be a safe remote path (no parent traversal).")
+        if not has_path_arg:
+            errors.append(f"{step.id}: {step.tool} requires a non-empty remote path.")
+        remote_path = step.args.get("path")
+        if not isinstance(remote_path, str) or not remote_path.strip():
+            errors.append(f"{step.id}: {step.tool} requires a non-empty remote path.")
     if step.tool in {"web_search", "web_fetch"} and not allow_web:
         errors.append(f"{step.id}: web tools are disabled for ToolPlan.")
     if step.tool in {"artifact_read", "artifact_grep"} and not allow_artifact_read:
@@ -105,6 +130,10 @@ def validate_tool_plan(
     allow_artifact_read: bool = True,
     allow_git: bool = False,
 ) -> tuple[ToolPlan | None, list[str]]:
+    for step in plan.steps:
+        if step.tool in {"ssh_file_read", "ssh_dir_list"}:
+            if "remote_path" in step.args and "path" not in step.args:
+                step.args["path"] = step.args.pop("remote_path")
     errors: list[str] = []
     if len(plan.steps) > max_steps:
         errors.append(f"ToolPlan requested {len(plan.steps)} steps; max is {max_steps}.")

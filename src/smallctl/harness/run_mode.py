@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from ..client import OpenAICompatClient
+from ..guards import is_four_b_or_under_model_name
 from .memory import assess_write_task_complexity
 from ..interrupt_replies import (
     is_interrupt_affirmative_response,
@@ -537,7 +538,18 @@ class ModeDecisionService:
                 looks_like_shell_request(raw_task)
                 and runtime_intent.label == "execute"
             )
+            _small_model = is_four_b_or_under_model_name(model_name)
             if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution:
+                if _small_model:
+                    self._log_mode_decision(
+                        mode="loop",
+                        raw="complex_task_small_model_skip_planning",
+                        intent=runtime_intent.label,
+                        task_mode=runtime_intent.task_mode,
+                        raw_task=raw_task,
+                        effective_task=mode_task,
+                    )
+                    return "loop"
                 self._log_mode_decision(
                     mode="planning",
                     raw="complex_task_auto_escalation",

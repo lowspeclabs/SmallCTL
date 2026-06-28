@@ -16,6 +16,7 @@ PARALLELIZABLE_TOOL_PLAN_TOOLS = frozenset({
     "web_search",
     "web_fetch",
     "ssh_file_read",
+    "ssh_dir_list",
     "git_status",
     "git_diff",
     "read_log",

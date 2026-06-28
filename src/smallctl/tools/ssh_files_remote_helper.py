@@ -185,6 +185,52 @@ def read_file(payload):
         "encoding": encoding,
     }
 
+def list_dir(payload):
+    path = pathlib.Path(payload["path"])
+    if not path.exists():
+        return {"ok": False, "error_kind": "file_not_found", "path": str(path), "message": "Remote directory not found."}
+    if not path.is_dir():
+        return {"ok": False, "error_kind": "not_a_directory", "path": str(path), "message": "Remote path is not a directory."}
+    try:
+        entries = []
+        total = 0
+        for entry in path.iterdir():
+            total += 1
+            if len(entries) >= 200:
+                continue
+            if entry.is_symlink():
+                entry_type = "symlink"
+            elif entry.is_dir():
+                entry_type = "dir"
+            elif entry.is_file():
+                entry_type = "file"
+            else:
+                entry_type = "other"
+            item = {"name": entry.name, "type": entry_type}
+            if entry_type == "file":
+                try:
+                    item["size"] = entry.stat().st_size
+                except OSError:
+                    pass
+            if entry_type == "symlink":
+                try:
+                    item["target"] = os.readlink(entry)
+                except OSError:
+                    pass
+            entries.append(item)
+    except PermissionError:
+        return {"ok": False, "error_kind": "permission_denied", "path": str(path), "message": "Permission denied listing remote directory."}
+    except OSError as exc:
+        return {"ok": False, "error_kind": "list_error", "path": str(path), "message": str(exc)}
+    return {
+        "ok": True,
+        "path": str(path),
+        "entries": entries,
+        "count": len(entries),
+        "truncated": total > len(entries),
+        "total_items": total,
+    }
+
 def atomic_write(path, data, payload):
     mode = payload.get("mode") or "overwrite"
     create_parent_dirs = bool(payload.get("create_parent_dirs"))
@@ -405,6 +451,9 @@ def main():
         action = payload.get("action")
         if action == "read":
             emit(read_file(payload))
+            return
+        if action == "list_dir":
+            emit(list_dir(payload))
             return
         if action == "write":
             encoding = payload.get("encoding") or "utf-8"

@@ -412,7 +412,14 @@ async def file_write(
         ):
             _has_completed_session = True
 
-    if target.exists() and target.is_file() and target.stat().st_size > 0 and not write_session_id and not _has_completed_session:
+    if (
+        target.exists()
+        and target.is_file()
+        and target.stat().st_size > 0
+        and not write_session_id
+        and not _has_completed_session
+        and _normalize_replace_strategy(replace_strategy) != "overwrite"
+    ):
         try:
             existing_content = target.read_text(encoding=encoding)
             if _looks_like_poisoned_truncated_file(existing_content):

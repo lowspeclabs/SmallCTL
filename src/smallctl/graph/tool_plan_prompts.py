@@ -33,7 +33,7 @@ Return ONLY JSON:
     {{
       "id": "E1",
       "tool": "{TOOL_PLAN_TOOL_LIST}",
-      "args": {{}},
+      "args": {{"path": "relative/path"}},
       "reason": "...",
       "depends_on": []
     }}
@@ -49,6 +49,21 @@ Rules:
 - For source-code questions, search exact identifiers and likely snake_case names from the task, then read the matched source files.
 - Do not add language-specific include filters unless the task or context clearly identifies that language.
 - Do not spend a step on README or other docs unless the task asks for documentation or source searches fail.
+
+Required arguments (do not leave args empty; use the real path/host/query for the task):
+- file_read: {{"path": "relative/path"}}
+- read_log: {{"path": "relative/path", "lines": 50}}
+- dir_list: {{"path": "relative/dir"}}
+- grep: {{"path": "relative/dir", "pattern": "term"}}
+- find_files: {{"path": "relative/dir", "pattern": "*.py"}}
+- ssh_file_read: {{"target": "user@host", "path": "/remote/path"}}
+- ssh_dir_list: {{"target": "user@host", "path": "/remote/dir"}}
+- artifact_read: {{"artifact_id": "..."}}
+- artifact_grep: {{"pattern": "term"}}
+- web_search: {{"query": "..."}}
+- web_fetch: {{"url": "https://..."}}
+- git_status: {{"path": "."}}
+- git_diff: {{"path": "."}}
 
 Dependency rules:
 - Omit depends_on or set it to [] when a step does not need output from another step.

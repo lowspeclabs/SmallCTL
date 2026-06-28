@@ -215,6 +215,35 @@ def register_operational_tools(
                 profiles={network_profile},
             ),
             make_registration(
+                name="ssh_dir_list",
+                description=(
+                    "List a REMOTE directory over SSH with structured output. Returns directory entries with name, "
+                    "type (file, dir, symlink, other), size for files, and symlink target. "
+                    "This tool operates on the REMOTE host filesystem ONLY."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "Preferred SSH target in `user@host` or `host` form."},
+                        "host": {"type": "string", "description": "Target hostname or IP."},
+                        "user": {"type": "string", "description": "SSH username."},
+                        "username": {"type": "string", "description": "Alias for `user`."},
+                        "port": {"type": "integer", "default": 22},
+                        "identity_file": {"type": "string", "description": "Path to SSH private key."},
+                        "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
+                        "path": {"type": "string", "description": "Remote directory path."},
+                        "timeout_sec": {"type": "integer", "default": 120},
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state_and_harness(ssh_files.ssh_dir_list),
+                category="network",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={network_profile},
+            ),
+            make_registration(
                 name="ssh_file_write",
                 description=(
                     "Write or overwrite a REMOTE file over SSH with atomic replace and readback hash verification. "

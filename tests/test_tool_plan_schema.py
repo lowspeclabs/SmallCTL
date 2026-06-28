@@ -20,6 +20,7 @@ def test_readonly_tool_plan_tools_contains_expected_primitives() -> None:
     assert "web_search" in READONLY_TOOL_PLAN_TOOLS
     assert "web_fetch" in READONLY_TOOL_PLAN_TOOLS
     assert "ssh_file_read" in READONLY_TOOL_PLAN_TOOLS
+    assert "ssh_dir_list" in READONLY_TOOL_PLAN_TOOLS
 
 
 def test_parallelizable_tool_plan_tools_is_positive_allowlist() -> None:

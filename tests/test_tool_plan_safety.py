@@ -11,7 +11,7 @@ def _harness(tmp_path, names: list[str] | None = None):
         state=SimpleNamespace(cwd=str(tmp_path)),
         registry=SimpleNamespace(
             names=lambda: names
-            or ["file_read", "dir_list", "grep", "find_files", "web_fetch", "ssh_file_read", "git_status", "git_diff", "read_log"]
+            or ["file_read", "dir_list", "grep", "find_files", "web_fetch", "ssh_file_read", "ssh_dir_list", "git_status", "git_diff", "read_log"]
         ),
     )
 
@@ -84,7 +84,7 @@ def test_validate_tool_plan_does_not_apply_local_path_rules_to_ssh_file_read(tmp
     plan = ToolPlan(
         mode="tool_plan",
         objective="inspect remote relative path",
-        steps=[ToolPlanStep("E1", "ssh_file_read", {"target": "root@example.test", "path": "../remote/app.log"})],
+        steps=[ToolPlanStep("E1", "ssh_file_read", {"target": "root@example.test", "path": "remote/app.log"})],
     )
 
     safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
@@ -104,6 +104,19 @@ def test_validate_tool_plan_requires_ssh_file_read_path(tmp_path) -> None:
 
     assert safe is None
     assert any("ssh_file_read requires a non-empty remote path" in error for error in errors)
+
+
+def test_validate_tool_plan_blocks_ssh_file_read_parent_traversal(tmp_path) -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote config",
+        steps=[ToolPlanStep("E1", "ssh_file_read", {"target": "root@example.test", "path": "../remote/app.log"})],
+    )
+
+    safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
+
+    assert safe is None
+    assert any("safe remote path" in error for error in errors)
 
 
 def test_validate_tool_plan_allows_read_log_in_workspace(tmp_path) -> None:
@@ -190,3 +203,77 @@ def test_validate_tool_plan_blocks_git_tools_when_disabled(tmp_path) -> None:
 
     assert safe is None
     assert any("git tools are disabled for ToolPlan" in error for error in errors)
+
+
+def test_validate_tool_plan_allows_ssh_dir_list_remote_absolute_path(tmp_path) -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote directory",
+        steps=[
+            ToolPlanStep(
+                "E1",
+                "ssh_dir_list",
+                {"target": "root@example.test", "path": "/etc/nginx"},
+            )
+        ],
+    )
+
+    safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
+
+    assert safe is plan
+    assert errors == []
+
+
+def test_validate_tool_plan_requires_ssh_dir_list_path(tmp_path) -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote directory",
+        steps=[ToolPlanStep("E1", "ssh_dir_list", {"target": "root@example.test"})],
+    )
+
+    safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
+
+    assert safe is None
+    assert any("ssh_dir_list requires a non-empty remote path" in error for error in errors)
+
+
+def test_validate_tool_plan_normalizes_remote_path_alias_for_ssh_file_read(tmp_path) -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote config",
+        steps=[
+            ToolPlanStep(
+                "E1",
+                "ssh_file_read",
+                {"target": "root@example.test", "remote_path": "/etc/nginx/nginx.conf"},
+            )
+        ],
+    )
+
+    safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
+
+    assert safe is plan
+    assert errors == []
+    assert safe is not None
+    assert safe.steps[0].args == {"target": "root@example.test", "path": "/etc/nginx/nginx.conf"}
+
+
+def test_validate_tool_plan_normalizes_remote_path_alias_for_ssh_dir_list(tmp_path) -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote directory",
+        steps=[
+            ToolPlanStep(
+                "E1",
+                "ssh_dir_list",
+                {"target": "root@example.test", "remote_path": "/etc/nginx"},
+            )
+        ],
+    )
+
+    safe, errors = validate_tool_plan(plan, harness=_harness(tmp_path))
+
+    assert safe is plan
+    assert errors == []
+    assert safe is not None
+    assert safe.steps[0].args == {"target": "root@example.test", "path": "/etc/nginx"}

@@ -15,3 +15,14 @@ def test_tool_plan_planner_prompt_teaches_dependency_rules() -> None:
     assert "git_status" in prompt
     assert "git_diff" in prompt
     assert "read_log" in prompt
+
+
+def test_tool_plan_planner_prompt_includes_required_args_examples() -> None:
+    prompt = build_tool_plan_planner_prompt(task="inspect remote backup", max_steps=6)
+
+    assert '"args": {"path": "relative/path"}' in prompt
+    assert "Required arguments" in prompt
+    assert 'ssh_file_read: {"target": "user@host", "path": "/remote/path"}' in prompt
+    assert "do not leave args empty" in prompt
+    assert 'web_fetch: {"url": "https://..."}' in prompt
+

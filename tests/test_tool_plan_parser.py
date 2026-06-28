@@ -43,3 +43,14 @@ def test_parse_tool_plan_rejects_duplicate_ids() -> None:
         """
     ) is None
 
+
+def test_parse_tool_plan_accepts_empty_steps() -> None:
+    plan = parse_tool_plan(
+        """
+        {"mode": "tool_plan", "objective": "No evidence needed", "steps": []}
+        """
+    )
+    assert plan is not None
+    assert plan.objective == "No evidence needed"
+    assert plan.steps == []
+

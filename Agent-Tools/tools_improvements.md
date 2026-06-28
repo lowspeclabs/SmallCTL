@@ -24,6 +24,7 @@ lost.
 
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
+| IMP-011 | trace_call.py | medium | In `--compact` mode, collapse repetitive `ui_event` records the same way token/chunk records are collapsed, optionally preserving only kind counts and first/last timestamps. | Large traces with many streamed UI updates still produce thousands of lines and can truncate the actual tool-call details. | open |
 
 ## Completed Improvements
 

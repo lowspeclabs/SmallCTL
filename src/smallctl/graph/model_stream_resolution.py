@@ -213,6 +213,45 @@ async def resolve_model_stream_result(
         stream_ended_without_done
         and stream_ended_without_done_details.get("reason") == "reasoning_only_stream_stall"
     ):
+        stream = OpenAICompatClient.collect_stream(
+            chunks,
+            reasoning_mode=harness.reasoning_mode,
+            thinking_start_tag=harness.thinking_start_tag,
+            thinking_end_tag=harness.thinking_end_tag,
+        )
+        if (
+            str(getattr(stream, "assistant_text", "") or "").strip()
+            or str(getattr(stream, "thinking_text", "") or "").strip()
+            or getattr(stream, "tool_calls", None)
+        ):
+            harness._runlog(
+                "reasoning_only_stream_salvaged",
+                "salvaging reasoning-only stream for parser recovery",
+                details=stream_ended_without_done_details,
+                thinking_length=len(str(getattr(stream, "thinking_text", "") or "")),
+                assistant_length=len(str(getattr(stream, "assistant_text", "") or "")),
+                tool_call_count=len(getattr(stream, "tool_calls", []) or []),
+            )
+            timeline = OpenAICompatClient.collect_timeline(
+                chunks,
+                reasoning_mode=harness.reasoning_mode,
+                thinking_start_tag=harness.thinking_start_tag,
+                thinking_end_tag=harness.thinking_end_tag,
+            )
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            ttft = (first_token_time - start_time) if first_token_time else duration
+            return StreamProcessingResult(
+                chunks=chunks,
+                stream=stream,
+                timeline=timeline,
+                usage=getattr(stream, "usage", {}) or {},
+                duration=duration,
+                ttft=ttft,
+                halted=True,
+                halt_reason="reasoning_only_stream_stall",
+                halt_details=stream_ended_without_done_details,
+            )
         failure_message = (
             "Model stream halted after repeated reasoning-only output with no assistant content "
             "or tool call"

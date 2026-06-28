@@ -221,6 +221,34 @@ async def ssh_file_read(
     )
 
 
+async def ssh_dir_list(
+    path: str,
+    target: str | None = None,
+    host: str | None = None,
+    user: str | None = None,
+    port: int = 22,
+    identity_file: str | None = None,
+    password: str | None = None,
+    timeout_sec: int = 120,
+    state: LoopState | None = None,
+    harness: Any = None,
+) -> dict[str, Any]:
+    return await _run_remote_file_action(
+        action="list_dir",
+        path=path,
+        payload={},
+        target=target,
+        host=host,
+        user=user,
+        port=port,
+        identity_file=identity_file,
+        password=password,
+        timeout_sec=timeout_sec,
+        state=state,
+        harness=harness,
+    )
+
+
 async def ssh_file_write(
     path: str,
     content: str,

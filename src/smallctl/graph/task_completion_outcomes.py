@@ -86,7 +86,7 @@ async def maybe_auto_complete_terminal_readiness(
             "terminal_readiness_auto_completed",
             "auto-completed task after harness detected terminal readiness",
             readiness=readiness,
-            message=message,
+            completion_message=message,
         )
     return True
 

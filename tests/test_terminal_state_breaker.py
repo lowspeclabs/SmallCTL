@@ -253,12 +253,17 @@ async def test_auto_complete_terminal_readiness_finalizes_when_ready(tmp_path: P
         exit_code=0,
     )
 
+    runlog_records: list[tuple[str, str, dict[str, object]]] = []
+
+    def _strict_runlog(_self: object, event: str, message: str = "", **data: object) -> None:
+        runlog_records.append((event, message, data))
+
     harness = type(
         "Harness",
         (),
         {
             "state": state,
-            "_runlog": lambda *args, **kwargs: None,
+            "_runlog": _strict_runlog,
             "_emit": _noop_emit,
         },
     )()
@@ -270,6 +275,8 @@ async def test_auto_complete_terminal_readiness_finalizes_when_ready(tmp_path: P
     assert graph_state.final_result is not None
     assert graph_state.final_result["status"] == "completed"
     assert state.scratchpad["_task_complete"] is True
+    assert runlog_records[-1][0] == "terminal_readiness_auto_completed"
+    assert runlog_records[-1][2]["completion_message"].startswith("Task auto-completed:")
 
 
 @pytest.mark.anyio

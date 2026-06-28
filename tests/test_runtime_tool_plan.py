@@ -579,3 +579,154 @@ def test_tool_plan_runtime_repairs_invalid_planner_output_once(tmp_path: Path, m
     metrics = harness.state.scratchpad["_recovery_metrics"]
     assert metrics["tool_plan_parse_failures"] == 1
     assert metrics["tool_plan_steps_executed"] == 1
+
+
+def test_tool_plan_runtime_falls_back_to_loop_when_evidence_gathering_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "src" / "app.py"
+    source.parent.mkdir()
+    source.write_text("def dispatch_tools():\n    return 'ok'\n", encoding="utf-8")
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+        tool_plan_max_repair_attempts=0,
+    )
+    planner_response = json.dumps(
+        {
+            "mode": "tool_plan",
+            "objective": "inspect source files",
+            "steps": [
+                {
+                    "id": "E1",
+                    "tool": "file_read",
+                    "args": {"path": "src/app.py"},
+                    "reason": "read existing file",
+                },
+                {
+                    "id": "E2",
+                    "tool": "file_read",
+                    "args": {"path": "src/missing.py"},
+                    "reason": "read missing file",
+                },
+                {
+                    "id": "E3",
+                    "tool": "file_read",
+                    "args": {"path": "src/also_missing.py"},
+                    "reason": "read another missing file",
+                },
+                {
+                    "id": "E4",
+                    "tool": "file_read",
+                    "args": {"path": "src/still_missing.py"},
+                    "reason": "read another missing file",
+                },
+                {
+                    "id": "E5",
+                    "tool": "file_read",
+                    "args": {"path": "src/not_here.py"},
+                    "reason": "read another missing file",
+                },
+                {
+                    "id": "E6",
+                    "tool": "file_read",
+                    "args": {"path": "src/absent.py"},
+                    "reason": "read another missing file",
+                },
+            ],
+        }
+    )
+    captured_prompts: list[list[dict[str, object]]] = []
+    responses = [
+        _content_stream(planner_response),
+        _tool_call_stream("fallback-complete", "task_complete", {"message": "Fallback loop response."}),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del tools
+        captured_prompts.append(list(messages))
+        if not responses:
+            raise AssertionError("unexpected extra model call")
+        for event in responses.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(asyncio.wait_for(ToolPlanRuntime.from_harness(harness).run("inspect source files"), timeout=10))
+
+    assert result["status"] == "completed"
+    assert len(captured_prompts) == 2
+    fallback_prompt_text = "\n".join(str(message.get("content") or "") for message in captured_prompts[1])
+    assert "ToolPlan evidence gathering succeeded for only 16%" in fallback_prompt_text
+    metrics = harness.state.scratchpad["_recovery_metrics"]
+    assert metrics["tool_plan_steps_executed"] == 6
+    assert metrics["tool_plan_step_failures"] == 5
+    assert metrics["tool_plan_worker_success_rate"] == round(1 / 6, 3)
+    assert metrics["tool_plan_fallback_count"] == 1
+    assert harness.state.failure_events[-1].failure_class == "tool_plan_insufficient_evidence"
+    assert harness.state.recent_errors == []
+
+
+def test_tool_plan_runtime_accepts_empty_plan_and_routes_to_solver(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    harness = Harness(
+        endpoint="http://example.test/v1",
+        model="wrench-9b",
+        provider_profile="lmstudio",
+        phase="execute",
+        api_key="test-key",
+        runtime_context_probe=False,
+        graph_checkpointer="memory",
+        tool_plan_max_repair_attempts=0,
+    )
+    planner_response = json.dumps(
+        {
+            "mode": "tool_plan",
+            "objective": "No evidence is needed for this conversational task.",
+            "steps": [],
+        }
+    )
+    captured_prompts: list[list[dict[str, object]]] = []
+    responses = [
+        _content_stream(planner_response, usage={"prompt_tokens": 15, "completion_tokens": 8}),
+        _tool_call_stream(
+            "solver-complete",
+            "task_complete",
+            {"message": "Hello briefly."},
+            usage={"total_tokens": 30},
+        ),
+    ]
+
+    async def fake_stream_chat(*, messages, tools):
+        del tools
+        captured_prompts.append(list(messages))
+        if not responses:
+            raise AssertionError("unexpected extra model call")
+        for event in responses.pop(0):
+            yield event
+
+    harness.client.stream_chat = fake_stream_chat
+
+    result = asyncio.run(asyncio.wait_for(ToolPlanRuntime.from_harness(harness).run("say hello briefly"), timeout=10))
+
+    assert result["status"] == "completed"
+    assert len(captured_prompts) == 2
+    solver_prompt_text = "\n".join(
+        str(message.get("content") or "") for message in captured_prompts[1]
+    )
+    assert "[HARNESS NOTICE]: You are the ToolPlan solver." in solver_prompt_text
+    assert "TOOL PLAN OBSERVATIONS" in solver_prompt_text
+    assert "No read-only evidence steps were required" in solver_prompt_text
+    assert result["message"]["message"] == "Hello briefly."
+    metrics = harness.state.scratchpad["_recovery_metrics"]
+    assert metrics["tool_plan_invocations"] == 1
+    assert metrics.get("tool_plan_parse_failures", 0) == 0
+    assert metrics.get("tool_plan_fallback_count", 0) == 0
+    assert metrics.get("tool_plan_steps_requested", 0) == 0
+    assert metrics.get("tool_plan_steps_executed", 0) == 0

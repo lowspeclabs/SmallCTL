@@ -84,7 +84,7 @@ def parse_tool_plan(text: str, *, max_steps: int = 6) -> ToolPlan | None:
     if not payload or payload.get("mode") != "tool_plan":
         return None
     raw_steps = payload.get("steps")
-    if not isinstance(raw_steps, list) or not (1 <= len(raw_steps) <= max_steps):
+    if not isinstance(raw_steps, list) or not (0 <= len(raw_steps) <= max_steps):
         return None
 
     steps: list[ToolPlanStep] = []

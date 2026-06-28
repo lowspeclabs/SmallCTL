@@ -11,13 +11,15 @@ from smallctl.graph.routing import LoopRoute
 from smallctl.graph.runtime_auto import AutoGraphRuntime
 from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.graph.state import PendingToolCall
-from smallctl.graph.interpret_nodes import _build_hidden_tool_block_message
+from smallctl.graph.interpret_nodes import _build_hidden_tool_block_message, interpret_planning_output
 from smallctl.harness import Harness
+from smallctl.harness.run_mode import ModeDecisionService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.phase_contracts import phase_contract_completion_block
 from smallctl.state import LoopState
 from smallctl.tools import build_registry
 from smallctl.tools.planning import request_validation_execution
+import pytest
 
 
 def _plan_approval_interrupt() -> dict[str, object]:
@@ -682,3 +684,134 @@ def test_planning_runtime_resume_rehydrates_plan_from_artifact(monkeypatch) -> N
     assert state.active_plan.plan_id == "plan-test"
     assert state.active_plan.implementation_plan == ["execute the thing"]
     assert state.active_plan.approved is True
+
+
+def test_auto_mode_does_not_escalate_complex_task_to_planning_for_small_model(tmp_path) -> None:
+    """Small models (<=4B) cannot reliably produce structured plans; stay in loop mode."""
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = (
+        "Analyze the backup architecture, design a migration plan, implement the changes, "
+        "write tests, and document the results."
+    )
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="gemma-4-e2b"),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        config=SimpleNamespace(staged_execution_enabled=False),
+    )
+
+    mode = asyncio.run(ModeDecisionService(harness).decide(state.run_brief.original_task))
+
+    assert mode == "loop"
+
+
+def test_auto_mode_escalates_complex_task_to_planning_for_large_model(tmp_path) -> None:
+    """Larger models should still be auto-escalated to planning mode for complex tasks."""
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = (
+        "Analyze the backup architecture, design a migration plan, implement the changes, "
+        "write tests, and document the results."
+    )
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="gemma-4-27b-it"),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        config=SimpleNamespace(staged_execution_enabled=False),
+        event_handler=None,
+    )
+
+    mode = asyncio.run(ModeDecisionService(harness).decide(state.run_brief.original_task))
+
+    assert mode == "planning"
+
+
+@pytest.mark.asyncio
+async def test_interpret_planning_output_synthesizes_fallback_plan_after_meta_commentary_loop() -> None:
+    """Repeated planning-mode meta-commentary should trigger a fallback plan."""
+    import smallctl.graph.interpret_nodes as interpret_nodes_module
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_planning_meta_commentary_loop_count"] = 1
+
+    called = {"pause": False}
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="t1",
+        run_mode="planning",
+        last_assistant_text="Planning mode is active. I need to create a structured plan.",
+        pending_tool_calls=[],
+    )
+
+    original_pause = interpret_nodes_module.pause_for_plan_approval
+
+    async def _fake_pause(gs, deps, *, question="Plan ready?"):
+        called["pause"] = True
+        gs.final_result = {"status": "needs_human"}
+
+    interpret_nodes_module.pause_for_plan_approval = _fake_pause
+    try:
+        route = await interpret_planning_output(
+            graph_state, GraphRuntimeDeps(harness=harness, event_handler=None)
+        )
+    finally:
+        interpret_nodes_module.pause_for_plan_approval = original_pause
+
+    assert route == LoopRoute.FINALIZE
+    assert called["pause"] is True
+    assert state.active_plan is not None
+    assert state.active_plan.goal == state.run_brief.original_task
+    assert state.active_plan.status == "draft"
+    assert state.active_plan.approved is False
+
+
+@pytest.mark.asyncio
+async def test_interpret_planning_output_resets_loop_counter_on_actionable_text() -> None:
+    """Actionable assistant text should reset the meta-commentary loop counter."""
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_planning_meta_commentary_loop_count"] = 1
+
+    harness = SimpleNamespace(
+        state=state,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+        ),
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="t1",
+        run_mode="planning",
+        last_assistant_text="I found the issue: backup.sh uses the wrong source path.",
+        pending_tool_calls=[],
+    )
+
+    route = await interpret_planning_output(
+        graph_state, GraphRuntimeDeps(harness=harness, event_handler=None)
+    )
+
+    assert route == LoopRoute.NEXT_STEP
+    assert "_planning_meta_commentary_loop_count" not in state.scratchpad

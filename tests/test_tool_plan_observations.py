@@ -275,6 +275,137 @@ def test_tool_plan_observations_dedupe_before_tight_token_fitting() -> None:
     assert "Duplicate of E1" in observations[1].summary
 
 
+def test_tool_plan_observations_extracts_content_from_dict_output_without_json_dump() -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote backup script",
+        steps=[
+            ToolPlanStep("E1", "ssh_file_read", {"path": "backup.sh"}),
+        ],
+    )
+    records = [
+        ToolExecutionRecord(
+            operation_id="op-1",
+            tool_name="ssh_file_read",
+            args={"path": "backup.sh"},
+            tool_call_id="toolplan:E1",
+            result=ToolEnvelope(
+                success=True,
+                output={
+                    "bytes": 376,
+                    "content": "#!/bin/bash\nSOURCE_DIR=\"/root/source\"\nBACKUP_DIR=\"/root/backups\"",
+                    "encoding": "utf-8",
+                    "host": "192.168.1.64",
+                    "path": "backup.sh",
+                    "sha256": "deadbeef",
+                    "truncated": False,
+                },
+                metadata={"path": "backup.sh", "host": "192.168.1.64"},
+            ),
+        )
+    ]
+
+    observations = build_tool_plan_observations(plan, records, token_limit=400, max_chars_per_step=240)
+    rendered = render_tool_plan_observations(plan.objective, observations)
+
+    assert observations[0].excerpt
+    assert "#!/bin/bash" in observations[0].excerpt
+    assert "SOURCE_DIR" in observations[0].excerpt
+    assert '"bytes":' not in observations[0].excerpt
+    assert '"sha256":' not in observations[0].excerpt
+    assert "deadbeef" not in rendered
+
+
+def test_tool_plan_observations_extracts_stdout_from_shell_dict_output() -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="check remote directory",
+        steps=[
+            ToolPlanStep("E1", "ssh_exec", {"command": "ls -la /root"}),
+        ],
+    )
+    records = [
+        ToolExecutionRecord(
+            operation_id="op-1",
+            tool_name="ssh_exec",
+            args={"command": "ls -la /root"},
+            tool_call_id="toolplan:E1",
+            result=ToolEnvelope(
+                success=True,
+                output={"stdout": "total 12\ndrwxr-xr-x 3 root root 4096 Jun 27 00:00 .\n", "stderr": "", "exit_code": 0},
+                metadata={"command": "ls -la /root"},
+            ),
+        )
+    ]
+
+    observations = build_tool_plan_observations(plan, records, token_limit=400, max_chars_per_step=240)
+
+    assert "total 12" in observations[0].excerpt
+    assert "stdout" not in observations[0].excerpt
+    assert "exit_code" not in observations[0].excerpt
+
+
+def test_tool_plan_observations_flattens_list_of_match_dicts() -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="find references",
+        steps=[
+            ToolPlanStep("E1", "grep", {"path": "src", "pattern": "ToolPlan"}),
+        ],
+    )
+    records = [
+        ToolExecutionRecord(
+            operation_id="op-1",
+            tool_name="grep",
+            args={"path": "src", "pattern": "ToolPlan"},
+            tool_call_id="toolplan:E1",
+            result=ToolEnvelope(
+                success=True,
+                output=[
+                    {"path": "src/a.py", "line": 10, "text": "class ToolPlan:"},
+                    {"path": "src/b.py", "line": 20, "text": "def tool_plan():"},
+                ],
+                metadata={"count": 2},
+            ),
+        )
+    ]
+
+    observations = build_tool_plan_observations(plan, records, token_limit=400, max_chars_per_step=240)
+
+    assert "class ToolPlan:" in observations[0].excerpt
+    assert "def tool_plan():" in observations[0].excerpt
+    assert "{" not in observations[0].excerpt
+
+
+def test_tool_plan_observations_does_not_json_dump_failed_dict_result() -> None:
+    plan = ToolPlan(
+        mode="tool_plan",
+        objective="inspect remote source directory",
+        steps=[
+            ToolPlanStep("E1", "ssh_file_read", {"path": "/root/source"}),
+        ],
+    )
+    records = [
+        ToolExecutionRecord(
+            operation_id="op-1",
+            tool_name="ssh_file_read",
+            args={"path": "/root/source"},
+            tool_call_id="toolplan:E1",
+            result=ToolEnvelope(
+                success=False,
+                error="Remote path is not a regular file.",
+                output={"path": "/root/source", "error": "Remote path is not a regular file."},
+                metadata={"path": "/root/source"},
+            ),
+        )
+    ]
+
+    observations = build_tool_plan_observations(plan, records, token_limit=400, max_chars_per_step=240)
+    rendered = render_tool_plan_observations(plan.objective, observations)
+
+    assert "Remote path is not a regular file." in rendered
+    assert '"path":' not in observations[0].excerpt
+
 def test_tool_plan_observation_to_evidence_preserves_fields_and_dedupes() -> None:
     observation = build_tool_plan_observations(
         ToolPlan(

@@ -196,6 +196,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 {
                     "prepare_tool_plan_prompt": "prepare_tool_plan_prompt",
                     "prepare_tool_plan_dispatch": "prepare_tool_plan_dispatch",
+                    "prepare_solver_prompt": "prepare_solver_prompt",
                     "prepare_step": "prepare_step",
                     END: END,
                 },
@@ -209,6 +210,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 "_route_after_compress",
                 {
                     "prepare_solver_prompt": "prepare_solver_prompt",
+                    "prepare_step": "prepare_step",
                     "apply_tool_outcomes": "apply_tool_outcomes",
                     END: END,
                 },
@@ -296,6 +298,12 @@ class ToolPlanRuntime(LoopGraphRuntime):
         plan = parse_tool_plan(graph_state.last_assistant_text, max_steps=max_steps)
         if plan is None:
             increment_metric(harness.state, "tool_plan_parse_failures")
+            harness._runlog(
+                "tool_plan_parse_failed",
+                "ToolPlan planner output could not be parsed",
+                raw_output=graph_state.last_assistant_text,
+                raw_thinking=graph_state.last_thinking_text,
+            )
             if self._maybe_retry_planner(
                 graph_state,
                 "Planner output was not valid bounded ToolPlan JSON.",
@@ -336,6 +344,10 @@ class ToolPlanRuntime(LoopGraphRuntime):
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "dispatch"
         _record_tool_plan_planner_metadata(harness, plan)
         harness._runlog("tool_plan_accepted", "ToolPlan accepted", steps=len(plan.steps), objective=plan.objective)
+        if not plan.steps:
+            graph_state.loop_state.scratchpad["_tool_plan_phase"] = "solver"
+            graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = "No read-only evidence steps were required for this task."
+            graph_state.loop_state.scratchpad["_tool_plan_observations"] = []
         return serialize_runtime_state(graph_state)
 
     async def _prepare_tool_plan_dispatch_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
@@ -348,6 +360,9 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 failure_class="tool_plan_invalid",
             )
         else:
+            graph_state.loop_state.scratchpad["_tool_plan_recent_errors_start"] = len(
+                getattr(graph_state.loop_state, "recent_errors", []) or []
+            )
             prepare_tool_plan_dispatch(graph_state, plan)
         return serialize_runtime_state(graph_state)
 
@@ -441,15 +456,6 @@ class ToolPlanRuntime(LoopGraphRuntime):
             max_chars_per_step=max_chars_per_step,
         )
         observation_stats = summarize_tool_plan_observations(plan, observations)
-        rendered = render_tool_plan_observations(plan.objective, observations)
-        graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = rendered
-        graph_state.loop_state.scratchpad["_tool_plan_observations"] = observations
-        graph_state.loop_state.scratchpad["_tool_plan_evidence_ids"] = attach_tool_plan_observation_evidence(
-            graph_state.loop_state,
-            objective=plan.objective,
-            observations=observations,
-        )
-        graph_state.loop_state.scratchpad["_tool_plan_phase"] = "solver"
         metrics = recovery_metrics(self.deps.harness.state)
         metrics["tool_plan_worker_steps_requested"] = observation_stats.requested_steps
         metrics["tool_plan_worker_steps_executed"] = observation_stats.executed_steps
@@ -468,7 +474,31 @@ class ToolPlanRuntime(LoopGraphRuntime):
         repeated_read_count = sum(1 for observation in observations if observation.duplicate_of)
         if repeated_read_count:
             increment_metric(self.deps.harness.state, "tool_plan_repeated_read_count", repeated_read_count)
-        metrics = recovery_metrics(self.deps.harness.state)
+        success_rate = observation_stats.success_rate
+        threshold = float(_tool_plan_config(self.deps, "tool_plan_failed_evidence_fallback_threshold", 0.5) or 0.5)
+        if (
+            success_rate is not None
+            and observation_stats.requested_steps > 0
+            and success_rate < threshold
+        ):
+            self._fallback_to_loop(
+                graph_state,
+                f"ToolPlan evidence gathering succeeded for only {int(success_rate * 100)}% of requested steps "
+                f"({observation_stats.successful_steps}/{observation_stats.requested_steps}). "
+                "Falling back to the normal loop so the model can gather the missing evidence.",
+                failure_class="tool_plan_insufficient_evidence",
+                suppress_worker_error_burst=True,
+            )
+            return serialize_runtime_state(graph_state)
+        rendered = render_tool_plan_observations(plan.objective, observations)
+        graph_state.loop_state.scratchpad["_tool_plan_observations_text"] = rendered
+        graph_state.loop_state.scratchpad["_tool_plan_observations"] = observations
+        graph_state.loop_state.scratchpad["_tool_plan_evidence_ids"] = attach_tool_plan_observation_evidence(
+            graph_state.loop_state,
+            objective=plan.objective,
+            observations=observations,
+        )
+        graph_state.loop_state.scratchpad["_tool_plan_phase"] = "solver"
         metrics["tool_plan_observation_tokens"] = int(metrics.get("tool_plan_observation_tokens", 0) or 0) + estimate_text_tokens(rendered)
         _attach_tool_plan_evidence(
             SimpleNamespace(
@@ -642,9 +672,18 @@ class ToolPlanRuntime(LoopGraphRuntime):
                     exception_type=exc.__class__.__name__,
                 )
 
-    def _fallback_to_loop(self, graph_state: GraphRunState, message: str, *, failure_class: str) -> None:
+    def _fallback_to_loop(
+        self,
+        graph_state: GraphRunState,
+        message: str,
+        *,
+        failure_class: str,
+        suppress_worker_error_burst: bool = False,
+    ) -> None:
         graph_state.loop_state.scratchpad["_tool_plan_phase"] = "fallback"
         graph_state.pending_tool_calls = []
+        if suppress_worker_error_burst:
+            self._suppress_tool_plan_worker_error_burst(graph_state)
         increment_metric(self.deps.harness.state, "tool_plan_fallback_count")
         _record_tool_plan_failure(
             self.deps.harness,
@@ -657,6 +696,25 @@ class ToolPlanRuntime(LoopGraphRuntime):
                 content=f"{message} Continue with the normal loop runtime.",
                 metadata={"is_recovery_nudge": True, "recovery_kind": "tool_plan_fallback"},
             )
+        )
+
+    def _suppress_tool_plan_worker_error_burst(self, graph_state: GraphRunState) -> None:
+        """Keep failed evidence batches from tripping the normal-loop error guard."""
+        state = graph_state.loop_state
+        recent_errors = list(getattr(state, "recent_errors", []) or [])
+        start_raw = state.scratchpad.pop("_tool_plan_recent_errors_start", None)
+        try:
+            start = max(0, int(start_raw))
+        except (TypeError, ValueError):
+            start = 0
+        if start >= len(recent_errors):
+            return
+        suppressed = recent_errors[start:]
+        state.recent_errors = recent_errors[:start]
+        self.deps.harness._runlog(
+            "tool_plan_worker_errors_suppressed",
+            "suppressed ToolPlan worker errors before normal-loop fallback",
+            suppressed_count=len(suppressed),
         )
 
     def _maybe_retry_planner(self, graph_state: GraphRunState, message: str) -> bool:
@@ -695,12 +753,18 @@ class ToolPlanRuntime(LoopGraphRuntime):
         phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
         if phase == "planning_repair":
             return route_if_final_else(payload, "prepare_tool_plan_prompt")
+        if phase == "solver":
+            return route_if_final_else(payload, "prepare_solver_prompt")
         if phase == "dispatch":
             return "prepare_tool_plan_dispatch"
         return route_if_final_else(payload, "prepare_step")
 
     @staticmethod
     def _route_after_prepare_dispatch(payload: LoopGraphPayload) -> str:
+        graph_state = inflate_graph_state(payload)
+        phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
+        if phase == "solver":
+            return route_if_final_else(payload, "prepare_solver_prompt")
         return route_if_final_else_pending_else(payload, pending_step="dispatch_tools", fallback_step="prepare_step")
 
     @staticmethod
@@ -713,6 +777,8 @@ class ToolPlanRuntime(LoopGraphRuntime):
         phase = str(graph_state.loop_state.scratchpad.get("_tool_plan_phase") or "")
         if phase == "solver":
             return route_if_final_else(payload, "prepare_solver_prompt")
+        if phase == "fallback":
+            return route_if_final_else(payload, "prepare_step")
         return route_if_final_else(payload, "apply_tool_outcomes")
 
     @staticmethod

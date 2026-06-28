@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any
 
 from ..memory.taxonomy import (
@@ -1408,6 +1409,25 @@ async def interpret_chat_output(
     return LoopRoute.FINALIZE
 
 
+def _is_planning_mode_meta_commentary(text: str) -> bool:
+    """Detect assistant text that just echoes planning-mode instructions."""
+    normalized = (text or "").strip().lower()
+    if len(normalized) < 10:
+        return False
+    meta_markers = (
+        "planning mode is active",
+        "planning mode",
+        "create a structured plan",
+        "structured plan",
+        "use `plan_set`",
+        "plan_set",
+        "before trying to execute anything",
+        "before proceeding with execution",
+        "the user wants me to",
+    )
+    return any(marker in normalized for marker in meta_markers)
+
+
 async def interpret_planning_output(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
@@ -1438,6 +1458,38 @@ async def interpret_planning_output(
             planning_tool_names = {str(name).strip() for name in names or [] if str(name).strip()}
         except Exception:
             planning_tool_names = set()
+
+        assistant_text = graph_state.last_assistant_text or ""
+        scratchpad = harness.state.scratchpad
+        loop_key = "_planning_meta_commentary_loop_count"
+        if _is_planning_mode_meta_commentary(assistant_text):
+            loop_count = int(scratchpad.get(loop_key, 0) or 0) + 1
+            scratchpad[loop_key] = loop_count
+            if loop_count >= 2:
+                goal = str(harness.state.run_brief.original_task or "").strip() or "Continue the task"
+                fallback_plan = ExecutionPlan(
+                    plan_id=f"plan-{uuid.uuid4().hex[:8]}",
+                    goal=goal,
+                    summary="Fallback plan synthesized because the model kept emitting planning-mode commentary without actionable tool calls.",
+                    steps=[PlanStep(step_id="step-1", title="Execute the task", description=goal)],
+                    status="draft",
+                    approved=False,
+                )
+                harness.state.draft_plan = fallback_plan
+                harness.state.active_plan = fallback_plan
+                harness.state.sync_plan_mirror()
+                _nodes._persist_planning_playbook(harness, fallback_plan)
+                harness.state.touch()
+                harness._runlog(
+                    "planning_meta_commentary_fallback",
+                    "synthesized fallback plan after repeated planning-mode commentary",
+                    loop_count=loop_count,
+                )
+                await pause_for_plan_approval(graph_state, deps)
+                return LoopRoute.FINALIZE
+        else:
+            scratchpad.pop(loop_key, None)
+
         if "plan_set" in planning_tool_names:
             nudge_content = "Planning mode is active. Create a structured plan with `plan_set` before trying to execute anything."
         else:

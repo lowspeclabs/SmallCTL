@@ -22,6 +22,7 @@ CAPSULE_TEXT: dict[str, str] = {
     "write_session_recovery_capsule": "Resume the active write session with its required next section/tool before other edits.",
     "outline_only_recovery": "If blocked on a large write, outline the next section instead of rewriting the whole target.",
     "repair_debug_scaffold": "REPAIR MODE: You have already read the failing file. The bugs are in code you wrote. Do NOT read the file again. Emit ONE mutation (file_patch/file_write/ast_patch) this turn, then run the verifier.",
+    "remote_repair_debug_scaffold": "REPAIR MODE: Remote target is active. Do NOT switch to local file_patch/shell_exec for remote paths. Emit ONE SSH action (ssh_exec/ssh_file_read/ssh_file_write) this turn, then verify remotely.",
     "mutation_loop_breaker": "MUTATION REQUIRED: You have already read enough. Stop gathering evidence. Emit ONE concrete mutation (`file_patch`, `file_write`, or `ast_patch`) this turn, then run a focused verifier or continue.",
     "preflight_contradiction_capsule": "A preflight validation passed but the gate is still blocking. Do not retry the same validator; escalate or ask for human guidance.",
     "repeated_remote_installer_failure_capsule": "The remote installer has failed repeatedly. Verify the remote environment state (apt sources, DNS, python3), repair any broken state, and only then retry.",
@@ -73,7 +74,12 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
     # Inject repair-phase debug scaffold when in repair with stuck signals
     state_phase = str(getattr(state, "current_phase", "") or "").strip().lower()
     if state_phase == "repair" and mitigation_names & {"done_gate", "micro_plan_capsule", "tool_exposure_narrowing"}:
-        scaffold = CAPSULE_TEXT.get("repair_debug_scaffold")
+        scaffold_key = (
+            "remote_repair_debug_scaffold"
+            if _remote_or_hybrid_target_active(state)
+            else "repair_debug_scaffold"
+        )
+        scaffold = CAPSULE_TEXT.get(scaffold_key)
         if scaffold and scaffold not in seen:
             scaffold_tokens = estimate_text_tokens(scaffold)
             if used_tokens + scaffold_tokens <= budget and len(lines) < 5:
@@ -103,6 +109,28 @@ def render_fama_capsules(state: Any, *, token_budget: int = 180) -> list[str]:
         else:
             scratchpad["_fama_empty_streak"] = 0
     return lines
+
+
+def _remote_or_hybrid_target_active(state: Any) -> bool:
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode in {"remote_execute", "hybrid_execute"}:
+        return True
+    if "remote" in task_mode:
+        return True
+    scratchpad = getattr(state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        target = scratchpad.get("remote_target") or scratchpad.get("_remote_target")
+        if target:
+            return True
+        handoff = scratchpad.get("_last_task_handoff")
+        if isinstance(handoff, dict):
+            handoff_mode = str(handoff.get("task_mode") or "").strip().lower()
+            if (
+                handoff_mode in {"remote_execute", "hybrid_execute"}
+                or "remote" in handoff_mode
+            ):
+                return True
+    return False
 
 
 def _remote_interactive_override_capsule(state: Any) -> str | None:

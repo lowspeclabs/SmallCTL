@@ -24,6 +24,7 @@ from .prompt_fragments import (
     _META_COGNITIVE_REPAIR_BRIEF,
     _PATCH_VERBATIM_RULE,
     _PLANNING_MODE_INTRO,
+    _PLANNING_MODE_INTRO_SMALL_GEMMA,
     _PRIVILEGES_NO_SUDO_GUESS,
     _REDUNDANCY_PREFER_SUMMARY,
     _REFLECTION_GATE,
@@ -763,7 +764,11 @@ def build_planning_prompt(
     prompt = build_system_prompt(
         state, phase, available_tool_names=available_tool_names, strategy_prompt=strategy_prompt, manifest=manifest, indexer_mode=indexer_mode
     )
-    planning_sections = [_PLANNING_MODE_INTRO]
+    model_name = str(state.scratchpad.get("_model_name") or "") if isinstance(getattr(state, "scratchpad", None), dict) else ""
+    if is_exact_small_gemma_4_it_model_name(model_name):
+        planning_sections = [_PLANNING_MODE_INTRO_SMALL_GEMMA]
+    else:
+        planning_sections = [_PLANNING_MODE_INTRO]
     plan = state.active_plan or state.draft_plan
     if plan is not None:
         planning_sections.append(

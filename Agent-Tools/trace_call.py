@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from collections import Counter
+
 from agent_tools_lib import (
     Colors,
     colorize,
@@ -39,7 +41,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run", default="latest", help="Run dir, run id, 'latest', or 'latest-N' (default: latest)")
     parser.add_argument("--logs-dir", help="Custom logs directory")
     parser.add_argument("--last-error", action="store_true", help="Trace the most recent error-ish harness record")
-    parser.add_argument("--compact", "-c", action="store_true", help="Collapse model_token / chunk records")
+    parser.add_argument("--compact", "-c", action="store_true", help="Collapse model_token / chunk / ui_event records")
     parser.add_argument("--json", action="store_true", help="Output raw JSON instead of formatted text")
     parser.add_argument("--step", type=int, help="Filter records to a specific step number")
     parser.add_argument("--task", help="Filter records to a specific task id")
@@ -131,6 +133,39 @@ def _filter_records(
     return result
 
 
+def _make_collapsed_record(run: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+    """Build a single synthetic record for a collapsed run of records."""
+    first_ts = run[0].get("timestamp", "") if run else ""
+    last_ts = run[-1].get("timestamp", "") if run else ""
+    ts_info = f" first={first_ts}"
+    if first_ts != last_ts:
+        ts_info += f" last={last_ts}"
+
+    if kind == "token_chunk":
+        return {
+            "timestamp": first_ts,
+            "event": "model_token/chunk",
+            "message": f"... {len(run)} token/chunk records collapsed ...",
+            "data": {},
+            "_collapsed": True,
+        }
+
+    if kind == "ui_event":
+        kinds = Counter(
+            str((r.get("data") or {}).get("event_type") or "unknown") for r in run
+        )
+        kind_summary = ", ".join(f"{k}={v}" for k, v in kinds.most_common())
+        return {
+            "timestamp": first_ts,
+            "event": "ui_event",
+            "message": f"... {len(run)} ui_event records collapsed ({kind_summary}){ts_info}",
+            "data": {},
+            "_collapsed": True,
+        }
+
+    return run[0] if run else {}
+
+
 def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str, Any]]], compact: bool = False, mismatch_warning: str | None = None) -> str:
     lines: list[str] = []
     lines.append(colorize(f"Trace: {trace_id}", Colors.BOLD + Colors.CYAN))
@@ -143,25 +178,32 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
         if not recs:
             continue
 
-        # In compact mode, collapse high-frequency token/chunk records
+        # In compact mode, collapse high-frequency token/chunk/ui_event records
         display_recs = recs
         if compact and channel in {"harness", "model_output", "chat"}:
             collapsed = []
-            token_run: list[dict[str, Any]] = []
+            run: list[dict[str, Any]] = []
+            run_kind: str | None = None
             for rec in recs:
-                if rec.get("event") in {"model_token", "chunk"}:
-                    token_run.append(rec)
-                else:
-                    if token_run:
-                        collapsed.append({
-                            "timestamp": token_run[0].get("timestamp"),
-                            "event": "model_token/chunk",
-                            "message": f"... {len(token_run)} token/chunk records collapsed ...",
-                            "data": {},
-                        })
-                        token_run = []
+                kind: str | None = None
+                event = rec.get("event")
+                if event in {"model_token", "chunk"}:
+                    kind = "token_chunk"
+                elif event == "ui_event":
+                    kind = "ui_event"
+
+                if kind == run_kind:
+                    run.append(rec)
+                    continue
+
+                if run:
+                    collapsed.append(_make_collapsed_record(run, run_kind))
+                    run = []
+
+                run_kind = kind
+                if kind is None:
                     collapsed.append(rec)
-                    if rec.get("event") == "model_output_degenerate_loop_exhausted":
+                    if event == "model_output_degenerate_loop_exhausted":
                         phrase = (rec.get("data") or {}).get("repeated_phrase")
                         if phrase:
                             collapsed.append({
@@ -170,13 +212,10 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
                                 "message": f"repeated phrase ({len(phrase)} chars): {str(phrase)[:120]}{'...' if len(str(phrase)) > 120 else ''}",
                                 "data": {},
                             })
-            if token_run:
-                collapsed.append({
-                    "timestamp": token_run[0].get("timestamp"),
-                    "event": "model_token/chunk",
-                    "message": f"... {len(token_run)} token/chunk records collapsed ...",
-                    "data": {},
-                })
+                else:
+                    run.append(rec)
+            if run:
+                collapsed.append(_make_collapsed_record(run, run_kind))
             display_recs = collapsed
 
         lines.append("")
@@ -185,7 +224,8 @@ def _render_text(run_dir: Path, trace_id: str, grouped: dict[str, list[dict[str,
             prefix = "  "
             if has_error_indicator(rec):
                 prefix = colorize("! ", Colors.RED)
-            lines.append(prefix + format_record_summary(rec))
+            max_width = 1000 if rec.get("_collapsed") else 160
+            lines.append(prefix + format_record_summary(rec, max_width=max_width))
 
     # Reconstruct assistant output if available
     assistant_texts = []

@@ -20,6 +20,7 @@ from ..harness.task_classifier import (
     looks_like_readonly_chat_request,
     runtime_policy_for_intent,
 )
+from ..prompt_model_classifiers import is_exact_small_gemma_4_it_model_name
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..runtime_error_repair import current_reported_runtime_error
 from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
@@ -717,7 +718,9 @@ async def interpret_model_output(
         graph_state.run_mode == "planning"
         or harness.state.planning_mode_enabled
     ):
-        synthesized_plan = _nodes._synthesize_plan_from_text(harness, assistant_text)
+        synthesized_plan = _nodes._synthesize_plan_from_text(
+            harness, assistant_text, allow_numbered_list=_small_gemma_planning_synthesis(harness)
+        )
         if synthesized_plan is not None:
             harness.state.draft_plan = synthesized_plan
             harness.state.active_plan = synthesized_plan
@@ -738,7 +741,9 @@ async def interpret_model_output(
         and planning_request is not None
         and _nodes._planning_response_looks_like_plan(assistant_text)
     ):
-        synthesized_plan = _nodes._synthesize_plan_from_text(harness, assistant_text)
+        synthesized_plan = _nodes._synthesize_plan_from_text(
+            harness, assistant_text, allow_numbered_list=_small_gemma_planning_synthesis(harness)
+        )
         if synthesized_plan is not None:
             harness.state.draft_plan = synthesized_plan
             harness.state.active_plan = synthesized_plan
@@ -844,7 +849,9 @@ async def interpret_model_output(
         and (thinking_looks_like_action or text_looks_like_action_list or text_has_tool_tags or text_has_func_calls)
     ):
         if graph_state.run_mode == "planning" or harness.state.planning_mode_enabled:
-            synthesized_plan = _nodes._synthesize_plan_from_text(harness, assistant_text)
+            synthesized_plan = _nodes._synthesize_plan_from_text(
+                harness, assistant_text, allow_numbered_list=_small_gemma_planning_synthesis(harness)
+            )
             if synthesized_plan is not None:
                 harness.state.draft_plan = synthesized_plan
                 harness.state.active_plan = synthesized_plan
@@ -1428,6 +1435,10 @@ def _is_planning_mode_meta_commentary(text: str) -> bool:
     return any(marker in normalized for marker in meta_markers)
 
 
+def _small_gemma_planning_synthesis(harness: Any) -> bool:
+    return is_exact_small_gemma_4_it_model_name(_nodes._harness_model_name(harness))
+
+
 async def interpret_planning_output(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
@@ -1440,7 +1451,9 @@ async def interpret_planning_output(
 
     plan = harness.state.active_plan or harness.state.draft_plan
     if plan is None:
-        synthesized_plan = _nodes._synthesize_plan_from_text(harness, graph_state.last_assistant_text)
+        synthesized_plan = _nodes._synthesize_plan_from_text(
+            harness, graph_state.last_assistant_text, allow_numbered_list=_small_gemma_planning_synthesis(harness)
+        )
         if synthesized_plan is not None:
             harness.state.draft_plan = synthesized_plan
             harness.state.active_plan = synthesized_plan

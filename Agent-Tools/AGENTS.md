@@ -100,7 +100,7 @@ python3 Agent-Tools/trace_call.py --run latest step-1:call-1
 python3 Agent-Tools/trace_call.py --run latest-1 step-1:call-1
 python3 Agent-Tools/trace_call.py --last-error      # trace the most recent error
 python3 Agent-Tools/trace_call.py TRACE_ID --json
-python3 Agent-Tools/trace_call.py TRACE_ID --compact # collapse token/chunk records
+python3 Agent-Tools/trace_call.py TRACE_ID --compact # collapse token/chunk/ui_event records
 ```
 
 Use this when you need to see exactly what the model emitted, which tool it

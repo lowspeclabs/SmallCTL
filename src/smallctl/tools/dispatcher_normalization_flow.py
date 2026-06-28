@@ -21,7 +21,9 @@ from .dispatcher_shell_guards import (
     looks_like_raw_ssh_shell_command as _looks_like_raw_ssh_shell_command,
     raw_ssh_shell_block_envelope as _raw_ssh_shell_block_envelope,
 )
-from ..shell_utils import looks_like_ssh_keygen_known_hosts_removal as _looks_like_ssh_keygen_known_hosts_removal
+from ..shell_utils import (
+    looks_like_ssh_keygen_known_hosts_removal as _looks_like_ssh_keygen_known_hosts_removal,
+)
 from .dispatcher_tool_guards import (
     _guard_remote_file_tool_request,
     _guard_remote_shell_tool_request,
@@ -36,9 +38,16 @@ from .dispatcher_ssh_recovery import (
     _pin_and_guard_ssh_credentials,
     _recover_ssh_arguments_from_task_context,
 )
-from .dispatcher_remote_detection import task_clearly_targets_remote_ssh_host as _task_clearly_targets_remote_ssh_host
+from .dispatcher_remote_detection import (
+    task_clearly_targets_remote_ssh_host as _task_clearly_targets_remote_ssh_host,
+)
 
-_SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
+_SSH_FILE_TOOLS = {
+    "ssh_file_read",
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
 _SSH_REMOTE_TOOLS = {"ssh_exec", "ssh_session_start"}
 
 
@@ -50,15 +59,22 @@ def normalize_tool_request(
     phase: str | None = None,
     state: Any | None = None,
     harness: Any | None = None,
+    source: str = "model",
 ) -> tuple[str, dict[str, Any], ToolEnvelope | None, dict[str, Any]]:
     credential_store = getattr(harness, "credential_store", None)
-    tool_name, arguments, normalization_metadata = _normalize_initial_tool_request(tool_name, arguments)
+    tool_name, arguments, normalization_metadata = _normalize_initial_tool_request(
+        tool_name, arguments
+    )
 
     if tool_name == "artifact_read":
-        tool_name, arguments, artifact_metadata = _normalize_artifact_read_request(arguments, state=state)
+        tool_name, arguments, artifact_metadata = _normalize_artifact_read_request(
+            arguments, state=state
+        )
         normalization_metadata.update(artifact_metadata)
     elif tool_name == "web_fetch":
-        arguments, web_fetch_metadata = _normalize_web_fetch_request(arguments, state=state)
+        arguments, web_fetch_metadata = _normalize_web_fetch_request(
+            arguments, state=state
+        )
         normalization_metadata.update(web_fetch_metadata)
 
     arguments, write_session_metadata = _repair_write_session_path_from_state(
@@ -87,27 +103,43 @@ def normalize_tool_request(
         normalization_metadata.update(pre_metadata)
         try:
             normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
-            normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
-                normalized_arguments,
-                state=state,
-                credential_store=credential_store,
+            normalized_arguments, ssh_metadata = (
+                _recover_ssh_arguments_from_task_context(
+                    normalized_arguments,
+                    state=state,
+                    credential_store=credential_store,
+                )
             )
-            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+            for _preserve_key in (
+                "recovered_ssh_host",
+                "recovered_ssh_user",
+                "recovered_ssh_password_source",
+                "routing_reason",
+            ):
                 if _preserve_key in normalization_metadata:
                     ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
             if "recovered_ssh_password_source" in normalization_metadata:
-                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_origin"] = normalization_metadata[
+                    "recovered_ssh_password_source"
+                ]
                 ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
-            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
-                normalized_arguments,
-                state=state,
-                normalization_metadata=normalization_metadata,
-                credential_store=credential_store,
+            normalized_arguments, pin_block, pin_metadata = (
+                _pin_and_guard_ssh_credentials(
+                    normalized_arguments,
+                    state=state,
+                    normalization_metadata=normalization_metadata,
+                    credential_store=credential_store,
+                )
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
-                return tool_name, normalized_arguments, pin_block, normalization_metadata
+                return (
+                    tool_name,
+                    normalized_arguments,
+                    pin_block,
+                    normalization_metadata,
+                )
             return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
             return (
@@ -133,27 +165,43 @@ def normalize_tool_request(
         normalization_metadata.update(pre_metadata)
         try:
             normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
-            normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
-                normalized_arguments,
-                state=state,
-                credential_store=credential_store,
+            normalized_arguments, ssh_metadata = (
+                _recover_ssh_arguments_from_task_context(
+                    normalized_arguments,
+                    state=state,
+                    credential_store=credential_store,
+                )
             )
-            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+            for _preserve_key in (
+                "recovered_ssh_host",
+                "recovered_ssh_user",
+                "recovered_ssh_password_source",
+                "routing_reason",
+            ):
                 if _preserve_key in normalization_metadata:
                     ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
             if "recovered_ssh_password_source" in normalization_metadata:
-                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_origin"] = normalization_metadata[
+                    "recovered_ssh_password_source"
+                ]
                 ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
-            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
-                normalized_arguments,
-                state=state,
-                normalization_metadata=normalization_metadata,
-                credential_store=credential_store,
+            normalized_arguments, pin_block, pin_metadata = (
+                _pin_and_guard_ssh_credentials(
+                    normalized_arguments,
+                    state=state,
+                    normalization_metadata=normalization_metadata,
+                    credential_store=credential_store,
+                )
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
-                return tool_name, normalized_arguments, pin_block, normalization_metadata
+                return (
+                    tool_name,
+                    normalized_arguments,
+                    pin_block,
+                    normalization_metadata,
+                )
             return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
             return (
@@ -173,10 +221,19 @@ def normalize_tool_request(
     if tool_name == "ssh_exec":
         arguments, repair_metadata = _repair_ssh_exec_malformed_args(arguments)
         normalization_metadata.update(repair_metadata)
-        command = str(arguments.get("command") or "").strip() if isinstance(arguments, dict) else ""
+        command = (
+            str(arguments.get("command") or "").strip()
+            if isinstance(arguments, dict)
+            else ""
+        )
         harness_tool_shell_error = _guard_harness_tool_as_ssh_shell_command(command)
         if harness_tool_shell_error is not None:
-            return tool_name, arguments, harness_tool_shell_error, normalization_metadata
+            return (
+                tool_name,
+                arguments,
+                harness_tool_shell_error,
+                normalization_metadata,
+            )
         nested_raw_ssh_error = _guard_nested_raw_ssh_in_ssh_exec(command)
         if nested_raw_ssh_error is not None:
             return tool_name, arguments, nested_raw_ssh_error, normalization_metadata
@@ -188,34 +245,55 @@ def normalize_tool_request(
         normalization_metadata.update(pre_metadata)
         try:
             normalized_arguments = network.normalize_ssh_arguments(pre_recovered)
-            normalized_arguments, ssh_metadata = _recover_ssh_arguments_from_task_context(
-                normalized_arguments,
-                state=state,
-                credential_store=credential_store,
+            normalized_arguments, ssh_metadata = (
+                _recover_ssh_arguments_from_task_context(
+                    normalized_arguments,
+                    state=state,
+                    credential_store=credential_store,
+                )
             )
-            for _preserve_key in ("recovered_ssh_host", "recovered_ssh_user", "recovered_ssh_password_source", "routing_reason"):
+            for _preserve_key in (
+                "recovered_ssh_host",
+                "recovered_ssh_user",
+                "recovered_ssh_password_source",
+                "routing_reason",
+            ):
                 if _preserve_key in normalization_metadata:
                     ssh_metadata[_preserve_key] = normalization_metadata[_preserve_key]
             if "recovered_ssh_password_source" in normalization_metadata:
-                ssh_metadata["ssh_password_origin"] = normalization_metadata["recovered_ssh_password_source"]
+                ssh_metadata["ssh_password_origin"] = normalization_metadata[
+                    "recovered_ssh_password_source"
+                ]
                 ssh_metadata["ssh_password_recovered"] = True
             normalization_metadata.update(ssh_metadata)
-            normalized_arguments, pin_block, pin_metadata = _pin_and_guard_ssh_credentials(
-                normalized_arguments,
-                state=state,
-                normalization_metadata=normalization_metadata,
-                credential_store=credential_store,
+            normalized_arguments, pin_block, pin_metadata = (
+                _pin_and_guard_ssh_credentials(
+                    normalized_arguments,
+                    state=state,
+                    normalization_metadata=normalization_metadata,
+                    credential_store=credential_store,
+                )
             )
             normalization_metadata.update(pin_metadata)
             if pin_block is not None:
-                return tool_name, normalized_arguments, pin_block, normalization_metadata
+                return (
+                    tool_name,
+                    normalized_arguments,
+                    pin_block,
+                    normalization_metadata,
+                )
             auth_recovery_error, auth_recovery_metadata = _guard_ssh_auth_recovery(
                 normalized_arguments,
                 state=state,
             )
             normalization_metadata.update(auth_recovery_metadata)
             if auth_recovery_error is not None:
-                return tool_name, normalized_arguments, auth_recovery_error, normalization_metadata
+                return (
+                    tool_name,
+                    normalized_arguments,
+                    auth_recovery_error,
+                    normalization_metadata,
+                )
             return tool_name, normalized_arguments, None, normalization_metadata
         except ValueError as exc:
             return (
@@ -238,10 +316,15 @@ def normalize_tool_request(
     ssh_spec = registry.get("ssh_exec") if hasattr(registry, "get") else None
     phase_allowed = getattr(ssh_spec, "phase_allowed", None)
     ssh_spec_phase_available = not (
-        ssh_spec is None or (phase and callable(phase_allowed) and not phase_allowed(phase))
+        ssh_spec is None
+        or (phase and callable(phase_allowed) and not phase_allowed(phase))
     )
 
-    command = str(arguments.get("command", "") or "").strip() if isinstance(arguments, dict) else ""
+    command = (
+        str(arguments.get("command", "") or "").strip()
+        if isinstance(arguments, dict)
+        else ""
+    )
     if not command:
         return tool_name, arguments, None, normalization_metadata
 
@@ -285,7 +368,12 @@ def normalize_tool_request(
             return tool_name, arguments, remote_shell_guard, normalization_metadata
         if _escalation_recommends_local_shell(state):
             return tool_name, arguments, None, normalization_metadata
-        if not _recent_ssh_auth_failure(state) and _task_clearly_targets_remote_ssh_host(state) and not re.search(r"\b(?:ssh|scp|sftp)\b", command):
+        if (
+            source != "system"
+            and not _recent_ssh_auth_failure(state)
+            and _task_clearly_targets_remote_ssh_host(state)
+            and not re.search(r"\b(?:ssh|scp|sftp)\b", command)
+        ):
             metadata = {
                 "tool_name": tool_name,
                 "reason": "remote_task_requires_ssh_exec",

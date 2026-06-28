@@ -8,7 +8,7 @@ from ..state import ExecutionPlan, PlanStep
 from ..tools.planning import _refresh_plan_playbook_artifact
 
 
-def planning_response_looks_like_plan(text: str) -> bool:
+def planning_response_looks_like_plan(text: str, *, allow_numbered_list: bool = False) -> bool:
     normalized = (text or "").strip()
     if len(normalized) < 40:
         return False
@@ -25,7 +25,11 @@ def planning_response_looks_like_plan(text: str) -> bool:
     )
     if any(marker in lowered for marker in markers):
         return True
-    return bool(re.search(r"^\|\s*\d+\s*\|", normalized, flags=re.MULTILINE))
+    if re.search(r"^\|\s*\d+\s*\|", normalized, flags=re.MULTILINE):
+        return True
+    if allow_numbered_list and re.search(r"^\s*\d+[.)]\s+\S", normalized, flags=re.MULTILINE):
+        return True
+    return False
 
 
 def extract_plan_steps_from_text(text: str) -> list[PlanStep]:
@@ -48,9 +52,9 @@ def extract_plan_steps_from_text(text: str) -> list[PlanStep]:
     return steps
 
 
-def synthesize_plan_from_text(harness: Any, text: str) -> ExecutionPlan | None:
+def synthesize_plan_from_text(harness: Any, text: str, *, allow_numbered_list: bool = False) -> ExecutionPlan | None:
     assistant_text = (text or "").strip()
-    if not assistant_text or not planning_response_looks_like_plan(assistant_text):
+    if not assistant_text or not planning_response_looks_like_plan(assistant_text, allow_numbered_list=allow_numbered_list):
         return None
     goal = str(harness.state.run_brief.original_task or "").strip() or assistant_text.splitlines()[0].strip()
     steps = extract_plan_steps_from_text(assistant_text)

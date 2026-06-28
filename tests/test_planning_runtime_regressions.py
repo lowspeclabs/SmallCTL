@@ -12,10 +12,12 @@ from smallctl.graph.runtime_auto import AutoGraphRuntime
 from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.graph.state import PendingToolCall
 from smallctl.graph.interpret_nodes import _build_hidden_tool_block_message, interpret_planning_output
+from smallctl.graph.planning_support import planning_response_looks_like_plan, synthesize_plan_from_text
 from smallctl.harness import Harness
 from smallctl.harness.run_mode import ModeDecisionService
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.phase_contracts import phase_contract_completion_block
+from smallctl.prompts import build_planning_prompt
 from smallctl.state import LoopState
 from smallctl.tools import build_registry
 from smallctl.tools.planning import request_validation_execution
@@ -815,3 +817,112 @@ async def test_interpret_planning_output_resets_loop_counter_on_actionable_text(
 
     assert route == LoopRoute.NEXT_STEP
     assert "_planning_meta_commentary_loop_count" not in state.scratchpad
+
+
+def test_planning_response_looks_like_plan_accepts_numbered_list_for_small_gemma() -> None:
+    text = (
+        "1. Inspect the current backup script on the remote host\n"
+        "2. Identify the wrong source path\n"
+        "3. Patch backup.sh to use the correct path\n"
+        "4. Run a test backup and verify the output"
+    )
+    assert planning_response_looks_like_plan(text, allow_numbered_list=True) is True
+    assert planning_response_looks_like_plan(text, allow_numbered_list=False) is False
+
+
+def test_synthesize_plan_from_text_uses_numbered_list_for_small_gemma() -> None:
+    text = (
+        "1. Inspect the current backup script on the remote host\n"
+        "2. Identify the wrong source path\n"
+        "3. Patch backup.sh to use the correct path\n"
+        "4. Run a test backup and verify the output"
+    )
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    harness = SimpleNamespace(state=state)
+
+    plan = synthesize_plan_from_text(harness, text, allow_numbered_list=True)
+
+    assert plan is not None
+    assert plan.goal == "Fix the remote backup job"
+    assert len(plan.steps) == 4
+    assert plan.steps[0].title == "Inspect the current backup script on the remote host"
+    assert plan.steps[3].step_id == "P4"
+    assert plan.status == "draft"
+    assert plan.approved is False
+
+
+def test_build_planning_prompt_uses_small_gemma_intro_for_small_gemma() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_model_name"] = "Gemma 4 e2b"
+
+    prompt = build_planning_prompt(state, "plan")
+
+    assert "small gemma planning mode" in prompt.lower()
+    assert "plain numbered list is enough" in prompt.lower()
+
+
+def test_build_planning_prompt_uses_default_intro_for_other_models() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_model_name"] = "gemma-4-27b-it"
+
+    prompt = build_planning_prompt(state, "plan")
+
+    assert "planning mode is active" in prompt.lower()
+    assert "convert the plan into a playbook artifact" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_interpret_planning_output_synthesizes_numbered_list_for_small_gemma() -> None:
+    """A small Gemma model emitting a plain numbered list should produce a draft plan."""
+    import smallctl.graph.interpret_nodes as interpret_nodes_module
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+
+    called = {"pause": False}
+
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="Gemma 4 e2b"),
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: None,
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="t1",
+        run_mode="planning",
+        last_assistant_text=(
+            "1. SSH into the backup host\n"
+            "2. Read backup.sh\n"
+            "3. Fix the source path\n"
+            "4. Run a test backup"
+        ),
+        pending_tool_calls=[],
+    )
+
+    original_pause = interpret_nodes_module.pause_for_plan_approval
+
+    async def _fake_pause(gs, deps, *, question="Plan ready?"):
+        called["pause"] = True
+        gs.final_result = {"status": "needs_human"}
+
+    interpret_nodes_module.pause_for_plan_approval = _fake_pause
+    try:
+        route = await interpret_planning_output(
+            graph_state, GraphRuntimeDeps(harness=harness, event_handler=None)
+        )
+    finally:
+        interpret_nodes_module.pause_for_plan_approval = original_pause
+
+    assert route == LoopRoute.FINALIZE
+    assert called["pause"] is True
+    assert state.active_plan is not None
+    assert state.active_plan.goal == state.run_brief.original_task
+    assert len(state.active_plan.steps) == 4
+    assert state.active_plan.status == "draft"
+    assert state.active_plan.approved is False

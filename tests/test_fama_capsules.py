@@ -79,6 +79,20 @@ def test_fama_capsules_render_mutation_loop_breaker() -> None:
     ]
 
 
+def test_fama_repair_scaffold_uses_ssh_actions_for_remote_target() -> None:
+    state = LoopState()
+    state.current_phase = "repair"
+    state.task_mode = "hybrid_execute"
+    _activate(state, "done_gate")
+
+    lines = render_fama_capsules(state, token_budget=500)
+    text = " ".join(lines)
+
+    assert "Emit ONE SSH action" in text
+    assert "local file_patch/shell_exec" in text
+    assert "Emit ONE mutation (file_patch/file_write/ast_patch)" not in text
+
+
 def test_fama_capsules_respect_disabled_config() -> None:
     state = LoopState()
     state.scratchpad["_fama_config"] = {"enabled": False, "mode": "lite", "capsule_token_budget": 180}

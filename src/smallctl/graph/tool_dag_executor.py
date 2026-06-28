@@ -7,10 +7,14 @@ from typing import Any
 
 from ..logging_utils import log_kv
 from ..models.tool_result import ToolEnvelope
-from ..state import json_safe_value
 from ..tools.dispatcher import normalize_tool_request
-from .node_support import HALLUCINATION_MAP, ToolNotFoundError
-from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
+from .node_support import HALLUCINATION_MAP
+from .state import (
+    GraphRunState,
+    PendingToolCall,
+    ToolExecutionRecord,
+    build_operation_id,
+)
 from .tool_execution_support import _store_tool_execution_record
 
 
@@ -54,9 +58,19 @@ async def dispatch_tool_dag(
                 all_records.append(result)
             else:
                 # Exception fallback
-                exc = result if isinstance(result, BaseException) else Exception(str(result))
+                exc = (
+                    result
+                    if isinstance(result, BaseException)
+                    else Exception(str(result))
+                )
                 error_msg = f"DAG dispatch error for `{pending.tool_name}`: {exc}"
-                log_kv(harness.log, logging.WARNING, "tool_dag_dispatch_error", tool_name=pending.tool_name, error=str(exc))
+                log_kv(
+                    harness.log,
+                    logging.WARNING,
+                    "tool_dag_dispatch_error",
+                    tool_name=pending.tool_name,
+                    error=str(exc),
+                )
                 envelope = ToolEnvelope(
                     success=False,
                     error=error_msg,
@@ -132,15 +146,22 @@ async def _dispatch_single_tool(
 
     registry = getattr(harness, "registry", None)
     if registry is not None:
-        normalized_tool_name, normalized_args, intercepted_result, _ = normalize_tool_request(
-            registry,
-            pending.tool_name,
-            pending.args,
-            phase=getattr(getattr(harness, "dispatcher", None), "phase", None),
-            state=harness.state,
+        normalized_tool_name, normalized_args, intercepted_result, _ = (
+            normalize_tool_request(
+                registry,
+                pending.tool_name,
+                pending.args,
+                phase=getattr(getattr(harness, "dispatcher", None), "phase", None),
+                state=harness.state,
+                source=getattr(pending, "source", "model"),
+            )
         )
     else:
-        normalized_tool_name, normalized_args, intercepted_result = pending.tool_name, pending.args, None
+        normalized_tool_name, normalized_args, intercepted_result = (
+            pending.tool_name,
+            pending.args,
+            None,
+        )
 
     pending.tool_name = normalized_tool_name
     pending.args = normalized_args
@@ -177,7 +198,10 @@ async def _dispatch_single_tool(
             envelope = ToolEnvelope(
                 success=True,
                 output=hint,
-                metadata={"interceptor_hit": True, "hallucinated_tool": pending.tool_name},
+                metadata={
+                    "interceptor_hit": True,
+                    "hallucinated_tool": pending.tool_name,
+                },
             )
         else:
             envelope = ToolEnvelope(
@@ -192,7 +216,10 @@ async def _dispatch_single_tool(
         envelope = ToolEnvelope(
             success=False,
             error="Tool dispatcher is unavailable in the current harness context.",
-            metadata={"tool_name": pending.tool_name, "reason": "dispatcher_unavailable"},
+            metadata={
+                "tool_name": pending.tool_name,
+                "reason": "dispatcher_unavailable",
+            },
         )
         return _record(envelope)
 

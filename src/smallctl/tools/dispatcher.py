@@ -19,8 +19,19 @@ from .dispatcher_policy_guards import (
     _verifier_loop_dispatch_block,
 )
 
-_SSH_FILE_TOOLS = {"ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
-_REMOTE_GUARDED_FILE_TOOLS = {"dir_list", "file_read", "file_write", "file_patch", "ast_patch"}
+_SSH_FILE_TOOLS = {
+    "ssh_file_read",
+    "ssh_file_write",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
+_REMOTE_GUARDED_FILE_TOOLS = {
+    "dir_list",
+    "file_read",
+    "file_write",
+    "file_patch",
+    "ast_patch",
+}
 _STAGED_CONTROL_TOOLS = {"loop_status", "step_complete", "step_fail", "ask_human"}
 _SSH_AUTH_RECOVERY_KEY = "_ssh_auth_recovery_state"
 
@@ -34,8 +45,7 @@ class ToolInterceptor(Protocol):
         tool_name: str,
         arguments: dict[str, Any],
         next_dispatch: Callable[[str, dict[str, Any]], Awaitable[ToolEnvelope]],
-    ) -> ToolEnvelope:
-        ...
+    ) -> ToolEnvelope: ...
 
 
 class ToolDispatcher:
@@ -55,7 +65,9 @@ class ToolDispatcher:
         self.phase = phase
         self.harness = harness
 
-    async def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> ToolEnvelope:
+    async def dispatch(
+        self, tool_name: str, arguments: dict[str, Any], *, source: str = "model"
+    ) -> ToolEnvelope:
         requested_tool_name = tool_name
         if not isinstance(arguments, dict):
             return ToolEnvelope.make_error(
@@ -72,13 +84,16 @@ class ToolDispatcher:
                     }
                 ],
             )
-        tool_name, arguments, intercepted_result, normalization_metadata = normalize_tool_request(
-            self.registry,
-            tool_name,
-            arguments,
-            phase=self.phase,
-            state=self.state,
-            harness=self.harness,
+        tool_name, arguments, intercepted_result, normalization_metadata = (
+            normalize_tool_request(
+                self.registry,
+                tool_name,
+                arguments,
+                phase=self.phase,
+                state=self.state,
+                harness=self.harness,
+                source=source,
+            )
         )
         log_kv(
             self.log,
@@ -86,8 +101,12 @@ class ToolDispatcher:
             "tool_dispatch_start",
             tool_name=tool_name,
             phase=self.phase,
-            requested_tool_name=requested_tool_name if requested_tool_name != tool_name else "",
-            arg_keys=sorted(list(arguments.keys())) if isinstance(arguments, dict) else [],
+            requested_tool_name=requested_tool_name
+            if requested_tool_name != tool_name
+            else "",
+            arg_keys=sorted(list(arguments.keys()))
+            if isinstance(arguments, dict)
+            else [],
         )
         if self.run_logger:
             self.run_logger.log(
@@ -97,13 +116,19 @@ class ToolDispatcher:
                 tool_name=tool_name,
                 phase=self.phase,
                 arguments=arguments,
-                requested_tool_name=requested_tool_name if requested_tool_name != tool_name else None,
+                requested_tool_name=requested_tool_name
+                if requested_tool_name != tool_name
+                else None,
             )
         spec = self.registry.get(tool_name)
         if spec is None:
-            log_kv(self.log, logging.WARNING, "tool_dispatch_unknown", tool_name=tool_name)
+            log_kv(
+                self.log, logging.WARNING, "tool_dispatch_unknown", tool_name=tool_name
+            )
             if self.run_logger:
-                self.run_logger.log("tools", "unknown", "unknown tool", tool_name=tool_name)
+                self.run_logger.log(
+                    "tools", "unknown", "unknown tool", tool_name=tool_name
+                )
             return ToolEnvelope.make_error(tool_name, f"Unknown tool: {tool_name}")
         staged_allowlist_error = _staged_tool_allowlist_error(self.state, tool_name)
         if staged_allowlist_error is not None:
@@ -146,7 +171,9 @@ class ToolDispatcher:
                 risk=spec.risk,
                 phase=self.phase,
             )
-        blocked_by_fama = _fama_dispatch_block(tool_name, arguments, state=self.state, phase=self.phase)
+        blocked_by_fama = _fama_dispatch_block(
+            tool_name, arguments, state=self.state, phase=self.phase
+        )
         if blocked_by_fama is not None:
             if self.run_logger:
                 self.run_logger.log(
@@ -166,9 +193,13 @@ class ToolDispatcher:
                     "verifier_loop_tool_call_blocked",
                     "verifier loop hard stop blocked tool call",
                     tool_name=tool_name,
-                    active_mitigation=blocked_by_verifier_loop.metadata.get("active_mitigation"),
+                    active_mitigation=blocked_by_verifier_loop.metadata.get(
+                        "active_mitigation"
+                    ),
                     reason=blocked_by_verifier_loop.metadata.get("reason"),
-                    rejection_count=blocked_by_verifier_loop.metadata.get("rejection_count"),
+                    rejection_count=blocked_by_verifier_loop.metadata.get(
+                        "rejection_count"
+                    ),
                 )
             return blocked_by_verifier_loop
         blocked_by_challenge_progress = redundant_verifier_block(
@@ -183,7 +214,9 @@ class ToolDispatcher:
                     "challenge_progress_tool_call_blocked",
                     "challenge progress policy blocked tool call",
                     tool_name=tool_name,
-                    active_mitigation=blocked_by_challenge_progress.metadata.get("active_mitigation"),
+                    active_mitigation=blocked_by_challenge_progress.metadata.get(
+                        "active_mitigation"
+                    ),
                     reason=blocked_by_challenge_progress.metadata.get("reason"),
                 )
             return blocked_by_challenge_progress
@@ -243,7 +276,11 @@ class ToolDispatcher:
             intercepted_result.metadata = {
                 **dispatch_metadata,
                 **normalization_metadata,
-                **(intercepted_result.metadata if isinstance(intercepted_result.metadata, dict) else {}),
+                **(
+                    intercepted_result.metadata
+                    if isinstance(intercepted_result.metadata, dict)
+                    else {}
+                ),
             }
             log_kv(
                 self.log,
@@ -322,18 +359,24 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     error=validation_error,
                     arguments_preview=json_safe_value(args),
-                    validation_issues=self._serialize_validation_issues(validation_issues),
+                    validation_issues=self._serialize_validation_issues(
+                        validation_issues
+                    ),
                 )
             metadata = {
                 "validation_error": "schema_validation",
-                "validation_issues": self._serialize_validation_issues(validation_issues),
+                "validation_issues": self._serialize_validation_issues(
+                    validation_issues
+                ),
             }
             if dropped_keys:
                 metadata["ignored_arguments"] = dropped_keys
                 required = spec.schema.get("required", [])
                 missing = [f for f in required if f not in args]
                 if missing:
-                    validation_error += f" (Ignored unknown parameters: {', '.join(dropped_keys)})"
+                    validation_error += (
+                        f" (Ignored unknown parameters: {', '.join(dropped_keys)})"
+                    )
             if coerced_entries:
                 metadata["coerced_arguments"] = coerced_entries
             return ToolEnvelope.make_error(tool_name, validation_error, **metadata)
@@ -360,10 +403,17 @@ class ToolDispatcher:
                 )
             return ToolEnvelope.make_error(tool_name, str(exc), tier=spec.tier)
 
-        if isinstance(result, dict) and {"success", "output", "error", "metadata"} <= set(
-            result.keys()
-        ):
-            result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        if isinstance(result, dict) and {
+            "success",
+            "output",
+            "error",
+            "metadata",
+        } <= set(result.keys()):
+            result_metadata = (
+                result.get("metadata")
+                if isinstance(result.get("metadata"), dict)
+                else {}
+            )
             result_metadata = {
                 **dispatch_metadata,
                 **normalization_metadata,
@@ -393,7 +443,7 @@ class ToolDispatcher:
                     tier=spec.tier,
                     output=result_output,
                     error=result.get("error"),
-            )
+                )
             return ToolEnvelope(
                 success=bool(result["success"]),
                 status=result.get("status"),
@@ -404,7 +454,11 @@ class ToolDispatcher:
         return ToolEnvelope(
             success=True,
             output=result,
-            metadata={**dispatch_metadata, **normalization_metadata, **self._legacy_coercion_metadata(dropped_keys, coerced_entries)},
+            metadata={
+                **dispatch_metadata,
+                **normalization_metadata,
+                **self._legacy_coercion_metadata(dropped_keys, coerced_entries),
+            },
         )
 
     @staticmethod
@@ -423,23 +477,33 @@ class ToolDispatcher:
         coerced_entries: list[dict[str, Any]] = []
         if isinstance(properties, dict):
             dropped = [key for key in coerced if key not in properties]
-            coerced = {key: value for key, value in coerced.items() if key in properties}
+            coerced = {
+                key: value for key, value in coerced.items() if key in properties
+            }
             for key, value in list(coerced.items()):
                 expected_type = properties.get(key, {}).get("type")
                 new_value = _coerce_value(expected_type, value)
                 if new_value is not value:
                     coerced_entries.append(
-                        {"key": key, "from": json_safe_value(value), "to": json_safe_value(new_value)}
+                        {
+                            "key": key,
+                            "from": json_safe_value(value),
+                            "to": json_safe_value(new_value),
+                        }
                     )
                 coerced[key] = new_value
         return coerced, dropped, coerced_entries
 
     @staticmethod
     def _validate_args(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:
-        return ToolDispatcher._format_validation_error(ToolDispatcher._validate_arg_issues(schema, arguments))
+        return ToolDispatcher._format_validation_error(
+            ToolDispatcher._validate_arg_issues(schema, arguments)
+        )
 
     @staticmethod
-    def _validate_arg_issues(schema: dict[str, Any], arguments: Any) -> list[ToolCallValidationIssue]:
+    def _validate_arg_issues(
+        schema: dict[str, Any], arguments: Any
+    ) -> list[ToolCallValidationIssue]:
         return validate_tool_args(schema, arguments)
 
     @staticmethod
@@ -461,7 +525,9 @@ class ToolDispatcher:
         return issue.message or f"Invalid field: {path}"
 
     @staticmethod
-    def _serialize_validation_issues(issues: list[ToolCallValidationIssue]) -> list[dict[str, Any]]:
+    def _serialize_validation_issues(
+        issues: list[ToolCallValidationIssue],
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "path": [str(part) for part in issue.path],
@@ -474,7 +540,9 @@ class ToolDispatcher:
         ]
 
     @staticmethod
-    def _legacy_coercion_metadata(dropped_keys: list[str], coerced_entries: list[dict[str, Any]]) -> dict[str, Any]:
+    def _legacy_coercion_metadata(
+        dropped_keys: list[str], coerced_entries: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         if not dropped_keys and not coerced_entries:
             return {}
         metadata: dict[str, Any] = {"legacy_dispatch_coercion": True}
@@ -488,7 +556,9 @@ class ToolDispatcher:
 class PipelineDispatcher:
     """Combines a base ToolDispatcher with multiple ToolInterceptors."""
 
-    def __init__(self, base: ToolDispatcher, interceptors: list[ToolInterceptor]) -> None:
+    def __init__(
+        self, base: ToolDispatcher, interceptors: list[ToolInterceptor]
+    ) -> None:
         self.base = base
         self.interceptors = interceptors
 
@@ -500,7 +570,3 @@ class PipelineDispatcher:
             return await interceptor(name, args, lambda n, a: _run(idx + 1, n, a))
 
         return await _run(0, tool_name, arguments)
-
-
-
-

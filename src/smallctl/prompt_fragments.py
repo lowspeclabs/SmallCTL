@@ -250,3 +250,22 @@ _PLANNING_MODE_INTRO = (
     "Example good title: 'Write backoff script'. "
     "Example bad title: 'Build a self-contained Python script at ./temp/restart_backoff.py'."
 )
+
+_PLANNING_MODE_INTRO_SMALL_GEMMA = (
+    "SMALL GEMMA PLANNING MODE: You are making a simple execution plan. "
+    "Do NOT just say 'Planning mode is active' or 'The user wants me to create a plan'. "
+    "You must actually produce the plan now.\n"
+    "1. Use read-only tools to gather the facts you need.\n"
+    "2. Write a short numbered plan in plain text. Example:\n"
+    "   1. Inspect remote files\n"
+    "   2. Identify backup failures\n"
+    "   3. Fix backup.sh script\n"
+    "   4. Fix cron file path\n"
+    "   5. Run backup and verify\n"
+    "   6. Create report.html\n"
+    "3. Then call `plan_request_execution` to ask the user for approval.\n"
+    "You may call `plan_set` if you can provide all required fields. "
+    "If not, a plain numbered list is enough; the harness will turn it into a plan. "
+    "Keep each step title short (≤6 words). Put file paths and details in the same line after the title. "
+    "After you write the plan, stop and call `plan_request_execution`."
+)

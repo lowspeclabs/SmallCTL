@@ -6,9 +6,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from smallctl.client.client import OpenAICompatClient
-from smallctl.graph.model_call_nodes import _conversation_tool_calls_from_pending, model_call
+from smallctl.graph.model_call_nodes import (
+    _conversation_tool_calls_from_pending,
+    model_call,
+)
 from smallctl.graph.model_stream_fallback import StreamProcessingResult
-from smallctl.graph.model_stream_loop_rendering import StreamTagState, flush_model_stream_buffer, handle_model_stream_chunk
+from smallctl.graph.model_stream_loop_rendering import (
+    StreamTagState,
+    flush_model_stream_buffer,
+    handle_model_stream_chunk,
+)
 from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.harness.memory import MemoryService
 from smallctl.graph.tool_call_parser import parse_tool_calls
@@ -50,7 +57,14 @@ class _FakeStdin:
 
 
 class _FakeProc:
-    def __init__(self, *, returncode: int, stdout: bytes = b"", stderr: bytes = b"", stdin: _FakeStdin | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        returncode: int,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        stdin: _FakeStdin | None = None,
+    ) -> None:
         self.stdout = _FakeStream([stdout, b""])
         self.stderr = _FakeStream([stderr, b""])
         self.returncode = returncode
@@ -124,7 +138,10 @@ def test_ssh_semantic_failure_ignores_plain_diagnostic_probe() -> None:
         "exit_code": 0,
     }
 
-    assert ssh_semantic_failure("which apt apt-get yum dnf 2>&1; ls /bin/dnf", output) == ""
+    assert (
+        ssh_semantic_failure("which apt apt-get yum dnf 2>&1; ls /bin/dnf", output)
+        == ""
+    )
 
 
 def test_qwen_distilled_wrappers_preserve_task_complete_and_plan_reasoning() -> None:
@@ -181,7 +198,9 @@ def test_qwen_distilled_wrappers_preserve_task_complete_and_plan_reasoning() -> 
     assert parse_result.final_assistant_text == ""
 
 
-def test_recovered_inline_tool_calls_are_materialized_for_conversation_history() -> None:
+def test_recovered_inline_tool_calls_are_materialized_for_conversation_history() -> (
+    None
+):
     pending = PendingToolCall(
         tool_name="task_complete",
         args={"message": "Task complete."},
@@ -207,7 +226,9 @@ def test_recovered_inline_tool_calls_are_materialized_for_conversation_history()
     ]
 
 
-def test_inline_json_tool_call_preserves_stripped_top_level_session_id_metadata() -> None:
+def test_inline_json_tool_call_preserves_stripped_top_level_session_id_metadata() -> (
+    None
+):
     cleaned, calls = _extract_inline_tool_calls(
         '{"session_id":"2d3ac862","name":"task_complete","arguments":{"message":"ok"}}'
     )
@@ -230,7 +251,9 @@ def test_plain_json_without_tool_name_is_not_removed_by_inline_parser() -> None:
     assert calls == []
 
 
-def test_truncated_inline_json_tool_call_is_recovered_by_adding_closing_braces() -> None:
+def test_truncated_inline_json_tool_call_is_recovered_by_adding_closing_braces() -> (
+    None
+):
     # Simulates a stream halted by the repetition-loop guard mid-JSON.
     text = '{"tool_name": "ssh_exec", "arguments": {"command": "which docker && dpkg -l | grep docker'
 
@@ -247,7 +270,9 @@ def test_truncated_inline_json_tool_call_is_recovered_by_adding_closing_braces()
 
 
 def test_native_ssh_exec_malformed_arguments_preserve_parse_diagnostic() -> None:
-    raw_arguments = '{"command": "cd /opt/qwen-compose-medium && docker compose up -d"{}'
+    raw_arguments = (
+        '{"command": "cd /opt/qwen-compose-medium && docker compose up -d"{}'
+    )
 
     pending = PendingToolCall.from_payload(
         {
@@ -263,7 +288,10 @@ def test_native_ssh_exec_malformed_arguments_preserve_parse_diagnostic() -> None
     assert pending.raw_arguments == raw_arguments
     assert pending.parser_metadata["arguments_empty"] is False
     assert pending.parser_metadata["raw_arguments_preview"] == raw_arguments
-    assert pending.parser_metadata["arguments_parse_error"]["kind"] == "malformed_json_arguments"
+    assert (
+        pending.parser_metadata["arguments_parse_error"]["kind"]
+        == "malformed_json_arguments"
+    )
 
 
 def test_native_tool_empty_arguments_are_not_marked_malformed() -> None:
@@ -326,7 +354,9 @@ def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
         registry=_Registry(),
         state=LoopState(cwd="."),
         client=SimpleNamespace(model="gemma-4-e4b-it"),
-        _runlog=lambda event, message, **data: runlog_events.append((event, message, data)),
+        _runlog=lambda event, message, **data: runlog_events.append(
+            (event, message, data)
+        ),
     )
 
     parse_result = parse_tool_calls(
@@ -349,17 +379,18 @@ def test_parse_tool_calls_logs_stripped_inline_json_metadata() -> None:
         )
     ]
 
+
 def test_lfm_plan_json_is_stripped_and_next_action_tool_recovered() -> None:
     stream = SimpleNamespace(
         assistant_text=(
-            '{\n'
+            "{\n"
             '  "plan": "Check remote state, then continue.",\n'
             '  "next_actions": [\n'
             '    {"tool_name": "ssh_exec", "arguments": {"host": "192.168.1.161", "user": "root", "command": "test -d /opt/pi-hole && echo present"}}\n'
-            '  ],\n'
+            "  ],\n"
             '  "status_required": "low",\n'
             '  "next_step": null\n'
-            '}'
+            "}"
         ),
         thinking_text="",
         tool_calls=[],
@@ -461,7 +492,9 @@ def test_gemma_channel_marker_does_not_make_prior_prose_thinking() -> None:
 
     stream = OpenAICompatClient.collect_stream(chunks, reasoning_mode="auto")
 
-    assert stream.assistant_text == "I will patch the function and then run the verifier."
+    assert (
+        stream.assistant_text == "I will patch the function and then run the verifier."
+    )
     assert stream.thinking_text == ""
 
 
@@ -525,7 +558,11 @@ def test_gemma_thought_aliases_survive_stream_chunk_boundaries_in_timeline() -> 
             "type": "chunk",
             "data": {
                 "choices": [
-                    {"delta": {"content": "ught>Think it through.</thought>Done.<channel|>"}}
+                    {
+                        "delta": {
+                            "content": "ught>Think it through.</thought>Done.<channel|>"
+                        }
+                    }
                 ]
             },
         },
@@ -607,7 +644,10 @@ def test_parse_tool_calls_recovers_inline_tool_call_from_thinking_text() -> None
 
     assert len(parse_result.pending_tool_calls) == 1
     assert parse_result.pending_tool_calls[0].tool_name == "ssh_exec"
-    assert parse_result.pending_tool_calls[0].args["command"] == "apt-get remove -y docker.io"
+    assert (
+        parse_result.pending_tool_calls[0].args["command"]
+        == "apt-get remove -y docker.io"
+    )
     assert parse_result.pending_tool_calls[0].args["host"] == "192.168.1.63"
     assert parse_result.pending_tool_calls[0].args["user"] == "root"
     assert parse_result.final_thinking_text == ""
@@ -660,7 +700,9 @@ def test_parse_tool_calls_recovers_orphan_parameter_block_from_thinking_text() -
     assert parse_result.final_thinking_text == ""
 
 
-def test_parse_tool_calls_strips_qwen_tool_payload_noise_from_visible_thinking() -> None:
+def test_parse_tool_calls_strips_qwen_tool_payload_noise_from_visible_thinking() -> (
+    None
+):
     stream = SimpleNamespace(
         assistant_text="",
         thinking_text=(
@@ -709,15 +751,13 @@ def test_parse_tool_calls_strips_qwen_tool_payload_noise_from_visible_thinking()
     assert "@S02v1735" not in parse_result.final_thinking_text
 
 
-def test_parse_tool_calls_skips_reasoning_fallback_when_tool_protocol_is_present() -> None:
+def test_parse_tool_calls_skips_reasoning_fallback_when_tool_protocol_is_present() -> (
+    None
+):
     stream = SimpleNamespace(
         assistant_text="",
         thinking_text=(
-            "<tool_call>\n"
-            "<parameter=password>\n"
-            "@S0v1735\n"
-            "</parameter>\n"
-            "</tool_call>\n"
+            "<tool_call>\n<parameter=password>\n@S0v1735\n</parameter>\n</tool_call>\n"
         ),
         tool_calls=[],
     )
@@ -740,7 +780,9 @@ def test_parse_tool_calls_skips_reasoning_fallback_when_tool_protocol_is_present
     assert parse_result.final_assistant_text == ""
 
 
-def test_parse_tool_calls_recovers_markdown_wrapped_task_complete_function_syntax() -> None:
+def test_parse_tool_calls_recovers_markdown_wrapped_task_complete_function_syntax() -> (
+    None
+):
     stream = SimpleNamespace(
         assistant_text="**task_complete(message='HTTP GET confirmed the page is served remotely.')**",
         thinking_text="",
@@ -764,7 +806,9 @@ def test_parse_tool_calls_recovers_markdown_wrapped_task_complete_function_synta
     assert len(parse_result.pending_tool_calls) == 1
     recovered = parse_result.pending_tool_calls[0]
     assert recovered.tool_name == "task_complete"
-    assert recovered.args["message"] == "HTTP GET confirmed the page is served remotely."
+    assert (
+        recovered.args["message"] == "HTTP GET confirmed the page is served remotely."
+    )
     assert parse_result.final_assistant_text == ""
 
 
@@ -886,7 +930,10 @@ def test_parse_tool_calls_reasoning_only_trace_uses_safe_non_silent_fallback() -
     )
 
     assert parse_result.pending_tool_calls == []
-    assert parse_result.final_assistant_text == "The model returned reasoning text but no final answer."
+    assert (
+        parse_result.final_assistant_text
+        == "The model returned reasoning text but no final answer."
+    )
     assert "Analyze the request" not in parse_result.final_assistant_text
 
 
@@ -902,7 +949,9 @@ def test_streaming_qwen_wrappers_hide_analysis_and_keep_response_visible() -> No
         thinking_visibility=True,
         state=SimpleNamespace(planning_mode_enabled=False),
         _emit=_emit,
-        _runlog=lambda event, message, **kwargs: runlog.append((event, message, kwargs)),
+        _runlog=lambda event, message, **kwargs: runlog.append(
+            (event, message, kwargs)
+        ),
         _stream_print=lambda text: printed.append(text),
     )
     deps = SimpleNamespace(event_handler=object())
@@ -911,11 +960,21 @@ def test_streaming_qwen_wrappers_hide_analysis_and_keep_response_visible() -> No
     chunks: list[dict[str, object]] = []
 
     stream_events = [
-        {"data": {"choices": [{"delta": {"reasoning_content": "Reason through the greeting.\n"}}]}},
+        {
+            "data": {
+                "choices": [
+                    {"delta": {"reasoning_content": "Reason through the greeting.\n"}}
+                ]
+            }
+        },
         {"data": {"choices": [{"delta": {"content": "<"}}]}},
         {"data": {"choices": [{"delta": {"content": "analysis"}}]}},
         {"data": {"choices": [{"delta": {"content": ">"}}]}},
-        {"data": {"choices": [{"delta": {"content": "Reason through the greeting.\n"}}]}},
+        {
+            "data": {
+                "choices": [{"delta": {"content": "Reason through the greeting.\n"}}]
+            }
+        },
         {"data": {"choices": [{"delta": {"content": "</"}}]}},
         {"data": {"choices": [{"delta": {"content": "analysis"}}]}},
         {"data": {"choices": [{"delta": {"content": ">"}}]}},
@@ -992,13 +1051,15 @@ def test_model_call_emits_thinking_replace_after_qwen_tool_recovery() -> None:
         _emit=_emit,
         _apply_usage=lambda _usage: None,
         _runlog=lambda *args, **kwargs: None,
-        _record_assistant_message=lambda assistant_text, tool_calls, **kwargs: recorded_messages.append(
-            (assistant_text, tool_calls)
+        _record_assistant_message=lambda assistant_text, tool_calls, **kwargs: (
+            recorded_messages.append((assistant_text, tool_calls))
         ),
         _log_conversation_state=lambda *_args, **_kwargs: None,
     )
     deps = SimpleNamespace(harness=harness, event_handler=object())
-    graph_state = GraphRunState(loop_state=harness.state, thread_id="session123", run_mode="execute")
+    graph_state = GraphRunState(
+        loop_state=harness.state, thread_id="session123", run_mode="execute"
+    )
 
     result = StreamProcessingResult(
         stream=SimpleNamespace(
@@ -1029,7 +1090,10 @@ def test_model_call_emits_thinking_replace_after_qwen_tool_recovery() -> None:
         ttft=0.1,
     )
 
-    with patch("smallctl.graph.model_call_nodes.process_model_stream", AsyncMock(return_value=result)):
+    with patch(
+        "smallctl.graph.model_call_nodes.process_model_stream",
+        AsyncMock(return_value=result),
+    ):
         asyncio.run(
             model_call(
                 graph_state,
@@ -1097,7 +1161,9 @@ def test_model_stream_batches_adjacent_assistant_chunks() -> None:
     )
 
     assistant_events = [
-        event for event in emitted if getattr(event, "event_type", None) == UIEventType.ASSISTANT
+        event
+        for event in emitted
+        if getattr(event, "event_type", None) == UIEventType.ASSISTANT
     ]
 
     assert len(assistant_events) == 1
@@ -1111,7 +1177,9 @@ def test_ssh_exec_exit1_with_stderr_returns_fail() -> None:
     with patch.object(
         network,
         "create_process",
-        AsyncMock(return_value=_FakeProc(returncode=1, stderr=b"some error occurred\n")),
+        AsyncMock(
+            return_value=_FakeProc(returncode=1, stderr=b"some error occurred\n")
+        ),
     ):
         result = asyncio.run(
             network.ssh_exec(
@@ -1134,7 +1202,9 @@ def test_ssh_exec_exit1_with_stderr_returns_fail() -> None:
     assert result["metadata"]["ssh_auth_transport"] == "sshpass_file"
     assert result["metadata"]["ssh_password_provided"] is True
     assert result["metadata"]["output"]["exit_code"] == 1
-    assert not any("username/password" in hint.lower() for hint in result["metadata"]["hints"])
+    assert not any(
+        "username/password" in hint.lower() for hint in result["metadata"]["hints"]
+    )
 
 
 def test_ssh_exec_diagnostic_not_found_returns_success() -> None:
@@ -1143,7 +1213,11 @@ def test_ssh_exec_diagnostic_not_found_returns_success() -> None:
     with patch.object(
         network,
         "create_process",
-        AsyncMock(return_value=_FakeProc(returncode=1, stderr=b"Unit fog-pxe.service could not be found.\n")),
+        AsyncMock(
+            return_value=_FakeProc(
+                returncode=1, stderr=b"Unit fog-pxe.service could not be found.\n"
+            )
+        ),
     ):
         result = asyncio.run(
             network.ssh_exec(
@@ -1247,14 +1321,20 @@ def test_ssh_remote_nonzero_memory_label_is_not_unknown_failure() -> None:
         success=False,
         error="Remote SSH command exited with code 1",
         metadata={
-            "arguments": {"host": "192.168.1.63", "user": "root", "command": "systemctl status missing"},
+            "arguments": {
+                "host": "192.168.1.63",
+                "user": "root",
+                "command": "systemctl status missing",
+            },
             "failure_mode": "remote_exit_nonzero",
             "ssh_error_class": "remote_exit_nonzero",
             "ssh_transport_succeeded": True,
         },
     )
 
-    memory = MemoryService(harness).record_experience(tool_name="ssh_exec", result=result)
+    memory = MemoryService(harness).record_experience(
+        tool_name="ssh_exec", result=result
+    )
 
     assert memory.failure_mode == "remote_exit_nonzero"
     assert "SSH reached the remote host" in memory.notes
@@ -1264,7 +1344,9 @@ def test_ssh_remote_nonzero_memory_label_is_not_unknown_failure() -> None:
 def test_ssh_exec_writes_stdin_data_to_remote_command() -> None:
     state = LoopState(cwd="/tmp")
     fake_stdin = _FakeStdin()
-    create_process = AsyncMock(return_value=_FakeProc(returncode=0, stdout=b"done\n", stdin=fake_stdin))
+    create_process = AsyncMock(
+        return_value=_FakeProc(returncode=0, stdout=b"done\n", stdin=fake_stdin)
+    )
 
     with patch.object(network, "create_process", create_process):
         result = asyncio.run(
@@ -1372,7 +1454,9 @@ def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
 
 def test_ssh_exec_blocks_harness_tool_name_as_remote_shell_command() -> None:
     state = LoopState(cwd=".")
-    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and fix service files'
+    state.run_brief.original_task = (
+        'ssh root@192.168.1.89 with password "Temp@Pass" and fix service files'
+    )
 
     tool_name, args, intercepted, _metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
@@ -1401,7 +1485,9 @@ def test_ssh_exec_blocks_harness_tool_name_as_remote_shell_command() -> None:
 
 def test_ssh_exec_blocks_nested_raw_ssh_command() -> None:
     state = LoopState(cwd=".")
-    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and run whoami'
+    state.run_brief.original_task = (
+        'ssh root@192.168.1.89 with password "Temp@Pass" and run whoami'
+    )
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
@@ -1647,12 +1733,14 @@ def test_normalize_tool_request_blocks_unparseable_raw_shell_ssh() -> None:
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(
-            get=lambda name: SimpleNamespace(
-                phase_allowed=lambda phase: True,
-                profile_allowed=lambda profiles: True,
+            get=lambda name: (
+                SimpleNamespace(
+                    phase_allowed=lambda phase: True,
+                    profile_allowed=lambda profiles: True,
+                )
+                if name == "ssh_exec"
+                else None
             )
-            if name == "ssh_exec"
-            else None
         ),
         "shell_exec",
         {"command": "scp ./local.txt root@192.168.1.63:/tmp/local.txt"},
@@ -1668,7 +1756,9 @@ def test_normalize_tool_request_blocks_unparseable_raw_shell_ssh() -> None:
     assert metadata == {}
 
 
-def test_normalize_tool_request_blocks_repeated_ssh_auth_failure_without_new_password() -> None:
+def test_normalize_tool_request_blocks_repeated_ssh_auth_failure_without_new_password() -> (
+    None
+):
     state = LoopState(cwd=".")
     state.scratchpad["_ssh_auth_recovery_state"] = {
         "root@192.168.1.63": {
@@ -1698,7 +1788,11 @@ def test_normalize_tool_request_blocks_repeated_ssh_auth_failure_without_new_pas
     assert tool_name == "ssh_exec"
     assert intercepted is not None
     assert intercepted.metadata["reason"] == "ssh_auth_recovery_required"
-    assert intercepted.metadata["next_required_action"]["tool_names"] == ["ssh_exec", "ask_human", "task_fail"]
+    assert intercepted.metadata["next_required_action"]["tool_names"] == [
+        "ssh_exec",
+        "ask_human",
+        "task_fail",
+    ]
     assert metadata["ssh_auth_recovery_required"] is True
 
 
@@ -1735,7 +1829,9 @@ def test_normalize_tool_request_allows_ssh_auth_retry_with_corrected_password() 
     assert metadata["ssh_auth_recovery_branch"] == "retry_with_password"
 
 
-def test_normalize_tool_request_pins_confirmed_ssh_password_over_stale_explicit_password() -> None:
+def test_normalize_tool_request_pins_confirmed_ssh_password_over_stale_explicit_password() -> (
+    None
+):
     state = LoopState(cwd=".")
     state.scratchpad["_session_ssh_targets"] = {
         "192.168.1.89": {
@@ -1767,7 +1863,9 @@ def test_normalize_tool_request_pins_confirmed_ssh_password_over_stale_explicit_
     assert metadata["pinned_ssh_password_overrode_origin"] == "explicit"
 
 
-def test_normalize_tool_request_allows_fresh_user_ssh_password_rotation_candidate() -> None:
+def test_normalize_tool_request_allows_fresh_user_ssh_password_rotation_candidate() -> (
+    None
+):
     state = LoopState(cwd=".")
     state.scratchpad["_session_ssh_targets"] = {
         "192.168.1.89": {
@@ -1910,10 +2008,14 @@ def test_tool_call_repair_drops_optional_none_sentinels() -> None:
     assert result.valid_after_repair is True
     assert "write_session_id" not in result.args
     assert "next_section_name" not in result.args
-    assert any(action.kind == "optional_none_sentinel_to_omit" for action in result.actions)
+    assert any(
+        action.kind == "optional_none_sentinel_to_omit" for action in result.actions
+    )
 
 
-def test_normalize_tool_request_does_not_backfill_mismatched_write_session_path() -> None:
+def test_normalize_tool_request_does_not_backfill_mismatched_write_session_path() -> (
+    None
+):
     state = LoopState(cwd=".")
     state.write_session = WriteSession(
         write_session_id="ws_active",
@@ -2056,11 +2158,49 @@ def test_remote_task_guard_blocks_local_shell_exec_for_remote_context() -> None:
     assert metadata == {}
     assert intercepted is not None
     assert intercepted.success is False
-    assert intercepted.error == "This is a remote task. Use `ssh_exec`, not local `shell_exec`."
+    assert (
+        intercepted.error
+        == "This is a remote task. Use `ssh_exec`, not local `shell_exec`."
+    )
     assert intercepted.metadata["reason"] == "remote_task_requires_ssh_exec"
 
 
-def test_remote_scope_guard_blocks_shell_exec_on_remote_nginx_paths_after_resteer() -> None:
+def test_remote_task_guard_allows_system_sourced_local_verifier_for_remote_context() -> (
+    None
+):
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = (
+        "ssh root@192.168.1.64 and generate a service health report; "
+        "then create /home/stephen/Scripts/Harness-Redo/temp/service_health_report.html"
+    )
+
+    def _get(name: str):
+        if name == "ssh_exec":
+            return SimpleNamespace(phase_allowed=lambda phase: True)
+        return None
+
+    command = (
+        "test -s /home/stephen/Scripts/Harness-Redo/temp/service_health_report.html "
+        "&& python3 - <<'PY'\nimport html\nprint('ok')\nPY"
+    )
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=_get),
+        "shell_exec",
+        {"command": command},
+        phase="execute",
+        state=state,
+        source="system",
+    )
+
+    assert tool_name == "shell_exec"
+    assert args == {"command": command}
+    assert intercepted is None
+    assert metadata.get("source") != "blocked"
+
+
+def test_remote_scope_guard_blocks_shell_exec_on_remote_nginx_paths_after_resteer() -> (
+    None
+):
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     state.task_mode = "debug_inspect"
     state.active_intent = "general_task"
@@ -2275,7 +2415,9 @@ def test_parse_ssh_exec_args_from_shell_command_recovers_connection_probe() -> N
 
 def test_normalize_tool_request_repairs_nested_ssh_exec_arguments() -> None:
     state = LoopState(cwd=".")
-    state.run_brief.original_task = 'ssh root@192.168.1.89 with password "Temp@Pass" and cleanup nginx'
+    state.run_brief.original_task = (
+        'ssh root@192.168.1.89 with password "Temp@Pass" and cleanup nginx'
+    )
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
@@ -2303,7 +2445,9 @@ def test_normalize_tool_request_repairs_nested_ssh_exec_arguments() -> None:
 
 def test_normalize_tool_request_recovers_host_from_task_context() -> None:
     state = LoopState(cwd=".")
-    state.run_brief.original_task = 'ssh root@192.168.1.99 with password "Secret123" and install docker'
+    state.run_brief.original_task = (
+        'ssh root@192.168.1.99 with password "Secret123" and install docker'
+    )
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
@@ -2362,7 +2506,9 @@ def test_store_verifier_verdict_shows_missing_host_placeholder() -> None:
 
 
 def test_build_repair_recovery_message_includes_ssh_schema_hint() -> None:
-    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.tool_execution_recovery_helpers import (
+        _build_repair_recovery_message,
+    )
     from smallctl.graph.state import ToolExecutionRecord
     from smallctl.models.tool_result import ToolEnvelope
 
@@ -2391,7 +2537,9 @@ def test_build_repair_recovery_message_includes_ssh_schema_hint() -> None:
 
 
 def test_build_repair_recovery_message_no_schema_hint_when_args_valid() -> None:
-    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.tool_execution_recovery_helpers import (
+        _build_repair_recovery_message,
+    )
     from smallctl.graph.state import ToolExecutionRecord
     from smallctl.models.tool_result import ToolEnvelope
 
@@ -2417,7 +2565,9 @@ def test_build_repair_recovery_message_no_schema_hint_when_args_valid() -> None:
 
 
 def test_build_repair_recovery_message_detects_interactive_ssh_script() -> None:
-    from smallctl.graph.tool_execution_recovery_helpers import _build_repair_recovery_message
+    from smallctl.graph.tool_execution_recovery_helpers import (
+        _build_repair_recovery_message,
+    )
     from smallctl.graph.state import ToolExecutionRecord
     from smallctl.models.tool_result import ToolEnvelope
 
@@ -2428,7 +2578,10 @@ def test_build_repair_recovery_message_detects_interactive_ssh_script() -> None:
     record = ToolExecutionRecord(
         operation_id="op1",
         tool_name="ssh_exec",
-        args={"target": "root@192.168.1.89", "command": "cd /root/fogproject/bin && echo \"y\" | ./installfog.sh"},
+        args={
+            "target": "root@192.168.1.89",
+            "command": 'cd /root/fogproject/bin && echo "y" | ./installfog.sh',
+        },
         tool_call_id="call_1",
         result=ToolEnvelope(
             success=False,
@@ -2469,10 +2622,16 @@ def test_tool_call_repair_repairs_patch_argument_aliases() -> None:
         handler=lambda **kwargs: kwargs,
     )
 
-    result = repair_tool_call_args(spec, {"path": "foo.py", "source": "old", "dest": "new"})
+    result = repair_tool_call_args(
+        spec, {"path": "foo.py", "source": "old", "dest": "new"}
+    )
 
     assert result.valid_after_repair is True
-    assert result.args == {"path": "foo.py", "target_text": "old", "replacement_text": "new"}
+    assert result.args == {
+        "path": "foo.py",
+        "target_text": "old",
+        "replacement_text": "new",
+    }
     assert "source" not in result.args
     assert "dest" not in result.args
     assert any(action.kind == "patch_argument_alias" for action in result.actions)
@@ -2573,7 +2732,9 @@ def test_tool_dispatcher_coerce_args_returns_dropped_keys_and_coerced_entries() 
     assert coerced == [{"key": "count", "from": "42", "to": 42}]
 
 
-def test_tool_dispatcher_validation_includes_dropped_keys_when_required_missing() -> None:
+def test_tool_dispatcher_validation_includes_dropped_keys_when_required_missing() -> (
+    None
+):
     from smallctl.tools.dispatcher import ToolDispatcher
 
     schema = {
@@ -2740,12 +2901,14 @@ def test_ssh_exec_records_host_key_failure_for_circuit_breaker() -> None:
 
 def _ssh_registry():
     return SimpleNamespace(
-        get=lambda name: SimpleNamespace(
-            phase_allowed=lambda phase: True,
-            profile_allowed=lambda profiles: True,
+        get=lambda name: (
+            SimpleNamespace(
+                phase_allowed=lambda phase: True,
+                profile_allowed=lambda profiles: True,
+            )
+            if name == "ssh_exec"
+            else None
         )
-        if name == "ssh_exec"
-        else None
     )
 
 
@@ -2809,12 +2972,14 @@ def test_normalize_tool_request_blocks_or_rewrites_raw_ssh_family() -> None:
 
 def test_normalize_tool_request_blocks_ssh_exec_when_ssh_unavailable() -> None:
     registry = SimpleNamespace(
-        get=lambda name: SimpleNamespace(
-            phase_allowed=lambda phase: True,
-            profile_allowed=lambda profiles: False,
+        get=lambda name: (
+            SimpleNamespace(
+                phase_allowed=lambda phase: True,
+                profile_allowed=lambda profiles: False,
+            )
+            if name == "ssh_exec"
+            else None
         )
-        if name == "ssh_exec"
-        else None
     )
     state = LoopState(cwd=".")
     tool_name, args, intercepted, _metadata = normalize_tool_request(
@@ -2861,21 +3026,29 @@ def test_normalize_tool_request_host_key_circuit_breaker_suggests_ssh_keygen() -
     assert tool_name == "ssh_exec"
     assert intercepted is not None
     assert intercepted.metadata["reason"] == "ssh_host_key_recovery_required"
-    assert "ssh-keygen -R 192.168.1.161" in intercepted.metadata.get("suggested_command", "")
+    assert "ssh-keygen -R 192.168.1.161" in intercepted.metadata.get(
+        "suggested_command", ""
+    )
     assert "shell_exec" in intercepted.metadata["next_required_action"]["tool_names"]
     assert metadata["ssh_host_key_recovery_required"] is True
 
 
 def test_record_ssh_failure_resets_consecutive_count_on_error_class_change() -> None:
     state = LoopState(cwd="/tmp")
-    network._record_ssh_failure(state, "host", "user", "cmd1", "auth_permission_denied", "err")
-    network._record_ssh_failure(state, "host", "user", "cmd2", "host_key_verification", "err")
+    network._record_ssh_failure(
+        state, "host", "user", "cmd1", "auth_permission_denied", "err"
+    )
+    network._record_ssh_failure(
+        state, "host", "user", "cmd2", "host_key_verification", "err"
+    )
 
     record = state.scratchpad["_ssh_auth_recovery_state"]["user@host"]
     assert record["consecutive_count"] == 1
     assert record["last_error_class"] == "host_key_verification"
 
-    network._record_ssh_failure(state, "host", "user", "cmd3", "host_key_verification", "err")
+    network._record_ssh_failure(
+        state, "host", "user", "cmd3", "host_key_verification", "err"
+    )
     record = state.scratchpad["_ssh_auth_recovery_state"]["user@host"]
     assert record["consecutive_count"] == 2
 
@@ -2961,7 +3134,9 @@ def test_streaming_gemma_channel_marker_ends_thinking_block() -> None:
         thinking_visibility=True,
         state=SimpleNamespace(planning_mode_enabled=False),
         _emit=_emit,
-        _runlog=lambda event, message, **kwargs: runlog.append((event, message, kwargs)),
+        _runlog=lambda event, message, **kwargs: runlog.append(
+            (event, message, kwargs)
+        ),
         _stream_print=lambda _text: None,
     )
     deps = SimpleNamespace(event_handler=object())

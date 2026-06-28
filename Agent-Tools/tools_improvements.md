@@ -24,7 +24,6 @@ lost.
 
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
-| IMP-011 | trace_call.py | medium | In `--compact` mode, collapse repetitive `ui_event` records the same way token/chunk records are collapsed, optionally preserving only kind counts and first/last timestamps. | Large traces with many streamed UI updates still produce thousands of lines and can truncate the actual tool-call details. | open |
 
 ## Completed Improvements
 
@@ -32,6 +31,7 @@ Move implemented improvements here and keep the original ID for reference.
 
 | ID | Tool | Summary | Done Date |
 |----|------|---------|-----------|
+| IMP-011 | trace_call.py | In `--compact` mode, consecutive `ui_event` records are collapsed into a single summary line that preserves per-kind counts and first/last timestamps. Collapsed lines use a wider max width so the summary is not truncated. | 2026-06-28 |
 | IMP-010 | session_replay.py, trace_call.py | `session_replay.py` now pairs multiple dispatches per trace_id and prints a `call-N:dispatch-M` sub-trace id plus `ui_event` kinds. `trace_call.py` renders all dispatches for a trace with their own tool/args/output blocks and ui_event kind summary. | 2026-06-25 |
 | IMP-009 | model_output_lint.py, run_diagnose.py | Detect control-token fragments and reasoning-channel tool-call wrappers without matching dispatches. Added `tool_call_protocol_mismatch` classification in `run_diagnose.py`/`runscan.py` and a dedicated lint category. | 2026-06-25 |
 | IMP-008 | run_diagnose.py, runscan.py | Added `continue_prompt_budget_loop` classification when user "continue"/"proceed" messages after a `task_fail` are followed by repeated `PROMPT BUDGET OVERFLOW` errors. | 2026-06-25 |

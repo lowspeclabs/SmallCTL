@@ -366,7 +366,17 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
     context_hint = _build_reasoning_only_context_hint(harness)
     if context_hint:
         base = f"{base} {context_hint}"
+    ssh_actions = [
+        name for name in ("ssh_exec", "ssh_file_read", "ssh_file_write") if name in names
+    ]
     if phase == "repair":
+        if ssh_actions:
+            action_list = "/".join(ssh_actions)
+            return (
+                f"{base} You are in REPAIR phase for a remote target. Stop analyzing and emit ONE concrete "
+                f"remote action now: call {action_list} to inspect or repair the remote host, or call "
+                "task_complete only if the objective is fully verified. Do not continue hidden reasoning only."
+            )
         if "escalate_to_bigger_model" in names:
             return (
                 f"{base} You are in REPAIR phase. Stop analyzing and emit ONE concrete action now: "
@@ -383,6 +393,12 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
             f"{base} Continue now with a concrete action: call file/read tools if you can make "
             "progress, or call escalate_to_bigger_model if you are stuck or need stronger reasoning. "
             "Do not continue hidden reasoning only."
+        )
+    if ssh_actions:
+        action_list = "/".join(ssh_actions)
+        return (
+            f"{base} Continue now with one concrete remote action: call {action_list}, or call "
+            "task_complete only if the objective is fully verified. Do not continue hidden reasoning only."
         )
     return (
         f"{base} Continue now by calling an appropriate available tool, or answer directly if "

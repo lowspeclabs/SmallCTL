@@ -26,7 +26,12 @@ from ..tools.fs import infer_write_session_intent, new_write_session_id  # noqa:
 from ..write_session_fsm import new_write_session, record_write_session_event  # noqa: F401
 from ..client.chunk_parser import format_tool_call_text
 from .display import format_tool_result_display
-from .state import GraphRunState, PendingToolCall, ToolExecutionRecord, build_operation_id
+from .state import (
+    GraphRunState,
+    PendingToolCall,
+    ToolExecutionRecord,
+    build_operation_id,
+)
 from . import nodes as _nodes
 from .autocontinue import clear_durable_autocontinue_for_pending
 from .lifecycle_tool_validation import (
@@ -108,6 +113,7 @@ async def _emit_tool_result_event(
         ),
     )
 
+
 async def _block_empty_file_write_before_dispatch(
     graph_state: GraphRunState,
     deps: Any,
@@ -123,11 +129,10 @@ async def _block_empty_file_write_before_dispatch(
         return False
 
     err_msg, details = missing_args
-    target_path = str(
-        details.get("target_path")
-        or pending.args.get("path")
-        or ""
-    ).strip() or None
+    target_path = (
+        str(details.get("target_path") or pending.args.get("path") or "").strip()
+        or None
+    )
     repair_decision = _nodes.schema_validation_repair_decision(
         harness,
         pending,
@@ -177,7 +182,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         graph_state.last_tool_results = []
         graph_state.pending_tool_calls = graph_state.pending_tool_calls[:1]
     for pending in graph_state.pending_tool_calls:
-        pending_source = str(getattr(pending, "source", "model") or "model").strip().lower()
+        pending_source = (
+            str(getattr(pending, "source", "model") or "model").strip().lower()
+        )
         if pending_source != "model" and _tool_call_repair_enabled(harness):
             repair_result = _apply_tool_call_schema_repair(harness, pending)
             if (
@@ -188,22 +195,37 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 _record_tool_call_schema_repair(harness, pending, repair_result)
         registry = getattr(harness, "registry", None)
         if registry is not None:
-            normalized_tool_name, normalized_args, intercepted_result, normalization_metadata = normalize_tool_request(
+            (
+                normalized_tool_name,
+                normalized_args,
+                intercepted_result,
+                normalization_metadata,
+            ) = normalize_tool_request(
                 registry,
                 pending.tool_name,
                 pending.args,
                 phase=getattr(getattr(harness, "dispatcher", None), "phase", None),
                 state=harness.state,
+                source=pending_source,
             )
         else:
-            normalized_tool_name, normalized_args, intercepted_result, normalization_metadata = (
+            (
+                normalized_tool_name,
+                normalized_args,
+                intercepted_result,
+                normalization_metadata,
+            ) = (
                 pending.tool_name,
                 pending.args,
                 None,
                 {},
             )
         if intercepted_result is not None:
-            intercepted_metadata = intercepted_result.metadata if isinstance(intercepted_result.metadata, dict) else {}
+            intercepted_metadata = (
+                intercepted_result.metadata
+                if isinstance(intercepted_result.metadata, dict)
+                else {}
+            )
             if intercepted_metadata.get("reason") in {
                 "remote_task_requires_ssh_exec",
                 "remote_path_requires_ssh_exec",
@@ -240,7 +262,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         if intercepted_result is None:
             pending.tool_name = normalized_tool_name
             pending.args = normalized_args
-            if await _block_long_running_remote_timeout_write(graph_state=graph_state, deps=deps, pending=pending):
+            if await _block_long_running_remote_timeout_write(
+                graph_state=graph_state, deps=deps, pending=pending
+            ):
                 return
             _nodes._apply_declared_read_before_write_reroute(
                 graph_state,
@@ -248,11 +272,17 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 pending,
                 assistant_text=dispatch_assistant_text,
             )
-            if await _block_empty_file_write_before_dispatch(graph_state, deps, pending):
+            if await _block_empty_file_write_before_dispatch(
+                graph_state, deps, pending
+            ):
                 return
-            if await _block_outline_mode_violation(graph_state=graph_state, deps=deps, pending=pending):
+            if await _block_outline_mode_violation(
+                graph_state=graph_state, deps=deps, pending=pending
+            ):
                 return
-            contract_violation = _detect_patch_existing_stage_read_contract_violation(harness, pending)
+            contract_violation = _detect_patch_existing_stage_read_contract_violation(
+                harness, pending
+            )
             if contract_violation is not None:
                 err_msg, details = contract_violation
                 harness.state.recent_errors.append(err_msg)
@@ -326,7 +356,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 return
             pending = maybe_pending
 
-        timeout_recovery = _detect_timeout_recovered_incomplete_tool_call(harness, pending)
+        timeout_recovery = _detect_timeout_recovered_incomplete_tool_call(
+            harness, pending
+        )
         if timeout_recovery is not None:
             recovery_message, recovery_details = timeout_recovery
             harness.state.append_message(
@@ -340,7 +372,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         "tool_call_id": pending.tool_call_id,
                         "required_fields": recovery_details.get("required_fields", []),
                         "present_fields": recovery_details.get("present_fields", []),
-                        "missing_required_fields": recovery_details.get("missing_required_fields", []),
+                        "missing_required_fields": recovery_details.get(
+                            "missing_required_fields", []
+                        ),
                     },
                 )
             )
@@ -351,7 +385,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 tool_call_id=pending.tool_call_id,
                 provider_profile=recovery_details.get("provider_profile"),
                 present_fields=recovery_details.get("present_fields", []),
-                missing_required_fields=recovery_details.get("missing_required_fields", []),
+                missing_required_fields=recovery_details.get(
+                    "missing_required_fields", []
+                ),
                 arguments=recovery_details.get("arguments", {}),
                 raw_arguments_preview=recovery_details.get("raw_arguments_preview", ""),
             )
@@ -366,7 +402,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         "tool_call_id": pending.tool_call_id,
                         "provider_profile": recovery_details.get("provider_profile"),
                         "present_fields": recovery_details.get("present_fields", []),
-                        "missing_required_fields": recovery_details.get("missing_required_fields", []),
+                        "missing_required_fields": recovery_details.get(
+                            "missing_required_fields", []
+                        ),
                     },
                 ),
             )
@@ -374,12 +412,24 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
 
         hallucination_hint = _detect_hallucinated_tool_call(harness, pending)
         if hallucination_hint:
-            log_kv(harness.log, logging.WARNING, "harness_hallucinated_tool_call", tool_name=pending.tool_name)
-            await harness._emit(deps.event_handler, UIEvent(event_type=UIEventType.SYSTEM, content=hallucination_hint))
+            log_kv(
+                harness.log,
+                logging.WARNING,
+                "harness_hallucinated_tool_call",
+                tool_name=pending.tool_name,
+            )
+            await harness._emit(
+                deps.event_handler,
+                UIEvent(event_type=UIEventType.SYSTEM, content=hallucination_hint),
+            )
             fake_result = ToolEnvelope(
                 success=False,
                 error=hallucination_hint,
-                metadata={"hallucinated_tool": pending.tool_name, "hallucination": True, "suppress_failure_persistence": True}
+                metadata={
+                    "hallucinated_tool": pending.tool_name,
+                    "hallucination": True,
+                    "suppress_failure_persistence": True,
+                },
             )
             graph_state.last_tool_results.append(
                 ToolExecutionRecord(
@@ -392,7 +442,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             )
             continue
 
-        pending_source = str(getattr(pending, "source", "model") or "model").strip().lower()
+        pending_source = (
+            str(getattr(pending, "source", "model") or "model").strip().lower()
+        )
         registry = getattr(harness, "registry", None)
         if pending_source == "model" and registry is not None:
             tool_exposure = resolve_turn_tool_exposure(harness, graph_state.run_mode)
@@ -410,7 +462,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 scratchpad = safe_scratchpad(harness.state) or {}
                 is_smalltalk_terminal_only = (
                     graph_state.run_mode == "chat"
-                    and str(scratchpad.get("_chat_tools_suppressed_reason") or "").strip()
+                    and str(
+                        scratchpad.get("_chat_tools_suppressed_reason") or ""
+                    ).strip()
                     == "smalltalk_terminal_only"
                 )
                 retry_scheduled = False
@@ -422,8 +476,14 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         arguments=pending.args,
                     )
                     if retry_scheduled:
-                        pending_args = pending.args if isinstance(pending.args, dict) else {}
-                        path = str(pending_args.get("path") or pending_args.get("target_path") or "").strip()
+                        pending_args = (
+                            pending.args if isinstance(pending.args, dict) else {}
+                        )
+                        path = str(
+                            pending_args.get("path")
+                            or pending_args.get("target_path")
+                            or ""
+                        ).strip()
                         retry_message = (
                             f"Registered but unavailable on this turn: `{pending.tool_name}`. "
                             f"Retry on the next turn with `{pending.tool_name}` immediately. "
@@ -457,9 +517,13 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 hidden_reason_text = _TOOL_NOT_EXPOSED_REASON_LABELS.get(
                     str(hidden_reason or "").strip(),
                 )
-                names_fn = getattr(registry, "names", None) if registry is not None else None
+                names_fn = (
+                    getattr(registry, "names", None) if registry is not None else None
+                )
                 try:
-                    is_registered = callable(names_fn) and pending.tool_name in names_fn()
+                    is_registered = (
+                        callable(names_fn) and pending.tool_name in names_fn()
+                    )
                 except Exception:
                     is_registered = False
                 if is_registered:
@@ -593,7 +657,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
         else:
             try:
                 registry = getattr(harness, "registry", None)
-                names_fn = getattr(registry, "names", None) if registry is not None else None
+                names_fn = (
+                    getattr(registry, "names", None) if registry is not None else None
+                )
                 if callable(names_fn):
                     if pending.tool_name not in names_fn():
                         raise _nodes.ToolNotFoundError(pending.tool_name)
@@ -622,17 +688,21 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         "tool_name": pending.tool_name,
                         "tool_call_id": pending.tool_call_id,
                     }
-                    harness._active_dispatch_task = asyncio.create_task(dispatch_fn(pending.tool_name, pending.args))
+                    harness._active_dispatch_task = asyncio.create_task(
+                        dispatch_fn(pending.tool_name, pending.args)
+                    )
                     result = await harness._active_dispatch_task
             except _nodes.ToolNotFoundError:
                 if pending.tool_name in _nodes.HALLUCINATION_MAP:
                     mapped_tool = _nodes.HALLUCINATION_MAP[pending.tool_name]
-                    pending_args = pending.args if isinstance(pending.args, dict) else {}
+                    pending_args = (
+                        pending.args if isinstance(pending.args, dict) else {}
+                    )
                     raw_id = (
-                        pending_args.get("path") or
-                        pending_args.get("artifact_id") or
-                        pending_args.get("pattern") or
-                        "A000X"
+                        pending_args.get("path")
+                        or pending_args.get("artifact_id")
+                        or pending_args.get("pattern")
+                        or "A000X"
                     )
                     artifact_id = str(raw_id).split("/")[-1]
                     if not artifact_id.startswith("A") and "A" in artifact_id:
@@ -643,7 +713,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     result = ToolEnvelope(
                         success=True,
                         output=hint,
-                        metadata={"interceptor_hit": True, "hallucinated_tool": pending.tool_name}
+                        metadata={
+                            "interceptor_hit": True,
+                            "hallucinated_tool": pending.tool_name,
+                        },
                     )
                 else:
                     result = ToolEnvelope.make_error(
@@ -694,7 +767,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         result=error_result,
                     )
                 )
-                harness.state.recent_errors.append(str(error_result.error or f"Tool dispatch failed: {pending.tool_name}"))
+                harness.state.recent_errors.append(
+                    str(
+                        error_result.error
+                        or f"Tool dispatch failed: {pending.tool_name}"
+                    )
+                )
                 continue
             except asyncio.CancelledError:
                 elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
@@ -730,7 +808,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         result=cancelled_result,
                     )
                 )
-                harness.state.recent_errors.append(str(cancelled_result.error or "Tool dispatch cancelled."))
+                harness.state.recent_errors.append(
+                    str(cancelled_result.error or "Tool dispatch cancelled.")
+                )
                 harness._runlog(
                     "tool_dispatch_cancelled",
                     "tool dispatch cancelled while awaiting tool result",
@@ -757,14 +837,19 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     deps.event_handler,
                     UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
                 )
-                graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
+                graph_state.final_result = {
+                    "status": "cancelled",
+                    "reason": "cancel_requested",
+                }
                 return
             finally:
                 harness._active_dispatch_task = None
                 harness._active_ui_tool_context = None
             if isinstance(result, dict):
                 result = _tool_envelope_from_dict(result)
-            elif isinstance(result, ToolEnvelope) and not isinstance(result.metadata, dict):
+            elif isinstance(result, ToolEnvelope) and not isinstance(
+                result.metadata, dict
+            ):
                 result.metadata = {}
             # Persist the artifact immediately while the result still holds the
             # full tool output. Graph state serialization between nodes compacts
@@ -774,7 +859,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             # only contains a 4k preview).
             if not replayed and result.success:
                 tool_results_service = getattr(harness, "tool_results", None)
-                if tool_results_service is not None and callable(getattr(tool_results_service, "persist_artifact_early", None)):
+                if tool_results_service is not None and callable(
+                    getattr(tool_results_service, "persist_artifact_early", None)
+                ):
                     try:
                         tool_results_service.persist_artifact_early(
                             tool_name=pending.tool_name,
@@ -824,7 +911,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 replayed=replayed,
             )
         )
-        if (getattr(result, "status", None) == "needs_human" or result.metadata.get("status") == "needs_human"):
+        if (
+            getattr(result, "status", None) == "needs_human"
+            or result.metadata.get("status") == "needs_human"
+        ):
             graph_state.pending_tool_calls = []
             break
 
@@ -841,13 +931,21 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
     total_approval_wait_sec = 0.0
     for record in graph_state.last_tool_results:
         if record.result and isinstance(record.result.metadata, dict):
-            total_execution_sec += record.result.metadata.get("execution_sec", 0.0) or 0.0
-            total_approval_wait_sec += record.result.metadata.get("approval_wait_sec", 0.0) or 0.0
+            total_execution_sec += (
+                record.result.metadata.get("execution_sec", 0.0) or 0.0
+            )
+            total_approval_wait_sec += (
+                record.result.metadata.get("approval_wait_sec", 0.0) or 0.0
+            )
 
     if total_execution_sec > 0:
-        graph_state.latency_metrics["tool_actual_execution_sec"] = round(total_execution_sec, 3)
+        graph_state.latency_metrics["tool_actual_execution_sec"] = round(
+            total_execution_sec, 3
+        )
     if total_approval_wait_sec > 0:
-        graph_state.latency_metrics["tool_approval_wait_sec"] = round(total_approval_wait_sec, 3)
+        graph_state.latency_metrics["tool_approval_wait_sec"] = round(
+            total_approval_wait_sec, 3
+        )
 
     if duration > 0.05:
         metrics_msg = f"Tool dispatch: {duration:.2f}s"
@@ -863,8 +961,12 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 content=metrics_msg,
                 data={
                     "duration_sec": duration,
-                    "execution_sec": total_execution_sec if total_execution_sec > 0 else None,
-                    "approval_wait_sec": total_approval_wait_sec if total_approval_wait_sec > 0 else None,
-                }
+                    "execution_sec": total_execution_sec
+                    if total_execution_sec > 0
+                    else None,
+                    "approval_wait_sec": total_approval_wait_sec
+                    if total_approval_wait_sec > 0
+                    else None,
+                },
             ),
         )

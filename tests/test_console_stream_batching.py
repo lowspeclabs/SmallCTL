@@ -112,6 +112,48 @@ def test_stream_filter_preserves_markdown_code_and_prose() -> None:
     asyncio.run(_run())
 
 
+def test_stream_filter_suppresses_split_fenced_json_tool_call() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        chunks = [
+            "I will inspect the host.\n\n```json\n{\n  \"tool_name\": \"ssh_exec\",",
+            "\n  \"arguments\": {\n    \"command\": \"hostname\"\n  }",
+            "\n}",
+            "\n```",
+            "\nAfter that I will review the output.",
+        ]
+        for chunk in chunks:
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, chunk))
+        await console.flush_stream_buffers()
+
+        assert console.calls == [
+            (
+                "assistant",
+                "I will inspect the host.\n\nAfter that I will review the output.",
+                None,
+                None,
+            )
+        ]
+
+    asyncio.run(_run())
+
+
+def test_stream_filter_suppresses_same_chunk_fenced_json_tool_call_preserving_prose() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        await console.append_event(
+            UIEvent(
+                UIEventType.ASSISTANT,
+                'Before\n```json\n{"tool_name":"ssh_exec","arguments":{"command":"hostname"}}\n```\nAfter',
+            )
+        )
+        await console.flush_stream_buffers()
+
+        assert console.calls == [("assistant", "Before\nAfter", None, None)]
+
+    asyncio.run(_run())
+
+
 def test_shell_stream_chunks_are_coalesced_by_tool_identity() -> None:
     async def _run() -> None:
         console = _RecordingConsole()

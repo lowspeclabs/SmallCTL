@@ -32,6 +32,8 @@ class ConsolePane(VerticalScroll):
         self._retention_placeholder: BubbleWidget | None = None
         self._json_suppress_active = False
         self._json_suppress_buffer = ""
+        self._json_suppress_mode = "raw"
+        self._json_suppress_trim_next_newline = False
         self._json_suppress_max_len = 5000
 
     def set_verbose(self, verbose: bool) -> None:
@@ -56,6 +58,8 @@ class ConsolePane(VerticalScroll):
         self._clear_stream_buffers()
         self._json_suppress_active = False
         self._json_suppress_buffer = ""
+        self._json_suppress_mode = "raw"
+        self._json_suppress_trim_next_newline = False
         stack = self.query_one("#bubble-stack", Vertical)
         await stack.remove_children()
         self._active_assistant_turn = None
@@ -390,15 +394,48 @@ class ConsolePane(VerticalScroll):
         if not text:
             return text
 
+        if (
+            not self._json_suppress_active
+            and self._json_suppress_trim_next_newline
+            and text.startswith("\n")
+        ):
+            text = text[1:]
+            if not text:
+                return ""
+        if not self._json_suppress_active:
+            self._json_suppress_trim_next_newline = False
+
         # If we are already suppressing a JSON tool-call block, keep buffering
         # until the block terminates (closing fence or balanced braces).
         if self._json_suppress_active:
             self._json_suppress_buffer += text
             buf = self._json_suppress_buffer
-            # Markdown JSON fence end
+            if self._json_suppress_mode == "fenced":
+                fence_match = re.search(r"(?:^|\n)```", buf)
+                if fence_match:
+                    fence_end = fence_match.end()
+                    self._json_suppress_active = False
+                    self._json_suppress_buffer = ""
+                    self._json_suppress_mode = "raw"
+                    remainder = buf[fence_end:]
+                    if self._json_suppress_trim_next_newline and remainder.startswith("\n"):
+                        remainder = remainder[1:]
+                    trim_next = self._json_suppress_trim_next_newline and not remainder
+                    self._json_suppress_trim_next_newline = trim_next
+                    return self._filter_tool_call_tokens_from_stream(remainder)
+                if len(self._json_suppress_buffer) > self._json_suppress_max_len:
+                    self._json_suppress_active = False
+                    self._json_suppress_buffer = ""
+                    self._json_suppress_mode = "raw"
+                    self._json_suppress_trim_next_newline = False
+                return ""
+
+            # Raw JSON object end.
             if "\n```" in buf or buf.rstrip().endswith("```"):
                 self._json_suppress_active = False
                 self._json_suppress_buffer = ""
+                self._json_suppress_mode = "raw"
+                self._json_suppress_trim_next_newline = False
                 return ""
             # Balanced braces for raw JSON objects
             brace_count = 0
@@ -432,12 +469,16 @@ class ConsolePane(VerticalScroll):
                     remainder = remainder_stripped[len("```") :]
                 self._json_suppress_active = False
                 self._json_suppress_buffer = ""
+                self._json_suppress_mode = "raw"
+                self._json_suppress_trim_next_newline = False
                 return self._filter_tool_call_tokens_from_stream(remainder)
             # Safety flush if the buffer grows too large without termination
             if len(self._json_suppress_buffer) > self._json_suppress_max_len:
                 flushed = self._json_suppress_buffer
                 self._json_suppress_active = False
                 self._json_suppress_buffer = ""
+                self._json_suppress_mode = "raw"
+                self._json_suppress_trim_next_newline = False
                 return flushed
             return ""
 
@@ -456,9 +497,17 @@ class ConsolePane(VerticalScroll):
             after = text[fence_start_idx + len("```json") :]
             # If the block closes in the same chunk, suppress just the block.
             if "\n```" in after or after.rstrip().endswith("```"):
+                close = re.search(r"(?:^|\n)```", after)
+                if close:
+                    remainder = after[close.end():]
+                    if before.endswith("\n") and remainder.startswith("\n"):
+                        remainder = remainder[1:]
+                    return before + self._filter_tool_call_tokens_from_stream(remainder)
                 return before
             self._json_suppress_active = True
             self._json_suppress_buffer = after
+            self._json_suppress_mode = "fenced"
+            self._json_suppress_trim_next_newline = before.endswith("\n")
             return before
         if fence_kind == "```":
             # We saw an unlabeled fence start; only suppress if the next
@@ -468,9 +517,18 @@ class ConsolePane(VerticalScroll):
             if stripped.lower().startswith("json"):
                 after_lang = stripped[len("json") :]
                 if "\n```" in after_lang or after_lang.rstrip().endswith("```"):
+                    close = re.search(r"(?:^|\n)```", after_lang)
+                    if close:
+                        before = text[:fence_start_idx]
+                        remainder = after_lang[close.end():]
+                        if before.endswith("\n") and remainder.startswith("\n"):
+                            remainder = remainder[1:]
+                        return before + self._filter_tool_call_tokens_from_stream(remainder)
                     return text[:fence_start_idx]
                 self._json_suppress_active = True
                 self._json_suppress_buffer = after_lang
+                self._json_suppress_mode = "fenced"
+                self._json_suppress_trim_next_newline = text[:fence_start_idx].endswith("\n")
                 return text[:fence_start_idx]
 
         # Detect raw JSON tool-call objects that are not inside fences.
@@ -498,6 +556,8 @@ class ConsolePane(VerticalScroll):
             # Start suppressing from the JSON object onward.
             self._json_suppress_active = True
             self._json_suppress_buffer = stripped
+            self._json_suppress_mode = "raw"
+            self._json_suppress_trim_next_newline = False
             return leading_ws
 
         # Terminal tool calls: task_complete(...), task_fail(...)
@@ -541,6 +601,8 @@ class ConsolePane(VerticalScroll):
             buffered = self._json_suppress_buffer
             self._json_suppress_active = False
             self._json_suppress_buffer = ""
+            self._json_suppress_mode = "raw"
+            self._json_suppress_trim_next_newline = False
             if buffered:
                 self._append_stream_buffer("assistant", buffered)
         groups = list(self._stream_buffer_groups)

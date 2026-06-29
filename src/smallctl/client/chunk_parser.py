@@ -12,20 +12,22 @@ _THINKING_START_TAG_ALIASES = ("<thinking>", "<thought>", "<|thought|>")
 _THINKING_END_TAG_ALIASES = ("</thinking>", "</thought>", "</|thought|>")
 _PROTOCOL_CONTROL_MARKERS = ("<|channel>", "<channel|>", "<|channel|>")
 
-# SentencePiece tokenizers (used by Gemma and others) represent inter-word
-# spaces with U+2581 (lower one eighth block). Backends that return partially
-# detokenized text leave these markers in the content, which breaks markdown
-# rendering and makes words run together.
-_SENTENCEPIECE_WHITESPACE_MARKER = "\u2581"
+# Tokenizers used by local Gemma-style models can leak their whitespace markers
+# into OpenAI-compatible stream deltas. Normalize the common markers before the
+# text reaches markdown rendering, transcript history, or tool argument parsing.
+_TOKENIZER_WHITESPACE_MARKERS = ("\u2581", "\u0120")
 
 
 def normalize_sentencepiece_whitespace(text: str) -> str:
-    """Convert SentencePiece whitespace markers into regular spaces."""
+    """Convert tokenizer whitespace markers into regular spaces."""
     if not text:
         return text
-    if _SENTENCEPIECE_WHITESPACE_MARKER not in text:
+    if not any(marker in text for marker in _TOKENIZER_WHITESPACE_MARKERS):
         return text
-    return text.replace(_SENTENCEPIECE_WHITESPACE_MARKER, " ")
+    normalized = text
+    for marker in _TOKENIZER_WHITESPACE_MARKERS:
+        normalized = normalized.replace(marker, " ")
+    return normalized
 
 
 def _clean_channel_protocol_body(text: str) -> str:

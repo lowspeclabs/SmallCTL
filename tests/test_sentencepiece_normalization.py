@@ -13,6 +13,11 @@ def test_normalize_sentencepiece_whitespace_converts_marker() -> None:
     assert normalize_sentencepiece_whitespace(raw) == " The listof Docker containers"
 
 
+def test_normalize_sentencepiece_whitespace_converts_bpe_space_marker() -> None:
+    raw = "The\u0120quick\u0120brown\u0120fox"
+    assert normalize_sentencepiece_whitespace(raw) == "The quick brown fox"
+
+
 def test_normalize_sentencepiece_whitespace_no_marker_unchanged() -> None:
     text = "The list of Docker containers"
     assert normalize_sentencepiece_whitespace(text) == text

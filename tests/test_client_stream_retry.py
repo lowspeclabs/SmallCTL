@@ -696,7 +696,10 @@ def test_stream_chat_llamacpp_400_retries_with_reduced_tools(monkeypatch) -> Non
             payloads.append(dict(payload))
             if attempts["count"] == 1:
                 raise _http_status_error(url, status_code=400)
-            yield {"type": "chunk", "data": {"choices": [{"delta": {"content": "ok"}}]}}
+            yield {
+                "type": "chunk",
+                "data": {"choices": [{"delta": {"content": "ok"}}]},
+            }
             yield {"type": "done"}
 
         async def nonstream_chat(self, async_client, url, headers, payload):
@@ -899,6 +902,69 @@ def test_stream_chat_llamacpp_model_unloaded_recovers_and_reuses_reduced_payload
     assert retry_budget_entries[-1]["data"]["context_limit"] is None
     assert retry_budget_entries[-1]["data"]["context_limit_source"] == "unknown"
     assert retry_budget_entries[-1]["data"]["reduction_reason"] == "http_400_recovery"
+
+
+def test_stream_chat_backend_stream_failure_invokes_recovery_and_retries(monkeypatch) -> None:
+    recovery_calls: list[dict[str, object]] = []
+
+    async def _recover(payload: dict[str, object]) -> dict[str, object]:
+        recovery_calls.append(payload)
+        return {"status": "recovered", "action": "restart_command"}
+
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="Gemma 4 e4b",
+        provider_profile="llamacpp",
+        run_logger=_RunLogger(),
+        backend_recovery_handler=_recover,
+    )
+    attempts = {"count": 0}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                yield {
+                    "type": "chunk_error",
+                    "error": "Remote protocol error after retry",
+                    "details": {
+                        "reason": "backend_stream_failure",
+                        "provider_profile": "llamacpp",
+                        "exception_type": "httpx.RemoteProtocolError",
+                    },
+                }
+                return
+            yield {"type": "chunk", "data": {"choices": [{"delta": {"content": "ok"}}]}}
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk", "done"]
+    assert attempts["count"] == 2
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["details"]["reason"] == "backend_stream_failure"
 
 
 def test_stream_chat_redacts_provider_payload_without_mutating_live_messages(monkeypatch) -> None:

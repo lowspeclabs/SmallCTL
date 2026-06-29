@@ -389,6 +389,49 @@ async def stream_chat(
                         ),
                     }
                     return
+                if event.get("type") == "chunk_error":
+                    details = event.get("details")
+                    if not isinstance(details, dict):
+                        details = {}
+                    if details.get("reason") == "backend_stream_failure":
+                        recovery: dict[str, Any] | None = None
+                        if client.backend_recovery_handler is not None:
+                            recovery = await client.backend_recovery_handler(
+                                {
+                                    "attempt": attempt,
+                                    "provider_profile": client.provider_profile,
+                                    "base_url": client.base_url,
+                                    "model": client.model,
+                                    "details": details,
+                                }
+                            )
+                        if isinstance(recovery, dict) and recovery.get("status") == "recovered":
+                            retry_after_backend_recovery = True
+                            log_kv(
+                                client.log,
+                                logging.WARNING,
+                                "chat_backend_recovery_succeeded",
+                                attempt=attempt,
+                                provider_profile=client.provider_profile,
+                                action=recovery.get("action"),
+                                reason="backend_stream_failure",
+                            )
+                            if client.run_logger:
+                                client.run_logger.log(
+                                    "chat",
+                                    "backend_recovery_succeeded",
+                                    "backend recovery succeeded after stream failure",
+                                    attempt=attempt,
+                                    provider_profile=client.provider_profile,
+                                    action=recovery.get("action"),
+                                    reason="backend_stream_failure",
+                                )
+                            await _reset_async_client(client)
+                            async_client = _get_async_client(client)
+                            break
+                        if isinstance(recovery, dict) and recovery:
+                            event = dict(event)
+                            event["details"] = {**details, "recovery": recovery}
                 yield event
             if retry_after_backend_recovery:
                 continue

@@ -16,6 +16,7 @@ def infer_ssh_user_from_execution_records(host: str, *, state: Any | None = None
     if not target_host:
         return ""
 
+    users: list[str] = []
     for record in reversed(list(records.values())):
         if not isinstance(record, dict):
             continue
@@ -40,7 +41,10 @@ def infer_ssh_user_from_execution_records(host: str, *, state: Any | None = None
             continue
         normalized_record_user = str(record_user_or_none or "").strip()
         if normalized_record_user:
-            return normalized_record_user
+            users.append(normalized_record_user)
+    unique_users = {user.lower() for user in users}
+    if len(unique_users) == 1:
+        return users[0]
     return ""
 
 

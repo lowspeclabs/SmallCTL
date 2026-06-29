@@ -1703,6 +1703,113 @@ def test_ssh_exec_recovers_missing_user_and_password_from_session_memory() -> No
     assert metadata["ssh_password_recovered"] is True
 
 
+def test_ssh_dir_list_recovers_missing_user_and_password_from_prior_authenticated_ssh_exec() -> None:
+    state = LoopState(cwd=".")
+    state.tool_execution_records["ssh-1"] = {
+        "tool_name": "ssh_exec",
+        "args": {
+            "host": "192.168.1.64",
+            "user": "root",
+            "password": "secret-pass",
+            "command": "whoami",
+        },
+        "result": {
+            "success": True,
+            "output": {"stdout": "root\n", "stderr": "", "exit_code": 0},
+            "error": None,
+            "metadata": {},
+        },
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_dir_list",
+        {"host": "192.168.1.64", "path": "/etc/cron"},
+        phase="explore",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_dir_list"
+    assert args["user"] == "root"
+    assert args["password"] == "secret-pass"
+    assert metadata["recovered_ssh_user_source"] == "prior_ssh_exec"
+    assert metadata["recovered_ssh_password_source"] == "prior_ssh_exec"
+
+
+def test_ssh_dir_list_blocks_missing_user_without_prior_identity() -> None:
+    state = LoopState(cwd=".")
+
+    tool_name, args, intercepted, _metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_dir_list",
+        {"host": "192.168.1.64", "path": "/etc/cron"},
+        phase="explore",
+        state=state,
+    )
+
+    assert tool_name == "ssh_dir_list"
+    assert args["host"] == "192.168.1.64"
+    assert intercepted is not None
+    assert intercepted.success is False
+    assert intercepted.metadata["reason"] == "ssh_identity_required"
+    assert "local username" in (intercepted.error or "")
+
+
+def test_ssh_dir_list_blocks_ambiguous_prior_users_for_same_host() -> None:
+    state = LoopState(cwd=".")
+    state.tool_execution_records["ssh-1"] = {
+        "tool_name": "ssh_exec",
+        "args": {"host": "192.168.1.64", "user": "root", "password": "root-pass", "command": "whoami"},
+        "result": {"success": True, "metadata": {}},
+    }
+    state.tool_execution_records["ssh-2"] = {
+        "tool_name": "ssh_exec",
+        "args": {"host": "192.168.1.64", "user": "admin", "password": "admin-pass", "command": "whoami"},
+        "result": {"success": True, "metadata": {}},
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_dir_list",
+        {"host": "192.168.1.64", "path": "/etc/cron"},
+        phase="explore",
+        state=state,
+    )
+
+    assert tool_name == "ssh_dir_list"
+    assert "user" not in args
+    assert metadata.get("recovered_ssh_user") is None
+    assert intercepted is not None
+    assert intercepted.metadata["reason"] == "ssh_identity_required"
+
+
+def test_ssh_dir_list_preserves_explicit_user_that_differs_from_confirmed_session_user() -> None:
+    state = LoopState(cwd=".")
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.64": {
+            "host": "192.168.1.64",
+            "user": "root",
+            "password": "root-pass",
+            "confirmed": True,
+        }
+    }
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_dir_list",
+        {"host": "192.168.1.64", "user": "stephen", "path": "/etc/cron"},
+        phase="explore",
+        state=state,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_dir_list"
+    assert args["user"] == "stephen"
+    assert "password" not in args
+    assert metadata["explicit_ssh_user_overrode_session"] is True
+
+
 def test_ssh_exec_recovers_connection_probe_command_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = 'ssh into root@192.168.1.63 password "@S02v1735"'

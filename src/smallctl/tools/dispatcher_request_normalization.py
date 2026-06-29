@@ -50,6 +50,7 @@ def repair_ssh_exec_malformed_args(
     if isinstance(inner_name, str) and inner_name.strip() and inner_name.strip() not in {
         "ssh_exec",
         "shell_exec",
+        "ssh_dir_list",
         "ssh_file_read",
         "ssh_file_write",
         "ssh_file_patch",

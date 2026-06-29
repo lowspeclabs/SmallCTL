@@ -20,6 +20,7 @@ from .dispatcher_policy_guards import (
 )
 
 _SSH_FILE_TOOLS = {
+    "ssh_dir_list",
     "ssh_file_read",
     "ssh_file_write",
     "ssh_file_patch",

@@ -70,7 +70,7 @@ def _infer_ssh_host_from_context(state: Any | None) -> str:
             if not isinstance(record, dict):
                 continue
             tool_name = str(record.get("tool_name") or "").strip()
-            if tool_name not in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
+            if tool_name not in {"ssh_exec", "ssh_dir_list", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}:
                 continue
             args = record.get("args")
             if not isinstance(args, dict):
@@ -249,6 +249,27 @@ def _pin_and_guard_ssh_credentials(
         metadata["pinned_ssh_user"] = confirmed_user
         user = confirmed_user
 
+    if user and confirmed_user and user != confirmed_user:
+        if not user_was_recovered:
+            metadata["explicit_ssh_user_overrode_session"] = True
+            metadata["confirmed_ssh_user"] = confirmed_user
+            return repaired, None, metadata
+        metadata["ssh_credential_block_reason"] = "user_mismatch"
+        error = (
+            f"SSH user mismatch for {host}: the confirmed session user is `{confirmed_user}`, "
+            f"but the recovered request uses `{user}`. Use the confirmed credentials or ask the user for new ones."
+        )
+        return repaired, ToolEnvelope(
+            success=False,
+            error=error,
+            metadata={
+                "reason": "ssh_credential_pinning_blocked",
+                "block_reason": "user_mismatch",
+                "expected_user": confirmed_user,
+                "provided_user": user,
+            },
+        ), metadata
+
     if not password and confirmed_password:
         repaired["password"] = confirmed_password
         metadata["pinned_ssh_password"] = True
@@ -261,23 +282,6 @@ def _pin_and_guard_ssh_credentials(
     if not str(repaired.get("identity_file") or "").strip() and confirmed_identity:
         repaired["identity_file"] = confirmed_identity
         metadata["pinned_ssh_identity_file"] = confirmed_identity
-
-    if user and confirmed_user and user != confirmed_user and not user_was_recovered:
-        metadata["ssh_credential_block_reason"] = "user_mismatch"
-        error = (
-            f"SSH user mismatch for {host}: the confirmed session user is `{confirmed_user}`, "
-            f"but the request uses `{user}`. Use the confirmed credentials or ask the user for new ones."
-        )
-        return repaired, ToolEnvelope(
-            success=False,
-            error=error,
-            metadata={
-                "reason": "ssh_credential_pinning_blocked",
-                "block_reason": "user_mismatch",
-                "expected_user": confirmed_user,
-                "provided_user": user,
-            },
-        ), metadata
 
     if password and confirmed_password:
         current_fp = _password_fingerprint(password)

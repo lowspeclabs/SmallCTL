@@ -43,6 +43,7 @@ from .dispatcher_remote_detection import (
 )
 
 _SSH_FILE_TOOLS = {
+    "ssh_dir_list",
     "ssh_file_read",
     "ssh_file_write",
     "ssh_file_patch",
@@ -138,6 +139,24 @@ def normalize_tool_request(
                     tool_name,
                     normalized_arguments,
                     pin_block,
+                    normalization_metadata,
+                )
+            if not str(normalized_arguments.get("user") or "").strip():
+                return (
+                    tool_name,
+                    normalized_arguments,
+                    ToolEnvelope(
+                        success=False,
+                        error=(
+                            "SSH filesystem tools require an explicit SSH user or one confirmed earlier in this session. "
+                            "Retry with `user` set, for example `root`, instead of falling back to the local username."
+                        ),
+                        metadata={
+                            "tool_name": tool_name,
+                            "reason": "ssh_identity_required",
+                            "host": normalized_arguments.get("host"),
+                        },
+                    ),
                     normalization_metadata,
                 )
             return tool_name, normalized_arguments, None, normalization_metadata

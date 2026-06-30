@@ -30,6 +30,7 @@ Move resolved bugs here and keep the original ID for reference.
 
 | ID | Tool | Fix Summary | Fixed Date |
 |----|------|-------------|------------|
+| BUG-016 | run_diagnose.py, runscan.py | Added `model_stream_stall` classification for `reasoning_only_stream_exhausted`/`model_stream_halt_exhausted` events before generic incomplete/recovery labels. | 2026-06-29 |
 | BUG-015 | tui_screenshot.py | Removed the explicit `pilot.exit(0)` call, added graceful cancellation of the active harness task before Textual tears the app down, and added a logging filter that suppresses the benign asyncio `Task.task_wakeup` RecursionError logged during shutdown. | 2026-06-25 |
 | BUG-014 | model_output_lint.py | Skip the `missing_tool_calls` heuristic when the record (or matching tools-channel dispatch) shows native tool_calls. Added explicit detection for control-token fragments and reasoning-channel tool-call wrappers. | 2026-06-25 |
 | BUG-013 | run_diagnose.py, runscan.py | Moved `policy_block` and `fama_block` classification checks ahead of `model_tool_loop_stall` so done-gate / not-exposed tool blocks are surfaced before generic stall labels. Added regression tests. | 2026-06-22 |

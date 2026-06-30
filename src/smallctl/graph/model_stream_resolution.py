@@ -264,15 +264,28 @@ async def resolve_model_stream_result(
         )
         await harness._emit(
             deps.event_handler,
-            UIEvent(event_type=UIEventType.ERROR, content=f"Stream error: {failure_message}"),
+            UIEvent(event_type=UIEventType.ALERT, content=f"Stream halt: {failure_message}"),
         )
-        graph_state.final_result = harness._failure(
-            failure_message,
-            error_type="model_stream_stall",
-            details=stream_ended_without_done_details,
+        timeline = OpenAICompatClient.collect_timeline(
+            chunks,
+            reasoning_mode=harness.reasoning_mode,
+            thinking_start_tag=harness.thinking_start_tag,
+            thinking_end_tag=harness.thinking_end_tag,
         )
-        graph_state.error = graph_state.final_result["error"]
-        return StreamProcessingResult(chunks=chunks)
+        end_time = time.perf_counter()
+        duration = end_time - start_time
+        ttft = (first_token_time - start_time) if first_token_time else duration
+        return StreamProcessingResult(
+            chunks=chunks,
+            stream=stream,
+            timeline=timeline,
+            usage=getattr(stream, "usage", {}) or {},
+            duration=duration,
+            ttft=ttft,
+            halted=True,
+            halt_reason="reasoning_only_stream_stall",
+            halt_details=stream_ended_without_done_details,
+        )
 
     if (
         stream_ended_without_done

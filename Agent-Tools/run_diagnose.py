@@ -124,6 +124,8 @@ def _classify_failure(
         return "fama_block"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
+    if events.get("reasoning_only_stream_exhausted") or events.get("model_stream_halt_exhausted"):
+        return "model_stream_stall"
     if events.get("action_stall") or events.get("no_tool_recovery"):
         return "model_tool_loop_stall"
     if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
@@ -236,6 +238,8 @@ def _recommend_next_steps(
         steps.append("Tool-call protocol mismatch detected; review reasoning-channel tool-call recovery and ensure the model emits proper JSON/native tool calls rather than markup fragments.")
     if events.get("action_stall") or events.get("no_tool_recovery"):
         steps.append("Model is struggling to emit valid tool calls; inspect recent prompts and tool schemas.")
+    if events.get("reasoning_only_stream_exhausted") or events.get("model_stream_halt_exhausted"):
+        steps.append("Model stream stalled in reasoning without producing an assistant answer or tool call; inspect prompt pressure and stream-halt recovery events.")
     if events.get("tool_blocked_not_exposed"):
         steps.append("Model called a tool not exposed this turn; check chat_tool_selection / phase / profile filtering.")
     if events.get("fama_tool_call_blocked"):

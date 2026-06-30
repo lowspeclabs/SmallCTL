@@ -430,3 +430,27 @@ def test_runscan_classifies_fama_block_before_model_tool_loop_stall() -> None:
 
     assert classification == "fama_block"
 
+
+def test_diagnose_classifies_reasoning_only_exhaustion_before_incomplete() -> None:
+    events: Counter[str] = Counter({"reasoning_only_stream_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "model_stream_stall"
+
+
+def test_runscan_classifies_reasoning_only_exhaustion_before_incomplete() -> None:
+    events: Counter[str] = Counter({"reasoning_only_stream_exhausted": 1})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    task_summary: dict = {"final_task_status": "failed"}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
+
+    assert classification == "model_stream_stall"

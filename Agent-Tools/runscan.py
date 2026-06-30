@@ -54,6 +54,7 @@ FAILURE_CLASS_LABELS = {
     "harness_circuit_breaker_false_positive": "harness_circuit_breaker_false_positive",
     "guard_misfire": "guard_misfire",
     "model_degeneration": "model_degeneration",
+    "model_stream_stall": "model_stream_stall",
     "model_tool_loop_stall": "model_tool_loop_stall",
     "file_patch_target_not_found_loop": "file_patch_target_not_found_loop",
     "patch_first_policy_loop": "patch_first_policy_loop",
@@ -153,6 +154,8 @@ def _classify_run(
         return "fama_block"
     if events.get("model_output_degenerate_loop_exhausted"):
         return "model_degeneration"
+    if events.get("reasoning_only_stream_exhausted") or events.get("model_stream_halt_exhausted"):
+        return "model_stream_stall"
     if events.get("action_stall") or events.get("no_tool_recovery"):
         return "model_tool_loop_stall"
     if events.get("dispatch_tools_error") or events.get("initialize_run_error"):
@@ -211,6 +214,7 @@ def _status_color(status: str | None) -> str:
         return Colors.YELLOW
     if status in {
         "model_degeneration",
+        "model_stream_stall",
         "runtime_exception",
         "policy_block",
         "fama_block",

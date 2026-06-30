@@ -924,7 +924,7 @@ def test_resolve_model_stream_result_preserves_existing_final_result() -> None:
     assert graph_state.error["type"] == "provider"
 
 
-def test_resolve_model_stream_result_reports_reasoning_only_stall() -> None:
+def test_resolve_model_stream_result_surfaces_reasoning_only_stall_for_recovery() -> None:
     state = LoopState(cwd="/tmp")
     harness = _Harness(state)
     graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
@@ -957,10 +957,10 @@ def test_resolve_model_stream_result_reports_reasoning_only_stall() -> None:
 
     assert result is not None
     assert result.chunks == []
-    assert graph_state.final_result is not None
-    assert graph_state.final_result["message"].startswith("Model stream halted after repeated reasoning-only")
-    assert graph_state.error is not None
-    assert graph_state.error["type"] == "model_stream_stall"
+    assert result.halted is True
+    assert result.halt_reason == "reasoning_only_stream_stall"
+    assert graph_state.final_result is None
+    assert graph_state.error is None
 
 
 def test_resolve_model_stream_result_salvages_reasoning_only_stall_with_content() -> None:

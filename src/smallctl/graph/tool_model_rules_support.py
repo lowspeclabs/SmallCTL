@@ -4,7 +4,10 @@ import ast
 import re
 from typing import Any
 
-from ..client.chunk_parser import extract_response_from_wrapper_tags, extract_thinking_from_tags
+from ..client.chunk_parser import (
+    extract_response_from_wrapper_tags,
+    extract_thinking_from_tags,
+)
 from .state import PendingToolCall
 from .tool_model_rules_model_detection import (
     _model_is_exact_qwen_25_7b_instruct,
@@ -113,6 +116,21 @@ def _looks_like_public_answer(text: str) -> bool:
     if not re.search(r"[A-Za-z0-9]", candidate):
         return False
     lowered = candidate.lower()
+    if lowered in {
+        "action",
+        "answer",
+        "command",
+        "final",
+        "function",
+        "loop",
+        "output",
+        "response",
+        "shell_exec",
+        "ssh_exec",
+        "tool",
+        "tool_call",
+    }:
+        return False
     if any(token in lowered for token in ("thinking process", "final decision", "option a", "option b", "option c")):
         return False
     if re.match(r"^\d+\.\s", candidate):

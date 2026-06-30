@@ -1,29 +1,38 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from dataclasses import dataclass
 import logging
-from pathlib import Path
 import re
 import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..client import StreamResult
-from ..client.chunk_parser import chunk_contains_tool_call_delta, normalize_sentencepiece_whitespace
+from ..client.chunk_parser import (
+    chunk_contains_tool_call_delta,
+    normalize_sentencepiece_whitespace,
+)
 from ..logging_utils import log_kv
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from .deps import GraphRuntimeDeps
-from .state import GraphRunState
-from .tool_model_rules import _model_is_gemma_4, _model_is_lfm25_8b_a1b
 from .model_stream_fallback_support import (
     _classify_model_call_error,
 )
-from .model_stream_loop_rendering import flush_model_stream_buffer
-from .model_stream_loop_rendering import handle_model_stream_chunk
-from .model_stream_loop_rendering import StreamTagState
 from .model_stream_loop_recovery import handle_model_stream_chunk_error
+from .model_stream_loop_rendering import (
+    StreamTagState,
+    flush_model_stream_buffer,
+    handle_model_stream_chunk,
+)
+from .state import GraphRunState
+from .tool_model_rules import (
+    _model_is_exact_small_gemma_4_it,
+    _model_is_gemma_4,
+    _model_is_lfm25_8b_a1b,
+)
 
 _REASONING_ONLY_MAX_SECONDS = 60.0
 _REASONING_ONLY_MAX_CHUNKS = 4096
@@ -366,6 +375,30 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
     context_hint = _build_reasoning_only_context_hint(harness)
     if context_hint:
         base = f"{base} {context_hint}"
+
+    model_name = ""
+    if harness is not None:
+        client = getattr(harness, "client", None)
+        model_name = str(getattr(client, "model", "") or "").strip()
+    if not model_name and harness is not None:
+        model_name = str(getattr(getattr(harness, "state", None), "scratchpad", {}).get("_model_name") or "").strip()
+    if _model_is_exact_small_gemma_4_it(model_name):
+        examples: list[str] = []
+        if "ssh_exec" in names:
+            examples.append(
+                '`{"name":"ssh_exec","arguments":{"host":"192.168.1.89","user":"root","password":"secret","command":"docker ps"}}`'
+            )
+        if "ssh_file_read" in names:
+            examples.append(
+                '`{"name":"ssh_file_read","arguments":{"path":"/root/config/app.ini"}}`'
+            )
+        if "file_read" in names:
+            examples.append(
+                '`{"name":"file_read","arguments":{"path":"src/app.py"}}`'
+            )
+        if examples:
+            base = f"{base} Emit exactly one line like: {' or '.join(examples)}."
+
     ssh_actions = [
         name for name in ("ssh_exec", "ssh_file_read", "ssh_file_write") if name in names
     ]
@@ -730,6 +763,18 @@ async def run_model_stream_loop(
                             )
                         else:
                             if reasoning_only_retries >= max_reasoning_only_retries:
+                                stream_state, first_token_time = await handle_model_stream_chunk(
+                                    harness=harness,
+                                    deps=deps,
+                                    event=event,
+                                    start_tag=start_tag,
+                                    end_tag=end_tag,
+                                    echo_to_stdout=echo_to_stdout,
+                                    chunks=chunks,
+                                    stream_state=stream_state,
+                                    first_token_time=first_token_time,
+                                    suppress_ui_events=suppress_ui_events,
+                                )
                                 stream_ended_without_done = True
                                 stream_ended_without_done_details = {
                                     "reason": "reasoning_only_stream_stall",
@@ -768,6 +813,18 @@ async def run_model_stream_loop(
                                 _stop_after_reasoning_only_stall = True
                                 break
                             reasoning_only_retries += 1
+                            stream_state, first_token_time = await handle_model_stream_chunk(
+                                harness=harness,
+                                deps=deps,
+                                event=event,
+                                start_tag=start_tag,
+                                end_tag=end_tag,
+                                echo_to_stdout=echo_to_stdout,
+                                chunks=chunks,
+                                stream_state=stream_state,
+                                first_token_time=first_token_time,
+                                suppress_ui_events=suppress_ui_events,
+                            )
                             current_phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
                             nudge = _build_reasoning_only_nudge(tools, phase=current_phase, harness=harness)
                             messages = list(messages) + [ConversationMessage(role="system", content=nudge).to_dict()]

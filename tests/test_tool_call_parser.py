@@ -8,7 +8,10 @@ import pytest
 from smallctl.client import OpenAICompatClient
 from smallctl.graph.tool_call_parser import ToolCallParseResult, parse_tool_calls
 from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
-from smallctl.graph.tool_model_rules_support import _strip_gemma_4_protocol_noise
+from smallctl.graph.tool_model_rules_support import (
+    _recover_reasoning_only_assistant_text,
+    _strip_gemma_4_protocol_noise,
+)
 from smallctl.tools.base import ToolSpec, build_tool_schema
 from smallctl.tools.registry import ToolRegistry
 
@@ -62,15 +65,27 @@ def _make_ssh_registry() -> ToolRegistry:
 
 
 class _Harness:
-    def __init__(self, registry: ToolRegistry | None = None) -> None:
+    def __init__(self, registry: ToolRegistry | None = None, state_overrides: dict[str, Any] | None = None) -> None:
         self.registry = registry or _make_registry()
-        self.state = SimpleNamespace(scratchpad={}, messages=[])
+        state_attrs: dict[str, Any] = {"scratchpad": {}, "messages": []}
+        if state_overrides:
+            state_attrs.update(state_overrides)
+        self.state = SimpleNamespace(**state_attrs)
         self.client = SimpleNamespace(model="google/gemma-4-e2b-it")
         self.thinking_start_tag = "<think>"
         self.thinking_end_tag = "</think>"
 
     def _runlog(self, *args: object, **kwargs: object) -> None:
         pass
+
+
+def test_reasoning_only_recovery_does_not_extract_generic_quoted_words() -> None:
+    text = (
+        "I need to choose the next tool. The required field is 'command', and "
+        "the loop should continue. Final decision: call a tool, not answer."
+    )
+
+    assert _recover_reasoning_only_assistant_text(text) == "The model returned reasoning text but no final answer."
 
 
 def _parse(
@@ -634,3 +649,99 @@ def test_flat_inline_json_preserves_argument_key_matching_tool_name() -> None:
         "path": "README.md",
         "file_read": "literal argument value",
     }
+
+
+def _make_remote_file_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="ssh_exec",
+            description="run ssh command",
+            schema=build_tool_schema(
+                properties={
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "password": {"type": "string"},
+                    "command": {"type": "string"},
+                },
+                required=["host", "command"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="ssh_file_read",
+            description="read remote file",
+            schema=build_tool_schema(
+                properties={
+                    "path": {"type": "string"},
+                    "host": {"type": "string"},
+                },
+                required=["path"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    return registry
+
+
+def _make_local_file_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec(
+            name="file_read",
+            description="read a file",
+            schema=build_tool_schema(
+                properties={"path": {"type": "string"}},
+                required=["path"],
+            ),
+            handler=lambda **kwargs: kwargs,
+        )
+    )
+    return registry
+
+
+def test_bare_remote_file_read_json_recovers_ssh_file_read() -> None:
+    """Gemma-4 sometimes emits only the arguments for ssh_file_read, e.g.
+    {"host": "192.168.1.64", "path": "/root/config/app.ini"}."""
+    text = '{"host":"192.168.1.64","path":"/root/config/app.ini"}'
+
+    result = _parse(text, registry=_make_remote_file_registry())
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_file_read"]
+    assert result.pending_tool_calls[0].args == {
+        "host": "192.168.1.64",
+        "path": "/root/config/app.ini",
+    }
+    assert result.pending_tool_calls[0].parser_metadata["bare_json_args_tool_inferred"] == "ssh_file_read"
+
+
+def test_bare_path_only_json_prefers_ssh_file_read_in_remote_scope() -> None:
+    """When remote scope is active, a bare {"path": "..."} should be treated
+    as ssh_file_read so the harness can fill in the session SSH target."""
+    text = '{"path":"/root/config/app.ini"}'
+    stream = SimpleNamespace(assistant_text=text, thinking_text="", tool_calls=[])
+    harness = _Harness(
+        registry=_make_remote_file_registry(),
+        state_overrides={"scratchpad": {}, "messages": [], "task_mode": "remote_execute"},
+    )
+    deps = SimpleNamespace(harness=harness)
+    graph_state = SimpleNamespace(run_mode="loop")
+
+    result = parse_tool_calls(stream, [], graph_state, deps, model_name="google/gemma-4-e2b-it")
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["ssh_file_read"]
+    assert result.pending_tool_calls[0].args == {"path": "/root/config/app.ini"}
+
+
+def test_bare_path_only_json_falls_back_to_local_file_read() -> None:
+    """Outside of remote scope, a bare {"path": "..."} should map to the local
+    file_read tool."""
+    text = '{"path":"README.md"}'
+
+    result = _parse(text, registry=_make_local_file_registry())
+
+    assert [c.tool_name for c in result.pending_tool_calls] == ["file_read"]
+    assert result.pending_tool_calls[0].args == {"path": "README.md"}
+    assert result.pending_tool_calls[0].parser_metadata["bare_json_args_tool_inferred"] == "file_read"

@@ -14,7 +14,6 @@ from .tool_model_rules import (
     _strip_gemma_4_protocol_noise,
 )
 
-
 _INLINE_TOOL_SCHEMA_KEYS = {
     "function",
     "name",
@@ -203,13 +202,14 @@ def _try_infer_tool_call_from_bare_args(
     data: Any,
     *,
     allowed_raw_function_names: set[str] | None,
+    remote_scope_active: bool = False,
 ) -> PendingToolCall | None:
     """Recover a bare argument object when the intended tool is unambiguous.
 
-    Gemma-4-e2b-it sometimes emits only the arguments for an SSH tool call, for
-    example {"host": "1.2.3.4", "user": "root", "command": "ls"}. Recovering
-    this is safe only when it has a command plus a remote target and ssh_exec is
-    exposed; otherwise plain JSON assistant output should remain prose/data.
+    Gemma-4-e2b/it sometimes emits only the arguments for a tool call, dropping
+    the wrapper/name. Recovering it is safe only when the argument shape points
+    to a single exposed tool; otherwise plain JSON assistant output should stay
+    as prose/data.
     """
     if not isinstance(data, dict) or not data:
         return None
@@ -231,17 +231,65 @@ def _try_infer_tool_call_from_bare_args(
         "port",
         "identity_file",
     }
-    if "command" not in keys or not keys.intersection(remote_keys) or not _tool_allowed("ssh_exec"):
-        return None
+    has_remote_keys = bool(keys.intersection(remote_keys))
 
-    args = {str(key): value for key, value in data.items()}
-    pending = PendingToolCall(
-        tool_name="ssh_exec",
-        args=args,
-        raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
-    )
-    pending.parser_metadata["bare_json_args_tool_inferred"] = "ssh_exec"
-    return pending
+    # Bare ssh_exec: {"host": "...", "command": "..."}.
+    if (
+        "command" in keys
+        and has_remote_keys
+        and _tool_allowed("ssh_exec")
+    ):
+        args = {str(key): value for key, value in data.items()}
+        pending = PendingToolCall(
+            tool_name="ssh_exec",
+            args=args,
+            raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+        )
+        pending.parser_metadata["bare_json_args_tool_inferred"] = "ssh_exec"
+        return pending
+
+    # Bare remote file read: {"host": "...", "path": "..."} with no command.
+    if (
+        "path" in keys
+        and "command" not in keys
+        and has_remote_keys
+        and _tool_allowed("ssh_file_read")
+    ):
+        args = {str(key): value for key, value in data.items()}
+        pending = PendingToolCall(
+            tool_name="ssh_file_read",
+            args=args,
+            raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+        )
+        pending.parser_metadata["bare_json_args_tool_inferred"] = "ssh_file_read"
+        return pending
+
+    # Bare path-only object. Prefer the remote file read when we are in a
+    # remote SSH scope and ssh_file_read is exposed; otherwise fall back to the
+    # local file_read. This matches the common Gemma failure mode where the
+    # model emits {"path": "/root/..."} and expects the session target to be
+    # filled in by the harness.
+    if keys == {"path"}:
+        if remote_scope_active and _tool_allowed("ssh_file_read"):
+            args = {str(key): value for key, value in data.items()}
+            pending = PendingToolCall(
+                tool_name="ssh_file_read",
+                args=args,
+                raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+            )
+            pending.parser_metadata["bare_json_args_tool_inferred"] = "ssh_file_read"
+            return pending
+        if _tool_allowed("file_read"):
+            args = {str(key): value for key, value in data.items()}
+            pending = PendingToolCall(
+                tool_name="file_read",
+                args=args,
+                raw_arguments=json.dumps(args, ensure_ascii=True, sort_keys=True),
+            )
+            pending.parser_metadata["bare_json_args_tool_inferred"] = "file_read"
+            return pending
+
+    return None
 
 
 def _normalize_gemma_quote_tokens(text: str) -> str:
@@ -320,6 +368,7 @@ def _extract_inline_tool_calls(
     *,
     model_name: str | None = None,
     allowed_raw_function_names: set[str] | None = None,
+    remote_scope_active: bool = False,
 ) -> tuple[str, list[PendingToolCall]]:
     if not text:
         return "", []
@@ -710,6 +759,7 @@ def _extract_inline_tool_calls(
                         pending = _try_infer_tool_call_from_bare_args(
                             data,
                             allowed_raw_function_names=allowed_raw_function_names,
+                            remote_scope_active=remote_scope_active,
                         )
                     if pending:
                         results.append(pending)

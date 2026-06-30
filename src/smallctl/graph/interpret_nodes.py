@@ -5,6 +5,17 @@ import re
 import uuid
 from typing import Any
 
+from ..harness.task_classifier import (
+    classify_runtime_intent,
+    looks_like_numbered_implementation_followup,
+    looks_like_readonly_chat_request,
+    runtime_policy_for_intent,
+)
+from ..harness.tool_visibility import (
+    hidden_tool_reason,
+    resolve_turn_tool_exposure,
+    schedule_retry_tool_exposure,
+)
 from ..memory.taxonomy import (
     PREMATURE_TASK_COMPLETE,
     TOOL_NOT_CALLED,
@@ -12,65 +23,32 @@ from ..memory.taxonomy import (
 from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..models.tool_result import ToolEnvelope
-from ..phases import filter_phase_blocked_tools, is_phase_contract_active, phase_contract
-from ..state import normalize_intent_label
-from ..harness.task_classifier import (
-    classify_runtime_intent,
-    looks_like_numbered_implementation_followup,
-    looks_like_readonly_chat_request,
-    runtime_policy_for_intent,
+from ..phases import (
+    filter_phase_blocked_tools,
+    is_phase_contract_active,
+    phase_contract,
 )
 from ..prompt_model_classifiers import is_exact_small_gemma_4_it_model_name
 from ..prompts import build_planning_prompt, build_system_prompt
 from ..runtime_error_repair import current_reported_runtime_error
-from ..state import ExecutionPlan, PlanStep, clip_text_value, json_safe_value
-from ..task_targets import primary_task_target_path
-from ..harness.tool_visibility import (
-    hidden_tool_reason,
-    resolve_turn_tool_exposure,
-    schedule_retry_tool_exposure,
+from ..state import (
+    ExecutionPlan,
+    PlanStep,
+    clip_text_value,
+    json_safe_value,
+    normalize_intent_label,
 )
-from .recovery_context import build_goal_recap
-from ..write_session_fsm import new_write_session, record_write_session_event
+from ..task_targets import primary_task_target_path
 from ..tools.dispatcher import normalize_tool_request
 from ..tools.planning import _refresh_plan_playbook_artifact
+from ..write_session_fsm import new_write_session, record_write_session_event
 from . import nodes as _nodes
 from .chat_progress import build_repeated_reasoning_loop_message
-from .deps import GraphRuntimeDeps
-from .routing import LoopRoute
-from .state import GraphRunState, PendingToolCall
-from .interrupts import pause_for_plan_approval
-from .write_recovery import (
-    build_synthetic_write_args,
-    can_safely_synthesize,
-    recover_write_intent,
-    write_recovery_kind,
-    write_recovery_metadata,
-    _force_finalize_if_complete_file,
-)
-from .terminal_completion import (
-    extract_completion_message as _extract_completion_message,
-    latest_verifier_allows_terminal_recovery as _latest_verifier_allows_terminal_recovery,
-    maybe_promote_raw_terminal_json_task_complete as _maybe_promote_raw_terminal_json_task_complete,
-    maybe_promote_terminal_prose_task_complete as _maybe_promote_terminal_prose_task_complete,
-    raw_terminal_json_completion_message as _raw_terminal_json_completion_message,
-    readonly_answer_can_complete as _readonly_answer_can_complete,
-    terminal_prose_completion_message as _terminal_prose_completion_message,
-    working_memory_signals_completion as _working_memory_signals_completion,
-)
-
-
 from .declared_file_read import (
     _consume_reasoning_fallback_flag,
     _maybe_synthesize_declared_file_read,
 )
-from .lifecycle_tool_validation import (
-    _apply_tool_call_schema_repair,
-    _record_tool_call_schema_repair,
-    _schema_validation_repair_failure,
-    _tool_call_repair_enabled,
-    _tool_call_repair_log_only,
-)
+from .deps import GraphRuntimeDeps
 from .hidden_tool_helpers import (
     _build_hidden_tool_block_message,
     _format_allowed_tool_summary,
@@ -79,7 +57,50 @@ from .hidden_tool_helpers import (
     _strip_hidden_chat_terminal_completion_calls,
     _validation_handoff_hint_for_blocked_tool,
 )
+from .interrupts import pause_for_plan_approval
+from .lifecycle_tool_validation import (
+    _apply_tool_call_schema_repair,
+    _record_tool_call_schema_repair,
+    _schema_validation_repair_failure,
+    _tool_call_repair_enabled,
+    _tool_call_repair_log_only,
+)
+from .recovery_context import build_goal_recap
+from .routing import LoopRoute
+from .state import GraphRunState, PendingToolCall
+from .terminal_completion import (
+    extract_completion_message as _extract_completion_message,
+)
+from .terminal_completion import (
+    latest_verifier_allows_terminal_recovery as _latest_verifier_allows_terminal_recovery,
+)
+from .terminal_completion import (
+    maybe_promote_raw_terminal_json_task_complete as _maybe_promote_raw_terminal_json_task_complete,
+)
+from .terminal_completion import (
+    maybe_promote_terminal_prose_task_complete as _maybe_promote_terminal_prose_task_complete,
+)
+from .terminal_completion import (
+    raw_terminal_json_completion_message as _raw_terminal_json_completion_message,
+)
+from .terminal_completion import (
+    readonly_answer_can_complete as _readonly_answer_can_complete,
+)
+from .terminal_completion import (
+    terminal_prose_completion_message as _terminal_prose_completion_message,
+)
+from .terminal_completion import (
+    working_memory_signals_completion as _working_memory_signals_completion,
+)
 from .tool_model_rules import _model_is_gemma_4
+from .write_recovery import (
+    _force_finalize_if_complete_file,
+    build_synthetic_write_args,
+    can_safely_synthesize,
+    recover_write_intent,
+    write_recovery_kind,
+    write_recovery_metadata,
+)
 
 
 def _is_readonly_lookup_intent(harness: Any) -> bool:
@@ -891,7 +912,9 @@ async def interpret_model_output(
                     if isinstance(scratchpad, dict):
                         model_name = str(scratchpad.get("_model_name") or "").strip()
                 # Import here to avoid circular imports at module load time.
-                from .tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
+                from .tool_model_rules_model_detection import (
+                    _model_is_exact_small_gemma_4_it,
+                )
                 if _model_is_exact_small_gemma_4_it(model_name):
                     msg += (
                         "\n\nGEMMA 4 e2b/e4b EXAMPLE: After </think>, output exactly one line like: "
@@ -1077,6 +1100,39 @@ async def interpret_model_output(
         )
         if nudges >= 2:
             msg = "REPEAT WARNING: You are stuck in a loop. You MUST call `task_complete` NOW to save your progress."
+
+        model_name = ""
+        client = getattr(harness, "client", None)
+        if client is not None:
+            model_name = str(getattr(client, "model", "") or "").strip()
+        if not model_name:
+            scratchpad = getattr(harness.state, "scratchpad", {}) or {}
+            if isinstance(scratchpad, dict):
+                model_name = str(scratchpad.get("_model_name") or "").strip()
+        from .tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
+        if _model_is_exact_small_gemma_4_it(model_name):
+            registry = getattr(harness, "registry", None)
+            names: set[str] = set()
+            if registry is not None:
+                try:
+                    names = {str(n).strip() for n in registry.names() if str(n).strip()}
+                except Exception:
+                    names = set()
+            examples: list[str] = []
+            if "ssh_exec" in names:
+                examples.append(
+                    '`{"name":"ssh_exec","arguments":{"host":"192.168.1.89","user":"root","password":"secret","command":"docker ps"}}`'
+                )
+            if "ssh_file_read" in names:
+                examples.append(
+                    '`{"name":"ssh_file_read","arguments":{"path":"/root/config/app.ini"}}`'
+                )
+            if "file_read" in names:
+                examples.append(
+                    '`{"name":"file_read","arguments":{"path":"src/app.py"}}`'
+                )
+            if examples:
+                msg = f"{msg} If you are not finished, emit exactly one line like: {' or '.join(examples)}."
 
         harness.state.append_message(
             ConversationMessage(

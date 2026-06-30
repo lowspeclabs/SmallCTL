@@ -24,6 +24,7 @@ lost.
 
 | ID | Tool | Priority | Description | Motivation | Status |
 |----|------|----------|-------------|------------|--------|
+| IMP-012 | trace_call.py | medium | When a partial trace id (e.g. `step-1:call-1` or `call-1`) matches no records, print a warning that includes the run's trace-id prefix and the expected `<session>:<task>:step-N:call-M` format. | The docs show `trace_call.py --run latest step-1:call-1`, but trace records are keyed with a task id (e.g. `task-0002`), so the partial form silently returns an empty trace. A warning would save agents from chasing non-existent records. | open |
 
 ## Completed Improvements
 

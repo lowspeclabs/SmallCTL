@@ -5,8 +5,6 @@ from typing import Any
 
 from ..diagnostic_tasks import diagnostic_failure_task
 from .detector_classifiers import (
-    WRONG_PATH_MARKERS,
-    WRITE_TOOLS,
     _BAD_ARG_ERROR_MARKERS,
     _BAD_ARG_REASONS,
     _LOOP_COUNTERS,
@@ -14,26 +12,29 @@ from .detector_classifiers import (
     _READ_LOOP_TOOLS,
     _REMOTE_CONFUSION_REASONS,
     _TEST_FAILURE_MARKERS,
+    WRITE_TOOLS,
+    WRONG_PATH_MARKERS,
     _is_patch_target_miss,
+    _looks_like_missing_remote_utility,
     _looks_like_test_failure_output,
     _looks_like_zero_tests,
     _metadata_verifier,
     _verdict_is_pass,
     _verifier_failed,
 )
-from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state
 from .detectors_support import (
-    _scratchpad_int,
     _early_stop_evidence,
+    _has_human_gate,
     _next_action_for_repeated_loop,
+    _path_from_metadata_or_args,
     _record_read_loop_recovery_payload,
     _repeated_tool_from_history,
+    _result_text,
+    _scratchpad_int,
     _verifier_evidence,
     _verifier_from_result_or_state,
-    _has_human_gate,
-    _result_text,
-    _path_from_metadata_or_args,
 )
+from .signals import FamaFailureKind, FamaSignal, current_step, get_fama_state
 
 
 def detect_early_stop_from_result(
@@ -381,6 +382,8 @@ def detect_wrong_path(
         return None
     combined = _result_text(result, metadata=metadata).lower()
     if str(tool_name or "").strip() in {"shell_exec", "ssh_exec"} and _looks_like_test_failure_output(combined):
+        return None
+    if str(tool_name or "").strip() == "ssh_exec" and _looks_like_missing_remote_utility(combined):
         return None
     if _is_patch_target_miss(tool_name, combined):
         return None

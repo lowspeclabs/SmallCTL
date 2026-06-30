@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 import re
 import time  # noqa: F401
+
+# ---------------------------------------------------------------------------
+# High-level parse entry point
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass, field
 from pathlib import Path  # noqa: F401
 from typing import Any
 
@@ -11,6 +16,7 @@ from ..client.chunk_parser import (
     extract_thinking_from_tags,
     normalize_thinking_tag_aliases,
 )
+from ..remote_scope import remote_scope_is_active
 from ..state import WriteSession, json_safe_value  # noqa: F401
 from ..task_targets import (  # noqa: F401
     extract_task_target_paths,
@@ -21,6 +27,67 @@ from ..write_session_fsm import (  # noqa: F401
     record_write_session_event,
 )
 from .state import PendingToolCall
+from .tool_call_parser_support import (  # noqa: F401
+    _active_write_session_for_target,
+    _artifact_read_recovery_hint,
+    _artifact_read_synthesis_hint,
+    _assistant_declares_read_before_write,
+    _assistant_text_target_paths,
+    _build_schema_repair_message,
+    _clear_artifact_read_guard_state,
+    _clear_tool_attempt_history,
+    _coerce_int_or_none,
+    _consume_repeat_guard_one_shot_allowance,
+    _declared_read_before_write_reason,
+    _detect_empty_file_write_payload,
+    _detect_hallucinated_tool_call,
+    _detect_missing_required_tool_arguments,
+    _detect_oversize_patch_payload,
+    _detect_oversize_write_payload,
+    _detect_patch_existing_stage_read_contract_violation,
+    _detect_placeholder_tool_call,
+    _detect_repeated_tool_loop,
+    _detect_timeout_recovered_incomplete_tool_call,
+    _dir_list_exploration_progress_is_progress,
+    _dir_list_repeat_has_intervening_progress,
+    _dir_list_same_path_repeat_is_loop,
+    _ensure_chunk_write_session,
+    _extract_args_from_fingerprint,
+    _extract_artifact_id_from_args,
+    _extract_path_from_fingerprint,
+    _fallback_repeated_artifact_read,
+    _fallback_repeated_file_read,
+    _file_read_line_progress_is_progress,
+    _find_full_file_artifact_for_path,
+    _infer_write_tool_path,
+    _is_strict_subpath,
+    _normalize_json_like,
+    _normalize_path_token,
+    _normalize_shell_command,
+    _normalize_token,
+    _normalize_tool_args,
+    _placeholder_token,
+    _placeholder_value_looks_generic,
+    _record_tool_attempt,
+    _recover_declared_read_before_write,
+    _repair_active_write_session_args,
+    _repair_empty_target_file_patch_to_file_write,
+    _repeat_loop_limits,
+    _requested_artifact_read_target,
+    _requested_file_read_range,
+    _resolve_artifact_record,
+    _resolve_dir_list_path,
+    _resolve_file_read_path,
+    _salvage_active_write_session_append,
+    _should_enter_chunk_mode,
+    _should_suppress_resolved_plan_artifact_read,
+    _suggested_chunk_sections,
+    _tool_attempt_history,
+    _tool_call_fingerprint,
+    _undo_tool_attempt_if_cached,
+    allow_repeated_tool_call_once,
+)
+from .tool_inline_parsing import _extract_inline_tool_calls
 from .tool_model_rules import (
     _clean_reasoning_fallback_text,
     _normalize_model_specific_text,
@@ -30,78 +97,10 @@ from .tool_model_rules import (
     _strip_empty_qwen_25_execute_wrappers,
     _strip_qwen_25_duplicate_thinking,
 )
-from .tool_inline_parsing import _extract_inline_tool_calls
 from .write_recovery import (  # noqa: F401
     infer_write_target_path,
     normalize_write_argument_aliases,
 )
-from .tool_call_parser_support import (  # noqa: F401
-    _artifact_read_recovery_hint,
-    _artifact_read_synthesis_hint,
-    _clear_artifact_read_guard_state,
-    _clear_tool_attempt_history,
-    _coerce_int_or_none,
-    _consume_repeat_guard_one_shot_allowance,
-    _detect_empty_file_write_payload,
-    _detect_timeout_recovered_incomplete_tool_call,
-    _detect_missing_required_tool_arguments,
-    _detect_patch_existing_stage_read_contract_violation,
-    _detect_hallucinated_tool_call,
-    _detect_placeholder_tool_call,
-    _detect_repeated_tool_loop,
-    _dir_list_exploration_progress_is_progress,
-    _dir_list_repeat_has_intervening_progress,
-    _dir_list_same_path_repeat_is_loop,
-    _extract_args_from_fingerprint,
-    _extract_artifact_id_from_args,
-    _extract_path_from_fingerprint,
-    _fallback_repeated_artifact_read,
-    _fallback_repeated_file_read,
-    _find_full_file_artifact_for_path,
-    _file_read_line_progress_is_progress,
-    _repair_empty_target_file_patch_to_file_write,
-    _is_strict_subpath,
-    _normalize_json_like,
-    _normalize_path_token,
-    _normalize_shell_command,
-    _normalize_tool_args,
-    _normalize_token,
-    _placeholder_token,
-    _placeholder_value_looks_generic,
-    _record_tool_attempt,
-    _undo_tool_attempt_if_cached,
-    _repeat_loop_limits,
-    _requested_artifact_read_target,
-    _requested_file_read_range,
-    _resolve_artifact_record,
-    _resolve_dir_list_path,
-    _resolve_file_read_path,
-    _should_suppress_resolved_plan_artifact_read,
-    _tool_attempt_history,
-    _tool_call_fingerprint,
-    allow_repeated_tool_call_once,
-    _active_write_session_for_target,
-    _assistant_declares_read_before_write,
-    _assistant_text_target_paths,
-    _build_schema_repair_message,
-    _declared_read_before_write_reason,
-    _detect_oversize_patch_payload,
-    _detect_oversize_write_payload,
-    _ensure_chunk_write_session,
-    _infer_write_tool_path,
-    _recover_declared_read_before_write,
-    _repair_active_write_session_args,
-    _salvage_active_write_session_append,
-    _should_enter_chunk_mode,
-    _suggested_chunk_sections,
-)
-
-
-# ---------------------------------------------------------------------------
-# High-level parse entry point
-# ---------------------------------------------------------------------------
-
-from dataclasses import dataclass, field
 
 
 @dataclass
@@ -307,6 +306,8 @@ def parse_tool_calls(
         except Exception:
             allowed_raw_function_names = None
 
+    remote_scope_active = remote_scope_is_active(getattr(harness, "state", None))
+
     # Extract Native tool calls
     native_calls = [
         pending
@@ -327,6 +328,7 @@ def parse_tool_calls(
         assistant_text,
         model_name=active_model_name,
         allowed_raw_function_names=allowed_raw_function_names,
+        remote_scope_active=remote_scope_active,
     )
     _log_inline_tool_metadata_stripped(harness, inline_calls)
     if _should_discard_qwen_25_structured_inline_tools(
@@ -355,6 +357,7 @@ def parse_tool_calls(
             thinking_text,
             model_name=active_model_name,
             allowed_raw_function_names=allowed_raw_function_names,
+            remote_scope_active=remote_scope_active,
         )
         if cleaned_thinking_text != thinking_text:
             final_thinking_text = _strip_tool_protocol_payloads(cleaned_thinking_text)

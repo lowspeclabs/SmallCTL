@@ -30,6 +30,10 @@ WRONG_PATH_MARKERS = (
     "filenotfounderror",
     "path does not exist",
 )
+_MISSING_REMOTE_UTILITY_RE = (
+    "command not found",
+    "not recognized as an internal or external command",
+)
 _TEST_OUTPUT_MARKERS = (
     "assertionerror",
     "traceback",
@@ -75,6 +79,13 @@ def _looks_like_test_failure_output(text: str) -> bool:
     if "assertionerror" in lowered and any(marker in lowered for marker in ("failed", "traceback", "ran ")):
         return True
     return False
+
+
+def _looks_like_missing_remote_utility(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in _MISSING_REMOTE_UTILITY_RE)
 
 
 def _is_patch_target_miss(tool_name: str, combined_result_text: str) -> bool:

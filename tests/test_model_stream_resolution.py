@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import smallctl.graph.model_stream as model_stream_module
 import smallctl.graph.model_stream_loop as model_stream_loop_module
 from smallctl.client import OpenAICompatClient, StreamResult
-from smallctl.graph.model_stream_loop import (
-    run_model_stream_loop,
-    _trim_degenerate_suffix,
-    _detect_degenerate_repetition,
-    _DEGENERATE_REPETITION_WINDOW_CHARS,
-)
 from smallctl.graph.model_stream import process_model_stream
+from smallctl.graph.model_stream_loop import (
+    _DEGENERATE_REPETITION_WINDOW_CHARS,
+    _detect_degenerate_repetition,
+    _trim_degenerate_suffix,
+    run_model_stream_loop,
+)
 from smallctl.graph.model_stream_resolution import (
     MAX_DEGENERATE_LOOP_RETRIES,
     resolve_model_stream_result,
@@ -196,6 +196,41 @@ class _AlwaysReasoningOnlyClient:
                     ]
                 },
             }
+
+
+class _DelayedReasoningOnlyClient:
+    model = "qwen3.5:9b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "role": "assistant",
+                            "content": None,
+                        }
+                    }
+                ]
+            },
+        }
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "I found the likely fix but did not emit an action."
+                        }
+                    }
+                ]
+            },
+        }
 
 
 class _ProgressingReasoningClient:
@@ -557,6 +592,45 @@ def test_reasoning_only_stream_halts_after_escalation_nudge_exhausted(monkeypatc
     assert result["stream_ended_without_done"] is True
     assert result["stream_ended_without_done_details"]["reason"] == "reasoning_only_stream_stall"
     assert result["stream_ended_without_done_details"]["retrying"] is False
+
+
+def test_reasoning_only_halt_keeps_triggering_chunk_for_salvage(monkeypatch) -> None:
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness.client = _DelayedReasoningOnlyClient()
+    harness._cancel_requested = False
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_CHUNKS", 1)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_CHUNKS", 1)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_MAX_SECONDS", 0.0)
+    monkeypatch.setattr(model_stream_loop_module, "_REASONING_ONLY_TOOL_MAX_SECONDS", 0.0)
+
+    result = asyncio.run(
+        run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=[{"role": "user", "content": "fix the service"}],
+            tools=tools,
+            echo_to_stdout=False,
+            start_tag="<think>",
+            end_tag="</think>",
+            start_time=time.perf_counter(),
+        )
+    )
+
+    assert len(harness.client.calls) == 2
+    assert result["stream_ended_without_done"] is True
+    stream = OpenAICompatClient.collect_stream(
+        result["chunks"],
+        reasoning_mode=harness.reasoning_mode,
+        thinking_start_tag=harness.thinking_start_tag,
+        thinking_end_tag=harness.thinking_end_tag,
+    )
+    assert "likely fix" in stream.thinking_text
 
 
 def test_progressing_reasoning_only_stream_gets_hard_budget_before_retry(monkeypatch) -> None:

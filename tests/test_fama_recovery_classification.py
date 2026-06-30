@@ -12,7 +12,12 @@ from smallctl.fama.detectors import (
     detect_wrong_path,
 )
 from smallctl.fama.runtime import observe_tool_result
-from smallctl.fama.signals import FamaFailureKind, FamaSignal, signal_from_dict, signal_to_dict
+from smallctl.fama.signals import (
+    FamaFailureKind,
+    FamaSignal,
+    signal_from_dict,
+    signal_to_dict,
+)
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.recovery_schema import Subtask, SubtaskLedger
 from smallctl.state import LoopState
@@ -98,6 +103,29 @@ def test_unittest_assertion_not_found_is_not_wrong_path() -> None:
     )
 
     assert detect_wrong_path(state, tool_name="shell_exec", result=result, operation_id="op-test") is None
+
+
+def test_ssh_missing_diagnostic_binary_is_not_wrong_path() -> None:
+    state = LoopState(step_count=2)
+    result = ToolEnvelope(
+        success=False,
+        output={
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": "bash: line 1: netstat: command not found\n",
+        },
+        error="bash: line 1: netstat: command not found",
+    )
+
+    assert (
+        detect_wrong_path(
+            state,
+            tool_name="ssh_exec",
+            result=result,
+            operation_id="op-netstat",
+        )
+        is None
+    )
 
 
 def test_remote_mutation_requires_verification_uses_pending_classification() -> None:

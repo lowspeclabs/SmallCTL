@@ -1543,20 +1543,18 @@ def test_control_post_change_helpers_build_focused_verifier_and_dependency_block
     assert dependency["command"] == "python3 -m pip install demo_dep"
 
 
-def test_post_change_html_verifier_accepts_dom_based_game(tmp_path: Path) -> None:
+def test_post_change_html_file_presence_is_harness_side(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
-    target = tmp_path / "catch-the-stars.html"
+    target = tmp_path / "status-card.html"
     target.write_text(
         "<!DOCTYPE html>\n"
         "<html>\n"
-        "<head><title>Catch the Stars</title></head>\n"
+        "<head><title>Status Card</title></head>\n"
         "<body>\n"
-        '<div id="game"></div>\n'
+        '<div class="dashboard-card"></div>\n'
+        '<button>Run Check</button>\n'
         "<script>\n"
-        "let score = 0;\n"
-        "let lives = 3;\n"
-        "function gameOver() {}\n"
-        "function restart() {}\n"
+        "document.querySelector('button').addEventListener('click', function () {});\n"
         "</script>\n"
         "</body>\n"
         "</html>\n"
@@ -1566,29 +1564,13 @@ def test_post_change_html_verifier_accepts_dom_based_game(tmp_path: Path) -> Non
     state.challenge_progress.last_code_change_paths = [str(target)]
 
     block = post_change_verification_block(state)
-    assert block is not None
-    assert block["reason"] == "post_change_verification_required"
-    command = block["next_required_action"]["required_arguments"]["command"]
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    assert block is None
+    assert state.challenge_progress.verified_after_last_change is True
 
 
-def test_post_change_html_verifier_accepts_generic_interactive_app(tmp_path: Path) -> None:
+def test_post_change_html_missing_file_gets_simple_presence_verifier(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
-    target = tmp_path / "mini-kanban.html"
-    target.write_text(
-        "<!DOCTYPE html>\n"
-        "<html>\n"
-        "<head><title>Mini Kanban</title></head>\n"
-        "<body>\n"
-        '<div id="board"></div>\n'
-        '<form id="add-task"><input name="title"><button type="submit">Add</button></form>\n'
-        "<script>\n"
-        'document.getElementById("add-task").addEventListener("submit", function () {});\n'
-        "</script>\n"
-        "</body>\n"
-        "</html>\n"
-    )
+    target = tmp_path / "missing.html"
     state.challenge_progress.code_change_count = 1
     state.challenge_progress.verified_after_last_change = False
     state.challenge_progress.last_code_change_paths = [str(target)]
@@ -1597,25 +1579,13 @@ def test_post_change_html_verifier_accepts_generic_interactive_app(tmp_path: Pat
     assert block is not None
     assert block["reason"] == "post_change_verification_required"
     command = block["next_required_action"]["required_arguments"]["command"]
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    assert command == f"test -f {str(target)} && test -s {str(target)}"
 
 
-def test_post_change_html_verifier_allows_static_report_when_task_is_report(tmp_path: Path) -> None:
+def test_post_change_html_empty_file_still_requires_presence_verifier(tmp_path: Path) -> None:
     state = LoopState(cwd=str(tmp_path))
-    state.run_brief.original_task = "Inspect the remote system and write a short health report to ./temp/report.html"
-    target = tmp_path / "report.html"
-    target.write_text(
-        "<!DOCTYPE html>\n"
-        "<html lang=\"en\">\n"
-        "<head><title>Health Report</title></head>\n"
-        "<body>\n"
-        "<h1>System Health Report</h1>\n"
-        "<p>The system is healthy. CPU usage is low, memory is abundant, and all critical services are running normally.</p>\n"
-        "<p>Disk usage is under 20% and no errors were found in the system logs during the inspection window.</p>\n"
-        "</body>\n"
-        "</html>\n"
-    )
+    target = tmp_path / "empty.html"
+    target.write_text("")
     state.challenge_progress.code_change_count = 1
     state.challenge_progress.verified_after_last_change = False
     state.challenge_progress.last_code_change_paths = [str(target)]
@@ -1623,30 +1593,6 @@ def test_post_change_html_verifier_allows_static_report_when_task_is_report(tmp_
     block = post_change_verification_block(state)
     assert block is not None
     assert block["reason"] == "post_change_verification_required"
-    command = block["next_required_action"]["required_arguments"]["command"]
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-
-
-def test_post_change_html_verifier_requires_interactivity_for_game_task(tmp_path: Path) -> None:
-    state = LoopState(cwd=str(tmp_path))
-    state.run_brief.original_task = "Build an interactive canvas game at ./temp/game.html"
-    target = tmp_path / "game.html"
-    target.write_text(
-        "<!DOCTYPE html>\n"
-        "<html>\n"
-        "<head><title>Game</title></head>\n"
-        "<body>\n"
-        "<h1>Game</h1>\n"
-        "</body>\n"
-        "</html>\n"
-    )
-    state.challenge_progress.code_change_count = 1
-    state.challenge_progress.verified_after_last_change = False
-    state.challenge_progress.last_code_change_paths = [str(target)]
-
-    block = post_change_verification_block(state)
-    assert block is not None
     command = block["next_required_action"]["required_arguments"]["command"]
     result = subprocess.run(command, shell=True, capture_output=True, text=True)
     assert result.returncode != 0

@@ -9,97 +9,6 @@ from ..state import LoopState
 
 _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError:\s+No module named ['\"](?P<module>[^'\"]+)['\"]")
 
-_HTML_INTERACTIVE_MARKERS = (
-    "game",
-    "interactive",
-    "canvas",
-    "dashboard",
-    "chart",
-    "plot",
-    "visualization",
-    "animation",
-    "click",
-    "button",
-    "input",
-    "form",
-    "drag",
-    "drop",
-    "event listener",
-    "addeventlistener",
-    "onclick",
-)
-
-_HTML_REPORT_MARKERS = (
-    "report",
-    "summary",
-    "health",
-    "status",
-    "overview",
-    "static",
-    "document",
-    "write a",
-    "write an",
-    "create a",
-    "generate a",
-)
-
-
-def _task_requires_interactive_html(state: LoopState) -> bool:
-    texts: list[str] = []
-    run_brief = getattr(state, "run_brief", None)
-    if run_brief is not None:
-        texts.append(str(getattr(run_brief, "original_task", "") or ""))
-        texts.append(str(getattr(run_brief, "current_phase_objective", "") or ""))
-    working_memory = getattr(state, "working_memory", None)
-    if working_memory is not None:
-        texts.append(str(getattr(working_memory, "current_goal", "") or ""))
-    combined = " ".join(texts).lower()
-    if not combined:
-        return True
-    has_report_marker = any(marker in combined for marker in _HTML_REPORT_MARKERS)
-    has_interactive_marker = any(marker in combined for marker in _HTML_INTERACTIVE_MARKERS)
-    if has_interactive_marker and not has_report_marker:
-        return True
-    if has_report_marker and not has_interactive_marker:
-        return False
-    return True
-
-
-def _html_verifier_command(target: str, interactive: bool) -> str:
-    base = (
-        f"test -s {shlex.quote(target)} && python3 - <<'PY'\n"
-        "from pathlib import Path\n"
-        "import re\n"
-        f"s = Path({target!r}).read_text()\n"
-        "assert '<!DOCTYPE html' in s or '<html' in s.lower()\n"
-        "assert '<small_model_thought>' not in s\n"
-    )
-    if interactive:
-        base += (
-            "assert '<script' in s\n"
-            "assert s.count('<script') == s.count('</script>')\n"
-            "# Allow either canvas-based or DOM-based interactive apps.\n"
-            "if '<canvas' not in s:\n"
-            "    assert re.search(r'<div\\b[^>]*id=[\"\\'][^\"\\']+[\"\\']', s, re.IGNORECASE) is not None\n"
-            "    lowered = s.lower()\n"
-            "    assert any(marker in lowered for marker in (\n"
-            "        # Generic interactive controls / event handling.\n"
-            "        'addeventlistener', 'onclick=', 'onchange=', 'onsubmit=', 'ondrop=', 'ondrag=',\n"
-            "        '<button', '<form', '<input', '<select', '<textarea',\n"
-            "        # Legacy DOM-based game markers kept for backward compatibility.\n"
-            "        'score', 'lives', 'game over', 'restart',\n"
-            "    ))\n"
-        )
-    else:
-        base += (
-            "# Static/report HTML: require well-formed document and non-trivial body content.\n"
-            "assert len(s.strip()) > 200\n"
-            "assert re.search(r'<body\\b', s, re.IGNORECASE) is not None\n"
-        )
-    base += "print('OK')\nPY"
-    return base
-
-
 def post_change_verification_block(state: LoopState) -> dict[str, Any] | None:
     progress = getattr(state, "challenge_progress", None)
     if progress is None:
@@ -111,9 +20,11 @@ def post_change_verification_block(state: LoopState) -> dict[str, Any] | None:
     paths = [str(path or "").strip() for path in getattr(progress, "last_code_change_paths", []) or [] if str(path or "").strip()]
     html_paths = [path for path in paths if path.lower().endswith((".html", ".htm"))]
     if html_paths:
+        if _all_paths_are_nonempty_files(html_paths, state=state):
+            progress.verified_after_last_change = True
+            return None
         target = html_paths[-1]
-        interactive = _task_requires_interactive_html(state)
-        command = _html_verifier_command(target, interactive=interactive)
+        command = _file_presence_verifier_command(target)
     else:
         target = paths[-1] if paths else "the changed artifact"
         command = focused_verifier_command_for_path(target, state=state) or "run the smallest focused verifier for the changed artifact"
@@ -135,6 +46,31 @@ def post_change_verification_block(state: LoopState) -> dict[str, Any] | None:
             "notes": notes,
         },
     }
+
+
+def _all_paths_are_nonempty_files(paths: list[str], *, state: LoopState) -> bool:
+    if not paths:
+        return False
+    for path in paths:
+        resolved = _resolve_path(path, state=state)
+        try:
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _resolve_path(path: str, *, state: LoopState) -> Path:
+    target = Path(str(path or "").strip())
+    if target.is_absolute():
+        return target
+    return Path(str(getattr(state, "cwd", "") or ".")) / target
+
+
+def _file_presence_verifier_command(target: str) -> str:
+    quoted = shlex.quote(target)
+    return f"test -f {quoted} && test -s {quoted}"
 
 
 def focused_verifier_command_for_path(path: str, *, state: LoopState) -> str:

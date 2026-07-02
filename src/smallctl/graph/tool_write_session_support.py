@@ -3,15 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..state import json_safe_value
 from ..task_targets import extract_task_target_paths, primary_task_target_path
 from .state import PendingToolCall
 from .write_recovery import infer_write_target_path, normalize_write_argument_aliases
 from .tool_write_session_policy import (
     _active_write_session_for_target,
-    _ensure_chunk_write_session,
-    _should_enter_chunk_mode,
-    _suggested_chunk_sections,
     _write_policy_value,
 )
 
@@ -504,6 +500,7 @@ def _build_schema_repair_message(
             f"{problem_text} "
             f"Please resend the tool call with these required fields: {required_text}."
             f"{target_hint} "
+            "Do not output the file contents in the chat; always write files through the `file_write` tool. "
             "If a full implementation is too large, break it down with a small valid scaffold first, "
             "then extend it with later writes. If this is a localized edit to an existing file, switch to "
             "`file_patch` or `ast_patch` instead of retrying a full `file_write`."

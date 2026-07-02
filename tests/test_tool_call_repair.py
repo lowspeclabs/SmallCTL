@@ -181,6 +181,52 @@ def test_markdown_links_in_content_fields_are_not_touched() -> None:
     assert result.args["content"] == "[label](target)"
 
 
+def test_missing_path_filled_from_task_target_for_file_write() -> None:
+    spec = _spec("file_write", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"])
+
+    result = repair_tool_call_args(
+        spec,
+        {"content": "<html></html>"},
+        primary_target_path="./temp/gemma-4-12b-network-monitor-sim.html",
+    )
+
+    assert result.valid_after_repair is True
+    assert result.args["path"] == "./temp/gemma-4-12b-network-monitor-sim.html"
+    assert any(action.kind == "missing_path_from_task_targets" for action in result.actions)
+
+
+def test_missing_path_not_filled_when_no_target() -> None:
+    spec = _spec("file_write", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"])
+
+    result = repair_tool_call_args(spec, {"content": "<html></html>"})
+
+    assert result.valid_after_repair is False
+    assert "path" not in result.args
+    assert not any(action.kind == "missing_path_from_task_targets" for action in result.actions)
+
+
+def test_missing_path_not_filled_for_non_path_tool() -> None:
+    spec = _spec("task_complete", {"message": {"type": "string"}}, ["message"])
+
+    result = repair_tool_call_args(spec, {"message": "done"}, primary_target_path="./temp/foo.html")
+
+    assert result.valid_initially is True
+    assert result.args == {"message": "done"}
+
+
+def test_existing_path_not_overwritten_by_task_target() -> None:
+    spec = _spec("file_write", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"])
+
+    result = repair_tool_call_args(
+        spec,
+        {"path": "./other.html", "content": "<html></html>"},
+        primary_target_path="./temp/foo.html",
+    )
+
+    assert result.valid_initially is True
+    assert result.args["path"] == "./other.html"
+
+
 def test_wrapper_unwraps_only_when_nested_args_validate() -> None:
     spec = _spec("file_read", {"path": {"type": "string"}}, ["path"])
 
@@ -299,6 +345,33 @@ async def test_lifecycle_validation_repairs_pending_call_before_dispatch() -> No
     assert pending.parser_metadata["tool_call_repair_kinds"] == ["null_optional_to_omit", "markdown_link_to_path"]
     assert harness.state.messages[-1].metadata["recovery_kind"] == "tool_call_repair"
     assert harness.state.scratchpad["_recovery_metrics"]["tool_call_repairs_total"] == 1
+    assert "tool_call_repair_applied" in {event for event, _message, _data in harness.runlogs}
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_validation_fills_missing_file_write_path_from_task_target() -> None:
+    spec = _spec("file_write", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"])
+    harness = _Harness(_registry_with(spec))
+    # Use two targets so the active-write-session heuristic refuses to guess and
+    # the schema-repair rule (primary_task_target_path fallback) is exercised.
+    harness.state.scratchpad["_task_target_paths"] = [
+        "./temp/gemma-4-12b-network-monitor-sim.html",
+        "./temp/network-monitor-sim.html",
+    ]
+    pending = PendingToolCall(
+        tool_name="file_write",
+        args={"content": "<html></html>"},
+        tool_call_id="tc1",
+    )
+    graph_state = SimpleNamespace(pending_tool_calls=[pending], last_assistant_text="")
+
+    short_circuited = await _validate_pending_tool_calls(harness, graph_state, SimpleNamespace(event_handler=None))
+
+    assert short_circuited is False
+    assert pending.args == {"path": "./temp/gemma-4-12b-network-monitor-sim.html", "content": "<html></html>"}
+    assert pending.parser_metadata["tool_call_repaired"] is True
+    assert "missing_path_from_task_targets" in pending.parser_metadata["tool_call_repair_kinds"]
+    assert harness.state.messages[-1].metadata["recovery_kind"] == "tool_call_repair"
     assert "tool_call_repair_applied" in {event for event, _message, _data in harness.runlogs}
 
 

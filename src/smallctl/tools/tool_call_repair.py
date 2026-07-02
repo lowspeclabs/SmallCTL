@@ -7,9 +7,27 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import ToolSpec
+from ..task_targets import primary_task_target_path
 
 
 PathPart = str | int
+
+# Tools whose primary required destination is a filesystem path. When the model
+# emits one of these calls without a path, the harness can safely fall back to
+# the task's primary target path rather than asking the model to retry (which
+# often causes the model to dump the intended file contents into chat instead).
+_PATH_BASED_FILE_TOOLS = {
+    "file_write",
+    "file_append",
+    "file_read",
+    "file_patch",
+    "ast_patch",
+    "file_delete",
+    "ssh_file_write",
+    "ssh_file_read",
+    "ssh_file_patch",
+    "ssh_file_replace_between",
+}
 
 
 @dataclass(frozen=True)
@@ -86,7 +104,9 @@ def validate_tool_args(schema: dict[str, Any], args: Any) -> list[ToolCallValida
     return _validate_schema(schema, args, ())
 
 
-def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepairResult:
+def repair_tool_call_args(
+    spec: ToolSpec, args: dict[str, Any], *, primary_target_path: str | None = None
+) -> ToolCallRepairResult:
     if not isinstance(args, dict):
         return ToolCallRepairResult(
             valid_initially=False,
@@ -115,6 +135,10 @@ def repair_tool_call_args(spec: ToolSpec, args: dict[str, Any]) -> ToolCallRepai
     if wrapper is not None:
         repaired_args, action = wrapper
         actions.append(action)
+
+    _repair_missing_path_from_task_targets(
+        spec, repaired_args, actions, primary_target_path=primary_target_path
+    )
 
     initial_issues = validate_tool_args(spec.schema, repaired_args) + _catalog_shape_issues(spec, repaired_args)
     if not initial_issues and not actions:
@@ -178,7 +202,8 @@ def repair_pending_tool_call_args(harness: Any, pending: Any) -> ToolCallRepairR
     args = getattr(pending, "args", None)
     if not isinstance(args, dict):
         return None
-    return repair_tool_call_args(spec, args)
+    target_path = primary_task_target_path(harness)
+    return repair_tool_call_args(spec, args, primary_target_path=target_path)
 
 
 def _validate_schema(schema: dict[str, Any], value: Any, path: tuple[PathPart, ...]) -> list[ToolCallValidationIssue]:
@@ -530,6 +555,51 @@ def _repair_paired_range(tool_name: str, args: dict[str, Any], actions: list[Too
         new_end = start + _DEFAULT_RANGE_WINDOW - 1
         _set_path(args, end_path, new_end)
         actions.append(ToolCallRepairAction("missing_paired_range_default", end_path, None, new_end, f"end_line={new_end} was assumed"))
+
+
+def _repair_missing_path_from_task_targets(
+    spec: ToolSpec,
+    args: dict[str, Any],
+    actions: list[ToolCallRepairAction],
+    *,
+    primary_target_path: str | None,
+) -> None:
+    """Fill a missing required path field from the task's primary target path.
+
+    Small local models (especially via llama.cpp/LM Studio) sometimes emit a
+    `file_write` call with the full file content but omit the `path` field.
+    Without this repair the harness rejects the call, and the model often
+    responds by dumping the same content into chat.  Filling in the obvious
+    target path keeps the write on the tool path.
+    """
+    tool_name = str(getattr(spec, "name", "") or "")
+    if tool_name not in _PATH_BASED_FILE_TOOLS:
+        return
+    if not primary_target_path:
+        return
+
+    required = set(spec.schema.get("required") or [])
+    properties = spec.schema.get("properties") or {}
+    path_field: str | None = None
+    for candidate in ("path", "file_path", "dir_path"):
+        if candidate in required and candidate in properties:
+            path_field = candidate
+            break
+    if path_field is None:
+        return
+    if args.get(path_field) is not None and str(args[path_field]).strip():
+        return
+
+    args[path_field] = primary_target_path
+    actions.append(
+        ToolCallRepairAction(
+            kind="missing_path_from_task_targets",
+            path=(path_field,),
+            before_preview="<missing>",
+            after_preview=primary_target_path,
+            message=f"{path_field} was missing, so the task target path was inserted",
+        )
+    )
 
 
 def _path_schema(schema: dict[str, Any], path: tuple[PathPart, ...]) -> dict[str, Any]:

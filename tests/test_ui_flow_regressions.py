@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 from textual.css.query import NoMatches
 
@@ -237,6 +238,92 @@ def test_ui_transcript_skips_loop_halt_placeholder() -> None:
     assert flow._ui_transcript == [persist_calls[0][0]]
     assert flow._ui_transcript[0]["event_type"] == "system"
     assert len(persist_calls) == 1
+
+
+def test_hidden_task_complete_does_not_promote_summary_after_visible_answer() -> None:
+    rendered: list[UIEvent] = []
+
+    class _Console:
+        def get_active_assistant_text(self) -> str:
+            return "Hello! How can I help you today?"
+
+        async def append_event(self, event: UIEvent) -> None:
+            rendered.append(event)
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._show_system_messages = False
+            self._pending_user_echo = None
+            self.active_task = None
+
+        def _get_console(self) -> object:
+            return _Console()
+
+        def _set_activity(self, text: str | None) -> None:
+            pass
+
+        def _refresh_status(self) -> None:
+            pass
+
+        def _record_ui_transcript_event(self, event: UIEvent) -> None:
+            rendered.append(event)
+
+        def _should_render_event(self, event: UIEvent) -> bool:
+            return True
+
+    flow = _Flow()
+
+    asyncio.run(
+        flow._handle_harness_event(
+            UIEvent(
+                UIEventType.TOOL_CALL,
+                "task_complete",
+                data={"args": {"message": "Replied to the user's greeting."}},
+            )
+        )
+    )
+
+    assert rendered == []
+
+
+def test_ui_transcript_coalesces_adjacent_stream_chunks() -> None:
+    persist_calls: list[list[dict[str, Any]]] = []
+
+    class _Flow(SmallctlAppFlowMixin):
+        def __init__(self) -> None:
+            self._ui_transcript = []
+            self._ui_transcript_recent_fingerprints = []
+            self._ui_transcript_persist_handle = None
+            self._ui_transcript_debounce_seconds = 0.0
+
+        def _persist_ui_transcript(self) -> None:
+            persist_calls.append(list(self._ui_transcript))
+
+    flow = _Flow()
+
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, "Hello! How can I"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, " help you today"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, "?\n\n"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.THINKING, "Plan: "))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.THINKING, "reply."))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.USER, "hi"))
+    flow._record_ui_transcript_event(UIEvent(UIEventType.ASSISTANT, "ok"))
+    flow._record_ui_transcript_event(
+        UIEvent(UIEventType.ASSISTANT, "replaced", data={"kind": "replace"})
+    )
+
+    assistant_events = [e for e in flow._ui_transcript if e["event_type"] == "assistant"]
+    thinking_events = [e for e in flow._ui_transcript if e["event_type"] == "thinking"]
+
+    assert len(assistant_events) == 3
+    assert assistant_events[0]["content"] == "Hello! How can I help you today?\n\n"
+    assert assistant_events[1]["content"] == "ok"
+    assert assistant_events[2]["content"] == "replaced"
+    assert assistant_events[2]["data"].get("kind") == "replace"
+
+    assert len(thinking_events) == 1
+    assert thinking_events[0]["content"] == "Plan: reply."
+
 
 def test_ui_transcript_persistence_can_be_debounced() -> None:
     persist_calls = []

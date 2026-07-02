@@ -222,9 +222,12 @@ class SmallctlAppFlowMixin:
                 skip_promotion = False
                 if name == "task_complete" and console:
                     active_text = console.get_active_assistant_text().strip()
-                    skip_promotion = check_duplicate_promotion(
-                        promote_text.lower(),
-                        active_text.lower(),
+                    skip_promotion = bool(active_text) and (
+                        suppress_task_complete
+                        or check_duplicate_promotion(
+                            promote_text.lower(),
+                            active_text.lower(),
+                        )
                     )
 
                 if not skip_promotion:
@@ -708,7 +711,10 @@ class SmallctlAppFlowMixin:
     def _sanitize_visible_text_event(self, event: UIEvent) -> UIEvent | None:
         if event.event_type not in {UIEventType.ASSISTANT, UIEventType.THINKING}:
             return event
-        cleaned, extracted = sanitize_assistant_content_for_history(str(event.content or ""))
+        cleaned, extracted = sanitize_assistant_content_for_history(
+            str(event.content or ""),
+            strip_result=False,
+        )
         if event.event_type == UIEventType.ASSISTANT:
             if not cleaned and extracted:
                 return None
@@ -785,6 +791,9 @@ class SmallctlAppFlowMixin:
             transcript = []
             self._ui_transcript = transcript
         event_dict = event.to_dict()
+        if self._coalesce_stream_transcript_event(transcript, event_dict):
+            self._schedule_ui_transcript_persist()
+            return
         fingerprint = self._ui_transcript_fingerprint(event_dict)
         recent_fingerprints = getattr(self, "_ui_transcript_recent_fingerprints", None)
         if not isinstance(recent_fingerprints, list):
@@ -797,6 +806,31 @@ class SmallctlAppFlowMixin:
         transcript.append(event_dict)
         del transcript[:-500]
         self._schedule_ui_transcript_persist()
+
+    @staticmethod
+    def _coalesce_stream_transcript_event(
+        transcript: list[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> bool:
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {UIEventType.ASSISTANT.value, UIEventType.THINKING.value}:
+            return False
+        if not transcript:
+            return False
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if data.get("kind") or data.get("promoted_from"):
+            return False
+        previous = transcript[-1]
+        if str(previous.get("event_type") or "") != event_type:
+            return False
+        previous_data = previous.get("data") if isinstance(previous.get("data"), dict) else {}
+        for key in ("kind", "promoted_from", "ui_kind", "tool_call_id", "trace_id", "task_id"):
+            if (previous_data.get(key) or "") != (data.get(key) or ""):
+                return False
+        previous["content"] = str(previous.get("content") or "") + str(event.get("content") or "")
+        if event.get("timestamp"):
+            previous["timestamp"] = event["timestamp"]
+        return True
 
     @staticmethod
     def _ui_transcript_fingerprint(event: dict[str, Any]) -> str:

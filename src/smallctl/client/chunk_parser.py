@@ -299,6 +299,7 @@ def sanitize_assistant_content_for_history(
     *,
     thinking_start_tag: str = "<think>",
     thinking_end_tag: str = "</think>",
+    strip_result: bool = True,
 ) -> tuple[str, str]:
     """Strip common reasoning wrappers from assistant content.
 
@@ -343,7 +344,10 @@ def sanitize_assistant_content_for_history(
     if extracted_thinking:
         thinking_parts.append(normalize_sentencepiece_whitespace(extracted_thinking))
 
-    return _collapse_large_file_code_blocks(assistant_text).strip(), normalize_sentencepiece_whitespace("".join(thinking_parts)).strip()
+    cleaned = _collapse_large_file_code_blocks(assistant_text)
+    if strip_result:
+        cleaned = cleaned.strip()
+    return cleaned, normalize_sentencepiece_whitespace("".join(thinking_parts)).strip()
 
 
 def extract_content_fragments(content: Any) -> list[tuple[Literal["assistant", "thinking"], str]]:

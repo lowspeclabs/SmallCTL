@@ -36,6 +36,15 @@ def test_sanitize_assistant_content_normalizes_whitespace() -> None:
     assert thinking == ""
 
 
+def test_sanitize_assistant_content_can_preserve_stream_chunk_boundaries() -> None:
+    assistant, thinking = sanitize_assistant_content_for_history(
+        " today?\n\n",
+        strip_result=False,
+    )
+    assert assistant == " today?\n\n"
+    assert thinking == ""
+
+
 def test_sanitize_assistant_content_normalizes_thinking_whitespace() -> None:
     raw = "<think>\u2581Deep\u2581thoughts</think>\u2581Answer"
     assistant, thinking = sanitize_assistant_content_for_history(raw)

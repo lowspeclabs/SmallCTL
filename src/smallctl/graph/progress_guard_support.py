@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..harness.task_transactions import recovery_context_lines, transaction_from_scratchpad
@@ -17,18 +18,32 @@ def _current_task_requires_file_mutation(state: Any | None) -> bool:
     working_memory = getattr(state, "working_memory", None)
     texts.append(str(getattr(working_memory, "current_goal", "") or ""))
     scratchpad = getattr(state, "scratchpad", None)
+    prior_target_paths: list[str] = []
     if isinstance(scratchpad, dict):
         handoff = scratchpad.get("_last_task_handoff")
         if isinstance(handoff, dict):
             texts.append(str(handoff.get("effective_task") or ""))
             texts.append(str(handoff.get("current_goal") or ""))
+            prior_target_paths = [
+                str(p).strip()
+                for p in (handoff.get("target_paths") or [])
+                if str(p).strip()
+            ]
     task_text = " ".join(texts).lower()
-    mutation_verb = any(verb in task_text for verb in ("patch", "fix", "repair", "update", "modify"))
+    mutation_verbs = ("patch", "fix", "repair", "update", "modify")
+    mutation_verb = any(verb in task_text for verb in mutation_verbs)
     file_target = any(
         marker in task_text
         for marker in ("file", "file_patch", ".html", ".py", ".js", ".ts", "/var/www", "do not do a direct overwrite")
     )
-    return mutation_verb and file_target
+    if mutation_verb and file_target:
+        return True
+    # Follow-up tasks that reference previous deliverables with file paths.
+    follow_up_verbs = mutation_verbs + ("add", "change", "review", "adjust", "tweak", "implement")
+    if prior_target_paths and any(verb in task_text for verb in follow_up_verbs):
+        if any(re.search(r"\.[a-zA-Z0-9]{1,10}$", p) for p in prior_target_paths):
+            return True
+    return False
 
 
 def _prior_turn_verdict(harness: Any) -> str:

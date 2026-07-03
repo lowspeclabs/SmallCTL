@@ -79,6 +79,31 @@ def test_bare_string_wraps_only_for_allowlisted_array_field() -> None:
     assert repair_tool_call_args(blocked, {"symbols": "Thing"}).valid_after_repair is False
 
 
+def test_garbage_extra_field_is_stripped_and_hint_is_sanitized() -> None:
+    spec = _spec("dir_list", {"path": {"type": "string"}})
+    garbage_key = 'path="."核心任务是：添加创建任务和重新分配优先级的功能。<|"|>\n<|channel>thought\n<channel|><|tool_call>call'
+
+    result = repair_tool_call_args(spec, {garbage_key: False})
+
+    assert result.valid_after_repair is True
+    assert result.args == {}
+    assert result.hint
+    assert garbage_key not in result.hint
+    assert "unknown field" in result.hint
+    assert len(result.hint) < 300
+
+
+def test_repair_hint_trims_long_reasoning_field_name() -> None:
+    spec = _spec("dir_list", {"path": {"type": "string"}})
+    long_key = "x" * 200
+
+    result = repair_tool_call_args(spec, {long_key: "value"})
+
+    assert result.valid_after_repair is True
+    assert "x" * 81 not in result.hint
+    assert "..." in result.hint
+
+
 def test_patch_argument_aliases_repaired_in_catalog() -> None:
     spec = _spec(
         "file_patch",

@@ -29,6 +29,28 @@ _PATH_BASED_FILE_TOOLS = {
     "ssh_file_replace_between",
 }
 
+_MAX_DISPLAY_FIELD_LEN = 80
+
+
+def _sanitize_field_name_for_display(name: Any) -> str:
+    """Return a short, human-readable form of a field name for repair hints.
+
+    Malformed model output can produce extra "field names" that are hundreds of
+    characters of reasoning text and control tokens.  Truncating and stripping
+    control characters keeps the repair hint from echoing garbage back into the
+    next prompt.
+    """
+    text = str(name or "")
+    # Collapse whitespace and control characters to a single space.
+    text = re.sub(r"[\s\x00-\x1f\x7f]+", " ", text).strip()
+    # Remove common Gemma/control-token markers that leak into arguments.
+    text = re.sub(r"<\|?/?[a-zA-Z0-9_|-]+\|?>", "", text).strip()
+    if not text:
+        return "<garbage>"
+    if len(text) > _MAX_DISPLAY_FIELD_LEN:
+        text = text[:_MAX_DISPLAY_FIELD_LEN].rstrip() + "..."
+    return text
+
 
 @dataclass(frozen=True)
 class ToolCallValidationIssue:
@@ -173,7 +195,7 @@ def repair_tool_call_args(
                         path=issue.path,
                         before_preview="<extra field>",
                         after_preview="<omitted>",
-                        message=f"unknown field {issue.path[-1]} was ignored",
+                        message=f"unknown field {_sanitize_field_name_for_display(issue.path[-1])} was ignored",
                     )
                 )
 

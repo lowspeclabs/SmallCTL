@@ -358,6 +358,86 @@ def test_large_context_exposes_artifact_read_for_mutation_task() -> None:
     assert "file_read" in names
 
 
+def test_large_context_exposes_artifact_read_for_follow_up_mutation_task() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = (
+        "task required a way to create a task and reassign priority, neither feature was deployed, review and fix"
+    )
+    state.scratchpad["_last_task_handoff"] = {
+        "target_paths": ["./temp/gemma-4-12b-mini-kanban.html"],
+    }
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(allow_artifact_read_large_context=False),
+        server_context_limit=1_048_576,
+        client=SimpleNamespace(model="deepseek-v4-flash", runtime_context_limit=None, context_limit=None),
+        _runlog=lambda *args, **kwargs: None,
+    )
+    schemas = [
+        {"type": "function", "function": {"name": "artifact_read"}},
+        {"type": "function", "function": {"name": "artifact_grep"}},
+        {"type": "function", "function": {"name": "artifact_print"}},
+        {"type": "function", "function": {"name": "file_read"}},
+    ]
+
+    filtered = _filter_artifact_read_for_run(harness, schemas, mode="loop")
+    names = {s["function"]["name"] for s in filtered}
+
+    assert "artifact_read" in names
+    assert "artifact_grep" in names
+    assert "artifact_print" in names
+    assert "file_read" in names
+
+
+def test_follow_up_without_file_targets_does_not_expose_artifact_read() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "review and fix the deployment"
+    state.scratchpad["_last_task_handoff"] = {
+        "target_paths": ["./docs/README"],
+    }
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(allow_artifact_read_large_context=False),
+        server_context_limit=1_048_576,
+        client=SimpleNamespace(model="deepseek-v4-flash", runtime_context_limit=None, context_limit=None),
+        _runlog=lambda *args, **kwargs: None,
+    )
+    schemas = [
+        {"type": "function", "function": {"name": "artifact_read"}},
+        {"type": "function", "function": {"name": "file_read"}},
+    ]
+
+    filtered = _filter_artifact_read_for_run(harness, schemas, mode="loop")
+    names = {s["function"]["name"] for s in filtered}
+
+    assert "artifact_read" not in names
+    assert "file_read" in names
+
+
+def test_current_task_requires_file_mutation_detects_follow_up_with_prior_targets() -> None:
+    from smallctl.graph.progress_guard_support import _current_task_requires_file_mutation
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "review and fix the missing features"
+    state.scratchpad["_last_task_handoff"] = {
+        "target_paths": ["./temp/gemma-4-12b-mini-kanban.html"],
+    }
+
+    assert _current_task_requires_file_mutation(state) is True
+
+
+def test_current_task_requires_file_mutation_false_for_pure_review_no_targets() -> None:
+    from smallctl.graph.progress_guard_support import _current_task_requires_file_mutation
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "review the deployment"
+    state.scratchpad["_last_task_handoff"] = {
+        "target_paths": [],
+    }
+
+    assert _current_task_requires_file_mutation(state) is False
+
+
 def test_remote_html_task_classifies_as_remote_execute() -> None:
     from smallctl.harness.task_classifier import classify_task_mode
 

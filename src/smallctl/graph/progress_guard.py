@@ -84,6 +84,39 @@ def _is_shell_read_command(record: Any) -> bool:
     return _is_read_only_shell_evidence_action(command)
 
 
+def _tool_history_entry_is_mutation(entry: str) -> bool:
+    """Return True when a tool_history fingerprint records a mutating operation.
+
+    Tool-history entries are formatted as ``tool_name|args_json|outcome``. File
+    mutations are recognized directly; shell/ssh executions count when their
+    command is not a read-only evidence action.
+    """
+    if not isinstance(entry, str):
+        return False
+    parts = entry.split("|")
+    if len(parts) < 3:
+        return False
+    tool_name = parts[0]
+    outcome = parts[-1]
+    if outcome != "success":
+        return False
+    if tool_name in _MUTATION_TOOLS:
+        return True
+    if tool_name not in {"shell_exec", "ssh_exec"}:
+        return False
+    args_json = "|".join(parts[1:-1])
+    try:
+        args = json.loads(args_json)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(args, dict):
+        return False
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return False
+    return not _is_read_only_shell_evidence_action(command)
+
+
 def _turn_is_read_only(last_tool_results: list[Any]) -> bool:
     """Return True if every tool result this turn is a read/search operation."""
     if not last_tool_results:
@@ -790,10 +823,7 @@ def _check_completion_confabulation(harness: Any, graph_state: Any) -> str | Non
         return None
 
     for entry in state.tool_history:
-        if not isinstance(entry, str):
-            continue
-        parts = entry.split("|")
-        if len(parts) >= 3 and parts[-1] == "success" and parts[0] in _MUTATION_TOOLS:
+        if _tool_history_entry_is_mutation(entry):
             return None
 
     text_to_check = " ".join(

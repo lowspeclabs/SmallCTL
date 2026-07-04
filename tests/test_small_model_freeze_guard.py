@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from smallctl.guards import GuardConfig, check_guards
-from smallctl.graph.recovery_context import build_goal_recap
+from smallctl.graph.recovery_context import build_concise_goal_hint, build_goal_recap
 from smallctl.graph.chat_progress import should_pause_repeated_tool_loop, build_repeated_tool_loop_interrupt_payload
 from smallctl.graph.chat_progress import looks_like_freeze_or_hang as chat_progress_freeze_guard
 from smallctl.graph.node_support import looks_like_freeze_or_hang as node_support_freeze_guard
@@ -199,6 +199,79 @@ def test_gemma_stream_halt_gets_extra_bounded_autocontinue() -> None:
     assert message.metadata["recovery_mode"] == "gemma_stream_autocontinue"
     assert message.metadata["max_retry_count"] == 5
     assert "Gemma stream auto-continue" in message.content
+    assert "<|channel>thought" in message.content
+    assert "Close the reasoning block immediately" in message.content
+
+
+def test_gemma_stream_halt_tracks_stalls_and_disables_thinking() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "Gemma 4 12b"
+        harness.state.scratchpad["_model_name"] = "Gemma 4 12b"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 3}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 1
+        harness.state.scratchpad["_gemma_reasoning_only_stall_count"] = 1
+        harness.reasoning_mode = "tags"
+        harness.state.run_brief.original_task = "Create a single-file HTML game"
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="",
+            last_thinking_text="Still reasoning without action.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    harness, graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.NEXT_STEP
+    assert harness.state.scratchpad["_gemma_reasoning_only_stall_count"] == 2
+    assert harness.reasoning_mode == "off"
+    assert harness.state.scratchpad["_thinking_tags_disabled"] is True
+    message = harness.state.recent_messages[-1]
+    assert "Thinking markers have been disabled for this turn" in message.content
+
+
+def test_gemma_4_exact_small_it_preserves_reasoning_mode_on_stall() -> None:
+    async def _run() -> tuple[object, object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "gemma-4-e2b-it"
+        harness.state.scratchpad["_model_name"] = "gemma-4-e2b-it"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 3}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 1
+        harness.state.scratchpad["_gemma_reasoning_only_stall_count"] = 1
+        harness.reasoning_mode = "field"
+        harness.state.run_brief.original_task = "Create a single-file HTML game"
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="",
+            last_thinking_text="Still reasoning without action.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, graph_state, route
+
+    harness, _graph_state, route = asyncio.run(_run())
+
+    assert route == LoopRoute.NEXT_STEP
+    assert harness.state.scratchpad["_gemma_reasoning_only_stall_count"] == 2
+    assert harness.reasoning_mode == "field"
 
 
 def test_gemma_stream_halt_still_stops_after_autocontinue_budget() -> None:
@@ -272,6 +345,76 @@ def test_goal_recap_omits_stale_task_boundary_goal() -> None:
 
     assert recap == "Goal recap: Original task: Read the latest harness log"
     assert "Current goal" not in recap
+
+
+def test_goal_recap_omits_redundant_phase_focus() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = "Debug the remote backup job"
+    harness.state.run_brief.current_phase_objective = "execute: Debug the remote backup job"
+
+    recap = build_goal_recap(harness)
+
+    assert "Original task: Debug the remote backup job" in recap
+    assert "Phase focus" not in recap
+
+
+def test_concise_goal_hint_trims_long_task() -> None:
+    harness = _FakeHarness()
+    harness.state.run_brief.original_task = (
+        "You are debugging a broken Linux backup job on a remote host.\n\n"
+        "Remote IP: root@192.168.1.64\nPassword: secret\n\n"
+        "The backup is supposed to archive /root/source into /root/backups using backup.sh.\n"
+        "Tasks:\n1. Inspect the files.\n2. Identify all reasons the backup would fail."
+    )
+
+    hint = build_concise_goal_hint(harness, max_chars=80)
+
+    assert hint.startswith("Task: ")
+    assert len(hint) <= 80 + len("Task: ")
+    assert "..." in hint or len(hint) <= 80 + len("Task: ")
+    assert "Remote IP" not in hint
+
+
+def test_gemma_stream_halt_uses_concise_goal_hint() -> None:
+    async def _run() -> tuple[object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "Gemma 4 12b"
+        harness.state.scratchpad["_model_name"] = "Gemma 4 12b"
+        harness.state.scratchpad["_last_stream_halted_without_done"] = True
+        harness.state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+        harness.state.scratchpad["_last_stream_halt_details"] = {"attempt": 3}
+        harness.state.scratchpad["_small_model_continue_nudges"] = 1
+        harness.state.run_brief.original_task = (
+            "You are debugging a broken Linux backup job on a remote host.\n\n"
+            "Remote IP: root@192.168.1.64\nPassword: secret\n\n"
+            "The backup is supposed to archive /root/source into /root/backups using backup.sh."
+        )
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="",
+            last_thinking_text="Still reasoning without action.",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, route
+
+    harness, route = asyncio.run(_run())
+
+    assert route == LoopRoute.NEXT_STEP
+    message = harness.state.recent_messages[-1]
+    assert message.metadata["recovery_mode"] == "gemma_stream_autocontinue"
+    assert "Gemma stream auto-continue" in message.content
+    # The full task body should not be duplicated inside the recovery nudge.
+    assert "Remote IP" not in message.content
+    assert "Password" not in message.content
+    # A concise one-line hint is allowed.
+    assert "Task:" in message.content
 
 
 def test_multiphase_discovery_uses_state_strategy_when_scratchpad_missing() -> None:

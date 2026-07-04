@@ -76,3 +76,19 @@ def is_gemma_4_it_model_name(model_name: str) -> bool:
 def is_lfm25_8b_a1b_model_name(model_name: str) -> bool:
     normalized = str(model_name or "").strip().lower()
     return normalized in _EXACT_LFM_25_8B_A1B_MODELS
+
+
+def is_gemma_4_non_exact_small_model_name(model_name: str) -> bool:
+    """True for Gemma-4 variants that are NOT the known-good small IT checkpoints.
+
+    Larger/non-IT Gemma-4 variants (e.g. 12b, 27b) served by backends such as
+    llama.cpp tend to emit native reasoning channels without producing visible
+    assistant content or tool calls.  Planning-mode auto-escalation hurts for
+    these models because they get stuck re-reasoning about the plan instead of
+    acting, so the harness treats them like small models and keeps them in loop
+    mode where reasoning-channel recovery is more robust.
+    """
+    normalized = collapse_model_name(model_name)
+    if "gemma-4" not in normalized:
+        return False
+    return not is_exact_small_gemma_4_it_model_name(model_name)

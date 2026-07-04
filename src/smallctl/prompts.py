@@ -25,6 +25,7 @@ from .prompt_fragments import (
     _PATCH_VERBATIM_RULE,
     _PLANNING_MODE_INTRO,
     _PLANNING_MODE_INTRO_SMALL_GEMMA,
+    _PLANNING_MODE_INTRO_GEMMA_RECOVERY,
     _PRIVILEGES_NO_SUDO_GUESS,
     _REDUNDANCY_PREFER_SUMMARY,
     _REFLECTION_GATE,
@@ -765,8 +766,16 @@ def build_planning_prompt(
         state, phase, available_tool_names=available_tool_names, strategy_prompt=strategy_prompt, manifest=manifest, indexer_mode=indexer_mode
     )
     model_name = str(state.scratchpad.get("_model_name") or "") if isinstance(getattr(state, "scratchpad", None), dict) else ""
+    thinking_tags_disabled = bool(
+        isinstance(state.scratchpad, dict) and state.scratchpad.get("_thinking_tags_disabled")
+    )
     if is_exact_small_gemma_4_it_model_name(model_name):
         planning_sections = [_PLANNING_MODE_INTRO_SMALL_GEMMA]
+    elif thinking_tags_disabled and is_gemma_model_name(model_name):
+        # Larger/non-IT Gemma-4 variants need an action-oriented planning intro
+        # after reasoning markers are disabled, to avoid falling back into
+        # native reasoning-channel loops.
+        planning_sections = [_PLANNING_MODE_INTRO_GEMMA_RECOVERY]
     else:
         planning_sections = [_PLANNING_MODE_INTRO]
     plan = state.active_plan or state.draft_plan

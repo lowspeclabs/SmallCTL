@@ -23,7 +23,7 @@ lost.
 ## Open Improvements
 
 | ID | Tool | Priority | Description | Motivation | Status |
-|----|------|----------|-------------|------------|--------|
+| IMP-013 | run_diagnose.py, logwatch.py | medium | When a run uses a Gemma-4 model and the failure involves `reasoning_only_stream_stall` or a degenerate loop whose repeated phrase is a Gemma reasoning-channel marker (e.g. `<|channel>thought`), add a note pointing to the llama.cpp `--reasoning-budget` backend setting. | Today the root cause (unbounded backend reasoning budget / KV-cache growth) is invisible in harness logs and is not surfaced by the diagnosis, so agents may chase SmallCTL-side fixes instead of the backend config. A note would shortcut the next RCA. | open |
 | IMP-012 | trace_call.py | medium | When a partial trace id (e.g. `step-1:call-1` or `call-1`) matches no records, print a warning that includes the run's trace-id prefix and the expected `<session>:<task>:step-N:call-M` format. | The docs show `trace_call.py --run latest step-1:call-1`, but trace records are keyed with a task id (e.g. `task-0002`), so the partial form silently returns an empty trace. A warning would save agents from chasing non-existent records. | open |
 
 ## Completed Improvements

@@ -111,6 +111,17 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
             self.reasoning_mode = "off"
             self.state.scratchpad["_thinking_tags_disabled"] = True
 
+    if (
+        getattr(config, "provider_profile", "") == "llamacpp"
+        and _model_uses_gemma_rules(config.model)
+    ):
+        logger.warning(
+            "Gemma-4 model with llama.cpp provider detected. If the backend "
+            "crashes or hangs in reasoning loops, start llama.cpp with a bounded "
+            "--reasoning-budget (e.g. 4096) so the native reasoning channel does "
+            "not consume unbounded KV-cache memory."
+        )
+
     self.thinking_visibility = config.thinking_visibility
     self.thinking_start_tag = config.thinking_start_tag
     self.thinking_end_tag = config.thinking_end_tag

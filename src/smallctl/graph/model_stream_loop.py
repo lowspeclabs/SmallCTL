@@ -398,6 +398,34 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
             )
         if examples:
             base = f"{base} Emit exactly one line like: {' or '.join(examples)}."
+    elif _model_is_gemma_4(model_name):
+        # Larger Gemma-4 variants (12b/27b/etc.) served by backends such as
+        # llama.cpp use native reasoning channels. When they stall in those
+        # channels, explicitly tell them to close the channel and emit a JSON
+        # tool call rather than starting another reasoning block.
+        examples: list[str] = []
+        if "ssh_exec" in names:
+            examples.append(
+                '`{"name":"ssh_exec","arguments":{"host":"192.168.1.89","user":"root","password":"secret","command":"docker ps"}}`'
+            )
+        if "ssh_file_read" in names:
+            examples.append(
+                '`{"name":"ssh_file_read","arguments":{"path":"/root/config/app.ini"}}`'
+            )
+        if "file_read" in names:
+            examples.append(
+                '`{"name":"file_read","arguments":{"path":"src/app.py"}}`'
+            )
+        example_clause = ""
+        if examples:
+            example_clause = f" Emit exactly one line like: {' or '.join(examples)}."
+        base = (
+            f"{base} End the current reasoning block now. Do not start another "
+            "reasoning block and do not emit `<|channel>thought`, `<channel|>`, "
+            "`<think>`, `<thinking>`, `<response>`, or any other angle-bracket "
+            f"control tag.{example_clause} Emit exactly one available tool call as a JSON object "
+            "on the next line."
+        )
 
     ssh_actions = [
         name for name in ("ssh_exec", "ssh_file_read", "ssh_file_write") if name in names

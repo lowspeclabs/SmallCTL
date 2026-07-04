@@ -269,3 +269,12 @@ _PLANNING_MODE_INTRO_SMALL_GEMMA = (
     "Keep each step title short (≤6 words). Put file paths and details in the same line after the title. "
     "After you write the plan, stop and call `plan_request_execution`."
 )
+
+_PLANNING_MODE_INTRO_GEMMA_RECOVERY = (
+    "PLANNING MODE IS ACTIVE. Thinking markers are DISABLED for this turn. "
+    "You must produce visible output or a tool call now, not a hidden reasoning block. "
+    "Use read-only tools to gather facts, then call `plan_set` with a structured plan OR "
+    "write a short numbered plain-text plan and call `plan_request_execution`. "
+    "Do not emit `<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, `<response>`, or any other angle-bracket tag. "
+    "If you are stuck, call exactly one read-only tool now so the harness can see progress."
+)

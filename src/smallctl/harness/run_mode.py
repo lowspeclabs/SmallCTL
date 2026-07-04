@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..client import OpenAICompatClient
 from ..guards import is_four_b_or_under_model_name
+from ..prompt_model_classifiers import is_gemma_4_non_exact_small_model_name
 from .memory import assess_write_task_complexity
 from ..interrupt_replies import (
     is_interrupt_affirmative_response,
@@ -539,11 +540,17 @@ class ModeDecisionService:
                 and runtime_intent.label == "execute"
             )
             _small_model = is_four_b_or_under_model_name(model_name)
+            _gemma_4_planning_risk = is_gemma_4_non_exact_small_model_name(model_name)
             if runtime_policy.route_mode == "loop" and _raw_is_complex and not _raw_is_direct_execution:
-                if _small_model:
+                if _small_model or _gemma_4_planning_risk:
+                    raw_reason = (
+                        "complex_task_gemma_4_skip_planning"
+                        if _gemma_4_planning_risk
+                        else "complex_task_small_model_skip_planning"
+                    )
                     self._log_mode_decision(
                         mode="loop",
-                        raw="complex_task_small_model_skip_planning",
+                        raw=raw_reason,
                         intent=runtime_intent.label,
                         task_mode=runtime_intent.task_mode,
                         raw_task=raw_task,

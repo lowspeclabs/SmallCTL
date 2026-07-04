@@ -713,7 +713,7 @@ def test_auto_mode_does_not_escalate_complex_task_to_planning_for_small_model(tm
 
 
 def test_auto_mode_escalates_complex_task_to_planning_for_large_model(tmp_path) -> None:
-    """Larger models should still be auto-escalated to planning mode for complex tasks."""
+    """Larger non-Gemma-4 models should still be auto-escalated to planning mode for complex tasks."""
     state = LoopState(cwd=str(tmp_path))
     state.run_brief.original_task = (
         "Analyze the backup architecture, design a migration plan, implement the changes, "
@@ -721,7 +721,7 @@ def test_auto_mode_escalates_complex_task_to_planning_for_large_model(tmp_path) 
     )
     harness = SimpleNamespace(
         state=state,
-        client=SimpleNamespace(model="gemma-4-27b-it"),
+        client=SimpleNamespace(model="llama-3-70b-instruct"),
         registry=SimpleNamespace(
             export_openai_tools=lambda **kwargs: [],
             get=lambda _name: None,
@@ -735,6 +735,36 @@ def test_auto_mode_escalates_complex_task_to_planning_for_large_model(tmp_path) 
     mode = asyncio.run(ModeDecisionService(harness).decide(state.run_brief.original_task))
 
     assert mode == "planning"
+
+
+def test_auto_mode_does_not_escalate_complex_task_to_planning_for_gemma_4_non_small(tmp_path) -> None:
+    """Non-exact-small Gemma-4 variants (12b, 27b, etc.) tend to stall in planning mode.
+
+    These models emit native reasoning channels without producing visible assistant
+    content or tool calls, so they should stay in loop mode where reasoning-channel
+    recovery is more robust.
+    """
+    state = LoopState(cwd=str(tmp_path))
+    state.run_brief.original_task = (
+        "You are debugging a broken Linux backup job on a remote host. Remote IP: root@192.168.1.64 "
+        "The backup is supposed to archive /root/source into /root/backups using backup.sh."
+    )
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="gemma-4-12b-it"),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        config=SimpleNamespace(staged_execution_enabled=False),
+        event_handler=None,
+    )
+
+    mode = asyncio.run(ModeDecisionService(harness).decide(state.run_brief.original_task))
+
+    assert mode == "loop"
 
 
 @pytest.mark.asyncio
@@ -783,6 +813,98 @@ async def test_interpret_planning_output_synthesizes_fallback_plan_after_meta_co
     assert state.active_plan.goal == state.run_brief.original_task
     assert state.active_plan.status == "draft"
     assert state.active_plan.approved is False
+
+
+@pytest.mark.asyncio
+async def test_interpret_planning_output_injects_gemma_recovery_nudge_on_reasoning_only_stall() -> None:
+    """A Gemma-4 reasoning-only stream stall in planning mode should get the loop-mode recovery nudge."""
+    from smallctl.graph.node_support import _harness_model_name
+
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_last_stream_halted_without_done"] = True
+    state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+    state.scratchpad["_model_name"] = "gemma-4-12b-it"
+
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="gemma-4-12b-it"),
+        reasoning_mode="tags",
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+            names=lambda: [],
+        ),
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="t1",
+        run_mode="planning",
+        last_assistant_text="",
+        last_thinking_text="The user wants me to create a plan...",
+        pending_tool_calls=[],
+    )
+
+    route = await interpret_planning_output(
+        graph_state, GraphRuntimeDeps(harness=harness, event_handler=None)
+    )
+
+    assert route == LoopRoute.NEXT_STEP
+    assert state.scratchpad.get("_gemma_reasoning_only_stall_count") == 1
+    assert state.scratchpad.get("_small_model_continue_nudges") == 1
+    assert state.scratchpad.get("_last_stream_halted_without_done") is None
+    last_msg = state.recent_messages[-1]
+    assert last_msg.role == "user"
+    assert "Gemma stream auto-continue" in last_msg.content
+    assert "Close the reasoning block immediately" in last_msg.content
+
+
+@pytest.mark.asyncio
+async def test_interpret_planning_output_injects_gemma_recovery_disables_thinking_after_repeat_stalls() -> None:
+    """After two Gemma reasoning-only stalls in planning mode, thinking markers are forced off."""
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_last_stream_halted_without_done"] = True
+    state.scratchpad["_last_stream_halt_reason"] = "reasoning_only_stream_stall"
+    state.scratchpad["_model_name"] = "gemma-4-12b-it"
+    state.scratchpad["_gemma_reasoning_only_stall_count"] = 1
+
+    harness = SimpleNamespace(
+        state=state,
+        client=SimpleNamespace(model="gemma-4-12b-it"),
+        reasoning_mode="tags",
+        _runlog=lambda *args, **kwargs: None,
+        _emit=lambda *args, **kwargs: asyncio.sleep(0),
+        log=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [],
+            get=lambda _name: None,
+            names=lambda: [],
+        ),
+    )
+
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="t1",
+        run_mode="planning",
+        last_assistant_text="",
+        last_thinking_text="Plan plan plan...",
+        pending_tool_calls=[],
+    )
+
+    route = await interpret_planning_output(
+        graph_state, GraphRuntimeDeps(harness=harness, event_handler=None)
+    )
+
+    assert route == LoopRoute.NEXT_STEP
+    assert harness.reasoning_mode == "off"
+    assert state.scratchpad.get("_thinking_tags_disabled") is True
+    last_msg = state.recent_messages[-1]
+    assert "Thinking markers have been disabled" in last_msg.content
 
 
 @pytest.mark.asyncio
@@ -872,6 +994,18 @@ def test_build_planning_prompt_uses_default_intro_for_other_models() -> None:
 
     assert "planning mode is active" in prompt.lower()
     assert "convert the plan into a playbook artifact" in prompt.lower()
+
+
+def test_build_planning_prompt_uses_recovery_intro_when_gemma_thinking_disabled() -> None:
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "Fix the remote backup job"
+    state.scratchpad["_model_name"] = "gemma-4-12b-it"
+    state.scratchpad["_thinking_tags_disabled"] = True
+
+    prompt = build_planning_prompt(state, "plan")
+
+    assert "thinking markers are disabled" in prompt.lower()
+    assert "produce visible output or a tool call now" in prompt.lower()
 
 
 @pytest.mark.asyncio

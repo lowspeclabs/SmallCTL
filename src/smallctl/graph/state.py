@@ -33,6 +33,74 @@ def _normalize_write_session_tool_args(tool_name: str, args: dict[str, Any]) -> 
     return normalized
 
 
+_GEMMA_SWALLOWED_KEY_SUFFIX_RE = re.compile(
+    r"^(.*)(['\"])(\s*,\s*([a-zA-Z0-9_-]+)\s*:\s*(?:\"([^\"]*)\"|\'([^\']*)\'|()))$"
+)
+
+_KNOWN_SWALLOWED_TOOL_ARGUMENTS = {
+    "path",
+    "content",
+    "command",
+    "host",
+    "target",
+    "target_text",
+    "replacement_text",
+    "replace_strategy",
+    "section_name",
+    "next_section_name",
+    "section_id",
+    "section_role",
+    "write_session_id",
+    "session_id",
+    "expected_followup_verifier",
+    "artifact_id",
+    "query",
+    "timeout_sec",
+    "background",
+    "job_id",
+    "dry_run",
+    "regex",
+    "expected_occurrences",
+    "encoding",
+    "mode",
+    "format",
+    "message",
+}
+
+
+def _repair_gemma_swallowed_json_keys(args: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(args, dict) or not args:
+        return args, []
+    repaired: dict[str, Any] = dict(args)
+    repairs: list[dict[str, Any]] = []
+    for key, value in list(args.items()):
+        if not isinstance(value, str):
+            continue
+        match = _GEMMA_SWALLOWED_KEY_SUFFIX_RE.match(value)
+        if not match:
+            continue
+        prefix, quote_char, _full_suffix, swallowed_key, v1, v2, v3 = match.groups()
+        if swallowed_key not in _KNOWN_SWALLOWED_TOOL_ARGUMENTS:
+            continue
+        if swallowed_key in repaired and repaired[swallowed_key] not in (None, ""):
+            continue
+        new_value = prefix
+        swallowed_value = (
+            v1 if v1 is not None else (v2 if v2 is not None else (v3 if v3 is not None else ""))
+        )
+        repaired[key] = new_value
+        if swallowed_value:
+            repaired[swallowed_key] = swallowed_value
+        repairs.append(
+            {
+                "original_key": key,
+                "swallowed_key": swallowed_key,
+                "swallowed_value": swallowed_value,
+            }
+        )
+    return repaired, repairs
+
+
 @dataclass
 class PendingToolCall:
     tool_name: str
@@ -131,11 +199,17 @@ class PendingToolCall:
                 repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
                 parsed, parse_error = _parse_mapping(repaired)
                 if parse_error is None:
+                    parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
+                    if repairs:
+                        metadata["gemma_swallowed_key_repairs"] = repairs
                     return parsed, metadata
                 last_error = parse_error
 
         parsed, parse_error = _parse_mapping(cleaned)
         if parse_error is None:
+            parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
+            if repairs:
+                metadata["gemma_swallowed_key_repairs"] = repairs
             return parsed, metadata
         if parse_error is not None:
             last_error = parse_error
@@ -152,6 +226,9 @@ class PendingToolCall:
                 else:
                     parsed = {}
         if isinstance(parsed, dict) and parsed:
+            parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
+            if repairs:
+                metadata["gemma_swallowed_key_repairs"] = repairs
             return parsed, metadata
         metadata["arguments_empty"] = False
         metadata["arguments_parse_error"] = last_error or {

@@ -6,6 +6,7 @@ from smallctl.prompt_model_classifiers import (
     is_exact_large_gemma_4_26b_a4b_it_model_name,
     is_exact_small_gemma_4_it_model_name,
     is_gemma_4_it_model_name,
+    is_gemma_4_non_exact_small_model_name,
     is_gemma_model_name,
     is_lfm25_8b_a1b_model_name,
 )
@@ -91,3 +92,33 @@ def test_lfm25_matches_exact_models() -> None:
     assert is_lfm25_8b_a1b_model_name("lfm2.5-8b-a1b") is True
     assert is_lfm25_8b_a1b_model_name("liquid/lfm2.5-8b-a1b") is True
     assert is_lfm25_8b_a1b_model_name("lfm2.5-8b") is False
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gemma-4-12b-it",
+        "gemma-4-12b",
+        "Gemma 4 12b",
+        "gemma-4-27b-it",
+        "gemma-4-27b",
+        "gemma-4-12b-it-IQ4_XS.gguf",
+    ],
+)
+def test_gemma_4_non_exact_small_matches_large_variants(model_name: str) -> None:
+    assert is_gemma_4_non_exact_small_model_name(model_name) is True
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "gemma-4-e2b-it",
+        "gemma-4-e4b-it",
+        "gemma-3-4b-it",
+        "qwen/qwen-2.5-7b-instruct",
+        "",
+        None,
+    ],
+)
+def test_gemma_4_non_exact_small_does_not_match_small_or_other_models(model_name: str | None) -> None:
+    assert is_gemma_4_non_exact_small_model_name(model_name) is False

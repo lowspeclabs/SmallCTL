@@ -65,7 +65,7 @@ from .lifecycle_tool_validation import (
     _tool_call_repair_enabled,
     _tool_call_repair_log_only,
 )
-from .recovery_context import build_goal_recap
+from .recovery_context import build_concise_goal_hint, build_goal_recap
 from .routing import LoopRoute
 from .state import GraphRunState, PendingToolCall
 from .terminal_completion import (
@@ -1167,12 +1167,43 @@ async def interpret_model_output(
                     "Do not restart the task; either call the next tool or emit the next JSON tool call immediately."
                 )
             if gemma_stream_halt and halt_reason == "reasoning_only_stream_stall":
-                msg = (
-                    "Gemma stream auto-continue: the prior response stayed in reasoning without emitting a tool call. "
-                    f"{build_goal_recap(harness)} Continue from the exact last state now. "
-                    "Do not summarize or restart. Emit exactly one available tool call, or call `task_complete(message='...')` "
-                    "only if the objective is fully verified."
-                )
+                # Gemma-4 served by backends such as llama.cpp can get stuck in the
+                # native reasoning channel (e.g. <|channel>thought ... <|channel|>).
+                # Track consecutive stalls and, after a small threshold, force
+                # reasoning markers off so the conflicting <think> instruction is
+                # removed from the system prompt on the next turn.
+                stall_count = int(harness.state.scratchpad.get("_gemma_reasoning_only_stall_count", 0)) + 1
+                harness.state.scratchpad["_gemma_reasoning_only_stall_count"] = stall_count
+                reasoning_mode_switched = False
+                # Exact-small Gemma-4 IT checkpoints use native reasoning fields
+                # successfully; only force tags off for larger/non-IT variants that
+                # degenerate into native reasoning-channel loops. Switch early (after
+                # the first observed stall) because larger variants tend to spiral.
+                if stall_count >= 1 and not is_exact_small_gemma_4_it_model_name(model_name):
+                    old_reasoning_mode = getattr(harness, "reasoning_mode", "tags")
+                    if old_reasoning_mode != "off":
+                        harness.reasoning_mode = "off"
+                        reasoning_mode_switched = True
+                    harness.state.scratchpad["_thinking_tags_disabled"] = True
+
+                # Avoid repeating the full task objective in the recovery nudge;
+                # doing so makes Gemma-4 restart its plan/thinking loop instead of
+                # emitting the next tool call. Use a one-line hint instead.
+                goal_hint = build_concise_goal_hint(harness)
+                goal_clause = f"{goal_hint} " if goal_hint else ""
+                msg_parts = [
+                    "Gemma stream auto-continue: the prior response stayed in reasoning without emitting a tool call. ",
+                    f"{goal_clause}Close the reasoning block immediately and emit exactly one available tool call. ",
+                    "Do not start another reasoning block, do not summarize or restart, and do not emit ",
+                    "`<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, `<response>`, or any other angle-bracket control tag. ",
+                    "Emit the next JSON tool call now, or call `task_complete(message='...')` only if the objective is fully verified.",
+                ]
+                if reasoning_mode_switched:
+                    msg_parts.insert(
+                        2,
+                        "Thinking markers have been disabled for this turn. ",
+                    )
+                msg = "".join(msg_parts)
             harness.state.append_message(
                 ConversationMessage(
                     role="user",
@@ -1507,6 +1538,73 @@ async def interpret_planning_output(
 
     plan = harness.state.active_plan or harness.state.draft_plan
     if plan is None:
+        # If the stream halted due to a reasoning-only stall (common with
+        # Gemma-4 served by llama.cpp), reuse the loop-mode Gemma recovery
+        # nudge instead of asking for more planning commentary.
+        stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
+        halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "")
+        model_name = _nodes._harness_model_name(harness)
+        if stream_halted and halt_reason == "reasoning_only_stream_stall" and _model_is_gemma_4(model_name):
+            freeze_nudges = int(harness.state.scratchpad.get("_small_model_continue_nudges", 0))
+            max_freeze_nudges = 5
+            if freeze_nudges < max_freeze_nudges:
+                harness.state.scratchpad["_small_model_continue_nudges"] = freeze_nudges + 1
+                stall_count = int(harness.state.scratchpad.get("_gemma_reasoning_only_stall_count", 0)) + 1
+                harness.state.scratchpad["_gemma_reasoning_only_stall_count"] = stall_count
+                reasoning_mode_switched = False
+                # Switch early (after the first observed stall) for larger/non-IT
+                # Gemma-4 variants because they tend to spiral in reasoning loops.
+                if stall_count >= 1 and not is_exact_small_gemma_4_it_model_name(model_name):
+                    old_reasoning_mode = getattr(harness, "reasoning_mode", "tags")
+                    if old_reasoning_mode != "off":
+                        harness.reasoning_mode = "off"
+                        reasoning_mode_switched = True
+                    harness.state.scratchpad["_thinking_tags_disabled"] = True
+
+                # Avoid repeating the full task objective in the recovery nudge;
+                # doing so makes Gemma-4 restart its plan/thinking loop instead of
+                # emitting the next tool call. Use a one-line hint instead.
+                goal_hint = build_concise_goal_hint(harness)
+                goal_clause = f"{goal_hint} " if goal_hint else ""
+                msg_parts = [
+                    "Gemma stream auto-continue: the prior response stayed in reasoning without emitting a tool call. ",
+                    f"{goal_clause}Close the reasoning block immediately and emit exactly one available tool call. ",
+                    "Do not start another reasoning block, do not summarize or restart, and do not emit ",
+                    "`<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, `<response>`, or any other angle-bracket control tag. ",
+                    "Emit the next JSON tool call now, or call `task_complete(message='...')` only if the objective is fully verified.",
+                ]
+                if reasoning_mode_switched:
+                    msg_parts.insert(
+                        2,
+                        "Thinking markers have been disabled for this turn. ",
+                    )
+                harness.state.append_message(
+                    ConversationMessage(
+                        role="user",
+                        content="".join(msg_parts),
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "model_halt",
+                            "recovery_mode": "gemma_stream_autocontinue",
+                            "retry_count": freeze_nudges + 1,
+                            "max_retry_count": max_freeze_nudges,
+                        },
+                    )
+                )
+                harness._runlog(
+                    "small_model_freeze_recovery",
+                    "injected Gemma reasoning-channel recovery nudge in planning runtime",
+                    retry_count=freeze_nudges + 1,
+                    max_retry_count=max_freeze_nudges,
+                    model_name=model_name,
+                    stream_halted=stream_halted,
+                    gemma_stream_autocontinue=True,
+                )
+                harness.state.scratchpad.pop("_last_stream_halted_without_done", None)
+                harness.state.scratchpad.pop("_last_stream_halt_reason", None)
+                harness.state.scratchpad.pop("_last_stream_halt_details", None)
+                return LoopRoute.NEXT_STEP
+
         synthesized_plan = _nodes._synthesize_plan_from_text(
             harness, graph_state.last_assistant_text, allow_numbered_list=_small_gemma_planning_synthesis(harness)
         )

@@ -182,8 +182,11 @@ class SSEStreamer:
                     chunk_count=chunk_count,
                     tool_call_stream_active=tool_call_stream_active,
                 )
+                effective_timeout = read_timeout
+                if chunk_count == 0 and self.prompt_processing_timeout_sec > 0:
+                    effective_timeout = min(read_timeout, self.prompt_processing_timeout_sec)
                 try:
-                    raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=read_timeout)
+                    raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=effective_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError as exc:

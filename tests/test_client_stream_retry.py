@@ -1216,6 +1216,42 @@ def test_llamacpp_preflight_preserves_file_write_for_build_script_intent() -> No
     assert {"artifact_read", "dir_list"} & set(result.dropped_tool_names)
 
 
+def test_llamacpp_preflight_warns_and_caps_context_for_small_gemma4() -> None:
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="gemma-4-12b",
+        provider_profile="llamacpp",
+    )
+    client.runtime_context_limit = 64768
+    run_logger = _RunLogger()
+    client.run_logger = run_logger
+
+    payload = {
+        "model": client.model,
+        "messages": [{"role": "user", "content": "fix the backup script"}],
+        "stream": True,
+        "tools": [],
+    }
+
+    result = client_transport._llamacpp_budget_preflight(client, payload=payload, stage="test")
+
+    assert result is not None
+    assert result.action == "unchanged"
+    warning = next(
+        (entry for entry in run_logger.entries if entry["event"] == "small_gemma4_context_warning"),
+        None,
+    )
+    assert warning is not None
+    assert warning["data"]["context_limit"] == 64768
+    assert warning["data"]["recommended_context_limit"] == 32768
+    preflight_log = next(
+        (entry for entry in run_logger.entries if entry["event"] == "payload_preflight_budget"),
+        None,
+    )
+    assert preflight_log is not None
+    assert preflight_log["data"]["context_limit"] == 32768
+
+
 def test_stream_chat_llamacpp_context_budget_error_is_not_retryable(monkeypatch) -> None:
     client = OpenAICompatClient(
         base_url="http://127.0.0.1:8080/v1",

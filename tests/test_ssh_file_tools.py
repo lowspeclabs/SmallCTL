@@ -1059,6 +1059,33 @@ def test_remote_mutation_requirement_ignores_quoted_paths_in_echo_payload() -> N
     assert requirement["guessed_paths"] == ["/home/stephen/temp/change_risk.txt"]
 
 
+def test_remote_mutation_redirection_emits_readback_nudge() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.64",
+            "user": "root",
+            "command": 'echo "test data" > /root/source/testfile.txt && echo "config" > /root/source/config.ini',
+        },
+    )
+
+    requirement = state.scratchpad.get(ssh_files.REMOTE_MUTATION_VERIFICATION_KEY)
+    assert isinstance(requirement, dict)
+    assert "/root/source/testfile.txt" in requirement["guessed_paths"]
+    assert "/root/source/config.ini" in requirement["guessed_paths"]
+
+    nudge = state.recent_messages[-1]
+    assert nudge.role == "system"
+    assert "ssh_file_read" in nudge.content
+    assert "directory listings" in nudge.content
+    assert nudge.metadata.get("recovery_kind") == "remote_redirection_mutation"
+
+
 def test_remote_mutation_path_guessing_skips_known_directory_operands() -> None:
     guessed_paths = guess_remote_mutation_paths(
         'echo "probe /etc" > /etc',

@@ -196,6 +196,47 @@ def _record_remote_mutation_requirement(
             guessed_paths=guessed_paths,
             multiline=bool(_REMOTE_MULTILINE_REPLACEMENT_RE.search(command)),
         )
+    elif guessed_paths:
+        _emit_remote_redirection_mutation_nudge(
+            service,
+            command=command,
+            guessed_paths=guessed_paths,
+        )
+
+
+def _emit_remote_redirection_mutation_nudge(
+    service: Any,
+    *,
+    command: str,
+    guessed_paths: list[str],
+) -> None:
+    signature = f"redirection:{hash(command)}:{','.join(guessed_paths[:4])}"
+    scratchpad = service.harness.state.scratchpad
+    prior = scratchpad.get("_remote_mutation_nudges", [])
+    if isinstance(prior, list) and signature in prior:
+        return
+    scratchpad["_remote_mutation_nudges"] = dedupe_keep_tail(
+        ([str(item) for item in prior] if isinstance(prior, list) else []) + [signature],
+        limit=12,
+    )
+    paths_text = ", ".join(f"`{path}`" for path in guessed_paths[:4])
+    content = (
+        f"Remote `ssh_exec` wrote files via redirection/echo ({paths_text}). "
+        "The harness cannot verify those writes until you read the files back with "
+        "`ssh_file_read`. Run the required `ssh_file_read` call(s) before calling "
+        "`task_complete`; directory listings or `ls` output are not sufficient proof."
+    )
+    service.harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=content,
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "remote_redirection_mutation",
+                "guessed_paths": guessed_paths,
+            },
+        )
+    )
 
 
 def _emit_remote_mutation_nudge(

@@ -274,6 +274,40 @@ def test_gemma_4_exact_small_it_preserves_reasoning_mode_on_stall() -> None:
     assert harness.reasoning_mode == "field"
 
 
+def test_gemma_4_small_read_only_loop_gets_early_action_nudge() -> None:
+    async def _run() -> tuple[object, object]:
+        harness = _FakeHarness()
+        harness.client.model = "gemma-4-12b"
+        harness.client.provider_profile = "llamacpp"
+        harness.state.scratchpad["_model_name"] = "gemma-4-12b"
+        harness.state.stagnation_counters["consecutive_read_only_turns"] = 4
+        harness.state.run_brief.original_task = "Fix the remote backup script"
+        deps = SimpleNamespace(harness=harness, event_handler=None)
+        graph_state = SimpleNamespace(
+            run_mode="loop",
+            pending_tool_calls=[],
+            last_assistant_text="",
+            last_thinking_text="",
+            last_usage={},
+            last_tool_results=[],
+            final_result=None,
+            error=None,
+        )
+
+        route = await interpret_model_output(graph_state, deps)
+        return harness, route
+
+    harness, route = asyncio.run(_run())
+
+    assert route == LoopRoute.NEXT_STEP
+    assert harness.state.scratchpad.get("_gemma_4_read_only_step_nudges") == 1
+    message = harness.state.recent_messages[-1]
+    assert message.role == "user"
+    assert message.metadata["recovery_kind"] == "gemma_4_small_read_only_loop"
+    assert "write or execution action" in message.content
+    assert "do not ask for more reads" in message.content
+
+
 def test_gemma_stream_halt_still_stops_after_autocontinue_budget() -> None:
     async def _run() -> tuple[object, object, object]:
         harness = _FakeHarness()

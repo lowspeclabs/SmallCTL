@@ -4,6 +4,7 @@ from typing import Any, Awaitable, Callable
 
 from . import http, network, shell, ssh_files
 from . import network_interactive_sessions
+from .base import path_field
 
 
 def register_operational_tools(
@@ -199,7 +200,7 @@ def register_operational_tools(
                         "port": {"type": "integer", "default": 22},
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
-                        "path": {"type": "string", "description": "Remote file path."},
+                        "path": path_field("Remote file path."),
                         "encoding": {"type": "string", "default": "utf-8"},
                         "max_bytes": {"type": "integer", "default": 262144},
                         "truncate": {"type": "boolean", "default": True, "description": "When false, fail instead of truncating oversized files."},
@@ -231,7 +232,7 @@ def register_operational_tools(
                         "port": {"type": "integer", "default": 22},
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
-                        "path": {"type": "string", "description": "Remote directory path."},
+                        "path": path_field("Remote directory path."),
                         "timeout_sec": {"type": "integer", "default": 120},
                     },
                     "required": ["path"],
@@ -262,7 +263,7 @@ def register_operational_tools(
                         "port": {"type": "integer", "default": 22},
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
-                        "path": {"type": "string", "description": "Remote file path."},
+                        "path": path_field("Remote file path."),
                         "content": {"type": "string", "description": "Content to write."},
                         "encoding": {"type": "string", "default": "utf-8"},
                         "mode": {"type": "string", "description": "overwrite, create, or append."},
@@ -298,7 +299,7 @@ def register_operational_tools(
                         "port": {"type": "integer", "default": 22},
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
-                        "path": {"type": "string", "description": "Remote file path."},
+                        "path": path_field("Remote file path."),
                         "target_text": {"type": "string", "description": "Exact text to replace."},
                         "replacement_text": {"type": "string", "description": "Replacement text. Use an empty string to delete the target text."},
                         "encoding": {"type": "string", "default": "utf-8"},
@@ -336,7 +337,7 @@ def register_operational_tools(
                         "port": {"type": "integer", "default": 22},
                         "identity_file": {"type": "string", "description": "Path to SSH private key."},
                         "password": {"type": "string", "description": "Optional SSH password. Uses `sshpass` when provided."},
-                        "path": {"type": "string", "description": "Remote file path."},
+                        "path": path_field("Remote file path."),
                         "start_text": {"type": "string", "description": "Exact start bound."},
                         "end_text": {"type": "string", "description": "Exact end bound."},
                         "replacement_text": {"type": "string", "description": "Replacement text. Use an empty string to delete the bounded block."},
@@ -444,7 +445,7 @@ def register_operational_tools(
                     "type": "object",
                     "properties": {
                         "url": {"type": "string"},
-                        "output_path": {"type": "string"},
+                        "output_path": path_field("Local path to save the downloaded file."),
                         "headers": {"type": "object"},
                         "timeout_sec": {"type": "integer"},
                     },

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from . import git_tools
+from .base import path_field
 
 
 def register_git_tools(
@@ -20,7 +21,7 @@ def register_git_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Workspace-relative directory path. Defaults to cwd."},
+                        "path": path_field("Workspace-relative directory path. Defaults to cwd."),
                         "short": {"type": "boolean", "description": "Use --short format. Default true."},
                     },
                     "required": [],
@@ -38,7 +39,7 @@ def register_git_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Workspace-relative directory path. Defaults to cwd."},
+                        "path": path_field("Workspace-relative directory path. Defaults to cwd."),
                         "cached": {"type": "boolean", "description": "Show staged changes. Default false."},
                         "target": {"type": "string", "description": "Optional workspace-relative file path to limit diff to."},
                     },
@@ -57,7 +58,7 @@ def register_git_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Workspace-relative log file path."},
+                        "path": path_field("Workspace-relative log file path."),
                         "lines": {"type": "integer", "description": "Number of lines to read. Default 100."},
                         "offset": {"type": "integer", "description": "Optional 0-based line offset to start reading from."},
                     },

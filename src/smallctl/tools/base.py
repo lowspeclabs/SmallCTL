@@ -112,3 +112,10 @@ def build_tool_schema(
         "required": required or [],
         "additionalProperties": False,
     }
+
+
+def path_field(description: str, *, required: bool = True) -> dict[str, Any]:
+    return {
+        "type": "string",
+        "description": f"{description} This value is passed directly to the filesystem (e.g. fopen). Do not wrap it in Markdown links or add protocols.",
+    }

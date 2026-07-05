@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from . import fs
+from .base import path_field
 
 
 def register_filesystem_tools(
@@ -29,7 +30,7 @@ def register_filesystem_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path to file."},
+                        "path": path_field("Path to file."),
                         "start_line": {"type": "integer", "description": "Start line (1-indexed)."},
                         "end_line": {"type": "integer", "description": "End line (inclusive)."},
                         "max_bytes": {"type": "integer", "description": "Max bytes to read."},
@@ -48,7 +49,7 @@ def register_filesystem_tools(
                 description="List LOCAL directory entries. Paths resolve relative to the current cwd; a leading slash or backslash is treated as an absolute path. The `~` character is expanded to the user's home directory (e.g. `~/.ssh` becomes `/home/user/.ssh`). This tool operates on the LOCAL orchestrator filesystem ONLY.",
                 schema={
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {"path": path_field("Path to directory.")},
                     "required": [],
                     "additionalProperties": False,
                 },
@@ -72,7 +73,7 @@ def register_filesystem_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path to file."},
+                        "path": path_field("Path to file."),
                         "content": {"type": "string", "description": "Content to write."},
                         "write_session_id": {"type": "string", "description": "Legacy/internal. The harness matches the target path automatically; omit this field."},
                         "section_name": {"type": "string", "description": "Brief name for this logical block (e.g. 'imports', 'class_def')."},
@@ -104,7 +105,7 @@ def register_filesystem_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path to file."},
+                        "path": path_field("Path to file."),
                         "target_text": {"type": "string", "description": "Exact text to replace, including whitespace."},
                         "replacement_text": {"type": "string", "description": "Text to insert in place of the target text. Use an empty string to delete the target text."},
                         "expected_occurrences": {"type": "integer", "description": "Expected number of exact matches. Defaults to 1."},
@@ -137,7 +138,7 @@ def register_filesystem_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path to file."},
+                        "path": path_field("Path to file."),
                         "language": {"type": "string", "description": "Language for the structural edit. v1 supports `python`."},
                         "operation": {"type": "string", "description": "Structural edit operation such as `add_import` or `replace_function`."},
                         "target": {"type": "object", "description": "Operation-specific locator data."},
@@ -160,7 +161,7 @@ def register_filesystem_tools(
                 description="Delete a file.",
                 schema={
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {"path": path_field("Path to file.")},
                     "required": ["path"],
                     "additionalProperties": False,
                 },
@@ -176,7 +177,7 @@ def register_filesystem_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": path_field("Path to directory."),
                         "max_depth": {"type": "integer"},
                         "max_entries": {"type": "integer"},
                     },

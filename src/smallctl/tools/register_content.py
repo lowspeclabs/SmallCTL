@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from . import artifact, data, indexer, indexer_query, search
+from .base import path_field
 
 
 def register_content_tools(
@@ -24,7 +25,7 @@ def register_content_tools(
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string"},
-                        "path": {"type": "string"},
+                        "path": path_field("Directory or file path to search under."),
                         "regex": {"type": "boolean"},
                         "case_sensitive": {"type": "boolean"},
                         "max_results": {"type": "integer"},
@@ -45,7 +46,7 @@ def register_content_tools(
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string"},
-                        "path": {"type": "string"},
+                        "path": path_field("Directory or file path to search under."),
                         "regex": {"type": "boolean"},
                         "max_results": {"type": "integer"},
                     },
@@ -78,7 +79,7 @@ def register_content_tools(
                 description="Read YAML file into structured data.",
                 schema={
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {"path": path_field("Path to YAML file.")},
                     "required": ["path"],
                     "additionalProperties": False,
                 },

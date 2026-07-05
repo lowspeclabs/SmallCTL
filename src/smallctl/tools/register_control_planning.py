@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from . import control, planning
+from .base import path_field
 
 
 def register_control_planning_tools(
@@ -198,14 +199,12 @@ def register_control_planning_tools(
                                 "anyOf": [{"type": "string"}, {"type": "object"}]
                             },
                         },
-                        "output_path": {
-                            "type": "string",
-                            "description": "Optional plan document export target. Must be a workspace-relative path (e.g. 'plan.md' or 'docs/plan.md'). Use only .md, .txt, or .text; never pass absolute paths or implementation paths like .py.",
-                        },
-                        "plan_output_path": {
-                            "type": "string",
-                            "description": "Alias for output_path. Reserved for plan document exports only. Must be a workspace-relative path; never absolute.",
-                        },
+                        "output_path": path_field(
+                            "Optional plan document export target. Must be a workspace-relative path (e.g. 'plan.md' or 'docs/plan.md'). Use only .md, .txt, or .text; never pass absolute paths or implementation paths like .py."
+                        ),
+                        "plan_output_path": path_field(
+                            "Alias for output_path. Reserved for plan document exports only. Must be a workspace-relative path; never absolute."
+                        ),
                         "output_format": {
                             "type": "string",
                             "enum": ["markdown", "md", "text", "txt"],
@@ -293,7 +292,7 @@ def register_control_planning_tools(
                 schema={
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string"},
+                        "path": path_field("Path to write the exported plan document."),
                         "format": {"type": "string"},
                     },
                     "required": ["path"],

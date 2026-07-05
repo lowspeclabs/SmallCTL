@@ -1195,11 +1195,11 @@ async def interpret_model_output(
     if stream_halted or _nodes._looks_like_freeze_or_hang(harness, assistant_text):
         model_name = _nodes._harness_model_name(harness)
         gemma_stream_halt = stream_halted and _model_is_gemma_4(model_name)
+        halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "")
         freeze_nudges = int(harness.state.scratchpad.get("_small_model_continue_nudges", 0))
         max_freeze_nudges = 5 if gemma_stream_halt else 2
         if freeze_nudges < max_freeze_nudges:
             harness.state.scratchpad["_small_model_continue_nudges"] = freeze_nudges + 1
-            halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "")
             msg = _nodes._build_small_model_continue_message(
                 harness,
                 assistant_text,
@@ -1300,6 +1300,51 @@ async def interpret_model_output(
             harness.state.scratchpad.pop("_last_stream_halt_reason", None)
             harness.state.scratchpad.pop("_last_stream_halt_details", None)
             return LoopRoute.NEXT_STEP
+
+        # Exhausted stall recovery for Gemma-4: surface a clear recommendation
+        # instead of letting the next call time out silently.
+        if gemma_stream_halt and halt_reason == "reasoning_only_stream_stall":
+            provider_profile = str(
+                getattr(getattr(harness, "client", None), "provider_profile", "")
+                or getattr(harness, "provider_profile", "")
+                or ""
+            ).strip().lower()
+            small_gemma4_llamacpp = (
+                _model_is_gemma_4_small(model_name) and provider_profile == "llamacpp"
+            )
+            if small_gemma4_llamacpp:
+                message = (
+                    "Gemma 4 12b (or smaller) on llama.cpp repeatedly stalled in reasoning "
+                    "without emitting a tool call. Consider using a different model or provider, "
+                    "or lowering --context-limit to 32768."
+                )
+            else:
+                message = (
+                    "Gemma-4 model repeatedly stalled in reasoning without emitting a tool call. "
+                    "Consider using a different model/provider or a checkpoint known to emit tool calls."
+                )
+            harness._runlog(
+                "gemma_stream_halt_exhausted",
+                message,
+                halt_reason=halt_reason,
+                model_name=model_name,
+                provider_profile=provider_profile,
+            )
+            await harness._emit(
+                deps.event_handler,
+                UIEvent(
+                    event_type=UIEventType.ALERT,
+                    content=message,
+                    data={"halt_reason": halt_reason, "model_name": model_name, "provider_profile": provider_profile},
+                ),
+            )
+            graph_state.final_result = harness._failure(
+                message,
+                error_type="model_stream_stall",
+                details={"halt_reason": halt_reason, "model_name": model_name, "provider_profile": provider_profile},
+            )
+            graph_state.error = graph_state.final_result.get("error")
+            return LoopRoute.FINALIZE
 
     if stream_halted and not graph_state.pending_tool_calls:
         halt_reason = str(harness.state.scratchpad.get("_last_stream_halt_reason", "") or "model_stream_stall")

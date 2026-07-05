@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -49,9 +50,10 @@ _GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS = 40.0
 _GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS = 2500
 # Small Gemma-4 (<=12b) served by llama.cpp does not recover from native
 # reasoning-channel stalls; waiting the full Gemma-4 budget wastes wall-clock
-# time and prompt-cache headroom.
-_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_SECONDS = 12.0
-_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_CHUNKS = 800
+# time and prompt-cache headroom. Halt quickly and let the fallback/escalation
+# path take over.
+_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_SECONDS = 5.0
+_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_CHUNKS = 300
 _REASONING_ONLY_MAX_RETRIES = 1
 _REASONING_ONLY_GEMMA4_MAX_RETRIES = 2
 _REASONING_PROGRESS_MIN_FRAGMENTS = 4
@@ -437,19 +439,82 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
                 goal_hint = ""
         goal_clause = f" {goal_hint}" if goal_hint else ""
         phase = str(phase or "").strip().lower()
+
+        def _gemma_small_example(tool_name: str, args: dict[str, Any]) -> str:
+            return json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+
+        examples: list[str] = []
         if phase in {"execute", "repair"}:
-            if any(name in names for name in ("ssh_file_write", "ssh_file_patch", "ssh_exec")):
-                action = "Call `ssh_file_write`, `ssh_file_patch`, or `ssh_exec` now; do not read again."
-            elif any(name in names for name in ("file_write", "file_patch", "ast_patch")):
-                action = "Call `file_write`, `file_patch`, or `ast_patch` now; do not read again."
+            if "ssh_file_write" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "ssh_file_write",
+                        {"host": "192.168.1.64", "user": "root", "password": "[PASSWORD]", "path": "/root/backup.sh", "content": "#!/bin/bash\n..."},
+                    )
+                )
+            if "ssh_file_patch" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "ssh_file_patch",
+                        {"host": "192.168.1.64", "user": "root", "password": "[PASSWORD]", "path": "/root/backup.sh", "old_string": "...", "new_string": "..."},
+                    )
+                )
+            if "ssh_exec" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "ssh_exec",
+                        {"host": "192.168.1.64", "user": "root", "password": "[PASSWORD]", "command": "ls -l /root"},
+                    )
+                )
+            if "file_write" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "file_write", {"path": "./temp/report.html", "content": "<html>...</html>"}
+                    )
+                )
+            if "file_patch" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "file_patch",
+                        {"path": "./temp/report.html", "old_string": "...", "new_string": "..."},
+                    )
+                )
+        if not examples:
+            if "ssh_exec" in names:
+                examples.append(
+                    _gemma_small_example(
+                        "ssh_exec",
+                        {"host": "192.168.1.64", "user": "root", "password": "[PASSWORD]", "command": "ls -l /root"},
+                    )
+                )
+            if "file_read" in names:
+                examples.append(
+                    _gemma_small_example("file_read", {"path": "src/app.py"})
+                )
+            if "shell_exec" in names:
+                examples.append(
+                    _gemma_small_example("shell_exec", {"command": "ls -l"})
+                )
+
+        if phase in {"execute", "repair"}:
+            if examples:
+                action = (
+                    f"Call one of these tools now: {', '.join(ex['name'] for ex in map(json.loads, examples))}. "
+                    f"Example: {'  '.join(examples)} Do not read again; call now."
+                )
             else:
                 action = "Emit exactly one available tool call now; do not read again."
         else:
             action = "Emit exactly one available tool call now; do not start another reasoning block."
+
+        example_clause = ""
+        if examples:
+            example_clause = f" Examples of valid next actions: {'  '.join(examples)}"
         base = (
-            f"{base}{goal_clause} Close the reasoning block immediately. {action} "
+            f"{base}{goal_clause} Close the reasoning block immediately. {action}{example_clause} "
             "Do not emit `<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, "
-            "`<response>`, or any other angle-bracket control tag."
+            "`<response>`, or any other angle-bracket control tag. "
+            "If the objective is fully verified, call `task_complete(message='...')` instead."
         )
     elif _model_is_gemma_4(resolved_model_name):
         # Larger Gemma-4 variants (12b/27b/etc.) served by backends such as

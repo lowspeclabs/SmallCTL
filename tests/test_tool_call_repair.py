@@ -14,7 +14,7 @@ from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.graph.tool_execution_nodes import dispatch_tools
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
-from smallctl.tools.base import ToolSpec, build_tool_schema
+from smallctl.tools.base import ToolSpec, build_tool_schema, path_field
 from smallctl.tools.registry import ToolRegistry
 from smallctl.tools.tool_call_repair import repair_tool_call_args, validate_tool_args
 
@@ -71,12 +71,40 @@ def test_stringified_array_parses_only_for_array_field() -> None:
     assert result.actions[0].kind == "json_string_to_array"
 
 
-def test_bare_string_wraps_only_for_allowlisted_array_field() -> None:
+def test_bare_string_wraps_for_any_string_array_field() -> None:
     allowed = _spec("index_write_import", {"symbols": {"type": "array", "items": {"type": "string"}}}, ["symbols"])
-    blocked = _spec("other_tool", {"symbols": {"type": "array", "items": {"type": "string"}}}, ["symbols"])
+    generic = _spec("other_tool", {"tags": {"type": "array", "items": {"type": "string"}}}, ["tags"])
 
     assert repair_tool_call_args(allowed, {"symbols": "Thing"}).args == {"symbols": ["Thing"]}
-    assert repair_tool_call_args(blocked, {"symbols": "Thing"}).valid_after_repair is False
+    assert repair_tool_call_args(generic, {"tags": "Thing"}).args == {"tags": ["Thing"]}
+
+
+def test_empty_string_is_not_wrapped_as_single_item_array() -> None:
+    spec = _spec("other_tool", {"tags": {"type": "array", "items": {"type": "string"}}}, ["tags"])
+
+    result = repair_tool_call_args(spec, {"tags": ""})
+
+    assert result.valid_after_repair is False
+    assert result.args == {"tags": ""}
+    assert result.actions == []
+
+
+def test_non_string_item_schema_does_not_wrap_bare_string() -> None:
+    spec = _spec("other_tool", {"counts": {"type": "array", "items": {"type": "integer"}}}, ["counts"])
+
+    result = repair_tool_call_args(spec, {"counts": "42"})
+
+    assert result.valid_after_repair is False
+    assert result.args == {"counts": "42"}
+    assert result.actions == []
+
+
+def test_path_field_schema_includes_anti_markdown_hint() -> None:
+    field = path_field("Path to file.")
+
+    assert field["type"] == "string"
+    assert "passed directly to the filesystem" in field["description"]
+    assert "Do not wrap it in Markdown links" in field["description"]
 
 
 def test_garbage_extra_field_is_stripped_and_hint_is_sanitized() -> None:

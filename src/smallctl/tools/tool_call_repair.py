@@ -92,7 +92,6 @@ _CONTENT_FIELD_NAMES = {
     "pattern",
     "message",
 }
-_SINGLE_ITEM_ARRAY_ALLOWLIST = {("index_write_import", ("symbols",))}
 _PAIRED_RANGE_FIELDS = {
     "file_read": (("start_line",), ("end_line",)),
     "artifact_read": (("start_line",), ("end_line",)),
@@ -425,14 +424,14 @@ def _repair_array_field(tool_name: str, schema: dict[str, Any], args: dict[str, 
         actions.append(ToolCallRepairAction("json_string_to_array", path, value, parsed, f"field {path[-1]} was parsed as an array"))
         return
     item_schema = _path_schema(schema, path).get("items", {})
-    if _allow_single_item_array(tool_name, path, item_schema) and value:
+    if _item_schema_accepts_string(item_schema) and value:
         wrapped = [value]
         _set_path(args, path, wrapped)
         actions.append(ToolCallRepairAction("string_to_single_item_array", path, value, wrapped, f"field {path[-1]} was wrapped as a single-item array"))
 
 
-def _allow_single_item_array(tool_name: str, path: tuple[PathPart, ...], item_schema: dict[str, Any]) -> bool:
-    return (tool_name, path) in _SINGLE_ITEM_ARRAY_ALLOWLIST and _schema_types(item_schema) == ["string"]
+def _item_schema_accepts_string(item_schema: dict[str, Any]) -> bool:
+    return "string" in _schema_types(item_schema)
 
 
 def _repair_optional_nulls(schema: dict[str, Any], args: dict[str, Any], actions: list[ToolCallRepairAction], path: tuple[PathPart, ...] = ()) -> None:

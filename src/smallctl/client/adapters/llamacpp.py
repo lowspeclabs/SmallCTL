@@ -15,6 +15,7 @@ class LlamaCppAdapter:
         supports_stream_options=False,
         first_token_timeout_sec=60.0,
         tool_call_continuation_timeout_sec=90.0,
+        prompt_processing_timeout_sec=120.0,
     )
 
     def sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

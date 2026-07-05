@@ -14,6 +14,7 @@ class StreamPolicy:
     first_token_timeout_sec: float = 30.0
     tool_call_continuation_timeout_sec: float = 30.0
     max_tokens_parameter_name: str = "max_tokens"
+    prompt_processing_timeout_sec: float = 0.0
 
 
 class ProviderAdapter(Protocol):

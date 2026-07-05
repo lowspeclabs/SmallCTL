@@ -57,6 +57,11 @@ def test_exact_small_gemma_4_does_not_match_other_models(model_name: str | None)
         "gemma-4-26b-a4b-it",
         "google/gemma-4-26b-a4b-it",
         "gemma-4-31b-it",
+        "gemma-4-12b-it",
+        "gemma-4-12b",
+        "Gemma 4 12b",
+        "gemma-4-27b-it",
+        "gemma-4-27b",
     ],
 )
 def test_gemma_4_it_matches_it_variants(model_name: str) -> None:

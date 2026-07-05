@@ -72,6 +72,7 @@ from .client_transport_helpers import (
     parse_retry_after_seconds as _parse_retry_after_seconds,
     provider_root as _provider_root,
     request_first_token_timeout_sec as _request_first_token_timeout_sec,
+    resolve_prompt_processing_timeout_sec as _resolve_prompt_processing_timeout_sec,
     tool_name as _tool_name,
 )
 from .client_transport_context_limits import (
@@ -97,6 +98,8 @@ async def stream_chat(
     client: Any,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    *,
+    force_nonstream: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     if httpx is None:
         raise RuntimeError("Dependency missing: httpx")
@@ -239,6 +242,7 @@ async def stream_chat(
         }
         return
     request_first_token_timeout_sec = _request_first_token_timeout_sec(client, tools)
+    prompt_processing_timeout_sec = _resolve_prompt_processing_timeout_sec(client)
     streamer = SSEStreamer(
         provider_profile=client.provider_profile,
         first_token_timeout_sec=request_first_token_timeout_sec,
@@ -247,7 +251,55 @@ async def stream_chat(
         run_logger=client.run_logger,
         log=client.log,
         api_client=client,
+        prompt_processing_timeout_sec=prompt_processing_timeout_sec,
     )
+
+    if force_nonstream:
+        log_kv(
+            client.log,
+            logging.INFO,
+            "chat_nonstream_request",
+            model=client.model,
+            provider_profile=client.provider_profile,
+        )
+        if client.run_logger:
+            client.run_logger.log(
+                "chat",
+                "nonstream_request",
+                "forcing non-streaming chat request",
+                model=client.model,
+                provider_profile=client.provider_profile,
+            )
+        nonstream_payload = dict(current_payload)
+        nonstream_payload["stream"] = False
+        nonstream_payload.pop("stream_options", None)
+        try:
+            async for event in streamer.nonstream_chat(async_client, url, headers, nonstream_payload):
+                yield event
+            return
+        except httpx.HTTPStatusError as exc:
+            _log_http_error(client, "chat_nonstream_http_error", exc)
+            yield {
+                "type": "chunk_error",
+                "error": f"Non-stream request failed: {exc}",
+                "details": {
+                    "reason": "nonstream_http_error",
+                    "provider_profile": client.provider_profile,
+                    "status_code": int(exc.response.status_code),
+                },
+            }
+            return
+        except Exception as exc:
+            yield {
+                "type": "chunk_error",
+                "error": f"Non-stream request failed: {exc}",
+                "details": {
+                    "reason": "nonstream_error",
+                    "provider_profile": client.provider_profile,
+                    "exception": type(exc).__name__,
+                },
+            }
+            return
 
     for attempt in range(1, client.STREAM_RETRY_ATTEMPTS + 1):
         retry_after_seconds: float | None = None

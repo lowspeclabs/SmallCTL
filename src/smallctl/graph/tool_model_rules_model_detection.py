@@ -108,3 +108,33 @@ def _model_is_gemma_4(model_name: str | None) -> bool:
     if not normalized:
         return False
     return "gemma-4" in normalized
+
+
+def _model_is_gemma_4_small(model_name: str | None) -> bool:
+    """Return True for Gemma-4 variants at 12b and below.
+
+    These smaller checkpoints (e.g. ``gemma-4-12b``, ``Gemma 4 12b``,
+    ``gemma-4-12b-it``) are more prone to getting stuck emitting native
+    reasoning tokens and do not recover with the wider reasoning budgets
+    used for larger variants.  The 27b checkpoint and exact-small IT
+    variants are excluded from this matcher.
+    """
+    normalized = collapse_model_name(model_name)
+    if not normalized:
+        return False
+    if not _model_is_gemma_4(model_name):
+        return False
+    # Exclude the larger 27b variant and the exact-small e2b/e4b IT checkpoints,
+    # which have their own dedicated handling.
+    if "gemma-4-27b" in normalized or "gemma-4-27-b" in normalized:
+        return False
+    if _model_is_exact_small_gemma_4_it(model_name):
+        return False
+    # Match 12b and smaller explicit size tokens (1b, 2b, 4b, 8b, 12b), or a
+    # bare instruction-tuned suffix with no size which is assumed to be the
+    # common 12b instruction checkpoint.
+    return bool(
+        re.search(r"gemma-4-(?:1[0-2]b|[1-9]b|it)(?:-|$)", normalized)
+        or normalized == "gemma-4-it"
+        or normalized == "gemma-4"
+    )

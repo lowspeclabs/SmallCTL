@@ -92,7 +92,7 @@ from .terminal_completion import (
 from .terminal_completion import (
     working_memory_signals_completion as _working_memory_signals_completion,
 )
-from .tool_model_rules import _model_is_gemma_4
+from .tool_model_rules import _model_is_gemma_4, _model_is_gemma_4_small
 from .write_recovery import (
     _force_finalize_if_complete_file,
     build_synthetic_write_args,
@@ -964,6 +964,51 @@ async def interpret_model_output(
 
     stream_halted = bool(harness.state.scratchpad.get("_last_stream_halted_without_done"))
 
+    # Small Gemma-4 on llama.cpp tends to inspect repeatedly without ever
+    # mutating. Inject a commanding nudge earlier than the generic read-only
+    # loop guard so the model is forced into a write/execution action.
+    if (
+        graph_state.run_mode == "loop"
+        and not graph_state.pending_tool_calls
+        and not stream_halted
+    ):
+        model_name = _nodes._harness_model_name(harness)
+        provider_profile = str(
+            getattr(getattr(harness, "client", None), "provider_profile", "")
+            or getattr(harness, "provider_profile", "")
+            or ""
+        ).strip().lower()
+        if (
+            _model_is_gemma_4_small(model_name)
+            and provider_profile == "llamacpp"
+        ):
+            counters = getattr(harness.state, "stagnation_counters", None) or {}
+            read_only_turns = int(counters.get("consecutive_read_only_turns", 0)) if isinstance(counters, dict) else 0
+            if read_only_turns >= 4:
+                small_gemma_read_nudges = int(harness.state.scratchpad.get("_gemma_4_read_only_step_nudges", 0))
+                if small_gemma_read_nudges < 2:
+                    harness.state.scratchpad["_gemma_4_read_only_step_nudges"] = small_gemma_read_nudges + 1
+                    harness.state.append_message(ConversationMessage(
+                        role="user",
+                        content=(
+                            "You have already inspected the files. The next step must be a write or execution action. "
+                            "Pick one concrete action and call it now; do not ask for more reads."
+                        ),
+                        metadata={
+                            "is_recovery_nudge": True,
+                            "recovery_kind": "gemma_4_small_read_only_loop",
+                            "consecutive_read_only_turns": read_only_turns,
+                            "retry_count": small_gemma_read_nudges + 1,
+                        },
+                    ))
+                    harness._runlog(
+                        "gemma_4_small_read_only_loop_nudge",
+                        "injected early read-only loop nudge for small Gemma-4",
+                        consecutive_read_only_turns=read_only_turns,
+                        retry_count=small_gemma_read_nudges + 1,
+                    )
+                    return LoopRoute.NEXT_STEP
+
     if (
         not reasoning_fallback_active
         and graph_state.run_mode not in {"chat", "planning"}
@@ -1185,6 +1230,31 @@ async def interpret_model_output(
                         harness.reasoning_mode = "off"
                         reasoning_mode_switched = True
                     harness.state.scratchpad["_thinking_tags_disabled"] = True
+
+                # Small Gemma-4 (<=12b) on llama.cpp rarely recovers from native
+                # reasoning-channel stalls. Track small-variant stalls separately
+                # and, after the second one, request a single non-streaming
+                # fallback on the next turn.
+                provider_profile = str(
+                    getattr(getattr(harness, "client", None), "provider_profile", "")
+                    or getattr(harness, "provider_profile", "")
+                    or ""
+                ).strip().lower()
+                small_gemma4_llamacpp = (
+                    _model_is_gemma_4_small(model_name) and provider_profile == "llamacpp"
+                )
+                if small_gemma4_llamacpp:
+                    small_stall_count = int(harness.state.scratchpad.get("_gemma_4_small_stall_count", 0)) + 1
+                    harness.state.scratchpad["_gemma_4_small_stall_count"] = small_stall_count
+                    if small_stall_count >= 2:
+                        harness.state.scratchpad["_try_nonstream_next_turn"] = True
+                        harness._runlog(
+                            "gemma_4_small_nonstream_fallback_scheduled",
+                            "scheduling a single non-streaming fallback after repeated reasoning stalls",
+                            stall_count=small_stall_count,
+                            model_name=model_name,
+                            provider_profile=provider_profile,
+                        )
 
                 # Avoid repeating the full task objective in the recovery nudge;
                 # doing so makes Gemma-4 restart its plan/thinking loop instead of

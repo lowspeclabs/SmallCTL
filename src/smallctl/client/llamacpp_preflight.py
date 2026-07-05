@@ -5,7 +5,7 @@ from typing import Any
 
 from ..logging_utils import log_kv
 from .openrouter_preflight import _client_context_limit, _tool_name
-from .request_budget import RequestEstimator, build_request_budget
+from .request_budget import RequestBudget, RequestEstimator, build_request_budget
 from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
 from .transport_constants import _LOCAL_PATCH_INTENT_RE, _LOCAL_WRITE_INTENT_RE, _UNSET
 
@@ -117,6 +117,33 @@ def _llamacpp_budget_preflight(
     limit = context_limit or _client_context_limit(client)
     raw_tools = payload.get("tools")
     tools = raw_tools if isinstance(raw_tools, list) else []
+
+    # Small Gemma-4 on llama.cpp suffers from SWA/hybrid-memory cache
+    # invalidation at large contexts. Warn when the requested context is above
+    # the safe threshold and cap the effective prompt budget to reduce cache
+    # pressure.
+    from ..graph.tool_model_rules_model_detection import _model_is_gemma_4_small
+    small_gemma4 = _model_is_gemma_4_small(client.model)
+    if small_gemma4 and limit is not None and limit > 32768:
+        log_kv(
+            client.log,
+            logging.WARNING,
+            "llamacpp_small_gemma4_context_warning",
+            model=client.model,
+            context_limit=limit,
+            recommendation="use --context-limit 32768 for small Gemma-4 on llama.cpp",
+        )
+        if client.run_logger:
+            client.run_logger.log(
+                "chat",
+                "small_gemma4_context_warning",
+                "small Gemma-4 context may cause prompt-cache invalidation",
+                model=client.model,
+                context_limit=limit,
+                recommended_context_limit=32768,
+            )
+        limit = min(limit, 32768)
+
     if limit is None:
         estimator = RequestEstimator()
         footprint = estimator.footprint(payload)
@@ -160,6 +187,14 @@ def _llamacpp_budget_preflight(
         return None
 
     budget = build_request_budget(limit)
+    if small_gemma4 and budget.effective_prompt_budget > 24576:
+        budget = RequestBudget(
+            context_limit=budget.context_limit,
+            reserve_completion_tokens=budget.reserve_completion_tokens,
+            safety_margin_tokens=budget.safety_margin_tokens,
+            tokenizer_slop_tokens=budget.tokenizer_slop_tokens,
+            effective_prompt_budget=24576,
+        )
     result = fit_tools_to_context_budget(
         payload=payload,
         tools=tools,

@@ -17,7 +17,11 @@ from ..context import (
 )
 from ..graph.tool_model_rules_model_detection import _model_uses_gemma_rules
 from ..guards import GuardConfig
-from ..prompt_model_classifiers import is_gemma_4_it_model_name, is_exact_small_gemma_4_it_model_name
+from ..prompt_model_classifiers import (
+    is_exact_small_gemma_4_it_model_name,
+    is_gemma_4_it_model_name,
+    is_gemma_4_non_exact_small_model_name,
+)
 from ..phases import normalize_phase
 from ..tools import ToolDispatcher, build_registry
 from .bootstrap_support import (
@@ -103,7 +107,18 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
             self.state.scratchpad["_thinking_tags_disabled"] = True
         elif is_gemma_4_it_model_name(config.model):
             # Known Gemma variants that follow the explicit <think> tag protocol.
-            self.reasoning_mode = "tags"
+            # Local llama.cpp backends are an exception: larger/non-exact-small
+            # Gemma-4 variants (12b, 27b, etc.) frequently degenerate into native
+            # reasoning-channel loops when the prompt asks for explicit <think>
+            # tags. Disable tag instructions for those local deployments.
+            if (
+                resolved_provider_profile == "llamacpp"
+                and is_gemma_4_non_exact_small_model_name(config.model)
+            ):
+                self.reasoning_mode = "off"
+                self.state.scratchpad["_thinking_tags_disabled"] = True
+            else:
+                self.reasoning_mode = "tags"
         elif config.reasoning_mode == "auto":
             # Other Gemma-4 models tend to degenerate when prompted for <think> tags.
             # Default to direct responses and hide the tag instructions from the

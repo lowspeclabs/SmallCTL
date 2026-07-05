@@ -22,6 +22,15 @@ _EXACT_GEMMA_4_SMALL_IT_MODEL_SUFFIXES = (
 _EXACT_GEMMA_4_26B_A4B_IT_MODEL_SUFFIXES = (
     "google-gemma-4-26b-a4b-it",
 )
+# User-facing and backend-agnostic slugs for Gemma-4 instruction-tuned
+# checkpoints that do not always include the "-it" token (e.g. "Gemma 4 12b"
+# or "gemma-4-12b" served by llama.cpp).  Treating them as IT lets the
+# harness keep the <think>-tag reasoning protocol enabled instead of falling
+# back to reasoning=off.
+_KNOWN_GEMMA_4_IT_BASE_SUFFIXES = (
+    "gemma-4-12b",
+    "gemma-4-27b",
+)
 _EXACT_LFM_25_8B_A1B_MODELS = (
     "lfm2.5-8b-a1b",
     "liquid/lfm2.5-8b-a1b",
@@ -62,15 +71,18 @@ def is_exact_large_gemma_4_26b_a4b_it_model_name(model_name: str) -> bool:
 def is_gemma_4_it_model_name(model_name: str) -> bool:
     """True for Gemma-4 instruction-tuned variants that emit <think> tags.
 
-    Covers the known small IT suffixes (e2b/e4b), the 26b A4B IT variant, and
-    the 31b IT variant observed on OpenRouter.  Using the broader "gemma-4-"
-    + "-it" heuristic lets the harness treat future Gemma-4 IT checkpoints the
-    same way without waiting for an exact allow-list update.
+    Covers the known small IT suffixes (e2b/e4b), the 26b A4B IT variant, the
+    31b IT variant observed on OpenRouter, and common user/backend slugs such
+    as ``gemma-4-12b`` where the "-it" token is omitted.  Using the broader
+    heuristic lets the harness treat future Gemma-4 IT checkpoints the same
+    way without waiting for an exact allow-list update.
     """
     normalized = collapse_model_name(model_name)
     if "gemma-4-" not in normalized:
         return False
-    return normalized.endswith("-it")
+    if normalized.endswith("-it"):
+        return True
+    return _matches_any_suffix(normalized, _KNOWN_GEMMA_4_IT_BASE_SUFFIXES)
 
 
 def is_lfm25_8b_a1b_model_name(model_name: str) -> bool:

@@ -340,6 +340,48 @@ class _Gemma4AlwaysReasoningClient:
                 },
             }
 
+class _SlowRoleThenContentClient:
+    """Emits a bare role chunk, then assistant content.
+
+    Mimics backends such as llama.cpp/LM Studio where the first streamed chunk
+    is just `{"role": "assistant", "content": null}` and real content follows
+    shortly after.  The role chunk must not consume the reasoning-only budget.
+    """
+
+    model = "Gemma 4 12b"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stream_chat(self, messages, tools):
+        self.calls.append({"messages": messages, "tools": tools})
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "role": "assistant",
+                            "content": None,
+                        }
+                    }
+                ]
+            },
+        }
+        yield {
+            "type": "chunk",
+            "data": {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "Proceeding with shell_exec now.",
+                        }
+                    }
+                ]
+            },
+        }
+
+
 class _DegenerateReasoningClient:
     """Emits a repetitive reasoning stream that should trigger the degenerate loop guard."""
 
@@ -1649,3 +1691,173 @@ def test_degenerate_loop_switches_reasoning_mode_off_at_third_iteration() -> Non
         event[0][0] == "degenerate_loop_reasoning_mode_disabled"
         for event in harness.runlog_events
     )
+
+
+def test_gemma_4_small_llamacpp_reasoning_limit_is_tighter() -> None:
+    small_gemma_tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+    seconds, chunks = model_stream_loop_module._reasoning_only_limits(
+        small_gemma_tools,
+        model_name="gemma-4-12b",
+        provider_profile="llamacpp",
+    )
+    assert seconds == model_stream_loop_module._GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_SECONDS
+    assert chunks == model_stream_loop_module._GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_CHUNKS
+
+
+def test_gemma_4_27b_keeps_wider_reasoning_limit() -> None:
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+    seconds, chunks = model_stream_loop_module._reasoning_only_limits(
+        tools,
+        model_name="gemma-4-27b",
+        provider_profile="llamacpp",
+    )
+    assert seconds == model_stream_loop_module._GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS
+    assert chunks == model_stream_loop_module._GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS
+
+
+def test_small_gemma_4_reasoning_only_nudge_names_write_family() -> None:
+    tools = [
+        {"type": "function", "function": {"name": "file_write", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "file_patch", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}},
+    ]
+    nudge = model_stream_loop_module._build_reasoning_only_nudge(
+        tools,
+        phase="execute",
+        model_name="gemma-4-12b",
+        provider_profile="llamacpp",
+    )
+    assert "file_write" in nudge
+    assert "file_patch" in nudge
+    assert "do not read again" in nudge.lower()
+
+
+def test_small_gemma_4_remote_reasoning_only_nudge_names_ssh_family() -> None:
+    tools = [
+        {"type": "function", "function": {"name": "ssh_file_write", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "ssh_exec", "parameters": {"type": "object"}}},
+    ]
+    nudge = model_stream_loop_module._build_reasoning_only_nudge(
+        tools,
+        phase="repair",
+        model_name="gemma-4-12b",
+        provider_profile="llamacpp",
+    )
+    assert "ssh_file_write" in nudge
+    assert "ssh_exec" in nudge
+    assert "do not read again" in nudge.lower()
+
+
+def test_prompt_processing_timeout_event_yields_dedicated_event(monkeypatch) -> None:
+    """SSEStreamer emits backend_prompt_processing_timeout when headers arrive but no chunk is emitted in time."""
+    import contextlib
+    import smallctl.client.streaming as streaming_module
+
+    class _SlowFirstChunkLineIter:
+        def __init__(self, delay: float) -> None:
+            self.delay = delay
+            self._called = False
+
+        async def __anext__(self):
+            if not self._called:
+                self._called = True
+                await asyncio.sleep(self.delay)
+            raise StopAsyncIteration
+
+    class _FakeResponse:
+        def __init__(self, line_iter) -> None:
+            self.line_iter = line_iter
+
+        def raise_for_status(self):
+            pass
+
+        def aiter_lines(self):
+            return self.line_iter
+
+    class _FakeClient:
+        @contextlib.asynccontextmanager
+        async def stream(self, *args, **kwargs):
+            line_iter = _SlowFirstChunkLineIter(delay=0.05)
+            response = _FakeResponse(line_iter)
+            yield response
+
+    streamer = streaming_module.SSEStreamer(
+        provider_profile="llamacpp",
+        first_token_timeout_sec=10.0,
+        prompt_processing_timeout_sec=0.01,
+    )
+
+    async def _run():
+        events = []
+        timeout = streaming_module.httpx.Timeout(30.0) if streaming_module.httpx is not None else 30.0
+        async for event in streamer._stream_sse_once(
+            _FakeClient(), "http://test", {}, {}, timeout
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+    assert len(events) == 1
+    assert events[0]["type"] == "backend_prompt_processing_timeout"
+    assert events[0]["details"]["reason"] == "prompt_processing_timeout"
+
+
+def test_nonstream_fallback_dispatches_tool_call(monkeypatch) -> None:
+    """When _try_nonstream_next_turn is set, process_model_stream uses a non-stream request."""
+    state = LoopState(cwd="/tmp")
+    harness = _Harness(state)
+    harness._cancel_requested = False
+    state.scratchpad["_try_nonstream_next_turn"] = True
+
+    class _NonstreamToolClient:
+        model = "gemma-4-12b"
+        provider_profile = "llamacpp"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def stream_chat(self, messages, tools, *, force_nonstream=False):
+            self.calls.append({"messages": messages, "tools": tools, "force_nonstream": force_nonstream})
+            yield {
+                "type": "chunk",
+                "data": {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "shell_exec",
+                                            "arguments": '{"command":"echo ok"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+            }
+            yield {"type": "done"}
+
+    harness.client = _NonstreamToolClient()
+    graph_state = GraphRunState(loop_state=state, thread_id="t1", run_mode="loop")
+    deps = SimpleNamespace(event_handler=None, harness=harness)
+    tools = [{"type": "function", "function": {"name": "shell_exec", "parameters": {"type": "object"}}}]
+
+    result = asyncio.run(
+        model_stream_module.process_model_stream(
+            graph_state,
+            deps,
+            messages=[{"role": "user", "content": "run a command"}],
+            tools=tools,
+        )
+    )
+
+    assert harness.client.calls[0]["force_nonstream"] is True
+    assert state.scratchpad.get("_try_nonstream_next_turn") is None
+    assert result.stream.tool_calls
+    assert result.stream.tool_calls[0]["function"]["name"] == "shell_exec"

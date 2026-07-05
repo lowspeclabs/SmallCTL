@@ -42,7 +42,82 @@ from .model_stream_fallback_recovery import (
     _with_speaker,
 )
 from .model_stream_loop import run_model_stream_loop
+from .model_stream_loop_rendering import (
+    StreamTagState,
+    flush_model_stream_buffer,
+    handle_model_stream_chunk,
+)
 from .model_stream_resolution import resolve_model_stream_result
+
+
+async def _run_nonstream_model_call(
+    graph_state: GraphRunState,
+    deps: GraphRuntimeDeps,
+    *,
+    harness: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    echo_to_stdout: bool,
+    start_tag: str,
+    end_tag: str,
+    start_time: float,
+    suppress_ui_events: bool = False,
+) -> dict[str, Any]:
+    """Execute a single non-streaming model call and return loop-shaped result."""
+    chunks: list[dict[str, Any]] = []
+    first_token_time: float | None = None
+    stream_state = StreamTagState()
+    try:
+        async for event in harness.client.stream_chat(messages=messages, tools=tools, force_nonstream=True):
+            if event.get("type") == "chunk":
+                if first_token_time is None:
+                    first_token_time = time.perf_counter()
+                stream_state, first_token_time = await handle_model_stream_chunk(
+                    harness=harness,
+                    deps=deps,
+                    event=event,
+                    start_tag=start_tag,
+                    end_tag=end_tag,
+                    echo_to_stdout=echo_to_stdout,
+                    chunks=chunks,
+                    stream_state=stream_state,
+                    first_token_time=first_token_time,
+                    suppress_ui_events=suppress_ui_events,
+                )
+            elif event.get("type") == "done":
+                break
+            elif event.get("type") == "chunk_error":
+                harness._runlog(
+                    "nonstream_chunk_error",
+                    "non-stream fallback returned a chunk error",
+                    error=event.get("error"),
+                    details=event.get("details"),
+                )
+                break
+    except Exception as exc:
+        harness.log.exception("nonstream model call failed")
+        harness._runlog("nonstream_model_call_error", "non-stream fallback failed", error=str(exc))
+
+    await flush_model_stream_buffer(
+        harness=harness,
+        deps=deps,
+        stream_state=stream_state,
+        start_tag=start_tag,
+        end_tag=end_tag,
+        echo_to_stdout=echo_to_stdout,
+        suppress_ui_events=suppress_ui_events,
+    )
+    return {
+        "chunks": chunks,
+        "stream_completed_cleanly": True,
+        "trigger_early_4b_fallback": False,
+        "salvage_partial_stream": None,
+        "last_chunk_error_details": None,
+        "stream_ended_without_done": False,
+        "stream_ended_without_done_details": {},
+        "partial_assistant_text": "",
+        "first_token_time": first_token_time,
+    }
 
 
 async def process_model_stream(
@@ -72,18 +147,34 @@ async def process_model_stream(
     end_tag = str(harness.thinking_end_tag or "</think>")
     harness.state.scratchpad.pop("_last_incomplete_tool_call", None)
     harness.state.scratchpad.pop("_last_text_write_fallback_assistant_text", None)
-    loop_result = await run_model_stream_loop(
-        graph_state,
-        deps,
-        harness=harness,
-        messages=messages,
-        tools=tools,
-        echo_to_stdout=echo_to_stdout,
-        start_tag=start_tag,
-        end_tag=end_tag,
-        start_time=start_time,
-        suppress_ui_events=suppress_ui_events,
-    )
+
+    try_nonstream = bool(harness.state.scratchpad.pop("_try_nonstream_next_turn", False))
+    if try_nonstream:
+        loop_result = await _run_nonstream_model_call(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=messages,
+            tools=tools,
+            echo_to_stdout=echo_to_stdout,
+            start_tag=start_tag,
+            end_tag=end_tag,
+            start_time=start_time,
+            suppress_ui_events=suppress_ui_events,
+        )
+    else:
+        loop_result = await run_model_stream_loop(
+            graph_state,
+            deps,
+            harness=harness,
+            messages=messages,
+            tools=tools,
+            echo_to_stdout=echo_to_stdout,
+            start_tag=start_tag,
+            end_tag=end_tag,
+            start_time=start_time,
+            suppress_ui_events=suppress_ui_events,
+        )
     if graph_state.final_result is not None:
         # Preserve provider-classified failures from the stream loop. Resolution
         # should only infer a chunk-exhaustion error when the loop ended

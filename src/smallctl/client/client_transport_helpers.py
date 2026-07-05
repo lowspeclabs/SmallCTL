@@ -29,6 +29,22 @@ def request_first_token_timeout_sec(client: Any, tools: list[dict[str, Any]]) ->
     return timeout
 
 
+def resolve_prompt_processing_timeout_sec(client: Any) -> float:
+    """Return the prompt-processing watchdog for this request, or 0 to disable."""
+    adapter_timeout = float(getattr(getattr(getattr(client, "adapter", None), "stream_policy", None), "prompt_processing_timeout_sec", 0.0) or 0.0)
+    if adapter_timeout <= 0:
+        return 0.0
+    # Only enable the prompt-processing watchdog for small Gemma-4 on llama.cpp,
+    # where repeated SWA/cache invalidation turns long contexts into wall-clock
+    # stalls before the first generation token.
+    if client.provider_profile != "llamacpp":
+        return 0.0
+    from ..graph.tool_model_rules_model_detection import _model_is_gemma_4_small
+    if not _model_is_gemma_4_small(getattr(client, "model", None)):
+        return 0.0
+    return adapter_timeout
+
+
 def _request_has_write_heavy_tool(client: Any, tools: list[dict[str, Any]]) -> bool:
     if not tools:
         return False

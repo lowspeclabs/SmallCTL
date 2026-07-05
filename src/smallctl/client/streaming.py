@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from typing import Any, AsyncIterator
 
@@ -59,6 +60,7 @@ class SSEStreamer:
         run_logger: Any | None = None,
         log: logging.Logger | None = None,
         api_client: Any | None = None,
+        prompt_processing_timeout_sec: float | None = None,
     ) -> None:
         self.provider_profile = provider_profile
         self.adapter = get_provider_adapter(provider_profile)
@@ -71,6 +73,11 @@ class SSEStreamer:
             self.tool_call_continuation_timeout_sec = default_timeout
         else:
             self.tool_call_continuation_timeout_sec = max(1.0, float(tool_call_continuation_timeout_sec))
+        if prompt_processing_timeout_sec is None:
+            adapter_prompt_timeout = float(self.adapter.stream_policy.prompt_processing_timeout_sec)
+            self.prompt_processing_timeout_sec = adapter_prompt_timeout if adapter_prompt_timeout > 0 else 0.0
+        else:
+            self.prompt_processing_timeout_sec = max(0.0, float(prompt_processing_timeout_sec))
         self.run_logger = run_logger
         self.log = log or logging.getLogger("smallctl.client.streaming")
         self.api_client = api_client
@@ -165,8 +172,10 @@ class SSEStreamer:
         saw_done = False
         tool_call_stream_active = False
         recent_chunks: deque[dict[str, Any]] = deque(maxlen=5)
+        headers_received_at: float | None = None
         async with client.stream("POST", url, headers=headers, json=payload, timeout=timeout) as response:
             response.raise_for_status()
+            headers_received_at = time.monotonic()
             line_iter = response.aiter_lines()
             while True:
                 read_timeout = self._next_stream_read_timeout(
@@ -179,6 +188,47 @@ class SSEStreamer:
                     break
                 except asyncio.TimeoutError as exc:
                     if chunk_count == 0:
+                        # If the backend has already received the headers but has
+                        # not emitted any content chunk within the prompt-processing
+                        # budget, report a dedicated timeout so the harness can
+                        # shrink context instead of waiting for the full first-token
+                        # watchdog (which may be much longer).
+                        if (
+                            self.prompt_processing_timeout_sec > 0
+                            and headers_received_at is not None
+                            and (time.monotonic() - headers_received_at) >= self.prompt_processing_timeout_sec
+                        ):
+                            elapsed = round(time.monotonic() - headers_received_at, 3)
+                            log_kv(
+                                self.log,
+                                logging.WARNING,
+                                "chat_backend_prompt_processing_timeout",
+                                elapsed_sec=elapsed,
+                                prompt_processing_timeout_sec=self.prompt_processing_timeout_sec,
+                                provider_profile=self.provider_profile,
+                            )
+                            if self.run_logger:
+                                self.run_logger.log(
+                                    "chat",
+                                    "backend_prompt_processing_timeout",
+                                    "backend spent too long processing the prompt before emitting a token",
+                                    elapsed_sec=elapsed,
+                                    prompt_processing_timeout_sec=self.prompt_processing_timeout_sec,
+                                    provider_profile=self.provider_profile,
+                                )
+                            yield {
+                                "type": "backend_prompt_processing_timeout",
+                                "error": "Backend spent too long processing the prompt",
+                                "details": {
+                                    "reason": "prompt_processing_timeout",
+                                    "provider_profile": self.provider_profile,
+                                    "elapsed_sec": elapsed,
+                                    "prompt_processing_timeout_sec": self.prompt_processing_timeout_sec,
+                                    "chunk_count": 0,
+                                    "last_chunks": [],
+                                },
+                            }
+                            return
                         message = "timed out waiting for first stream token"
                         log_kv(
                             self.log,

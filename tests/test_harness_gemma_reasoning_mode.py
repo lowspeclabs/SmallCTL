@@ -85,3 +85,34 @@ def test_harness_recognizes_spaced_gemma_4_e4b_name_as_field() -> None:
     )
     assert harness.reasoning_mode == "field"
     assert harness.state.scratchpad.get("_thinking_tags_disabled") is True
+
+
+def test_harness_disables_think_tags_for_non_exact_small_gemma_on_llamacpp() -> None:
+    # Larger local Gemma-4 variants (e.g. 12b served by llama.cpp) are prone
+    # to native reasoning-channel loops when prompted for explicit <think>
+    # tags. The harness should proactively disable tag instructions.
+    harness = Harness(
+        endpoint="http://localhost:8080/v1",
+        model="Gemma 4 12b",
+        provider_profile="llamacpp",
+        api_key="test-key",
+        reasoning_mode="auto",
+        runtime_context_probe=False,
+    )
+    assert harness.reasoning_mode == "off"
+    assert harness.state.scratchpad.get("_thinking_tags_disabled") is True
+
+
+def test_harness_overrides_explicit_tags_for_non_exact_small_gemma_on_llamacpp() -> None:
+    # Even if the user/profile asks for tags, non-exact-small local Gemma-4
+    # variants should not use explicit <think> instructions.
+    harness = Harness(
+        endpoint="http://localhost:8080/v1",
+        model="gemma-4-12b-it",
+        provider_profile="llamacpp",
+        api_key="test-key",
+        reasoning_mode="tags",
+        runtime_context_probe=False,
+    )
+    assert harness.reasoning_mode == "off"
+    assert harness.state.scratchpad.get("_thinking_tags_disabled") is True

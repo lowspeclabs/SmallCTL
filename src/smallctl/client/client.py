@@ -357,8 +357,10 @@ class OpenAICompatClient:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        *,
+        force_nonstream: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        return stream_chat(self, messages, tools)
+        return stream_chat(self, messages, tools, force_nonstream=force_nonstream)
 
     async def fetch_model_context_limit(self) -> int | None:
         return await fetch_model_context_limit(self)

@@ -781,6 +781,38 @@ async def _rebuild_messages_after_context_overflow(
     return await self._build_prompt_messages(system_prompt, event_handler=event_handler)
 
 
+async def _shrink_messages_for_prompt_processing_timeout(
+    self: Any,
+    *,
+    messages: list[dict[str, Any]],
+    event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Shrink messages after the backend spends too long processing the prompt.
+
+    llama.cpp with small Gemma-4 can invalidate its prompt cache on long contexts,
+    causing each turn to re-process the entire prompt. Drop old messages to leave
+    only the system prompt and the most recent exchange, then rebuild so the
+    context policy can apply the reduced budget.
+    """
+    system_prompt = str(self.state.scratchpad.get("_last_system_prompt") or "")
+    if not system_prompt:
+        return None
+    # Reduce the effective prompt budget to create headroom and reduce cache
+    # pressure on the next turn.
+    policy = getattr(self, "context_policy", None)
+    if policy is not None:
+        current_limit = getattr(policy, "max_prompt_tokens", None)
+        if isinstance(current_limit, int) and current_limit > 16384:
+            policy.max_prompt_tokens = 16384
+            self._runlog(
+                "prompt_processing_timeout_budget_cap",
+                "capped prompt budget after prompt-processing timeout",
+                new_max_prompt_tokens=16384,
+                previous_max_prompt_tokens=current_limit,
+            )
+    return await self._build_prompt_messages(system_prompt, event_handler=event_handler)
+
+
 async def _build_prompt_messages(
     self: Any,
     system_prompt: str,
@@ -1208,6 +1240,9 @@ def bind_core_facade(cls: type[Any]) -> None:
     cls._stream_print = staticmethod(_stream_print)
     cls._rebuild_messages_after_context_overflow = (
         _rebuild_messages_after_context_overflow
+    )
+    cls._shrink_messages_for_prompt_processing_timeout = (
+        _shrink_messages_for_prompt_processing_timeout
     )
     cls._build_prompt_messages = _build_prompt_messages
     cls._maybe_compact_context = _maybe_compact_context

@@ -31,6 +31,7 @@ from .state import GraphRunState
 from .tool_model_rules import (
     _model_is_exact_small_gemma_4_it,
     _model_is_gemma_4,
+    _model_is_gemma_4_small,
     _model_is_lfm25_8b_a1b,
 )
 
@@ -46,6 +47,11 @@ _LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS = 512
 # instead of halting immediately.
 _GEMMA4_REASONING_ONLY_TOOL_MAX_SECONDS = 40.0
 _GEMMA4_REASONING_ONLY_TOOL_MAX_CHUNKS = 2500
+# Small Gemma-4 (<=12b) served by llama.cpp does not recover from native
+# reasoning-channel stalls; waiting the full Gemma-4 budget wastes wall-clock
+# time and prompt-cache headroom.
+_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_SECONDS = 12.0
+_GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_CHUNKS = 800
 _REASONING_ONLY_MAX_RETRIES = 1
 _REASONING_ONLY_GEMMA4_MAX_RETRIES = 2
 _REASONING_PROGRESS_MIN_FRAGMENTS = 4
@@ -347,6 +353,7 @@ def _reasoning_only_limits(
     tools: list[dict[str, Any]],
     *,
     model_name: str | None = None,
+    provider_profile: str | None = None,
 ) -> tuple[float, int]:
     if not tools:
         return _REASONING_ONLY_MAX_SECONDS, _REASONING_ONLY_MAX_CHUNKS
@@ -354,6 +361,11 @@ def _reasoning_only_limits(
         return (
             min(_REASONING_ONLY_MAX_SECONDS, _LFM25_REASONING_ONLY_TOOL_MAX_SECONDS),
             min(_REASONING_ONLY_MAX_CHUNKS, _LFM25_REASONING_ONLY_TOOL_MAX_CHUNKS),
+        )
+    if _model_is_gemma_4_small(model_name) and str(provider_profile or "").strip().lower() == "llamacpp":
+        return (
+            min(_REASONING_ONLY_MAX_SECONDS, _GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_SECONDS),
+            min(_REASONING_ONLY_MAX_CHUNKS, _GEMMA4_SMALL_REASONING_ONLY_TOOL_MAX_CHUNKS),
         )
     if _model_is_gemma_4(model_name):
         return (
@@ -366,7 +378,7 @@ def _reasoning_only_limits(
     )
 
 
-def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "", harness: Any = None) -> str:
+def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "", harness: Any = None, model_name: str | None = None, provider_profile: str | None = None) -> str:
     names = _tool_names(tools)
     base = (
         "The prior response stream spent too long in reasoning without producing assistant content "
@@ -376,13 +388,27 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
     if context_hint:
         base = f"{base} {context_hint}"
 
-    model_name = ""
-    if harness is not None:
+    resolved_model_name = model_name or ""
+    if harness is not None and not resolved_model_name:
         client = getattr(harness, "client", None)
-        model_name = str(getattr(client, "model", "") or "").strip()
-    if not model_name and harness is not None:
-        model_name = str(getattr(getattr(harness, "state", None), "scratchpad", {}).get("_model_name") or "").strip()
-    if _model_is_exact_small_gemma_4_it(model_name):
+        resolved_model_name = str(getattr(client, "model", "") or "").strip()
+    if not resolved_model_name and harness is not None:
+        resolved_model_name = str(getattr(getattr(harness, "state", None), "scratchpad", {}).get("_model_name") or "").strip()
+
+    resolved_provider_profile = provider_profile or ""
+    if harness is not None and not resolved_provider_profile:
+        resolved_provider_profile = str(
+            getattr(getattr(harness, "client", None), "provider_profile", "")
+            or getattr(harness, "provider_profile", "")
+            or ""
+        ).strip()
+
+    small_gemma4_llamacpp = (
+        _model_is_gemma_4_small(resolved_model_name)
+        and resolved_provider_profile.lower() == "llamacpp"
+    )
+
+    if _model_is_exact_small_gemma_4_it(resolved_model_name):
         examples: list[str] = []
         if "ssh_exec" in names:
             examples.append(
@@ -398,7 +424,34 @@ def _build_reasoning_only_nudge(tools: list[dict[str, Any]], *, phase: str = "",
             )
         if examples:
             base = f"{base} Emit exactly one line like: {' or '.join(examples)}."
-    elif _model_is_gemma_4(model_name):
+    elif small_gemma4_llamacpp:
+        # Small Gemma-4 (<=12b) on llama.cpp gets stuck in native reasoning
+        # channels. Give it a commanding, phase-aware instruction that names the
+        # exact tool family it must use instead of asking for "the next tool call".
+        goal_hint = ""
+        if harness is not None:
+            try:
+                from .recovery_context import build_concise_goal_hint
+                goal_hint = build_concise_goal_hint(harness)
+            except Exception:
+                goal_hint = ""
+        goal_clause = f" {goal_hint}" if goal_hint else ""
+        phase = str(phase or "").strip().lower()
+        if phase in {"execute", "repair"}:
+            if any(name in names for name in ("ssh_file_write", "ssh_file_patch", "ssh_exec")):
+                action = "Call `ssh_file_write`, `ssh_file_patch`, or `ssh_exec` now; do not read again."
+            elif any(name in names for name in ("file_write", "file_patch", "ast_patch")):
+                action = "Call `file_write`, `file_patch`, or `ast_patch` now; do not read again."
+            else:
+                action = "Emit exactly one available tool call now; do not read again."
+        else:
+            action = "Emit exactly one available tool call now; do not start another reasoning block."
+        base = (
+            f"{base}{goal_clause} Close the reasoning block immediately. {action} "
+            "Do not emit `<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, "
+            "`<response>`, or any other angle-bracket control tag."
+        )
+    elif _model_is_gemma_4(resolved_model_name):
         # Larger Gemma-4 variants (12b/27b/etc.) served by backends such as
         # llama.cpp use native reasoning channels. When they stall in those
         # channels, explicitly tell them to close the channel and emit a JSON
@@ -545,13 +598,24 @@ async def run_model_stream_loop(
             _retry_immediately = False
             _stop_after_reasoning_only_stall = False
             attempt_started_at = time.monotonic()
+            first_token_time = None
             reasoning_only_chunks = 0
             active_model_name = str(getattr(getattr(harness, "client", None), "model", "") or "")
+            active_provider_profile = str(
+                getattr(getattr(harness, "client", None), "provider_profile", "")
+                or getattr(harness, "provider_profile", "")
+                or ""
+            )
             lfm25_reasoning_guard = _model_is_lfm25_8b_a1b(active_model_name)
             gemma4_reasoning_guard = _model_is_gemma_4(active_model_name)
+            gemma4_small_reasoning_guard = (
+                _model_is_gemma_4_small(active_model_name)
+                and active_provider_profile.strip().lower() == "llamacpp"
+            )
             reasoning_only_max_seconds, reasoning_only_max_chunks = _reasoning_only_limits(
                 tools,
                 model_name=active_model_name,
+                provider_profile=active_provider_profile,
             )
             # Shrink the reasoning-only window on each retry. A model that already
             # stalled once is unlikely to need the full initial budget again;
@@ -691,6 +755,87 @@ async def run_model_stream_loop(
                     if _trigger_early_4b_fallback:
                         break
                     break
+                if event.get("type") == "backend_prompt_processing_timeout":
+                    details = event.get("details")
+                    if not isinstance(details, dict):
+                        details = {}
+                    graph_state.latency_metrics["backend_prompt_processing_timeout_count"] = (
+                        int(graph_state.latency_metrics.get("backend_prompt_processing_timeout_count", 0) or 0) + 1
+                    )
+                    harness._runlog(
+                        "backend_prompt_processing_timeout",
+                        "backend spent too long processing the prompt before emitting a token",
+                        details=details,
+                    )
+                    shrink = getattr(harness, "_shrink_messages_for_prompt_processing_timeout", None)
+                    if callable(shrink) and not harness.state.scratchpad.get("_prompt_processing_timeout_shrink_done"):
+                        try:
+                            replacement_messages = await shrink(
+                                messages=messages,
+                                event_handler=deps.event_handler,
+                            )
+                        except Exception as exc:
+                            harness._runlog(
+                                "prompt_processing_timeout_shrink_failed",
+                                "failed to shrink context after prompt-processing timeout",
+                                error=str(exc),
+                            )
+                            replacement_messages = None
+                        if replacement_messages:
+                            messages = replacement_messages
+                            harness.state.scratchpad["_prompt_processing_timeout_shrink_done"] = True
+                            harness._runlog(
+                                "prompt_processing_timeout_context_shrink",
+                                "shrinking prompt context after prompt-processing timeout",
+                                attempt=_model_attempt + 1,
+                                details=details,
+                            )
+                            await harness._emit(
+                                deps.event_handler,
+                                UIEvent(
+                                    event_type=UIEventType.ALERT,
+                                    content="Prompt processing is taking too long; shrinking context and retrying.",
+                                    data={
+                                        "is_api_error": True,
+                                        "retrying": True,
+                                        "attempt": _model_attempt + 1,
+                                        "details": details,
+                                        "recovery": "context_shrink",
+                                    },
+                                ),
+                            )
+                            _retry_immediately = True
+                            break
+                    harness._runlog(
+                        "backend_prompt_processing_timeout_exhausted",
+                        "prompt-processing timeout recovery exhausted",
+                        details=details,
+                    )
+                    await harness._emit(
+                        deps.event_handler,
+                        UIEvent(
+                            event_type=UIEventType.ERROR,
+                            content="Backend spent too long processing the prompt and could not recover.",
+                            data={"is_api_error": True, "details": details},
+                        ),
+                    )
+                    graph_state.final_result = harness._failure(
+                        "Backend spent too long processing the prompt",
+                        error_type="provider",
+                        details=details,
+                    )
+                    graph_state.error = graph_state.final_result["error"]
+                    return {
+                        "chunks": chunks,
+                        "stream_completed_cleanly": False,
+                        "trigger_early_4b_fallback": _trigger_early_4b_fallback,
+                        "salvage_partial_stream": salvage_partial_stream,
+                        "last_chunk_error_details": last_chunk_error_details,
+                        "stream_ended_without_done": stream_ended_without_done,
+                        "stream_ended_without_done_details": stream_ended_without_done_details,
+                        "partial_assistant_text": "",
+                        "first_token_time": first_token_time,
+                    }
                 if event.get("type") == "backend_wedged":
                     details = event.get("details")
                     if not isinstance(details, dict):
@@ -748,10 +893,19 @@ async def run_model_stream_loop(
                         and not saw_tool_call
                         and (
                             reasoning_only_chunks >= reasoning_only_max_chunks
-                            or (time.monotonic() - attempt_started_at) >= reasoning_only_max_seconds
+                            or (
+                                first_token_time is not None
+                                and (time.monotonic() - first_token_time)
+                                >= reasoning_only_max_seconds
+                            )
                         )
                     ):
                         elapsed_seconds = round(time.monotonic() - attempt_started_at, 3)
+                        reasoning_elapsed_seconds = (
+                            round(time.monotonic() - first_token_time, 3)
+                            if first_token_time is not None
+                            else elapsed_seconds
+                        )
                         tool_names = _tool_names(tools)
                         hard_max_seconds = max(
                             reasoning_only_max_seconds,
@@ -810,6 +964,7 @@ async def run_model_stream_loop(
                                     "attempt": _model_attempt + 1,
                                     "reasoning_only_chunks": reasoning_only_chunks,
                                     "elapsed_seconds": elapsed_seconds,
+                                    "reasoning_elapsed_seconds": reasoning_elapsed_seconds,
                                     "tools_available": tool_names,
                                     "progress": progress_details,
                                     "max_reasoning_only_retries": max_reasoning_only_retries,
@@ -823,6 +978,7 @@ async def run_model_stream_loop(
                                     attempt=_model_attempt + 1,
                                     reasoning_only_chunks=reasoning_only_chunks,
                                     elapsed_seconds=elapsed_seconds,
+                                    reasoning_elapsed_seconds=reasoning_elapsed_seconds,
                                     tool_count=len(tools),
                                     tools_available=tool_names,
                                     **progress_details,
@@ -854,12 +1010,19 @@ async def run_model_stream_loop(
                                 suppress_ui_events=suppress_ui_events,
                             )
                             current_phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
-                            nudge = _build_reasoning_only_nudge(tools, phase=current_phase, harness=harness)
+                            nudge = _build_reasoning_only_nudge(
+                                tools,
+                                phase=current_phase,
+                                harness=harness,
+                                model_name=active_model_name,
+                                provider_profile=active_provider_profile,
+                            )
                             messages = list(messages) + [ConversationMessage(role="system", content=nudge).to_dict()]
                             harness.state.scratchpad["_last_reasoning_only_retry"] = {
                                 "attempt": _model_attempt + 1,
                                 "reasoning_only_chunks": reasoning_only_chunks,
                                 "elapsed_seconds": elapsed_seconds,
+                                "reasoning_elapsed_seconds": reasoning_elapsed_seconds,
                                 "tools_available": tool_names,
                                 "progress": progress_details,
                             }
@@ -869,6 +1032,7 @@ async def run_model_stream_loop(
                                 attempt=_model_attempt + 1,
                                 reasoning_only_chunks=reasoning_only_chunks,
                                 elapsed_seconds=elapsed_seconds,
+                                reasoning_elapsed_seconds=reasoning_elapsed_seconds,
                                 tool_count=len(tools),
                                 tools_available=tool_names,
                                 **progress_details,
@@ -883,6 +1047,7 @@ async def run_model_stream_loop(
                                         "retrying": True,
                                         "reasoning_only_chunks": reasoning_only_chunks,
                                         "elapsed_seconds": elapsed_seconds,
+                                        "reasoning_elapsed_seconds": reasoning_elapsed_seconds,
                                     },
                                 ),
                             )

@@ -273,7 +273,13 @@ async def handle_model_stream_chunk(
     reason_field = delta.get("reasoning_content") or delta.get("reasoning")
     content_field = delta.get("content")
 
-    if (content_field or reason_field) and first_token_time is None:
+    # Treat the first streamed chunk (even a role-only delta) as the first
+    # token for TTFT and reasoning-budget accounting.  Backends such as
+    # llama.cpp/LM Studio often emit a bare `{"role": "assistant"}` chunk
+    # before the native reasoning/content stream starts; ignoring it caused the
+    # reasoning-only guard to measure elapsed time from request start and abort
+    # slow-but-healthy Gemma-4 streams before they produced any output.
+    if first_token_time is None:
         first_token_time = time.perf_counter()
 
     if reason_field:

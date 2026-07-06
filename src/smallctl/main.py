@@ -12,6 +12,7 @@ from .harness import Harness, HarnessConfig
 from .logging_utils import create_run_logger, log_kv, setup_logging
 from .memory_cli import build_memory_parser, handle_memory_command
 from .presets import list_presets
+from .update_cli import build_update_parser, handle_update_command
 
 
 def _escalation_harness_kwargs(config: object) -> dict[str, object]:
@@ -464,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommands
     subparsers = parser.add_subparsers(dest="command")
     build_memory_parser(subparsers)
+    build_update_parser(subparsers)
     
     return parser
 
@@ -505,6 +507,8 @@ def cli(argv: list[str] | None = None) -> int:
     # Handle subcommands first
     if args.command == "memory":
         return handle_memory_command(args)
+    if args.command == "update":
+        return handle_update_command(args)
 
     config = resolve_config(vars(args))
 

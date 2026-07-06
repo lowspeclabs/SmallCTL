@@ -15,6 +15,7 @@ from ..harness import Harness, HarnessConfig
 from ..logging_utils import RunLogger
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType
+from ..update_cli import __version__ as smallctl_version
 from .console import ConsolePane
 from .app_approvals import handle_approval_prompt
 from .app_approvals import handle_sudo_password_prompt
@@ -178,7 +179,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
             if restore_status is None:
                 asyncio.create_task(
                     self._append_system_line(
-                        "Ready. Type a message to begin.",
+                        f"Ready. SmallCTL v{smallctl_version}. Type a message to begin.",
                         force=True,
                         kind="system",
                     )

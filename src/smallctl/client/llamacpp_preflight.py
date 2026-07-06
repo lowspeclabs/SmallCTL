@@ -54,8 +54,8 @@ def _log_llamacpp_budget_preflight(
     stage: str,
     action: str,
     result: ToolBudgetResult | None,
+    budget: RequestBudget | None = None,
     context_limit: int | None,
-    budget_context_limit: int | None = None,
     context_limit_source: str = "observed",
     reduction_reason: str = "",
 ) -> None:
@@ -70,18 +70,15 @@ def _log_llamacpp_budget_preflight(
     if reduction_reason:
         details["reduction_reason"] = reduction_reason
     if result is not None:
-        budget_limit = context_limit if budget_context_limit is None else budget_context_limit
-        budget = (
-            build_request_budget(result.footprint.estimated_payload_tokens)
-            if budget_limit is None
-            else build_request_budget(budget_limit)
-        )
+        logged_budget = budget
+        if logged_budget is None:
+            logged_budget = build_request_budget(result.footprint.estimated_payload_tokens)
         details.update(
             {
-                "effective_prompt_budget": budget.effective_prompt_budget,
-                "reserve_completion_tokens": budget.reserve_completion_tokens,
-                "safety_margin_tokens": budget.safety_margin_tokens,
-                "tokenizer_slop_tokens": budget.tokenizer_slop_tokens,
+                "effective_prompt_budget": logged_budget.effective_prompt_budget,
+                "reserve_completion_tokens": logged_budget.reserve_completion_tokens,
+                "safety_margin_tokens": logged_budget.safety_margin_tokens,
+                "tokenizer_slop_tokens": logged_budget.tokenizer_slop_tokens,
                 "estimated_payload_tokens": result.footprint.estimated_payload_tokens,
                 "estimated_message_tokens": result.footprint.estimated_message_tokens,
                 "estimated_tool_tokens": result.footprint.estimated_tool_tokens,
@@ -208,8 +205,8 @@ def _llamacpp_budget_preflight(
         stage=stage,
         action=result.action,
         result=result,
+        budget=budget,
         context_limit=displayed_context_limit,
-        budget_context_limit=limit,
         context_limit_source=context_limit_source,
         reduction_reason=reduction_reason,
     )
@@ -295,3 +292,123 @@ def _build_minimal_context_payload(
         "stream": True,
     }
     return client.adapter.mutate_payload(payload)
+
+
+def _is_swa_model(model_name: str | None, provider_profile: str | None) -> bool:
+    """Return True for models/backends known to use SWA/hybrid memory on llama.cpp."""
+    from ..graph.tool_model_rules_model_detection import _model_is_gemma_4_small
+
+    return (
+        _model_is_gemma_4_small(model_name)
+        and str(provider_profile or "").strip().lower() == "llamacpp"
+    )
+
+
+def _extract_cached_tokens(usage: dict[str, Any]) -> int | None:
+    """Best-effort extraction of cached/prefix prompt tokens from usage payload."""
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens")
+        if cached is not None:
+            try:
+                return int(cached)
+            except (TypeError, ValueError):
+                return None
+    # Some llama.cpp wrappers expose cached_tokens at the top level.
+    cached = usage.get("cached_tokens")
+    if cached is not None:
+        try:
+            return int(cached)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _record_swa_cache_observation(
+    harness: Any,
+    usage: dict[str, Any],
+    *,
+    warning_threshold: int = 2,
+) -> bool:
+    """Track consecutive turns with zero cached tokens on SWA models.
+
+    Returns True when the streak crosses the warning threshold.
+    """
+    client = getattr(harness, "client", None)
+    model_name = getattr(client, "model", None) if client is not None else None
+    provider_profile = getattr(client, "provider_profile", None) if client is not None else None
+    if not _is_swa_model(model_name, provider_profile):
+        return False
+    cached = _extract_cached_tokens(usage)
+    if cached is None:
+        return False
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    if cached == 0:
+        streak = int(scratchpad.get("_swa_zero_cached_streak", 0) or 0) + 1
+        scratchpad["_swa_zero_cached_streak"] = streak
+        return streak >= warning_threshold
+    scratchpad["_swa_zero_cached_streak"] = 0
+    return False
+
+
+def _maybe_emit_swa_cache_warning(harness: Any, usage: dict[str, Any]) -> None:
+    """Log and inject a FAMA capsule when SWA cache stays inactive."""
+    if not _record_swa_cache_observation(harness, usage):
+        return
+    log_kv(
+        harness.log,
+        logging.WARNING,
+        "llamacpp_swa_cache_inactive",
+        model=getattr(getattr(harness, "client", None), "model", None),
+        message=(
+            "llama.cpp SWA cache appears inactive (cached_tokens=0 for N turns). "
+            "If the backend supports it, run with --swa-full or disable SWA/hybrid memory "
+            "so prefix caching can be reused across turns."
+        ),
+    )
+    harness._runlog(
+        "swa_cache_inactive",
+        "llama.cpp SWA cache appears inactive across multiple turns",
+        recommendation="run backend with --swa-full or disable SWA/hybrid memory",
+    )
+    try:
+        from ..fama.signals import FamaFailureKind, FamaSignal, push_fama_signal
+        from ..fama.state import activate_mitigations, ActiveMitigation
+
+        state = getattr(harness, "state", None)
+        if state is None:
+            return
+        step = int(getattr(state, "step_count", 0) or 0)
+        push_fama_signal(
+            state,
+            FamaSignal(
+                kind=FamaFailureKind.CONTEXT_DRIFT,
+                severity=2,
+                source="swa_cache_inactive",
+                evidence="cached_tokens=0 for consecutive turns on SWA model",
+                step=step,
+                suggested_mitigations=["micro_plan_capsule"],
+                failure_class="context_missing",
+                next_safe_action="keep reasoning concise and reuse visible evidence",
+            ),
+        )
+        activate_mitigations(
+            state,
+            [
+                ActiveMitigation(
+                    name="micro_plan_capsule",
+                    reason="SWA/hybrid cache inactive; keep reasoning concise",
+                    source_signal="swa_cache_inactive",
+                    activated_step=step,
+                    expires_after_step=step + 4,
+                    priority=55,
+                )
+            ],
+            max_active=2,
+        )
+    except Exception:
+        pass

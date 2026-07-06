@@ -6,6 +6,7 @@ from typing import Any
 
 from ..provider_profiles import detect_provider_profile as _detect_provider_profile
 from ..state import json_safe_value
+from .llamacpp_preflight import _maybe_emit_swa_cache_warning
 
 
 def extract_context_limit(payload: Any) -> int | None:
@@ -180,6 +181,7 @@ def apply_usage_metrics(harness: Any, usage: dict[str, Any]) -> None:
     harness.state.last_completion_tokens = completion_tokens
     harness.state.scratchpad["last_completion_tokens"] = completion_tokens
     harness._runlog("usage", "token usage update", usage=normalized_usage)
+    _maybe_emit_swa_cache_warning(harness, normalized_usage)
 
 
 def _parse_positive_int(value: Any) -> int | None:

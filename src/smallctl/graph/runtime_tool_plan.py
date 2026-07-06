@@ -290,7 +290,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
         if graph_state.final_result is None:
             usage_payload = result.usage if isinstance(result.usage, dict) else {}
             if usage_payload:
-                self.deps.harness._apply_usage(usage_payload)
+                await self.deps.harness._apply_usage(usage_payload)
                 _record_tool_plan_tokens(graph_state.loop_state, "tool_plan_planner_tokens", usage_payload)
             graph_state.last_usage = usage_payload
             graph_state.last_assistant_text = result.stream.assistant_text

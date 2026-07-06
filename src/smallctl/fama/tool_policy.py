@@ -129,6 +129,11 @@ def fama_hidden_tools_for_exposure(
     config = _effective_config(state, config)
     if not fama_enabled(config):
         return set()
+    # Stable tool exposure for SWA/hybrid-memory models: dynamic schema churn
+    # prevents prefix caching, so keep the schema list stable and gate calls via
+    # risk/phase policy instead of hiding schemas.
+    if _swa_stable_tool_exposure(state, config):
+        return set()
     active = active_mitigation_names(state)
     exported = {_tool_name(schema) for schema in schemas}
     hidden_tools: set[str] = set()
@@ -411,6 +416,25 @@ def _effective_config(state: Any, config: Any) -> Any:
         fama_mode=str(payload.get("mode") or "lite"),
         fama_done_gate_on_failure=bool(payload.get("done_gate_on_failure", True)),
     )
+
+
+def _swa_stable_tool_exposure(state: Any, config: Any) -> bool:
+    """Return True when the backend is a SWA model where schema churn is harmful."""
+    from ..client.llamacpp_preflight import _is_swa_model
+
+    model_name = ""
+    provider_profile = ""
+    if config is not None:
+        model_name = str(getattr(config, "model", "") or "").strip()
+        provider_profile = str(getattr(config, "provider_profile", "") or "").strip()
+    if not model_name:
+        scratchpad = getattr(state, "scratchpad", None) or {}
+        model_name = str(getattr(scratchpad, "_model_name", "") or "").strip()
+    if not model_name:
+        model_name = str(getattr(state, "model", "") or "").strip()
+    if not provider_profile:
+        provider_profile = str(getattr(state, "provider_profile", "") or "").strip()
+    return _is_swa_model(model_name, provider_profile)
 
 
 def _latest_verifier(state: Any) -> dict[str, Any] | None:

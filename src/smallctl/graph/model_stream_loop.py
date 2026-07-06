@@ -1082,6 +1082,27 @@ async def run_model_stream_loop(
                                 model_name=active_model_name,
                                 provider_profile=active_provider_profile,
                             )
+                            # Small Gemma-4 on llama.cpp cannot reuse a long KV
+                            # prefix due to SWA/hybrid memory. Drop all but the
+                            # last system message, the most recent assistant/tool
+                            # exchange, and the current user turn before adding
+                            # the nudge, so the retry is cheap to reprocess.
+                            if gemma4_small_reasoning_guard:
+                                from ..client.llamacpp_preflight import _build_minimal_context_payload
+
+                                original_message_count = len(messages)
+                                minimal_payload = _build_minimal_context_payload(
+                                    harness.client,
+                                    messages=messages,
+                                )
+                                messages = list(minimal_payload.get("messages") or [])
+                                harness._runlog(
+                                    "reasoning_only_stream_minimal_context",
+                                    "shrinking retry context for SWA reasoning-only stall",
+                                    original_message_count=original_message_count,
+                                    reduced_message_count=len(messages),
+                                    attempt=_model_attempt + 1,
+                                )
                             messages = list(messages) + [ConversationMessage(role="system", content=nudge).to_dict()]
                             harness.state.scratchpad["_last_reasoning_only_retry"] = {
                                 "attempt": _model_attempt + 1,

@@ -51,7 +51,11 @@ from .error_hardening import (
     _maybe_schedule_web_search_for_repeated_error,
 )
 from .tool_outcome_resolution import maybe_apply_terminal_tool_outcome
-from .progress_guard import _update_progress_tracking
+from .progress_guard import (
+    _update_progress_tracking,
+    _record_is_mutation,
+    clear_stale_confabulation_nudge,
+)
 from .tool_execution_support import (
     _conversation_message_from_dict,
     _get_tool_execution_record,
@@ -90,6 +94,8 @@ async def apply_tool_outcomes(
         _maybe_clear_missing_input_after_remote_readback(harness, record)
         _maybe_clear_missing_input_after_local_alias_read(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)
+        if _record_is_mutation(record):
+            clear_stale_confabulation_nudge(harness.state)
         if record.tool_name == "shell_exec":
             _maybe_emit_repair_recovery_nudge(harness, record, deps)
             _maybe_schedule_repair_loop_status_autocontinue(graph_state, harness, record)

@@ -209,7 +209,7 @@ async def model_call(
     if not isinstance(usage_payload, dict):
         usage_payload = {}
     if usage_payload:
-        harness._apply_usage(usage_payload)
+        await harness._apply_usage(usage_payload)
 
     graph_state.last_usage = usage_payload
     graph_state.last_assistant_text = result.stream.assistant_text

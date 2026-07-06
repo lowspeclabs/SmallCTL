@@ -117,6 +117,56 @@ def _tool_history_entry_is_mutation(entry: str) -> bool:
     return not _is_read_only_shell_evidence_action(command)
 
 
+def _record_is_mutation(record: Any) -> bool:
+    """Return True when a ToolExecutionRecord represents a mutating operation."""
+    tool_name = str(getattr(record, "tool_name", "") or "")
+    result = getattr(record, "result", None)
+    if result is None or not getattr(result, "success", False):
+        return False
+    if tool_name in _MUTATION_TOOLS:
+        return True
+    if tool_name not in {"shell_exec", "ssh_exec"}:
+        return False
+    args = getattr(record, "args", None) or {}
+    if not isinstance(args, dict):
+        return False
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return False
+    return not _is_read_only_shell_evidence_action(command)
+
+
+def clear_stale_confabulation_nudge(state: Any) -> None:
+    """Remove a stale 'no mutating operations' confabulation nudge from context.
+
+    The confabulation guard injects a recovery message when it thinks the model
+    is falsely claiming work is complete. Once a real mutating tool succeeds,
+    that message becomes false and confusing, so drop it and reset the guard.
+    """
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict) or not scratchpad.get("_confabulation_nudged"):
+        return
+    messages = getattr(state, "messages", None)
+    if not messages:
+        return
+    cleaned = []
+    removed = False
+    for msg in messages:
+        role = str(getattr(msg, "role", "") or "").strip()
+        metadata = getattr(msg, "metadata", None)
+        if (
+            role == "user"
+            and isinstance(metadata, dict)
+            and metadata.get("recovery_kind") == "completion_confabulation"
+        ):
+            removed = True
+            continue
+        cleaned.append(msg)
+    if removed:
+        state.messages = cleaned
+        scratchpad.pop("_confabulation_nudged", None)
+
+
 def _turn_is_read_only(last_tool_results: list[Any]) -> bool:
     """Return True if every tool result this turn is a read/search operation."""
     if not last_tool_results:

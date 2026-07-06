@@ -3,12 +3,35 @@ from __future__ import annotations
 from typing import Any
 
 from ..client.usage import apply_usage_metrics as _apply_usage_metrics
+from ..client.usage import _maybe_emit_swa_cache_warning as _maybe_emit_swa_cache_warning
 from ..context import build_retrieval_query as _build_retrieval_query
 from ..models.tool_result import ToolEnvelope
 from .conversation_logging import log_conversation_state as _log_conversation_state_helper
 from .conversation_logging import record_assistant_message as _record_assistant_message_helper
 from .context_limits import apply_server_context_limit as _apply_server_context_limit_helper
 from .context_limits import resolve_effective_prompt_budget as _resolve_effective_prompt_budget_helper
+
+
+_SWA_CACHE_SHRINK_THRESHOLD = 2
+
+
+def _should_shrink_for_swa_cache(harness: Any) -> bool:
+    """Return True when SWA cache inactivity should trigger proactive compaction."""
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return False
+    streak = int(scratchpad.get("_swa_zero_cached_streak", 0) or 0)
+    if streak < _SWA_CACHE_SHRINK_THRESHOLD:
+        return False
+    policy = getattr(harness, "context_policy", None)
+    if policy is None:
+        return False
+    max_prompt = getattr(policy, "max_prompt_tokens", None)
+    swa_cap = getattr(policy, "swa_prompt_cap", 12288)
+    return max_prompt is None or max_prompt > swa_cap
 
 
 def _resolve_effective_prompt_budget(
@@ -52,8 +75,14 @@ async def _ensure_context_limit(self: Any) -> None:
     await self.prompt_builder.ensure_context_limit()
 
 
-def _apply_usage(self: Any, usage: dict[str, Any]) -> None:
+async def _apply_usage(self: Any, usage: dict[str, Any]) -> None:
     _apply_usage_metrics(self, usage)
+    _maybe_emit_swa_cache_warning(self, usage)
+    if _should_shrink_for_swa_cache(self):
+        await self._shrink_messages_for_prompt_processing_timeout(
+            messages=[],
+            event_handler=getattr(self, "event_handler", None),
+        )
     backend_model = usage.get("_backend_model_name") if isinstance(usage, dict) else None
     if backend_model and getattr(self, "client", None) is not None:
         context_limit = getattr(self, "server_context_limit", None) or getattr(

@@ -7,6 +7,8 @@ from smallctl.graph.progress_guard import (
     _check_completion_confabulation,
     _tool_history_entry_is_mutation,
     _turn_has_actionable_progress,
+    _record_is_mutation,
+    clear_stale_confabulation_nudge,
 )
 from smallctl.state import LoopState
 
@@ -105,7 +107,7 @@ def test_tool_history_entry_is_mutation_ignores_failed_shell() -> None:
 def test_check_completion_confabulation_skips_after_shell_mkdir() -> None:
     state = LoopState(cwd="/tmp")
     state.tool_history.append(
-        'shell_exec|{"command": "mkdir -p ./temp"}|success'
+        'shell_exec|{"command": "mkdir -p ./tmp"}|success'
     )
     harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
 
@@ -116,3 +118,42 @@ def test_check_completion_confabulation_skips_after_shell_mkdir() -> None:
 
     assert _check_completion_confabulation(harness, graph_state) is None
     assert state.scratchpad.get("_confabulation_nudged") is None
+
+
+def test_record_is_mutation_counts_ssh_exec_backup_script() -> None:
+    record = SimpleNamespace(
+        tool_name="ssh_exec",
+        args={"command": "/root/backup.sh", "host": "192.168.1.64", "user": "root"},
+        result=SimpleNamespace(success=True),
+    )
+    assert _record_is_mutation(record) is True
+
+
+def test_record_is_mutation_ignores_ssh_exec_read() -> None:
+    record = SimpleNamespace(
+        tool_name="ssh_exec",
+        args={"command": "cat /root/backup.sh", "host": "192.168.1.64", "user": "root"},
+        result=SimpleNamespace(success=True),
+    )
+    assert _record_is_mutation(record) is False
+
+
+def test_clear_stale_confabulation_nudge_removes_message_after_mutation() -> None:
+    from smallctl.models.conversation import ConversationMessage
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_confabulation_nudged"] = True
+    nudge = ConversationMessage(
+        role="user",
+        content="GROUND TRUTH CHECK: No mutating operations...",
+        metadata={"is_recovery_nudge": True, "recovery_kind": "completion_confabulation"},
+    )
+    other = ConversationMessage(role="user", content="Do the task.", metadata={})
+    state.messages = [other, nudge]
+
+    clear_stale_confabulation_nudge(state)
+
+    assert state.scratchpad.get("_confabulation_nudged") is None
+    assert nudge not in state.messages
+    assert other in state.messages
+

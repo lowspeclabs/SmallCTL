@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from ..remote_scope import has_any_session_ssh_target, remote_scope_is_active
+from ..shell_utils import is_read_only_shell_evidence_action
 from ..state import LoopState, clip_text_value, normalize_intent_label
 from .artifact_visibility import (
     artifact_path_candidates,
@@ -439,12 +442,28 @@ def should_render_active_ssh_sessions(state: LoopState) -> bool:
 def render_task_ground_truth(state: LoopState) -> str:
     """Render explicit ground-truth about successful tools in the current task."""
     successful_tools: list[str] = []
+    mutation_tools: list[str] = []
+
     for entry in state.tool_history:
         if not isinstance(entry, str):
             continue
         parts = entry.split("|")
-        if len(parts) >= 3 and parts[-1] == "success":
-            successful_tools.append(parts[0])
+        if len(parts) < 3 or parts[-1] != "success":
+            continue
+        tool_name = parts[0]
+        successful_tools.append(tool_name)
+        if tool_name in MUTATION_TOOL_NAMES:
+            mutation_tools.append(tool_name)
+        elif tool_name in {"shell_exec", "ssh_exec"}:
+            args_json = "|".join(parts[1:-1])
+            try:
+                args = json.loads(args_json)
+            except json.JSONDecodeError:
+                args = None
+            if isinstance(args, dict):
+                command = str(args.get("command") or "").strip()
+                if command and not is_read_only_shell_evidence_action(command):
+                    mutation_tools.append(tool_name)
 
     if not successful_tools:
         return (
@@ -452,7 +471,6 @@ def render_task_ground_truth(state: LoopState) -> str:
             "Do not assume any work is already complete."
         )
 
-    mutation_tools = [tool for tool in successful_tools if tool in MUTATION_TOOL_NAMES]
     if mutation_tools:
         changed = (
             ", ".join(state.files_changed_this_cycle[-5:])

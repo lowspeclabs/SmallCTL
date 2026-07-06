@@ -103,6 +103,71 @@ After creating the file, do not explain. Just make sure the file exists."""
     assert classify_task_mode(task) == "local_execute"
 
 
+def test_inline_docker_compose_rca_is_not_complex_task() -> None:
+    """Regression for run d28b2e17.
+
+    A user pasted an inline docker-compose YAML and asked for an RCA.
+    The file-extension heuristic must not count the pasted `.yml` and
+    two `.conf` paths (buggy regex matched them as `.c`) as three file
+    targets and escalate to planning mode.
+    """
+    task = """rca this docker compose, whats wrong with it and why "# docker-compose.broken.yml
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: todo-app
+    ports:
+      - "8000:5000"
+    environment:
+      DATABASE_URL: postgres://todo:todo@database:5432/tododb
+      REDIS_URL: redis://cache:6379/0
+      NODE_ENV: production
+      PORT: "5000"
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./app:/usr/src/app
+    command: npm start
+
+  db:
+    image: postgres:16
+    container_name: todo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: todo
+      POSTGRES_PASSWORD: todo
+      POSTGRES_DB: todos
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql
+
+  redis:
+    image: redis:7
+    container_name: todo-cache
+    restart: unless-stopped
+    ports:
+      - "6378:6379"
+
+  nginx:
+    image: nginx:latest
+    container_name: todo-proxy
+    ports:
+      - "8080:80"
+    depends_on:
+      - app
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/app.conf"""  # noqa: E501
+
+    assert looks_like_complex_task(task) is False
+    assert classify_task_mode(task) == "local_execute"
+
+
 def test_local_temp_log_recovery_task_ignores_config_hosts_for_remote_mode() -> None:
     task = """You are working only inside ./temp.
 

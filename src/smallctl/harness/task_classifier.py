@@ -615,9 +615,16 @@ def looks_like_complex_task(task: str) -> bool:
     if has_remote and has_local:
         return True
 
-    # Multiple file targets
-    file_extensions = re.findall(r"[\./\\A-Za-z0-9_-]+\.(?:py|sh|bash|ps1|js|ts|tsx|jsx|md|toml|yaml|yml|json|go|rs|java|kt|cpp|c|html|htm|h|rb|php)", text)
-    if len(set(file_extensions)) >= 3:
+    # Multiple file targets. Match extension-only tokens to avoid alternation
+    # ordering bugs such as treating `.conf` as `.c` because `c` matches first.
+    ext_tokens = re.findall(r"(?<![A-Za-z0-9_])[\./\\A-Za-z0-9_-]+\.(\w+)", text)
+    code_extensions = {
+        "py", "sh", "bash", "ps1", "js", "ts", "tsx", "jsx", "md", "toml",
+        "yaml", "yml", "json", "go", "rs", "java", "kt", "cpp", "c", "html",
+        "htm", "h", "rb", "php",
+    }
+    distinct_exts = {ext for ext in ext_tokens if ext in code_extensions}
+    if len(distinct_exts) >= 3:
         return True
 
     # Debug-investigate-fix-verify chain

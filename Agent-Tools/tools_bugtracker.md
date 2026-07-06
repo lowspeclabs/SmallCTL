@@ -23,6 +23,7 @@ moving on.
 
 | ID | Tool | Severity | Description | Repro | Status |
 |----|------|----------|-------------|-------|--------|
+| BUG-017 | run_diagnose.py, runscan.py | major | Runs that fail with `PROMPT BUDGET OVERFLOW` are classified as generic `incomplete_unverified` instead of a prompt-budget failure class. `run_diagnose.py` repeats the postmortem but does not surface a concrete next-step label, and `runscan.py` does not include a `prompt_budget_overflow` classification even though the postmortem_summary clearly states it. | `python3 Agent-Tools/run_diagnose.py b2818de8` and `python3 Agent-Tools/runscan.py --last 20 --failures-only` (run `b2818de8-20260706-002838`). | open |
 
 ## Fixed Bugs
 

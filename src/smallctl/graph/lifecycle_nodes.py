@@ -58,6 +58,7 @@ from ..fama.runtime import observe_guard_trip
 from .lifecycle_guard_recovery import (
     _dispatch_artifact_read_recovery,
     _dispatch_stagnation_recovery,
+    _dispatch_write_session_guard_recovery,
     _inject_artifact_read_recovery_nudge,
 )
 from .lifecycle_tool_validation import _validate_pending_tool_calls
@@ -1211,6 +1212,10 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
         ):
             _dispatch_stagnation_recovery(harness, guard_error)
             guard_error = None
+
+        if guard_error and "max_consecutive_errors" in guard_error.lower():
+            if _dispatch_write_session_guard_recovery(harness, graph_state, guard_error):
+                guard_error = None
 
         if guard_error:
             recovery_hint = _artifact_read_recovery_hint(harness, guard_error)

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from ..models.conversation import ConversationMessage
-from ..models.events import UIEvent, UIEventType
 from .state import PendingToolCall
+
+_WRITE_SESSION_GUARD_ERROR_KINDS = {
+    "patch_over_rewrite_guard",
+    "patch_existing_requires_explicit_replace_strategy",
+    "Patch-existing write sessions",
+    "chunked_write_overwrite_new_section_after_progress",
+    "write_session_staging_path_used_as_target",
+}
 
 
 def _dispatch_stagnation_recovery(harness: Any, guard_error: str) -> None:
@@ -165,3 +174,137 @@ def _inject_artifact_read_recovery_nudge(harness: Any, recovery_hint: tuple[str,
         artifact_id=artifact_id,
         query=query,
     )
+
+
+def _extract_write_session_guard_target_path(guard_error: str, recent_errors: list[str]) -> str | None:
+    """Find the most likely target path from a write-session guard trip."""
+    # Prefer the most recent write-session-related error with a path.
+    for error in reversed(recent_errors):
+        text = str(error or "")
+        if not any(kind in text for kind in _WRITE_SESSION_GUARD_ERROR_KINDS):
+            if "file_write to `" not in text:
+                continue
+        m = re.search(r"file_write to `([^`]+)`", text)
+        if m:
+            return m.group(1).strip()
+        # Also accept backtick-wrapped paths that look like files.
+        m = re.search(r"`([^`]+\.[a-zA-Z0-9]+)`", text)
+        if m:
+            return m.group(1).strip()
+    # Fallback to the guard error text itself.
+    m = re.search(r"file_write to `([^`]+)`", str(guard_error or ""))
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _is_write_session_guard_trip(guard_error: str, recent_errors: list[str]) -> bool:
+    """Return True if max_consecutive_errors is dominated by write-session failures."""
+    if "max_consecutive_errors" not in str(guard_error or "").lower():
+        return False
+    ws_errors = 0
+    for error in recent_errors:
+        text = str(error or "")
+        if any(kind in text for kind in _WRITE_SESSION_GUARD_ERROR_KINDS):
+            ws_errors += 1
+        elif text.startswith("file_write:") and "file_write to `" in text:
+            # A file_write failure that is not explicitly a write-session error
+            # but still counts as part of the stuck write loop.
+            ws_errors += 1
+    # Need at least 3 related errors or a majority of the configured threshold.
+    return ws_errors >= 3
+
+
+def _dispatch_write_session_guard_recovery(
+    harness: Any,
+    graph_state: Any,
+    guard_error: str,
+) -> bool:
+    """Recover from max_consecutive_errors caused by a stuck write session.
+
+    Aborts the active write session, clears error counters, and schedules a
+    fresh file_read so the model can choose a correct write shape instead of
+    looping on implicit chunked/patch-existing semantics.
+    """
+    recent_errors = list(getattr(harness.state, "recent_errors", []) or [])
+    if not _is_write_session_guard_trip(guard_error, recent_errors):
+        return False
+
+    target_path = _extract_write_session_guard_target_path(guard_error, recent_errors)
+    if not target_path:
+        return False
+
+    session = getattr(harness.state, "write_session", None)
+    aborted_session_id: str | None = None
+    if session is not None:
+        session_target = str(getattr(session, "write_target_path", "") or "").strip()
+        if session_target:
+            try:
+                from ..tools.fs import _same_target_path
+
+                matches = _same_target_path(
+                    session_target, target_path, getattr(harness.state, "cwd", None)
+                )
+            except Exception:
+                matches = session_target == target_path
+            if matches:
+                from .write_session_outcomes_support import _abort_write_session
+
+                aborted_session_id = str(
+                    getattr(session, "write_session_id", "") or ""
+                ).strip()
+                _abort_write_session(harness, session)
+
+    # Clear the error state that caused the guard trip so the runtime can continue.
+    harness.state.recent_errors = []
+    harness.state.tool_history = []
+    harness.state.stagnation_counters = {}
+    scratchpad = getattr(harness.state, "scratchpad", None)
+    if isinstance(scratchpad, dict):
+        scratchpad.pop("_tool_attempt_history", None)
+
+    # Schedule a fresh read of the target so the model has current content.
+    read_args = {"path": target_path}
+    graph_state.pending_tool_calls = [
+        PendingToolCall(
+            tool_name="file_read",
+            args=read_args,
+            raw_arguments=json.dumps(read_args, ensure_ascii=True, sort_keys=True),
+            source="system",
+        )
+    ]
+    from .tool_call_parser import allow_repeated_tool_call_once
+
+    allow_repeated_tool_call_once(harness, "file_read", read_args)
+
+    session_note = (
+        f" Active Write Session `{aborted_session_id}` has been aborted."
+        if aborted_session_id
+        else ""
+    )
+    harness.state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"Recovery: repeated `file_write` failures to `{target_path}` were caused by a stuck "
+                f"patch-existing/chunked write session.{session_note} "
+                "Read the current file content, then choose exactly one approach: "
+                "use `file_write(path=..., replace_strategy='overwrite')` to replace the entire file, "
+                "or use `file_patch` for a narrow exact edit. Do not retry implicit chunked writes."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "write_session_guard_recovery",
+                "target_path": target_path,
+                "aborted_session_id": aborted_session_id or "",
+            },
+        )
+    )
+    harness._runlog(
+        "write_session_guard_recovery",
+        "aborted stuck write session and scheduled fresh file_read after max_consecutive_errors",
+        target_path=target_path,
+        aborted_session_id=aborted_session_id or "",
+        step=getattr(harness.state, "step_count", 0),
+    )
+    return True

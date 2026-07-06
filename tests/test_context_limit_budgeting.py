@@ -522,3 +522,24 @@ def test_prompt_assembler_enforces_max_prompt_token_ceiling() -> None:
     assert assembly.estimated_prompt_tokens <= max_prompt_tokens
     # At least one optional lane should have been sacrificed to stay under the cap.
     assert assembly.section_tokens.get("fresh_tool_outputs", 0) == 0
+
+
+def test_swa_prompt_cap_uses_higher_limit_for_gemma_4_12b_and_27b() -> None:
+    harness = _make_harness(max_prompt_tokens=32768, provider_profile="llamacpp")
+    harness.client = SimpleNamespace(model="gemma-4-12b")
+
+    new_limit = apply_server_context_limit(harness, 65024, source="runtime_probe")
+
+    assert new_limit == 24576
+    assert harness.context_policy.max_prompt_tokens == 24576
+
+
+def test_swa_prompt_cap_uses_default_for_exact_small_gemma_4() -> None:
+    harness = _make_harness(max_prompt_tokens=32768, provider_profile="llamacpp")
+    harness.client = SimpleNamespace(model="gemma-4-e4b-it")
+
+    new_limit = apply_server_context_limit(harness, 65024, source="runtime_probe")
+
+    assert new_limit == 12288
+    assert harness.context_policy.max_prompt_tokens == 12288
+

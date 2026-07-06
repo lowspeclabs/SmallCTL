@@ -1792,3 +1792,87 @@ def test_swa_cache_observation_ignores_non_swa_model() -> None:
     usage = {"prompt_tokens_details": {"cached_tokens": 0}}
     assert not _record_swa_cache_observation(harness, usage)
     assert "_swa_zero_cached_streak" not in harness.state.scratchpad
+
+
+def test_swa_cache_observation_tracks_gemma_4_12b() -> None:
+    from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-12b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+    )
+    usage = {"prompt_tokens_details": {"cached_tokens": 0}}
+    assert not _record_swa_cache_observation(harness, usage)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 1
+    assert _record_swa_cache_observation(harness, usage)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 2
+
+
+def test_is_swa_model_matches_gemma_4_variants_on_llamacpp() -> None:
+    from smallctl.client.llamacpp_preflight import _is_swa_model
+
+    assert _is_swa_model("gemma-4-12b", "llamacpp") is True
+    assert _is_swa_model("Gemma 4 12b", "llamacpp") is True
+    assert _is_swa_model("gemma-4-e4b-it", "llamacpp") is True
+    assert _is_swa_model("gemma-4-27b-it", "llamacpp") is True
+    assert _is_swa_model("gemma-4-12b", "lmstudio") is False
+    assert _is_swa_model("gemma-3-4b-it", "llamacpp") is False
+    assert _is_swa_model("qwen2.5-7b", "llamacpp") is False
+
+
+def test_swa_cache_observation_treats_missing_cached_as_zero_for_gemma4_llamacpp() -> None:
+    from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-12b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+    )
+    usage_no_cached = {"prompt_tokens": 1000}
+    assert not _record_swa_cache_observation(harness, usage_no_cached)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 1
+    assert _record_swa_cache_observation(harness, usage_no_cached)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 2
+
+    usage_cached = {"prompt_tokens_details": {"cached_tokens": 10}}
+    assert not _record_swa_cache_observation(harness, usage_cached)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 0
+
+
+def test_swa_cache_observation_ignores_missing_cached_for_non_swa() -> None:
+    from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="qwen2.5-7b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+    )
+    usage = {"prompt_tokens": 1000}
+    assert not _record_swa_cache_observation(harness, usage)
+    assert "_swa_zero_cached_streak" not in harness.state.scratchpad
+
+
+def test_maybe_emit_swa_cache_warning_logs_for_gemma4_llamacpp() -> None:
+    from smallctl.client.llamacpp_preflight import _maybe_emit_swa_cache_warning
+
+    log_calls: list[dict[str, object]] = []
+    runlog_calls: list[dict[str, object]] = []
+
+    class _FakeLog:
+        def warning(self, *args, **kwargs):
+            log_calls.append({"args": args, "kwargs": kwargs})
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-12b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+        log=_FakeLog(),
+        _runlog=lambda event, message, **data: runlog_calls.append({"event": event, "message": message, **data}),
+    )
+    usage = {"prompt_tokens": 1000}
+    # First call should start the streak but not yet warn.
+    _maybe_emit_swa_cache_warning(harness, usage)
+    assert not any(c.get("event") == "swa_cache_inactive" for c in runlog_calls)
+
+    # Second call should trigger the warning.
+    _maybe_emit_swa_cache_warning(harness, usage)
+    assert any(c.get("event") == "swa_cache_inactive" for c in runlog_calls)
+    assert any("--swa-full" in str(c.get("recommendation", "")) for c in runlog_calls)
+

@@ -19,6 +19,8 @@ def test_gemma_4_with_llamacpp_logs_reasoning_budget_warning(tmp_path: pytest.Te
 
     assert any("--reasoning-budget" in record.message for record in caplog.records)
     assert any("Gemma-4 model with llama.cpp" in record.message for record in caplog.records)
+    assert any("--swa-full" in record.message for record in caplog.records)
+    assert any("--ctx-size" in record.message for record in caplog.records)
 
 
 def test_gemma_4_with_lmstudio_does_not_log_reasoning_budget_warning(tmp_path: pytest.TempPathFactory, monkeypatch, caplog) -> None:

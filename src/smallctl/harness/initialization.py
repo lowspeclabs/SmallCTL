@@ -132,9 +132,11 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     ):
         logger.warning(
             "Gemma-4 model with llama.cpp provider detected. If the backend "
-            "crashes or hangs in reasoning loops, start llama.cpp with a bounded "
-            "--reasoning-budget (e.g. 4096) so the native reasoning channel does "
-            "not consume unbounded KV-cache memory."
+            "crashes, hangs in reasoning loops, or reprocesses the full prompt every "
+            "turn (SWA/hybrid-memory cache invalidation), start llama.cpp with a bounded "
+            "--reasoning-budget (e.g. 4096), --ctx-size no larger than 32768, and "
+            "--swa-full so the native reasoning channel does not consume unbounded "
+            "KV-cache memory and prompt caching can be reused across turns."
         )
 
     self.thinking_visibility = config.thinking_visibility

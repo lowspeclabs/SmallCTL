@@ -1250,6 +1250,36 @@ def test_llamacpp_preflight_warns_and_caps_context_for_small_gemma4() -> None:
     )
     assert preflight_log is not None
     assert preflight_log["data"]["context_limit"] == 32768
+    assert preflight_log["data"]["effective_prompt_budget"] == 24576
+
+
+def test_llamacpp_preflight_small_gemma4_uses_enforced_budget_in_log() -> None:
+    """The logged effective_prompt_budget must reflect the 24576 override."""
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="gemma-4-12b",
+        provider_profile="llamacpp",
+    )
+    client.runtime_context_limit = 32768
+    run_logger = _RunLogger()
+    client.run_logger = run_logger
+
+    payload = {
+        "model": client.model,
+        "messages": [{"role": "user", "content": "fix the backup script"}],
+        "stream": True,
+        "tools": [],
+    }
+
+    result = client_transport._llamacpp_budget_preflight(client, payload=payload, stage="test")
+
+    assert result is not None
+    preflight_log = next(
+        (entry for entry in run_logger.entries if entry["event"] == "payload_preflight_budget"),
+        None,
+    )
+    assert preflight_log is not None
+    assert preflight_log["data"]["effective_prompt_budget"] == 24576
 
 
 def test_stream_chat_llamacpp_context_budget_error_is_not_retryable(monkeypatch) -> None:
@@ -1724,3 +1754,41 @@ def test_stream_chat_openrouter_400_exhaustion_yields_actionable_chunk_error(mon
     assert details["provider_error"] == "Input validation error"
     assert details["model"] == "demo-model"
     assert details["role_counts"] == {"user": 1}
+
+
+def test_extract_cached_tokens_reads_prompt_tokens_details() -> None:
+    from smallctl.client.llamacpp_preflight import _extract_cached_tokens
+
+    assert _extract_cached_tokens({"prompt_tokens_details": {"cached_tokens": 42}}) == 42
+    assert _extract_cached_tokens({"cached_tokens": 7}) == 7
+    assert _extract_cached_tokens({"prompt_tokens": 100}) is None
+
+
+def test_swa_cache_observation_tracks_zero_cached_streak() -> None:
+    from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="gemma-4-12b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+    )
+    usage = {"prompt_tokens_details": {"cached_tokens": 0}}
+    assert not _record_swa_cache_observation(harness, usage)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 1
+    assert _record_swa_cache_observation(harness, usage)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 2
+
+    usage_cached = {"prompt_tokens_details": {"cached_tokens": 10}}
+    assert not _record_swa_cache_observation(harness, usage_cached)
+    assert harness.state.scratchpad["_swa_zero_cached_streak"] == 0
+
+
+def test_swa_cache_observation_ignores_non_swa_model() -> None:
+    from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
+
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="qwen2.5-7b", provider_profile="llamacpp"),
+        state=SimpleNamespace(scratchpad={}),
+    )
+    usage = {"prompt_tokens_details": {"cached_tokens": 0}}
+    assert not _record_swa_cache_observation(harness, usage)
+    assert "_swa_zero_cached_streak" not in harness.state.scratchpad

@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any
 
+from ..client.llamacpp_preflight import _is_swa_model
 from ..client.request_budget import build_request_budget
 from ..normalization import collapse_model_name
 
@@ -124,6 +125,22 @@ def apply_server_context_limit(
         provider_profile=getattr(harness, "provider_profile", None),
         model_name=model_name,
     )
+
+    # Apply SWA-aware hard cap for small Gemma-4 on llama.cpp so each full
+    # reprocess stays cheap even when prefix caching cannot be reused.
+    if (
+        _is_swa_model(model_name, getattr(harness, "provider_profile", None))
+        and effective_max_prompt_tokens is not None
+        and effective_max_prompt_tokens > harness.context_policy.swa_prompt_cap
+    ):
+        previous = effective_max_prompt_tokens
+        effective_max_prompt_tokens = harness.context_policy.swa_prompt_cap
+        harness._runlog(
+            "swa_prompt_cap_applied",
+            "capped prompt budget for SWA/hybrid-memory model",
+            swa_prompt_cap=harness.context_policy.swa_prompt_cap,
+            previous_budget=previous,
+        )
 
     if (
         configured_budget is not None

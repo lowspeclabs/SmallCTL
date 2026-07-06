@@ -14,6 +14,7 @@ def estimate_text_tokens(text: str) -> int:
 @dataclass
 class ContextPolicy:
     max_prompt_tokens: int | None = None
+    swa_prompt_cap: int = 12288
     reserve_completion_tokens: int = 1024
     reserve_tool_tokens: int = 512
     summarize_at_ratio: float = 0.8

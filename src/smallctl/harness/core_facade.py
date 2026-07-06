@@ -798,16 +798,17 @@ async def _shrink_messages_for_prompt_processing_timeout(
     if not system_prompt:
         return None
     # Reduce the effective prompt budget to create headroom and reduce cache
-    # pressure on the next turn.
+    # pressure on the next turn. Use the SWA-aware cap when available.
     policy = getattr(self, "context_policy", None)
     if policy is not None:
         current_limit = getattr(policy, "max_prompt_tokens", None)
-        if isinstance(current_limit, int) and current_limit > 16384:
-            policy.max_prompt_tokens = 16384
+        target_cap = getattr(policy, "swa_prompt_cap", 16384)
+        if isinstance(current_limit, int) and current_limit > target_cap:
+            policy.max_prompt_tokens = target_cap
             self._runlog(
                 "prompt_processing_timeout_budget_cap",
-                "capped prompt budget after prompt-processing timeout",
-                new_max_prompt_tokens=16384,
+                "capped prompt budget to reduce cache pressure",
+                new_max_prompt_tokens=target_cap,
                 previous_max_prompt_tokens=current_limit,
             )
     return await self._build_prompt_messages(system_prompt, event_handler=event_handler)

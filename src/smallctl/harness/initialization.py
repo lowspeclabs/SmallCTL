@@ -266,6 +266,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.context_policy = build_context_policy(
         policy=config.policy,
         effective_max_prompt_tokens=effective_max_prompt_tokens,
+        swa_prompt_cap=config.swa_prompt_cap,
         reserve_completion_tokens=config.reserve_completion_tokens,
         reserve_tool_tokens=config.reserve_tool_tokens,
         summarize_at_ratio=config.summarize_at_ratio,

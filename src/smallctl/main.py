@@ -79,6 +79,7 @@ def build_harness_config_kwargs(
         "context_limit": config.context_limit,
         "max_prompt_tokens": config.max_prompt_tokens,
         "max_prompt_tokens_explicit": max_prompt_tokens_explicit,
+        "swa_prompt_cap": getattr(config, "swa_prompt_cap", 12288),
         "max_completion_tokens": getattr(config, "max_completion_tokens", None),
         "reserve_completion_tokens": config.reserve_completion_tokens,
         "reserve_tool_tokens": config.reserve_tool_tokens,
@@ -411,6 +412,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", dest="api_key", help="API key for endpoint")
     parser.add_argument("--context-limit", type=int, help="Context window/token budget override")
     parser.add_argument("--max-prompt-tokens", type=int, help="Per-request prompt token budget")
+    parser.add_argument(
+        "--swa-prompt-cap",
+        type=int,
+        help="Prompt-token hard cap for SWA/hybrid-memory models (default: 12288)",
+    )
     parser.add_argument("--max-completion-tokens", type=int, help="Per-turn maximum completion token budget")
     parser.add_argument("--reserve-completion-tokens", type=int, help="Reserved completion tokens")
     parser.add_argument("--reserve-tool-tokens", type=int, help="Reserved tool-call tokens")

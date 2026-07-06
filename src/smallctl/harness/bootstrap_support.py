@@ -79,6 +79,7 @@ def build_context_policy(
     *,
     policy: ContextPolicy | None,
     effective_max_prompt_tokens: int | None,
+    swa_prompt_cap: int,
     reserve_completion_tokens: int,
     reserve_tool_tokens: int,
     summarize_at_ratio: float,
@@ -97,6 +98,7 @@ def build_context_policy(
     if policy is None:
         return ContextPolicy(
             max_prompt_tokens=effective_max_prompt_tokens,
+            swa_prompt_cap=swa_prompt_cap,
             reserve_completion_tokens=reserve_completion_tokens,
             reserve_tool_tokens=reserve_tool_tokens,
             summarize_at_ratio=summarize_at_ratio,
@@ -112,6 +114,7 @@ def build_context_policy(
             tool_result_inline_token_limit=tool_result_inline_token_limit,
             artifact_read_inline_token_limit=artifact_read_inline_token_limit,
         )
+    policy.swa_prompt_cap = swa_prompt_cap
     if effective_max_prompt_tokens is not None:
         policy.max_prompt_tokens = effective_max_prompt_tokens
     return policy

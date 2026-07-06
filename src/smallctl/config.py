@@ -163,6 +163,7 @@ class SmallctlConfig:
     context_limit: int | None = None
     max_prompt_tokens: int | None = None
     max_prompt_tokens_explicit: bool = False
+    swa_prompt_cap: int = 12288
     max_completion_tokens: int | None = None
     reserve_completion_tokens: int = 1024
     reserve_tool_tokens: int = 512

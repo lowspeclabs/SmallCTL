@@ -115,10 +115,11 @@ def _llamacpp_budget_preflight(
     raw_tools = payload.get("tools")
     tools = raw_tools if isinstance(raw_tools, list) else []
 
-    # Small Gemma-4 on llama.cpp suffers from SWA/hybrid-memory cache
-    # invalidation at large contexts. Warn when the requested context is above
-    # the safe threshold and cap the effective prompt budget to reduce cache
-    # pressure.
+    # Gemma-4 variants (including 12b) on llama.cpp use SWA/hybrid memory by
+    # default and can invalidate the prompt cache at large contexts. Warn when
+    # the requested context is above the safe threshold and cap the effective
+    # prompt budget to reduce cache pressure. The real fix is to run the
+    # backend with --swa-full so prefix caching can be reused across turns.
     from ..graph.tool_model_rules_model_detection import _model_is_gemma_4_small
     small_gemma4 = _model_is_gemma_4_small(client.model)
     if small_gemma4 and limit is not None and limit > 32768:
@@ -128,13 +129,13 @@ def _llamacpp_budget_preflight(
             "llamacpp_small_gemma4_context_warning",
             model=client.model,
             context_limit=limit,
-            recommendation="use --context-limit 32768 for small Gemma-4 on llama.cpp",
+            recommendation="use --context-limit 32768 and --swa-full for Gemma-4 on llama.cpp",
         )
         if client.run_logger:
             client.run_logger.log(
                 "chat",
                 "small_gemma4_context_warning",
-                "small Gemma-4 context may cause prompt-cache invalidation",
+                "Gemma-4 SWA context may cause prompt-cache invalidation",
                 model=client.model,
                 context_limit=limit,
                 recommended_context_limit=32768,
@@ -297,14 +298,16 @@ def _build_minimal_context_payload(
 def _is_swa_model(model_name: str | None, provider_profile: str | None) -> bool:
     """Return True for models/backends known to use SWA/hybrid memory on llama.cpp.
 
-    Only the tiny Gemma-4 e2b/e4b instruction checkpoints are known to rely on
-    SWA/hybrid memory on llama.cpp. Larger variants (12b, 27b) use a normal KV
-    cache and should not be capped at the SWA prompt limit.
+    The Gemma-4 family (including the 12b checkpoint observed in the wild on
+    llama.cpp) uses SWA/hybrid memory. When the backend cannot restore the
+    cached SWA state across turns, it falls back to full prompt reprocessing,
+    which looks like a prompt-cache loop. Treat all Gemma-4 variants served by
+    llama.cpp as SWA models so the harness can warn and compact context.
     """
-    from ..graph.tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
+    from ..graph.tool_model_rules_model_detection import _model_is_gemma_4
 
     return (
-        _model_is_exact_small_gemma_4_it(model_name)
+        _model_is_gemma_4(model_name)
         and str(provider_profile or "").strip().lower() == "llamacpp"
     )
 
@@ -348,7 +351,12 @@ def _record_swa_cache_observation(
         return False
     cached = _extract_cached_tokens(usage)
     if cached is None:
-        return False
+        # llama.cpp SWA models frequently omit cached_tokens from usage. Treat
+        # a missing value as a zero-cache observation for SWA models so the
+        # harness can still warn and compact context proactively.
+        if not _is_swa_model(model_name, provider_profile):
+            return False
+        cached = 0
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
     if not isinstance(scratchpad, dict):
         return False
@@ -369,7 +377,7 @@ def _maybe_emit_swa_cache_warning(harness: Any, usage: dict[str, Any]) -> None:
         logging.WARNING,
         "llamacpp_swa_cache_inactive",
         model=getattr(getattr(harness, "client", None), "model", None),
-        message=(
+        recommendation=(
             "llama.cpp SWA cache appears inactive (cached_tokens=0 for N turns). "
             "If the backend supports it, run with --swa-full or disable SWA/hybrid memory "
             "so prefix caching can be reused across turns."

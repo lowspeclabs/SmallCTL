@@ -6,6 +6,7 @@ from typing import Any
 
 from ..client.llamacpp_preflight import _is_swa_model
 from ..client.request_budget import build_request_budget
+from ..graph.tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
 from ..normalization import collapse_model_name
 
 
@@ -126,19 +127,25 @@ def apply_server_context_limit(
         model_name=model_name,
     )
 
-    # Apply SWA-aware hard cap for small Gemma-4 on llama.cpp so each full
+    # Apply SWA-aware hard cap for Gemma-4 on llama.cpp so each full
     # reprocess stays cheap even when prefix caching cannot be reused.
+    # The exact-small e2b/e4b checkpoints keep the conservative default cap;
+    # larger Gemma-4 variants (12b, 27b, etc.) can afford a larger cap while
+    # still keeping reprocessing bounded.
     if (
         _is_swa_model(model_name, getattr(harness, "provider_profile", None))
         and effective_max_prompt_tokens is not None
         and effective_max_prompt_tokens > harness.context_policy.swa_prompt_cap
     ):
         previous = effective_max_prompt_tokens
-        effective_max_prompt_tokens = harness.context_policy.swa_prompt_cap
+        swa_cap = harness.context_policy.swa_prompt_cap
+        if not _model_is_exact_small_gemma_4_it(model_name):
+            swa_cap = max(swa_cap, 24576)
+        effective_max_prompt_tokens = swa_cap
         harness._runlog(
             "swa_prompt_cap_applied",
             "capped prompt budget for SWA/hybrid-memory model",
-            swa_prompt_cap=harness.context_policy.swa_prompt_cap,
+            swa_prompt_cap=swa_cap,
             previous_budget=previous,
         )
 

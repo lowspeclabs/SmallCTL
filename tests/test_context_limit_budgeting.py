@@ -7,7 +7,6 @@ import httpx
 import pytest
 
 from smallctl.client import OpenAICompatClient
-from smallctl.client import client_transport
 from smallctl.client.request_budget import RequestEstimator, build_request_budget
 from smallctl.client.tool_budgeting import fit_tools_to_context_budget
 from smallctl.context import ContextPolicy, PromptAssembler
@@ -15,7 +14,7 @@ from smallctl.harness import Harness
 from smallctl.harness.context_limits import apply_server_context_limit
 from smallctl.harness.tool_message_compaction import trim_recent_messages_window
 from smallctl.models.conversation import ConversationMessage
-from smallctl.state import ArtifactRecord, EvidenceRecord, LoopState
+from smallctl.state import ArtifactRecord, ArtifactSnippet, EvidenceRecord, ExperienceMemory, LoopState
 
 
 def _make_harness(
@@ -469,3 +468,57 @@ async def test_fetch_model_context_limit_logs_each_probe_failure(caplog, monkeyp
     for url in expected_urls:
         assert any(url in message for message in failure_messages)
     assert any("ConnectError" in message for message in failure_messages)
+
+
+def test_prompt_assembler_enforces_max_prompt_token_ceiling() -> None:
+    """Regression: optional context lanes must be dropped before the assembled
+    prompt exceeds the model's max_prompt_tokens ceiling.
+    """
+    state = LoopState(cwd="/tmp")
+    state.run_brief.original_task = "debug remote backup" + " detail" * 80
+    state.run_brief.current_phase_objective = "inspect remote host" + " detail" * 80
+    state.working_memory.current_goal = "inspect remote host" + " detail" * 80
+    state.working_memory.next_actions = ["list /root"] * 20
+    state.recent_messages = [
+        ConversationMessage(role="user", content=("debug remote backup " + "x " * 300)),
+        ConversationMessage(role="assistant", content="I will inspect the remote host."),
+        ConversationMessage(role="tool", name="ssh_dir_list", content="entry\n" * 250),
+    ]
+    state.scratchpad["_fresh_tool_outputs"] = [
+        {"tool_name": "ssh_dir_list", "artifact_id": "", "content": "entry\n" * 250}
+    ]
+    for i in range(4):
+        state.reasoning_graph.evidence_records.append(
+            EvidenceRecord(
+                evidence_id=f"E-{i}",
+                statement=f"observation-{i} " + ("detail " * 40),
+                phase="execute",
+                tool_name="ssh_dir_list",
+                metadata={"observation_adapter": "artifact_observation_list"},
+            )
+        )
+
+    system_prompt = "SYSTEM\n" + "directive text line content\n" * 910
+
+    assembler = PromptAssembler(ContextPolicy(max_prompt_tokens=12288, recent_message_limit=8))
+    assembly = assembler.build_messages(
+        state=state,
+        system_prompt=system_prompt,
+        retrieved_artifacts=[ArtifactSnippet(artifact_id="A0001", text="prior artifact note")],
+        retrieved_experiences=[
+            ExperienceMemory(
+                memory_id="mem-1",
+                intent="requested_ssh_exec",
+                tool_name="ssh_dir_list",
+                outcome="success",
+                notes="prior success",
+            )
+        ],
+        include_structured_sections=True,
+    )
+
+    max_prompt_tokens = assembler.policy.max_prompt_tokens
+    assert max_prompt_tokens is not None
+    assert assembly.estimated_prompt_tokens <= max_prompt_tokens
+    # At least one optional lane should have been sacrificed to stay under the cap.
+    assert assembly.section_tokens.get("fresh_tool_outputs", 0) == 0

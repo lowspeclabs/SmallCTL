@@ -415,6 +415,81 @@ class PromptAssembler:
                         + experience_text
                     )
                     break
+
+        # Hard prompt ceiling: if the assembled prompt still exceeds the model's
+        # max prompt budget, drop optional context lanes in priority order before
+        # rendering them. The base prompt (system instructions, run brief, working
+        # memory, and recent transcript) is preserved.
+        hard_limit = self.policy.max_prompt_tokens
+        if hard_limit:
+            preliminary_total = (
+                sum(section_tokens.values())
+                - section_tokens.get("fama_capsules", 0)
+                - section_tokens.get("recovery_guidance", 0)
+            )
+            if preliminary_total > hard_limit:
+                drop_order: list[tuple[str, str]] = [
+                    ("warm_memories", "experience_memories"),
+                    ("artifact_snippets", "artifact_snippets"),
+                    ("episodic_summaries", "episodic_summaries"),
+                    ("turn_bundles", "turn_bundles"),
+                    ("active_artifact_reads", "active_artifact_reads"),
+                    ("fresh_tool_outputs", "fresh_tool_outputs"),
+                    ("normalized_observations", "normalized_observations"),
+                    ("warm_briefs", "context_briefs"),
+                ]
+                for section_key, lane_name in drop_order:
+                    if preliminary_total <= hard_limit:
+                        break
+                    cost = section_tokens.get(section_key, 0)
+                    if not cost:
+                        continue
+                    dropped_ids: list[str] = []
+                    if section_key == "warm_memories":
+                        dropped_ids = [m.memory_id for m in frame.experience_packet.memories if m.memory_id]
+                        frame.experience_packet.memories = []
+                    elif section_key == "artifact_snippets":
+                        dropped_ids = [a.artifact_id for a in frame.artifact_packet.snippets if a.artifact_id]
+                        frame.artifact_packet.snippets = []
+                    elif section_key == "episodic_summaries":
+                        dropped_ids = [s.summary_id for s in frame.evidence_packet.summaries if s.summary_id]
+                        frame.evidence_packet.summaries = []
+                    elif section_key == "turn_bundles":
+                        dropped_ids = [b.bundle_id for b in frame.evidence_packet.turn_bundles if b.bundle_id]
+                        frame.evidence_packet.turn_bundles = []
+                    elif section_key == "normalized_observations":
+                        dropped_ids = [o.observation_id for o in frame.evidence_packet.observations if o.observation_id]
+                        frame.evidence_packet.observations = []
+                    elif section_key == "warm_briefs":
+                        dropped_ids = [b.brief_id for b in frame.evidence_packet.context_briefs if b.brief_id]
+                        frame.evidence_packet.context_briefs = []
+                    frame.add_drop(
+                        lane=lane_name,
+                        reason="token_budget",
+                        dropped_count=max(1, len(dropped_ids)),
+                        dropped_ids=dropped_ids,
+                    )
+                    section_tokens[section_key] = 0
+                    preliminary_total -= cost
+
+                # Zero out rendered text for any dropped sections.
+                if section_tokens.get("warm_memories", 0) == 0:
+                    experience_text = ""
+                if section_tokens.get("artifact_snippets", 0) == 0:
+                    artifact_text = ""
+                if section_tokens.get("episodic_summaries", 0) == 0:
+                    summary_text = ""
+                if section_tokens.get("turn_bundles", 0) == 0:
+                    turn_bundle_text = ""
+                if section_tokens.get("active_artifact_reads", 0) == 0:
+                    active_artifact_read_text = ""
+                if section_tokens.get("fresh_tool_outputs", 0) == 0:
+                    fresh_tool_output_text = ""
+                if section_tokens.get("normalized_observations", 0) == 0:
+                    observation_text = ""
+                if section_tokens.get("warm_briefs", 0) == 0:
+                    warm_brief_text = ""
+
         resume_contract_text = self._render_resume_contract(state)
         if resume_contract_text:
             section_tokens["resume_contract"] = estimate_text_tokens(resume_contract_text)

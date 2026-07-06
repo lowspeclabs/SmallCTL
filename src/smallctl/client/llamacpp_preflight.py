@@ -295,11 +295,16 @@ def _build_minimal_context_payload(
 
 
 def _is_swa_model(model_name: str | None, provider_profile: str | None) -> bool:
-    """Return True for models/backends known to use SWA/hybrid memory on llama.cpp."""
-    from ..graph.tool_model_rules_model_detection import _model_is_gemma_4_small
+    """Return True for models/backends known to use SWA/hybrid memory on llama.cpp.
+
+    Only the tiny Gemma-4 e2b/e4b instruction checkpoints are known to rely on
+    SWA/hybrid memory on llama.cpp. Larger variants (12b, 27b) use a normal KV
+    cache and should not be capped at the SWA prompt limit.
+    """
+    from ..graph.tool_model_rules_model_detection import _model_is_exact_small_gemma_4_it
 
     return (
-        _model_is_gemma_4_small(model_name)
+        _model_is_exact_small_gemma_4_it(model_name)
         and str(provider_profile or "").strip().lower() == "llamacpp"
     )
 

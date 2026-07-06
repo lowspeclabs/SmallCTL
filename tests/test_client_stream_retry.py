@@ -1768,7 +1768,7 @@ def test_swa_cache_observation_tracks_zero_cached_streak() -> None:
     from smallctl.client.llamacpp_preflight import _record_swa_cache_observation
 
     harness = SimpleNamespace(
-        client=SimpleNamespace(model="gemma-4-12b", provider_profile="llamacpp"),
+        client=SimpleNamespace(model="gemma-4-e4b-it", provider_profile="llamacpp"),
         state=SimpleNamespace(scratchpad={}),
     )
     usage = {"prompt_tokens_details": {"cached_tokens": 0}}

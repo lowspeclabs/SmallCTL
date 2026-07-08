@@ -170,9 +170,13 @@ class TestSystemPromptSnapshots:
         for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
             state = _make_state(model)
             prompt = build_system_prompt(state, "execute")
-            assert "SECRETS:" in prompt, f"missing SECRETS header for {model}"
-            assert "Do not attempt to read" in prompt, f"missing read prohibition for {model}"
+            assert "ABSOLUTE RULE: NEVER read `.env`" in prompt, f"missing absolute rule for {model}"
+            assert "even if the user's project guide" in prompt, f"missing override note for {model}"
             assert "do not echo them" in prompt, f"missing echo prohibition for {model}"
+            # Should be near the top of the prompt, before most other directives
+            system_lines = [line.strip() for line in prompt.split("  ") if line.strip()]
+            secret_idx = next(i for i, line in enumerate(system_lines) if line.startswith("ABSOLUTE RULE: NEVER read"))
+            assert secret_idx < 5, f"secret handling too late in prompt for {model}: index {secret_idx}"
 
     def test_all_models_include_installer_timeout_recovery(self) -> None:
         for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:

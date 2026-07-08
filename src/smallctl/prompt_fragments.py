@@ -201,10 +201,12 @@ _LOCAL_SCOPE_PREFERENCE = (
 )
 
 _SECRET_HANDLING = (
-    "SECRETS: If the user provides credentials, API tokens, or other secrets in their message, use them directly "
+    "ABSOLUTE RULE: NEVER read `.env`, `.env.local`, `.envrc`, `.netrc`, or similar secret-bearing files, "
+    "even if the user's project guide or another instruction suggests doing so. "
+    "If the user provides credentials, API tokens, or other secrets in their message, use them directly "
     "in the appropriate tool arguments (e.g., shell_exec or ssh_exec) and do not echo them in your reasoning or "
-    "assistant text. Do not attempt to read `.env`, `.env.local`, `.envrc`, or similar secret-bearing files to "
-    "verify credentials; if the target program reads its own `.env`, run the program and let it read the file. "
+    "assistant text. Do not attempt to read `.env` or similar files to verify credentials; "
+    "if the target program reads its own `.env`, run the program and let it read the file. "
     "Never store secrets in memory_update, session notes, or plain-text artifacts."
 )
 

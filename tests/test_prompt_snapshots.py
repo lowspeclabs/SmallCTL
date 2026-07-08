@@ -5,8 +5,6 @@ can prove parity.
 """
 from __future__ import annotations
 
-import pytest
-
 from smallctl.prompts import build_system_prompt
 from smallctl.state import LoopState
 
@@ -168,9 +166,18 @@ class TestSystemPromptSnapshots:
             assert "NetworkSettings.Ports" in prompt, f"missing NetworkSettings.Ports for {model}"
             assert "`.PortMappings` is not a valid key" in prompt, f"missing PortMappings note for {model}: {prompt[:500]}..."
 
+    def test_all_models_include_secret_handling(self) -> None:
+        for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
+            state = _make_state(model)
+            prompt = build_system_prompt(state, "execute")
+            assert "SECRETS:" in prompt, f"missing SECRETS header for {model}"
+            assert "Do not attempt to read" in prompt, f"missing read prohibition for {model}"
+            assert "do not echo them" in prompt, f"missing echo prohibition for {model}"
+
     def test_all_models_include_installer_timeout_recovery(self) -> None:
         for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
             state = _make_state(model)
             prompt = build_system_prompt(state, "execute")
             assert "INSTALLER TIMEOUT RECOVERY" in prompt
             assert "larger `timeout_sec`" in prompt
+

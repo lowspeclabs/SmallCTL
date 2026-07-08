@@ -200,6 +200,14 @@ _LOCAL_SCOPE_PREFERENCE = (
     "ssh_file_read, ssh_file_write, ssh_file_patch, or ssh_file_replace_between. "
 )
 
+_SECRET_HANDLING = (
+    "SECRETS: If the user provides credentials, API tokens, or other secrets in their message, use them directly "
+    "in the appropriate tool arguments (e.g., shell_exec or ssh_exec) and do not echo them in your reasoning or "
+    "assistant text. Do not attempt to read `.env`, `.env.local`, `.envrc`, or similar secret-bearing files to "
+    "verify credentials; if the target program reads its own `.env`, run the program and let it read the file. "
+    "Never store secrets in memory_update, session notes, or plain-text artifacts."
+)
+
 _REMOTE_CLEANUP_TASK_KEYWORDS = (
     "uninstall", "remove", "delete", "purge", "clean up", "clean-up",
     "get rid of", "wipe", "tear down", "teardown", "disable",

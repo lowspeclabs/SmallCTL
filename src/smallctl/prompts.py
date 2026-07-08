@@ -34,6 +34,7 @@ from .prompt_fragments import (
     _RESPONSE_STRUCTURE_GEMMA,
     _RESPONSE_STRUCTURE_SMALL_GEMMA,
     _RESPONSE_STRUCTURE_THINK,
+    _SECRET_HANDLING,
     _SHELL_POSIX_REDIRECTION,
     _SMALL_GEMMA_STRICT_FORMAT,
     _STDERR_CIRCUIT_BREAKER_PREFIX,
@@ -57,7 +58,7 @@ from .prompts_support import (
     _render_plan_step,
     _state_has_remote_cleanup_intent,
 )
-from .context.retrieval_state_helpers import effective_current_goal, state_target_paths
+from .context.retrieval_state_helpers import state_target_paths
 from .tools.fs_loop_guard import build_loop_guard_prompt
 from .tools.fs_write_sessions import write_session_contract
 
@@ -113,6 +114,7 @@ def build_system_prompt(
             "CONCISENESS: Do not paste long tool output into chat. Summarize briefly, then call `task_complete(message='...')` when done. ",
             "REDUNDANCY: Reuse what you already know. Do not repeat identical or near-identical tool calls. ",
             _LARGE_GEMMA_26B_ANTI_LOOP_RULE,
+            _SECRET_HANDLING,
             f"Phase: {phase} | Active tool profiles: {active_profiles} | CWD: {state.cwd}. Only the tools exposed for the active profiles are available. ",
             f"Contract phase: {state.contract_phase()}. ",
             f"Phase contract focus: {contract.focus}. ",
@@ -141,6 +143,7 @@ def build_system_prompt(
                 f"Phase contract focus: {contract.focus}. ",
                 _WORKSPACE_RELATIVE_PATHS,
                 _PRIVILEGES_NO_SUDO_GUESS,
+                _SECRET_HANDLING,
                 _SHELL_POSIX_REDIRECTION,
                 _REMOTE_PROBES_BATCH,
                 _REMOTE_DOWNLOAD_FALLBACK,
@@ -174,6 +177,7 @@ def build_system_prompt(
                 f"Phase contract focus: {contract.focus}. ",
                 _WORKSPACE_RELATIVE_PATHS,
                 _PRIVILEGES_NO_SUDO_GUESS,
+                _SECRET_HANDLING,
                 _SHELL_POSIX_REDIRECTION,
                 "SHELL: When verifying a Python script that has `if __name__ == '__main__': main()`, do not run it bare without arguments if `main()` reads from stdin. Pipe sample input (e.g., `echo '{}' | python3 script.py`) or use `python3 -m unittest discover` / `python3 -m pytest` instead of bare execution. ",
                 _REMOTE_PROBES_BATCH,

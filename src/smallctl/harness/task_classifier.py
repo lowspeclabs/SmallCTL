@@ -38,6 +38,7 @@ from .task_classifier_support import (
     task_is_local_coding_target,
     task_is_local_ssh_file_target,
     task_is_local_system_target,
+    task_uses_local_tool_for_remote_api,
 )
 
 
@@ -71,6 +72,11 @@ _TASK_CLASSIFICATION_RULES: list[TaskClassificationRule] = [
     ),
     TaskClassificationRule(
         "local_ssh_file_target", task_is_local_ssh_file_target, "local_execute"
+    ),
+    TaskClassificationRule(
+        "local_tool_remote_api",
+        task_uses_local_tool_for_remote_api,
+        "local_execute",
     ),
     TaskClassificationRule(
         "hybrid_execute",

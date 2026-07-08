@@ -180,7 +180,7 @@ def render_run_brief(state: LoopState) -> str:
         parts.append(f"  Goal: {brief.original_task}")
         if _task_has_local_scope_markers(brief.original_task):
             parts.append(
-                "  Scope: local user task; prefer local file tools and shell_exec over ssh_exec"
+                "  Scope: local user task; use local file tools and shell_exec. Do NOT use ssh_exec or ssh_* tools."
             )
 
     if brief.task_contract:

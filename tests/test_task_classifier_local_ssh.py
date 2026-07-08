@@ -8,6 +8,7 @@ from smallctl.harness.task_intent import infer_requested_tool_name
 from smallctl.harness.task_classifier_support import (
     task_is_local_ssh_file_target,
     task_is_local_system_target,
+    task_uses_local_tool_for_remote_api,
 )
 from smallctl.prompts import build_system_prompt
 from smallctl.state import LoopState
@@ -89,6 +90,50 @@ def test_remote_ssh_profiles_include_network() -> None:
     assert NETWORK_PROFILE in profiles
 
 
+LOCAL_TOOL_REMOTE_API_TASKS = [
+    "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, then connect to the proxmox host on 192.168.1.74 using the proxmox cli, api keys are 'ai-user@pam!aitoken 9a4f76d8-aded-49f3-a070-d64d1826ca26' update the .env as needed",
+    "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md and load the proxmox cli, api info \"ai-user@pam!aitoken\n9a4f76d8-aded-49f3-a070-d64d1826ca26\" host is 192.168.1.74",
+    "connect to 192.168.1.10 using the backup script",
+    "run the local python script against 10.0.0.5",
+    "use the proxmox client to connect to 192.168.1.74",
+]
+
+
+@pytest.mark.parametrize("task", LOCAL_TOOL_REMOTE_API_TASKS)
+def test_local_tool_for_remote_api_classifies_as_local_execute(task: str) -> None:
+    assert classify_task_mode(task) == "local_execute"
+    assert task_uses_local_tool_for_remote_api(task) is True
+
+
+REMOTE_EXECUTION_TASKS_STILL_REMOTE = [
+    "ssh to 192.168.1.74 and check the .env file",
+    "connect to remote host 192.168.1.74 over ssh and run the proxmox cli",
+    "run the backup script on 192.168.1.10",
+]
+
+
+@pytest.mark.parametrize("task", LOCAL_TOOL_REMOTE_API_TASKS)
+def test_local_tool_for_remote_api_intent_is_shell_exec(task: str) -> None:
+    class _Harness:
+        pass
+
+    assert infer_requested_tool_name(_Harness(), task) == "shell_exec"
+
+
+@pytest.mark.parametrize("task", REMOTE_EXECUTION_TASKS_STILL_REMOTE)
+def test_explicit_remote_execution_intent_is_ssh_exec(task: str) -> None:
+    class _Harness:
+        pass
+
+    assert infer_requested_tool_name(_Harness(), task) == "ssh_exec"
+
+
+@pytest.mark.parametrize("task", REMOTE_EXECUTION_TASKS_STILL_REMOTE)
+def test_explicit_remote_execution_stays_remote_execute(task: str) -> None:
+    assert classify_task_mode(task) == "remote_execute"
+    assert task_uses_local_tool_for_remote_api(task) is False
+
+
 def test_run_brief_includes_local_scope_line() -> None:
     state = LoopState()
     state.run_brief.original_task = (
@@ -98,7 +143,7 @@ def test_run_brief_includes_local_scope_line() -> None:
     text = render_run_brief(state)
 
     assert "Scope: local user task" in text
-    assert "prefer local file tools and shell_exec over ssh_exec" in text
+    assert "Do NOT use ssh_exec" in text
 
 
 def test_system_prompt_includes_local_scope_preference() -> None:
@@ -109,4 +154,5 @@ def test_system_prompt_includes_local_scope_preference() -> None:
 
     prompt = build_system_prompt(state, "execute")
 
-    assert "prefer local file tools and shell_exec over ssh_exec" in prompt
+    assert "Do NOT use ssh_exec" in prompt
+    assert "local_execute" in prompt

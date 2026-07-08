@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from .task_classifier_constants import (
     ANALYSIS_MARKERS,
@@ -10,8 +9,6 @@ from .task_classifier_constants import (
     PLAN_ONLY_PHRASES,
     READONLY_FILE_TARGETS,
     READONLY_SUGGESTION_MARKERS,
-    REMOTE_HINTS_WORD_BOUNDARIES_RE,
-    WEB_LOOKUP_MARKERS,
 )
 
 
@@ -40,6 +37,38 @@ _LOCAL_SCOPE_MARKERS = (
     "on this machine",
 )
 
+_LOCAL_TOOL_FOR_REMOTE_API_MARKERS = (
+    "local script",
+    "local cli",
+    "local client",
+    "local tool",
+    "using the",
+    "using a",
+    "use the",
+    "use a",
+    "with the",
+    "with a",
+    "via the",
+    "via a",
+    "run the",
+    "run a",
+    "execute the",
+    "execute a",
+    "load the",
+    "load",
+)
+
+_LOCAL_TOOL_KEYWORDS = (
+    "cli",
+    "client",
+    "script",
+    "python",
+    "python3",
+    "bash",
+    ".py",
+    ".sh",
+)
+
 _EXPLICIT_REMOTE_EXECUTION_MARKERS = (
     "ssh to",
     "connect to",
@@ -50,8 +79,27 @@ _EXPLICIT_REMOTE_EXECUTION_MARKERS = (
     "via ssh",
 )
 
+# Stricter subset: only markers that unambiguously mean "run on the remote machine".
+# "connect to" is intentionally omitted because it is commonly used for API connections
+# from a local tool (e.g. "connect to X using the Y cli").
+_EXPLICIT_ONLY_REMOTE_EXECUTION_MARKERS = (
+    "ssh to",
+    "remote host",
+    "remote server",
+    "target host",
+    "over ssh",
+    "via ssh",
+    "on the remote host",
+    "on the remote server",
+)
+
 _LOCAL_COMMAND_TARGET_RE = re.compile(
     r"(?:^|[\s`'\"])(?:\./|\.\./|/)[^\s`'\"]+\.(?:py|sh|bash|js|ts|tsx|jsx|rb|pl|lua)\b",
+    re.IGNORECASE,
+)
+
+_SSH_COMMAND_TARGET_RE = re.compile(
+    r"\b(?:ssh|scp|sftp)\s+(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+\b",
     re.IGNORECASE,
 )
 
@@ -185,6 +233,39 @@ def task_is_local_ssh_file_target(task: str) -> bool:
     # A bare known_hosts cleanup normally treats the IP as data in the file,
     # not as an SSH destination. Explicit remote phrasing still wins.
     return not _has_explicit_remote_execution_scope(text)
+
+
+def task_uses_local_tool_for_remote_api(task: str) -> bool:
+    """Detect tasks that use a local CLI/script to reach a remote API/host.
+
+    These should be treated as local execution (the script runs here) even
+    though they mention a remote IP or host. Phrasing like "connect to X using
+    the Y cli" or "run the Y script against X" indicates the tool is local.
+    """
+    text = str(task or "").strip().lower()
+    if not text:
+        return False
+    # Need some remote target (IP, user@host, or explicit remote host).
+    has_remote_target = (
+        has_remote_execution_target(text)
+        or bool(IP_ADDRESS_PATTERN.search(text))
+        or ("@" in text and any(marker in text for marker in ("ssh", "scp", "sftp")))
+    )
+    if not has_remote_target:
+        return False
+    # Explicit remote execution scope ("ssh to", "over ssh", "ssh user@host",
+    # or "run X on <ip>") means the action really is meant to run on the remote
+    # machine. Descriptive phrases like "host on <ip>" are not treated as remote
+    # execution because they just locate the remote endpoint for a local tool.
+    if any(marker in text for marker in _EXPLICIT_ONLY_REMOTE_EXECUTION_MARKERS):
+        return False
+    if _SSH_COMMAND_TARGET_RE.search(text):
+        return False
+    if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+" + IP_ADDRESS_PATTERN.pattern + r"\b", text):
+        return False
+    has_local_tool_marker = any(marker in text for marker in _LOCAL_TOOL_FOR_REMOTE_API_MARKERS)
+    has_tool_keyword = any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
+    return has_local_tool_marker and has_tool_keyword
 
 def is_smalltalk(task: str) -> bool:
     text = task.strip().lower()

@@ -194,8 +194,11 @@ _LOCAL_ARTIFACT_TASK_PREFIX = (
 )
 
 _LOCAL_SCOPE_PREFERENCE = (
-    "SCOPE: If the task mentions 'current user', 'this host', or local files such as ~/.ssh/known_hosts, "
-    "prefer local file tools and shell_exec over ssh_exec, even if an IP address appears in the task text. "
+    "SCOPE: This task is local_execute. You MUST use local file tools and shell_exec. "
+    "Do NOT use ssh_exec, ssh_file_read, ssh_file_write, ssh_file_patch, or ssh_file_replace_between, "
+    "even if an IP address or remote host appears in the task text. "
+    "If the task asks you to use a local CLI/script to interact with a remote API or host, run the CLI/script locally with shell_exec "
+    "and pass the remote endpoint via arguments or environment variables. "
     "The SSH client trust store (`~/.ssh/known_hosts`) is local to the harness machine; do not read or modify it with "
     "ssh_file_read, ssh_file_write, ssh_file_patch, or ssh_file_replace_between. "
 )

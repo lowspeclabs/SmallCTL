@@ -15,7 +15,7 @@ from .task_classifier import (
 )
 from .task_classifier_constants import LOCAL_SHELL_OVERRIDE_RE as _LOCAL_SHELL_OVERRIDE_RE
 from .task_classifier_constants import READONLY_SUGGESTION_MARKERS
-from .task_classifier_support import task_has_local_command_target, task_is_local_ssh_file_target, task_is_local_system_target
+from .task_classifier_support import task_has_local_command_target, task_is_local_ssh_file_target, task_is_local_system_target, task_uses_local_tool_for_remote_api
 
 _MEMORY_MARKERS = (
     "save this in memory",
@@ -347,6 +347,8 @@ def infer_requested_tool_name(harness: Any, task: str) -> str:
         if hasattr(harness, "_looks_like_shell_request") and harness._looks_like_shell_request(task):
             return "shell_exec"
         return ""
+    if task_uses_local_tool_for_remote_api(task):
+        return "shell_exec"
     remote_task = bool(
         (_REMOTE_TASK_HINT_RE.search(text)
          or _IPV4_RE.search(text)

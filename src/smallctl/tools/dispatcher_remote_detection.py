@@ -36,6 +36,12 @@ def task_clearly_targets_remote_ssh_host(state: Any | None) -> bool:
     if state is None:
         return False
     _ensure_regexes()
+    # If the task classifier has already decided this is a local execution task
+    # (e.g., using a local CLI/script against a remote API), do not let the
+    # dispatcher override that decision and force ssh_exec.
+    task_mode = str(getattr(state, "task_mode", "") or "").strip().lower()
+    if task_mode == "local_execute":
+        return False
     for text in _ssh_task_context_texts(state):
         if not text:
             continue

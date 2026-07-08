@@ -95,6 +95,24 @@ def test_remote_task_without_local_clarification_is_remote() -> None:
     assert result is False
 
 
+def test_local_execute_task_mode_allows_local_shell() -> None:
+    """If the task classifier says local_execute, do not force ssh_exec."""
+    from smallctl.tools.dispatcher_remote_detection import task_clearly_targets_remote_ssh_host
+    from smallctl.state import LoopState
+
+    state = LoopState(cwd="/tmp")
+    state.task_mode = "local_execute"
+    state.run_brief.original_task = (
+        "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, "
+        'and use it to run the proxmox cli against the following "ai-user@pam!aitoken\n'
+        "9a4f76d8-aded-49f3-a070-d64d1826ca26\nip: 192.168.1.74"
+    )
+    assert task_clearly_targets_remote_ssh_host(state) is False
+
+    state.task_mode = "remote_execute"
+    assert task_clearly_targets_remote_ssh_host(state) is True
+
+
 def test_diagnosis_task_allows_read_only_shell_evidence_without_supported_claim() -> None:
     state = LoopState(cwd="/tmp")
     state.current_phase = "execute"

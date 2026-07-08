@@ -79,20 +79,6 @@ _EXPLICIT_REMOTE_EXECUTION_MARKERS = (
     "via ssh",
 )
 
-# Stricter subset: only markers that unambiguously mean "run on the remote machine".
-# "connect to" is intentionally omitted because it is commonly used for API connections
-# from a local tool (e.g. "connect to X using the Y cli").
-_EXPLICIT_ONLY_REMOTE_EXECUTION_MARKERS = (
-    "ssh to",
-    "remote host",
-    "remote server",
-    "target host",
-    "over ssh",
-    "via ssh",
-    "on the remote host",
-    "on the remote server",
-)
-
 _LOCAL_COMMAND_TARGET_RE = re.compile(
     r"(?:^|[\s`'\"])(?:\./|\.\./|/)[^\s`'\"]+\.(?:py|sh|bash|js|ts|tsx|jsx|rb|pl|lua)\b",
     re.IGNORECASE,
@@ -241,6 +227,10 @@ def task_uses_local_tool_for_remote_api(task: str) -> bool:
     These should be treated as local execution (the script runs here) even
     though they mention a remote IP or host. Phrasing like "connect to X using
     the Y cli" or "run the Y script against X" indicates the tool is local.
+
+    Words like "remote host" or "target host" are often descriptive (where the
+    data lives), not imperative. We only block local-tool classification when
+    the phrasing unambiguously means "run on the remote machine".
     """
     text = str(task or "").strip().lower()
     if not text:
@@ -253,19 +243,27 @@ def task_uses_local_tool_for_remote_api(task: str) -> bool:
     )
     if not has_remote_target:
         return False
-    # Explicit remote execution scope ("ssh to", "over ssh", "ssh user@host",
-    # or "run X on <ip>") means the action really is meant to run on the remote
-    # machine. Descriptive phrases like "host on <ip>" are not treated as remote
-    # execution because they just locate the remote endpoint for a local tool.
-    if any(marker in text for marker in _EXPLICIT_ONLY_REMOTE_EXECUTION_MARKERS):
+
+    has_local_tool_marker = any(marker in text for marker in _LOCAL_TOOL_FOR_REMOTE_API_MARKERS)
+    has_tool_keyword = any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
+    if not (has_local_tool_marker and has_tool_keyword):
+        # No strong local-tool context; let the remote-execution rules handle it.
+        return False
+
+    # Unambiguous remote-execution phrasing overrides local-tool classification.
+    if any(marker in text for marker in ("ssh to", "over ssh", "via ssh")):
         return False
     if _SSH_COMMAND_TARGET_RE.search(text):
         return False
     if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+" + IP_ADDRESS_PATTERN.pattern + r"\b", text):
         return False
-    has_local_tool_marker = any(marker in text for marker in _LOCAL_TOOL_FOR_REMOTE_API_MARKERS)
-    has_tool_keyword = any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
-    return has_local_tool_marker and has_tool_keyword
+    if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+(?:the\s+)?(?:remote\s+host|remote\s+server)\b", text):
+        return False
+
+    # The task mentions a remote endpoint but is clearly using a local tool/script
+    # to talk to it (e.g. "list the lxcs on the remote host using the proxmox cli").
+    return True
+
 
 def is_smalltalk(task: str) -> bool:
     text = task.strip().lower()

@@ -93,6 +93,7 @@ def test_remote_ssh_profiles_include_network() -> None:
 LOCAL_TOOL_REMOTE_API_TASKS = [
     "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, then connect to the proxmox host on 192.168.1.74 using the proxmox cli, api keys are 'ai-user@pam!aitoken 9a4f76d8-aded-49f3-a070-d64d1826ca26' update the .env as needed",
     "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md and load the proxmox cli, api info \"ai-user@pam!aitoken\n9a4f76d8-aded-49f3-a070-d64d1826ca26\" host is 192.168.1.74",
+    "/home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, read this and load the proxmox cli script and list the lxcs on the remote host, api info is \"ai-user@pam!aitoken\n9a4f76d8-aded-49f3-a070-d64d1826ca26\nip: 192.168.1.74\"",
     "connect to 192.168.1.10 using the backup script",
     "run the local python script against 10.0.0.5",
     "use the proxmox client to connect to 192.168.1.74",
@@ -109,6 +110,7 @@ REMOTE_EXECUTION_TASKS_STILL_REMOTE = [
     "ssh to 192.168.1.74 and check the .env file",
     "connect to remote host 192.168.1.74 over ssh and run the proxmox cli",
     "run the backup script on 192.168.1.10",
+    "run the command on the remote host 192.168.1.74",
 ]
 
 

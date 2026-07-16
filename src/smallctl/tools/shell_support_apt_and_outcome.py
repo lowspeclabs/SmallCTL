@@ -347,9 +347,31 @@ def record_sources_list_d_modification(
 
 
 def classify_shell_outcome(command: str, returncode: int, stdout: str, stderr: str) -> dict[str, Any]:
-    """Classify expected miss commands as empty_result when stdout/stderr semantics are clear."""
+    """Classify shell results, including failures hidden by output pipelines."""
     cmd = str(command or "").strip()
     if returncode == 0:
+        combined = f"{stdout}\n{stderr}".lower()
+        # A trailing ``echo`` or a pipeline can turn a failed CLI invocation
+        # into exit code 0. Treat only unambiguous diagnostic signatures as a
+        # failure; normal command output must remain successful.
+        masked_failure_patterns = (
+            "## error",
+            "api_error",
+            "certificate verify failed",
+            "temporary failure in name resolution",
+            "connection refused",
+            "invalid choice",
+            "traceback (most recent call last)",
+        )
+        if ("|" in cmd or re.search(r"(?:^|[;&])\s*echo\s+['\"]?-{2,}exit", cmd, re.IGNORECASE)) and any(
+            pattern in combined for pattern in masked_failure_patterns
+        ):
+            return {
+                "status": "failure",
+                "kind": "masked_pipeline_failure",
+                "exit_code": returncode,
+                "failure_mode": "masked_pipeline_failure",
+            }
         return {"status": "success", "kind": "ok"}
     combined = f"{stdout}\n{stderr}".lower()
     if (

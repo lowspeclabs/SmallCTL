@@ -28,6 +28,7 @@ from .shell_support import (
     _shell_execution_authoring_guard,
     _shell_status_update_interval,
     _shell_workspace_relative_hint,
+    classify_shell_outcome,
 )
 from .ui_streaming import BufferedUIEventEmitter
 
@@ -590,6 +591,22 @@ async def shell_exec_foreground(
                 failure_metadata = {"output": output, "command": command}
                 failure_metadata.update(_classify_shell_failure(command, error, output))
                 return fail(error, metadata=failure_metadata)
+            outcome = classify_shell_outcome(
+                command,
+                int(proc.returncode or 0),
+                str(output.get("stdout") or ""),
+                str(output.get("stderr") or ""),
+            )
+            if outcome.get("status") == "failure":
+                combined_output = "\n".join(
+                    str(output.get(key) or "").strip()
+                    for key in ("stderr", "stdout")
+                    if str(output.get(key) or "").strip()
+                )
+                return fail(
+                    combined_output or "Command output indicates failure despite exit code 0.",
+                    metadata={"output": output, "command": command, "classification": outcome},
+                )
             return ok(output)
         except asyncio.TimeoutError:
             if start_time:

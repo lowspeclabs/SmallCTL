@@ -88,6 +88,7 @@ from .shell_support_argparse import (
     _build_argparse_missing_args_question,
     _build_argparse_unrecognized_args_hint,
     _detect_unsupported_shell_syntax,
+    _extract_dry_run_hint,
 )
 from .shell_support_misc import (
     _shell_workspace_relative_hint,

@@ -55,17 +55,33 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         strategy=config.strategy,
     )
 
-    self.backend_healthcheck_url = str(config.healthcheck_url or config.backend_healthcheck_url or "").strip() or None
-    self.backend_restart_command = str(config.restart_command or config.backend_restart_command or "").strip() or None
-    self.backend_unload_command = str(config.backend_unload_command or "").strip() or None
-    self.backend_healthcheck_timeout_sec = max(1, int(config.backend_healthcheck_timeout_sec))
+    self.backend_healthcheck_url = (
+        str(config.healthcheck_url or config.backend_healthcheck_url or "").strip()
+        or None
+    )
+    self.backend_restart_command = (
+        str(config.restart_command or config.backend_restart_command or "").strip()
+        or None
+    )
+    self.backend_unload_command = (
+        str(config.backend_unload_command or "").strip() or None
+    )
+    self.backend_healthcheck_timeout_sec = max(
+        1, int(config.backend_healthcheck_timeout_sec)
+    )
     self.backend_restart_grace_sec = max(
         1,
-        int(config.startup_grace_period_sec if config.startup_grace_period_sec is not None else config.backend_restart_grace_sec),
+        int(
+            config.startup_grace_period_sec
+            if config.startup_grace_period_sec is not None
+            else config.backend_restart_grace_sec
+        ),
     )
     self.backend_max_restarts_per_hour = max(0, int(config.max_restarts_per_hour))
 
-    resolved_provider_profile = resolve_provider_profile(config.endpoint, config.model, config.provider_profile)
+    resolved_provider_profile = resolve_provider_profile(
+        config.endpoint, config.model, config.provider_profile
+    )
     self.client = build_client(
         endpoint=config.endpoint,
         model=config.model,
@@ -126,10 +142,9 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
             self.reasoning_mode = "off"
             self.state.scratchpad["_thinking_tags_disabled"] = True
 
-    if (
-        getattr(config, "provider_profile", "") == "llamacpp"
-        and _model_uses_gemma_rules(config.model)
-    ):
+    if getattr(
+        config, "provider_profile", ""
+    ) == "llamacpp" and _model_uses_gemma_rules(config.model):
         logger.warning(
             "Gemma-4 model with llama.cpp provider detected. If the backend "
             "crashes, hangs in reasoning loops, or reprocesses the full prompt every "
@@ -144,7 +159,9 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.thinking_end_tag = config.thinking_end_tag
     self.state.scratchpad["_model_name"] = config.model
     self.state.scratchpad["_model_is_small"] = self._is_small_model_name(config.model)
-    self.state.scratchpad["_max_repair_steps"] = int(getattr(config, "max_repair_steps", 3) or 3)
+    self.state.scratchpad["_max_repair_steps"] = int(
+        getattr(config, "max_repair_steps", 3) or 3
+    )
     self._backend_recovery_service = BackendRecoveryService(self)
     self._task_boundary_service = TaskBoundaryService(self)
     self._active_processes: set[asyncio.subprocess.Process] = set()
@@ -152,14 +169,18 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self._teardown_task: asyncio.Task[None] | None = None
     self.strategy_prompt = config.strategy_prompt
     self.event_handler = None
-    self.allow_interactive_shell_approval = bool(config.allow_interactive_shell_approval)
+    self.allow_interactive_shell_approval = bool(
+        config.allow_interactive_shell_approval
+    )
     self.shell_approval_session_default = bool(config.shell_approval_session_default)
     self.credential_store = CredentialStore()
     if config.sudo_password:
         self.credential_store.set_sudo_password(config.sudo_password)
     self.sudo_password = None
     config.sudo_password = None
-    self._configured_tool_profiles = list(config.tool_profiles) if config.tool_profiles else None
+    self._configured_tool_profiles = (
+        list(config.tool_profiles) if config.tool_profiles else None
+    )
     self._strategy_prompt = config.strategy_prompt
     self._indexer = config.indexer
     self.provider_profile = self.client.provider_profile
@@ -179,7 +200,11 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.config = config
 
     # Loop-mode guard: FAMA must stay enabled in loop mode unless explicitly disabled via --fama-disabled
-    if str(config.run_mode or "").strip().lower() == "loop" and not config.fama_enabled and not config.fama_disabled:
+    if (
+        str(config.run_mode or "").strip().lower() == "loop"
+        and not config.fama_enabled
+        and not config.fama_disabled
+    ):
         logger.warning(
             "FAMA was disabled in config but run_mode is 'loop'. Auto-enabling FAMA to prevent "
             "retry loops and tool misuse. Pass --fama-disabled to override this guard."
@@ -258,7 +283,10 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         provider_profile=self.provider_profile,
         model_name=config.model,
     )
-    if effective_max_prompt_tokens is None and self.configured_max_prompt_tokens is not None:
+    if (
+        effective_max_prompt_tokens is None
+        and self.configured_max_prompt_tokens is not None
+    ):
         effective_max_prompt_tokens = max(64, int(self.configured_max_prompt_tokens))
 
     configured_prompt_budget = self.configured_max_prompt_tokens
@@ -289,7 +317,7 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
     self.retriever = LexicalRetriever(self.context_policy)
     self.summarizer = ContextSummarizer(self.context_policy)
     self.subtask_runner = SubtaskRunner(max_child_depth=1)
-    self.guards = GuardConfig()
+    self.guards = GuardConfig(max_consecutive_errors=config.max_consecutive_errors)
     scaling_context = self.context_policy.max_prompt_tokens or self.server_context_limit
     finalize_harness_bootstrap(
         self=self,
@@ -311,3 +339,24 @@ def initialize_harness(self: Any, config: HarnessConfig) -> None:
         config.model,
         self._initial_phase,
     )
+    if getattr(self, "_runlog", None) is not None:
+        from .. import __version__ as smallctl_version
+
+        self._runlog(
+            "effective_runtime_config",
+            "effective runtime config at startup",
+            level="info",
+            subsystem="state",
+            smallctl_version=smallctl_version,
+            model=config.model,
+            provider_profile=self.provider_profile,
+            endpoint=str(config.endpoint or "")[:120],
+            phase=self._initial_phase,
+            fama_enabled=bool(config.fama_enabled),
+            fama_mode=str(config.fama_mode or ""),
+            max_consecutive_errors=int(config.max_consecutive_errors),
+            max_prompt_tokens=self.context_policy.max_prompt_tokens,
+            swa_prompt_cap=int(config.swa_prompt_cap),
+            reserve_completion_tokens=int(config.reserve_completion_tokens),
+            runtime_context_probe=bool(config.runtime_context_probe),
+        )

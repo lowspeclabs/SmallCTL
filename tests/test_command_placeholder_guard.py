@@ -18,7 +18,7 @@ def _pending(tool_name: str, command: str) -> PendingToolCall:
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["shell_exec", "bash_exec", "ssh_exec"],
+    ["shell_exec", "ssh_exec"],
 )
 def test_detects_angle_bracket_placeholder_in_command(tool_name: str) -> None:
     pending = _pending(tool_name, "docker run <original_docker_run_command>")

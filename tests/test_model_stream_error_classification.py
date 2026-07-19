@@ -60,11 +60,18 @@ def test_context_budget_chunk_error_reports_prompt_budget_failure() -> None:
 
 
 def test_context_overflow_details_parse_as_window_overflow() -> None:
-    details = {
-        "type": "context_budget_exceeded",
-        "context_overflow": True,
-        "request_tokens": 16385,
-        "context_limit": 16384,
-    }
+    from types import SimpleNamespace
+
+    from smallctl.client.transport_error_classification import (
+        _llamacpp_context_overflow_chunk_error_details,
+    )
+
+    details = _llamacpp_context_overflow_chunk_error_details(
+        SimpleNamespace(provider_profile="llamacpp"),
+        payload=None,
+        body_summary={"request_tokens": 16385, "context_limit": 16384},
+        status_code=400,
+        attempt=1,
+    )
 
     assert _parse_context_window_overflow("llamacpp context window exceeded", details) == (16385, 16384)

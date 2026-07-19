@@ -10,6 +10,7 @@ from smallctl.state_schema import WorkingMemory
 from smallctl.tools.shell_support_argparse import (
     _build_argparse_unrecognized_args_hint,
     _detect_unbalanced_quotes,
+    _extract_dry_run_hint,
     _extract_unrecognized_argparse_arguments,
 )
 from smallctl.tools.shell_support_constants import _ARGPARSE_UNRECOGNIZED_ARGS_PATTERN
@@ -198,3 +199,26 @@ def test_maybe_inject_argparse_skips_when_already_present() -> None:
     )
     _maybe_inject_argparse_subcommand_note(state)
     assert len(wm.known_facts) == 1
+
+
+def test_extract_dry_run_hint_detects_markdown_yaml() -> None:
+    output = {
+        "stdout": "## Dry Run\n\n- ok: True\n- dry_run: True\n- would_call: /nodes/pve/lxc\n- message: Dry run only. Re-run with --execute to apply.\n",
+        "stderr": "",
+        "exit_code": 0,
+    }
+    hint = _extract_dry_run_hint(output)
+    assert hint is not None
+    assert "dry run only" in hint.lower()
+    assert "--execute" in hint
+
+
+def test_extract_dry_run_hint_detects_stdout_string() -> None:
+    output = "Dry-run only. Re-run with --execute to apply.\n"
+    hint = _extract_dry_run_hint(output)
+    assert hint is not None
+
+
+def test_extract_dry_run_hint_returns_none_for_real_run() -> None:
+    output = {"stdout": "Created container 105\n", "stderr": "", "exit_code": 0}
+    assert _extract_dry_run_hint(output) is None

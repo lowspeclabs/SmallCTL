@@ -4,6 +4,55 @@ from typing import Any, Awaitable, Callable
 
 from . import fs
 from .base import path_field
+from .fs_sessions import _replace_strategy_external_error
+
+
+def _file_write_session_active(kwargs: dict[str, Any]) -> bool:
+    """Mirror file_write's session routing to decide whether omission of
+    `replace_strategy` is backed by a tracked active write session."""
+    state = kwargs.get("state")
+    if state is None:
+        return False
+    path = str(kwargs.get("path") or "")
+    cwd = kwargs.get("cwd")
+    supplied_id = str(kwargs.get("write_session_id") or kwargs.get("session_id") or "").strip()
+    active = getattr(state, "write_session", None)
+    if (
+        supplied_id
+        and active is not None
+        and str(getattr(active, "status", "") or "").strip().lower() != "complete"
+        and supplied_id == str(getattr(active, "write_session_id", "") or "").strip()
+    ):
+        return True
+    try:
+        from .fs_write_sessions import resolve_write_session_for_path
+
+        return resolve_write_session_for_path(state, path, cwd) is not None
+    except Exception:
+        return False
+
+
+async def _file_write_with_strategy_gate(**kwargs: Any) -> dict[str, Any]:
+    """Reject non-enum `replace_strategy` values and standalone omission before
+    the write runs; tracked write sessions may still omit the strategy."""
+    strategy_error = _replace_strategy_external_error(
+        kwargs.get("replace_strategy"),
+        session_active=_file_write_session_active(kwargs),
+        path=str(kwargs.get("path") or ""),
+    )
+    if strategy_error is not None:
+        return strategy_error
+    return await fs.file_write(**kwargs)
+
+
+async def _file_append_with_strategy_gate(**kwargs: Any) -> dict[str, Any]:
+    """Keep file_append at file_write's mutation-semantics parity: an explicit
+    `replace_strategy='overwrite'` is a full replacement, so it routes through
+    the file_write strategy gate instead of appending."""
+    strategy = str(kwargs.get("replace_strategy") or "").strip().lower()
+    if strategy == "overwrite":
+        return await _file_write_with_strategy_gate(**kwargs)
+    return await fs.file_append(**kwargs)
 
 
 def register_filesystem_tools(
@@ -80,13 +129,50 @@ def register_filesystem_tools(
                         "section_id": {"type": "string", "description": "Optional stable section identifier for chunk-mode writes."},
                         "section_role": {"type": "string", "description": "Optional section role such as 'imports', 'helpers', or 'core_logic'."},
                         "next_section_name": {"type": "string", "description": "Name of the logical block you will write next. Omit for the last chunk."},
-                        "replace_strategy": {"type": "string", "enum": ["append", "overwrite"], "description": "Explicit write mode: 'append' to add content, 'overwrite' to replace the entire file. During a patch_existing session with no committed sections, you MUST use 'overwrite' for the first same-target file_write."},
+                        "replace_strategy": {"type": "string", "enum": ["append", "overwrite"], "description": "Explicit write mode: 'append' to add content, 'overwrite' to replace the entire file. Required for standalone writes; omit it only while a tracked write session owns the target path. During a patch_existing session with no committed sections, you MUST use 'overwrite' for the first same-target file_write."},
                         "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
                     },
                     "required": ["path", "content"],
                     "additionalProperties": False,
                 },
-                handler=inject_state_and_cwd(fs.file_write),
+                handler=inject_state_and_cwd(_file_write_with_strategy_gate),
+                category="filesystem",
+                risk="high",
+                allowed_modes={"chat", "loop", "planning"},
+                profiles={core_profile},
+            ),
+            make_registration(
+                name="file_append",
+                description=(
+                    "Append content to the end of a LOCAL file, creating the file and parent directories if they do not exist. "
+                    "Use this to grow an existing file without rewriting its current content; pass `replace_strategy='overwrite'` "
+                    "to replace the entire file like file_write instead. "
+                    "For large files or complex implementations, use chunked mode by providing "
+                    "the target `path`, a `section_name` for the current logical block, and an optional `next_section_name`. "
+                    "The harness will stage the file and promote it when the last section is written. "
+                    "`write_session_id` is handled internally and should normally be omitted. "
+                    "Paths resolve relative to the current cwd. "
+                    "The `~` character is expanded to the user's home directory (e.g. `~/.bashrc` becomes `/home/user/.bashrc`). "
+                    "During an active write session, always pass the target file path as `path`; staged copy paths under `.smallctl/write_sessions/` are for read/verify only. "
+                    "This tool operates on the LOCAL orchestrator filesystem ONLY."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "path": path_field("Path to file."),
+                        "content": {"type": "string", "description": "Content to append to the file."},
+                        "write_session_id": {"type": "string", "description": "Legacy/internal. The harness matches the target path automatically; omit this field."},
+                        "section_name": {"type": "string", "description": "Brief name for this logical block (e.g. 'imports', 'class_def')."},
+                        "section_id": {"type": "string", "description": "Optional stable section identifier for chunk-mode writes."},
+                        "section_role": {"type": "string", "description": "Optional section role such as 'imports', 'helpers', or 'core_logic'."},
+                        "next_section_name": {"type": "string", "description": "Name of the logical block you will write next. Omit for the last chunk."},
+                        "replace_strategy": {"type": "string", "enum": ["append", "overwrite"], "description": "Optional explicit write mode: 'append' (the default) adds content to the end of the file; 'overwrite' replaces the entire file like file_write."},
+                        "expected_followup_verifier": {"type": "string", "description": "Optional verifier hint such as 'python -m py_compile'."},
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+                handler=inject_state_and_cwd(_file_append_with_strategy_gate),
                 category="filesystem",
                 risk="high",
                 allowed_modes={"chat", "loop", "planning"},

@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from smallctl.context.artifacts import ArtifactStore
 from smallctl.harness.tool_result_verification import _store_verifier_verdict
+from smallctl.harness.tool_results import ToolResultService
+from smallctl.challenge_progress import record_verifier_result, initialize_challenge_progress_from_task
 from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.graph.progress_guard import _build_progress_stagnation_nudge
 from smallctl.graph.tool_outcome_resolution import maybe_apply_terminal_tool_outcome
@@ -741,6 +744,107 @@ def test_diagnostic_task_failed_probe_does_not_enter_repair_phase() -> None:
     assert state.scratchpad.get("_contract_phase") != "repair"
 
 
+def test_report_back_task_is_classified_as_diagnostic() -> None:
+    from smallctl.diagnostic_tasks import diagnostic_failure_task
+
+    state = LoopState()
+    state.run_brief.original_task = (
+        "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, "
+        "then load the proxmox cli and report back running lxc and vms"
+    )
+
+    assert diagnostic_failure_task(state) is True
+
+
+def test_report_back_task_failed_probe_does_not_enter_repair_phase() -> None:
+    """A pure 'report back' observation task should not enter repair when a probe fails."""
+    state = LoopState()
+    state.run_brief.original_task = (
+        "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, "
+        "then load the proxmox cli and report back running lxc and vms"
+    )
+    failed = ToolEnvelope(
+        success=False,
+        output={"exit_code": 4, "stdout": "", "stderr": "hostname lookup 'pve1' failed"},
+        error="hostname lookup 'pve1' failed",
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=failed,
+        arguments={"command": "python scripts/Proxmox-cli.py lxcs list --node pve1"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "fail"
+    assert state.repair_cycle_id == ""
+    assert state.scratchpad.get("_contract_phase") != "repair"
+
+
+def test_report_back_task_corrected_probe_overwrites_failed_probe() -> None:
+    """A different successful probe for a 'report back' task must not be rejected as insufficient."""
+    state = LoopState()
+    state.run_brief.original_task = (
+        "read /home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md, "
+        "then load the proxmox cli and report back running lxc and vms"
+    )
+    failed = ToolEnvelope(
+        success=False,
+        output={"exit_code": 4, "stdout": "", "stderr": "hostname lookup 'pve1' failed"},
+        error="hostname lookup 'pve1' failed",
+    )
+    _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=failed,
+        arguments={"command": "python scripts/Proxmox-cli.py lxcs list --node pve1"},
+    )
+
+    success = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "## LXCs on pve\n\n- 0: ...", "stderr": ""},
+    )
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=success,
+        arguments={"command": "python scripts/Proxmox-cli.py lxcs list --node pve"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict.get("insufficient_verifier") is not True
+    assert state.repair_cycle_id == ""
+
+
+def test_stronger_verifier_overwrites_prior_failed_verifier() -> None:
+    """A strictly stronger passing verifier should overwrite a prior weaker failure."""
+    state = LoopState()
+    state.run_brief.original_task = "Build and run the script."
+    state.scratchpad["_last_failed_verifier"] = {
+        "tool_name": "shell_exec",
+        "command": "cat /tmp/debug.log",
+        "summary": ["missing log"],
+        "raw_output": "missing log",
+    }
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "script output ok", "stderr": ""},
+    )
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="shell_exec",
+        result=result,
+        arguments={"command": "cd /repo && python3 ./temp/script.py"},
+    )
+
+    assert verdict is not None
+    assert verdict["verdict"] == "pass"
+    assert verdict.get("insufficient_verifier") is not True
+
+
 def test_diagnostic_task_later_probe_overwrites_failed_diagnostic_verifier() -> None:
     """A different successful diagnostic probe should not be rejected as 'insufficient'."""
     state = LoopState()
@@ -774,3 +878,114 @@ def test_diagnostic_task_later_probe_overwrites_failed_diagnostic_verifier() -> 
     assert verdict["verdict"] == "pass"
     assert verdict.get("insufficient_verifier") is not True
     assert state.repair_cycle_id == ""
+
+
+def _make_harness(tmp_path) -> SimpleNamespace:
+    state = LoopState(cwd=str(tmp_path))
+    state.thread_id = "thread-1"
+    state.run_brief.original_task = "Inspect the workspace"
+    state.artifacts = {}
+    state.retrieval_cache = []
+    state.scratchpad = {}
+    return SimpleNamespace(
+        state=state,
+        artifact_store=ArtifactStore(tmp_path, "run-1"),
+        context_policy=SimpleNamespace(tool_result_inline_token_limit=800, artifact_summarization_threshold=999999),
+        summarizer_client=None,
+        summarizer=None,
+        _current_user_task=lambda: state.run_brief.original_task,
+        _runlog=lambda *args, **kwargs: None,
+    )
+
+
+def test_failed_tool_result_records_one_recent_error(tmp_path) -> None:
+    """A single failed tool dispatch must create exactly one recent_errors entry."""
+    harness = _make_harness(tmp_path)
+    service = ToolResultService(harness)
+    result = ToolEnvelope(
+        success=False,
+        error="command not found",
+        metadata={"exit_code": 127, "stderr": "bash: not_found: command not found"},
+    )
+
+    asyncio.run(
+        service.record_result(
+            tool_name="shell_exec",
+            tool_call_id="call-fail-1",
+            result=result,
+            arguments={"command": "not_found"},
+            operation_id="op-fail-1",
+        )
+    )
+
+    assert len(harness.state.recent_errors) == 1
+    assert "command not found" in harness.state.recent_errors[0]
+
+
+def _make_vm_creation_state(vm_name: str) -> LoopState:
+    state = LoopState()
+    state.run_brief.original_task = f"Create a Debian VM named '{vm_name}' on Proxmox"
+    initialize_challenge_progress_from_task(state, state.run_brief.original_task)
+    return state
+
+
+def test_generic_inventory_command_cannot_verify_vm_creation() -> None:
+    """Commands like `nodes list` must not count as verification for a VM creation objective."""
+    vm_name = "3.6-35-a3b-tester"
+    state = _make_vm_creation_state(vm_name)
+
+    record_verifier_result(
+        state,
+        tool_name="ssh_exec",
+        command="python scripts/Proxmox-cli.py nodes list",
+        verifier_kind="diagnostic",
+        verdict="pass",
+        exit_code=0,
+        stdout="",
+        stderr="",
+    )
+
+    assert state.challenge_progress.verified_after_last_change is False
+
+
+def test_vm_status_command_with_resource_name_verifies_vm_creation() -> None:
+    """A status/readback command that names the requested VM must count as verification."""
+    vm_name = "3.6-35-a3b-tester"
+    state = _make_vm_creation_state(vm_name)
+
+    record_verifier_result(
+        state,
+        tool_name="ssh_exec",
+        command=f"qm status {vm_name}",
+        verifier_kind="run_target",
+        verdict="pass",
+        exit_code=0,
+        stdout=f"VM {vm_name} status: running\n",
+        stderr="",
+    )
+
+    assert state.challenge_progress.verified_after_last_change is True
+
+
+def test_mixed_diagnostic_then_fix_task_is_not_classified_as_diagnostic() -> None:
+    """Broad diagnostic markers must not override mutation/remediation intent."""
+    from smallctl.diagnostic_tasks import diagnostic_failure_task
+
+    state = LoopState()
+    state.run_brief.original_task = (
+        "show me the latest failures in the log and then fix the broken service"
+    )
+
+    assert diagnostic_failure_task(state) is False
+
+
+def test_pure_diagnostic_task_still_classified_as_diagnostic() -> None:
+    """Pure report-only tasks should remain classified as diagnostic."""
+    from smallctl.diagnostic_tasks import diagnostic_failure_task
+
+    state = LoopState()
+    state.run_brief.original_task = (
+        "show me the latest failures in the log and report back what you find"
+    )
+
+    assert diagnostic_failure_task(state) is True

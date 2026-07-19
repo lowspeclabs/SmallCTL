@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
 
 from ..models.conversation import ConversationMessage
 from .state import PendingToolCall
+
+_FAMA_OBSERVE_TASKS: set[asyncio.Task[Any]] = set()
 
 _WRITE_SESSION_GUARD_ERROR_KINDS = {
     "patch_over_rewrite_guard",
@@ -69,17 +72,52 @@ def _dispatch_stagnation_recovery(harness: Any, guard_error: str) -> None:
         "injected strategy pivot nudge",
         step=harness.state.step_count,
     )
-    if "no_progress" in harness.state.stagnation_counters:
-        harness.state.stagnation_counters["no_progress"] = 0
-    if "repeat_command" in harness.state.stagnation_counters:
-        harness.state.stagnation_counters["repeat_command"] = 0
-    if "repeat_patch" in harness.state.stagnation_counters:
-        harness.state.stagnation_counters["repeat_patch"] = 0
-    phase = str(getattr(harness.state, "current_phase", "") or "").strip().lower()
-    if phase != "repair":
-        harness.state.tool_history.clear()
-    else:
-        harness.state.tool_history = harness.state.tool_history[-6:]
+    counters = harness.state.stagnation_counters
+    if isinstance(counters, dict):
+        # Reset the counter that actually trips the progress-stagnation guard
+        # (progress_guard._check_progress_stagnation reads only
+        # "no_actionable_progress"); without this the trip re-fires every step.
+        for name in ("no_actionable_progress", "no_progress", "repeat_command", "repeat_patch"):
+            if name in counters:
+                counters[name] = 0
+    # tool_history is intentionally retained: clearing it disarms the
+    # repeated-action guard (guards.py) and hides the loop from FAMA.
+    _observe_stagnation_guard_trip(harness, guard_error)
+
+
+def _observe_stagnation_guard_trip(harness: Any, guard_error: str) -> None:
+    """Route the stagnation guard trip into FAMA.
+
+    The caller clears ``guard_error`` immediately after dispatch, which would
+    otherwise skip ``observe_guard_trip`` entirely for stagnation recoveries.
+    Emit the observation here, before that happens.
+    """
+    try:
+        from ..fama.runtime import observe_guard_trip
+
+        coro = observe_guard_trip(
+            harness,
+            guard_error=guard_error,
+            tool_history_tail=list((getattr(harness.state, "tool_history", []) or [])[-8:]),
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            task = loop.create_task(coro)
+            _FAMA_OBSERVE_TASKS.add(task)
+            task.add_done_callback(_FAMA_OBSERVE_TASKS.discard)
+        else:
+            asyncio.run(coro)
+    except Exception as exc:
+        runlog = getattr(harness, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "guard_trip_fama_observation_failed",
+                "FAMA guard-trip observation failed",
+                error=str(exc),
+            )
 
 
 def _dispatch_artifact_read_recovery(harness: Any, graph_state: Any, recovery_hint: tuple[str, str]) -> None:

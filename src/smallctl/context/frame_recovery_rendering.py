@@ -108,6 +108,17 @@ def render_recovery_guidance(state: LoopState, token_budget: int = 500) -> list[
         return []
 
     lines: list[str] = []
+    pinned_recovery = state.scratchpad.get("_pinned_recovery")
+    if isinstance(pinned_recovery, dict):
+        blocker = str(pinned_recovery.get("current_blocker") or "").strip()
+        next_action = str(pinned_recovery.get("next_allowed_action") or "").strip()
+        required_tool = str(pinned_recovery.get("required_tool") or "").strip()
+        if blocker:
+            lines.append("Mandatory recovery blocker: " + blocker)
+        if next_action:
+            lines.append("Mandatory next action: " + next_action)
+        if required_tool:
+            lines.append("Required tool: " + required_tool)
     lines.extend(remote_repair_state_lines(state))
     lines.extend(fresh_schema_validation_hint_lines(state))
     lines.extend(fresh_tool_call_repair_hint_lines(state))

@@ -23,6 +23,17 @@ def track_verifier_rejection(state: Any, verdict: dict[str, Any] | None) -> dict
     state.scratchpad["_verifier_rejection_count"] = rejection_count
     state.scratchpad["_last_verifier_rejection"] = dict(verdict)
 
+    # Update same-target streak only when a new rejection is recorded
+    command = str(verdict.get("command") or verdict.get("target") or "").strip()
+    if command:
+        key = "_fama_same_target_streak"
+        last = state.scratchpad.get(key)
+        if isinstance(last, dict) and last.get("command") == command:
+            streak = int(last.get("streak", 0) or 0) + 1
+        else:
+            streak = 1
+        state.scratchpad[key] = {"command": command, "streak": streak}
+
     result = {
         "rejection_count": rejection_count,
         "is_loop": rejection_count > 3,

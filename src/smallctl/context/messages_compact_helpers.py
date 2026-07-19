@@ -348,6 +348,16 @@ def collapse_repeated_tool_failures(messages: list[Any]) -> list[Any]:
     if not to_replace:
         return messages
 
+    # Pair-awareness: tool messages being collapsed away may carry a
+    # tool_call_id answered by an assistant tool_calls entry. Removing the
+    # tool message without touching the assistant call would leave a dangling
+    # tool_call, so strip the matching tool_calls entries as well.
+    removed_call_ids: set[str] = set()
+    for idx in to_replace:
+        tool_call_id = getattr(messages[idx], "tool_call_id", None)
+        if tool_call_id:
+            removed_call_ids.add(str(tool_call_id))
+
     result: list[Any] = []
     summary_text = f"[{len(to_replace)} repeated tool failures with identical error collapsed to save tokens. Last 2 occurrences preserved.]"
     summary_added = False
@@ -355,15 +365,44 @@ def collapse_repeated_tool_failures(messages: list[Any]) -> list[Any]:
         if idx in to_replace:
             if not summary_added:
                 from ..models.conversation import ConversationMessage
+                # Harness notes must be role="user"; an id-less role="tool"
+                # message is schema-invalid for strict providers.
                 result.append(
                     ConversationMessage(
-                        role="tool",
+                        role="user",
                         name="collapsed_failures",
                         content=summary_text,
                     )
                 )
                 summary_added = True
             continue
+        if removed_call_ids and getattr(msg, "role", None) == "assistant":
+            tool_calls = getattr(msg, "tool_calls", None)
+            if isinstance(tool_calls, list) and tool_calls:
+                kept_tool_calls = [
+                    tool_call
+                    for tool_call in tool_calls
+                    if not (
+                        isinstance(tool_call, dict)
+                        and str(tool_call.get("id") or "") in removed_call_ids
+                    )
+                ]
+                if len(kept_tool_calls) != len(tool_calls):
+                    content = str(getattr(msg, "content", "") or "").strip()
+                    if not kept_tool_calls and not content:
+                        # No surviving calls and no visible content: drop the
+                        # assistant message instead of leaving an empty shell.
+                        continue
+                    from ..models.conversation import ConversationMessage
+                    msg = ConversationMessage(
+                        role=msg.role,
+                        content=msg.content,
+                        name=msg.name,
+                        tool_call_id=msg.tool_call_id,
+                        tool_calls=kept_tool_calls,
+                        metadata=msg.metadata,
+                        retrieval_safe_text=msg.retrieval_safe_text,
+                    )
         result.append(msg)
 
     return result

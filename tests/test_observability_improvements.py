@@ -394,3 +394,157 @@ def test_finalize_writes_run_summary(tmp_path):
     payload = __import__("json").loads(run_summary.read_text(encoding="utf-8"))
     assert payload["summary_kind"] == "run"
     assert payload["latest_task_id"] == "task-0001"
+
+
+@pytest.mark.asyncio
+async def test_shell_approval_timeout_emits_event():
+    from smallctl.harness.approvals import ApprovalService
+
+    events = []
+
+    async def _emit(handler, event):
+        del handler, event
+
+    harness = SimpleNamespace(
+        allow_interactive_shell_approval=True,
+        shell_approval_session_default=False,
+        event_handler="handler",
+        _emit=_emit,
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    service = ApprovalService(harness)
+
+    result = await service.request_shell_approval(command="ls", cwd="/tmp", timeout_sec=1)
+
+    assert result is False
+    timeout_events = [e for e in events if e[0] == "approval_timeout"]
+    assert len(timeout_events) == 1
+    data = timeout_events[0][2]
+    assert data["command"] == "ls"
+    assert data["timeout_sec"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sudo_password_timeout_emits_event():
+    from smallctl.harness.approvals import ApprovalService
+
+    events = []
+
+    async def _emit(handler, event):
+        del handler, event
+
+    harness = SimpleNamespace(
+        allow_interactive_shell_approval=True,
+        shell_approval_session_default=False,
+        event_handler="handler",
+        _emit=_emit,
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    service = ApprovalService(harness)
+
+    result = await service.request_sudo_password(command="ls", prompt_text="password:", timeout_sec=1)
+
+    assert result is None
+    timeout_events = [e for e in events if e[0] == "sudo_password_timeout"]
+    assert len(timeout_events) == 1
+    data = timeout_events[0][2]
+    assert data["command"] == "ls"
+    assert data["timeout_sec"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ssh_tool_block_logs_classification():
+    from smallctl.harness.tool_dispatch import dispatch_tool_call
+
+    state = LoopState(cwd="/tmp")
+    state.task_mode = "local_execute"
+    state.scratchpad = {}
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        registry=SimpleNamespace(names=lambda: ["ssh_exec"], get=lambda name: None),
+        dispatcher=SimpleNamespace(dispatch=lambda tool, args: None),
+        allow_interactive_shell_approval=False,
+        shell_approval_session_default=False,
+        config=SimpleNamespace(
+            graph_dispatch_tools_timeout_sec=None,
+            fama_enabled=False,
+            interactive_shell_approval=False,
+        ),
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+
+    result = await dispatch_tool_call(harness, "ssh_exec", {"host": "remote", "command": "ls"})
+    assert result.success is False
+    blocked = [e for e in events if e[0] == "tool_dispatch_blocked"]
+    assert len(blocked) == 1
+    data = blocked[0][2]
+    assert data["tool_name"] == "ssh_exec"
+    assert data["tool_category"] == "ssh"
+    assert data["task_mode"] == "local_execute"
+    assert data["block_reason"] == "local_coding_ssh_block"
+
+
+def test_retrieval_history_records_kind_and_logs():
+    from smallctl.context.retrieval import LexicalRetriever
+    from smallctl.state import ArtifactSnippet
+
+    state = LoopState(cwd="/tmp")
+    state.step_count = 5
+    state.scratchpad = {}
+    events = []
+    state._runlog = lambda event, message, **data: events.append((event, message, data))
+
+    retriever = LexicalRetriever()
+    snippets = [
+        ArtifactSnippet(artifact_id="A1", text="body1"),
+        ArtifactSnippet(artifact_id="A2", text="body2"),
+    ]
+    retriever._record_retrieved_id_history(
+        state, "_retrieved_artifact_history", [s.artifact_id for s in snippets], kind="artifact"
+    )
+
+    history = state.scratchpad["_retrieved_artifact_history"]
+    assert len(history) == 2
+    assert history[0]["id"] == "A1"
+    assert history[0]["kind"] == "artifact"
+    assert history[0]["retrieved_at_step"] == 5
+    logged = [e for e in events if e[0] == "retrieval_history_recorded"]
+    assert len(logged) == 1
+    assert logged[0][2]["kind"] == "artifact"
+    assert logged[0][2]["count"] == 2
+
+
+def test_verifier_decision_logs_verdict():
+    from smallctl.harness.tool_result_artifact_updates import _apply_verifier_and_evidence_updates
+    from smallctl.models.tool_result import ToolEnvelope
+
+    state = LoopState(cwd="/tmp")
+    state.scratchpad = {}
+    events = []
+    harness = SimpleNamespace(
+        state=state,
+        config=SimpleNamespace(subtask_ledger_enabled=False),
+        _runlog=lambda event, message, **data: events.append((event, message, data)),
+    )
+    service = SimpleNamespace(harness=harness)
+
+    result = ToolEnvelope(
+        success=True,
+        output={"exit_code": 0, "stdout": "ok", "stderr": ""},
+    )
+    _apply_verifier_and_evidence_updates(
+        service,
+        tool_name="shell_exec",
+        result=result,
+        artifact=None,
+        arguments={"command": "python3 -m py_compile app.py"},
+    )
+
+    decision = [e for e in events if e[0] == "verifier_decision"]
+    assert len(decision) == 1
+    data = decision[0][2]
+    assert data["tool_name"] == "shell_exec"
+    assert data["verdict"] == "pass"
+    assert data["command"] == "python3 -m py_compile app.py"
+

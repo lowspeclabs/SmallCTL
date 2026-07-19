@@ -282,7 +282,8 @@ def test_loop_state_round_trip_preserves_full_transcript_when_recent_messages_tr
         "message 5",
     ]
     assert len(restored.recent_messages) == 3
-    assert [message["content"] for message in payload["conversation_history"]] == [
+    assert "conversation_history" not in payload
+    assert [message["content"] for message in payload["transcript_messages"]] == [
         "message 0",
         "message 1",
         "message 2",

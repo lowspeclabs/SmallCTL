@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from smallctl.graph.runtime_base import GraphNodeTimeoutError, RuntimeGraphBuilder
 from smallctl.graph.runtime_payloads import execute_streaming_graph
 
@@ -91,24 +89,22 @@ def test_runtime_graph_node_wrapper_logs_entry_exit() -> None:
     assert events[0][1]["node"] == "interpret_model_output"
 
 
-def test_runtime_graph_node_wrapper_times_out_hung_node() -> None:
+def test_runtime_graph_node_wrapper_does_not_enforce_timeout_locally() -> None:
     events: list[tuple[str, dict[str, object]]] = []
     harness = SimpleNamespace(config=SimpleNamespace(graph_node_timeout_sec=0.01))
     harness._runlog = lambda event, message, **data: events.append((event, data))
     runtime = SimpleNamespace(deps=SimpleNamespace(harness=harness))
 
-    async def node(_payload):  # type: ignore[no-untyped-def]
-        await asyncio.sleep(1)
+    async def node(payload):  # type: ignore[no-untyped-def]
+        return {"ok": payload["ok"]}
 
     wrapped = RuntimeGraphBuilder._wrap_node(runtime, "interpret_model_output", node)
+    result = asyncio.run(wrapped({"ok": True}))
 
-    with pytest.raises(GraphNodeTimeoutError) as exc_info:
-        asyncio.run(wrapped({}))
-
-    assert exc_info.value.node_name == "interpret_model_output"
+    assert result == {"ok": True}
     assert [event for event, _ in events] == [
         "interpret_model_output_start",
-        "interpret_model_output_timeout",
+        "interpret_model_output_end",
     ]
 
 

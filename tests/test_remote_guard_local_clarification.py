@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 
 from smallctl.state import LoopState
+from smallctl.harness.tool_dispatch import dispatch_tool_call
 from smallctl.tools.dispatcher_tool_guards import (
     _guard_remote_file_tool_request,
     _guard_remote_shell_tool_request,
@@ -125,3 +127,31 @@ def test_remote_guard_allows_file_read_for_debug_inspect_mode() -> None:
         ssh_available=True,
     )
     assert result is None
+
+
+def test_direct_ssh_exec_rejects_local_workspace_command() -> None:
+    state = _make_state(task_mode="local_execute", cwd="/workspace")
+    state.run_brief.original_task = (
+        "read /workspace/temp/proxmox-manager/AGENTS.md and run the local proxmox cli against its API on 192.168.1.74"
+    )
+
+    class _Registry:
+        def names(self) -> set[str]:
+            return {"ssh_exec", "shell_exec"}
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        _runlog=lambda *_args, **_kwargs: None,
+    )
+    result = asyncio.run(
+        dispatch_tool_call(
+            harness,
+            "ssh_exec",
+            {"host": "192.168.1.74", "command": "/workspace/temp/proxmox-manager/proxmox doctor"},
+        )
+    )
+
+    assert result.success is False
+    assert result.metadata["reason"] == "local_command_requires_shell_exec"
+    assert result.metadata["required_tool"] == "shell_exec"

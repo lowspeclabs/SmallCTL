@@ -56,6 +56,20 @@ class HarnessConfig:
     graph_recursion_limit: int = 1024
     graph_coding_recursion_limit: int = 2048
     needs_human_timeout_sec: int = 600
+    # Native LangGraph per-node timeouts are opt-in until rollout validation is complete.
+    langgraph_native_timeouts_enabled: bool = False
+    # Native LangGraph retry policy: opt-in, bounded, and restricted to safe nodes.
+    langgraph_native_retries_enabled: bool = False
+    langgraph_native_retry_max_attempts: int = 2
+    # Native LangGraph node error handlers: opt-in; route selected safe-node failures
+    # into the harness's existing recovery logic instead of ending the graph immediately.
+    langgraph_error_handlers_enabled: bool = False
+    # Native LangGraph task/checkpoint streaming: opt-in; expose graph lifecycle events
+    # to the TUI/logs without removing the custom runlog system.
+    langgraph_stream_events_enabled: bool = False
+    # Native LangGraph cache policy: disabled. No graph node has a provably correct
+    # cache key, so this remains off.
+    langgraph_cache_policy_enabled: bool = False
     fresh_run: bool = False
     fresh_run_turns: int = 1
     planning_mode: bool = False
@@ -80,6 +94,9 @@ class HarnessConfig:
     allow_interactive_shell_approval: bool = False
     shell_approval_session_default: bool = False
     sudo_password: str | None = None
+    # SSH host-key policy passed to `ssh -o StrictHostKeyChecking=...`.
+    # Default preserves historical unattended behavior (trust on first use).
+    ssh_strict_host_key_checking: str = "accept-new"
     loop_guard_enabled: bool = True
     loop_guard_stagnation_threshold: int = 3
     loop_guard_level2_threshold: int = 5
@@ -89,6 +106,7 @@ class HarnessConfig:
     loop_guard_cumulative_write_gate: bool = True
     loop_guard_checkpoint_gate: bool = True
     loop_guard_diff_gate: bool = True
+    max_consecutive_errors: int = 8
     fama_enabled: bool = True
     fama_mode: str = "lite"
     fama_default_ttl_steps: int = 2
@@ -129,7 +147,9 @@ class HarnessConfig:
     min_exploration_steps: int = 1
     chunk_mode_min_bytes: int = 4096
     chunk_mode_new_file_only: bool = True
-    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"])
+    chunk_mode_supported_models: list[str] = field(
+        default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"]
+    )
     small_model_soft_write_chars: int = 2000
     small_model_hard_write_chars: int = 4000
     new_file_chunk_mode_line_estimate: int = 100
@@ -155,7 +175,9 @@ class HarnessConfig:
     solver_refine_on_task_complete: bool = True
     solver_refine_token_budget: int = 700
     test_time_scaling_enabled: bool = False
-    test_time_scaling_runtimes: list[str] = field(default_factory=lambda: ["staged_execution"])
+    test_time_scaling_runtimes: list[str] = field(
+        default_factory=lambda: ["staged_execution"]
+    )
     test_time_scaling_trigger: str = "retry_or_explicit"
     test_time_scaling_max_candidates: int = 3
     test_time_scaling_min_candidates: int = 2

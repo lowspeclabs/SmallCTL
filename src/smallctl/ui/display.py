@@ -37,6 +37,7 @@ _CRITICAL_EVENTS = {
     "fama_signal_detected",
     "fama_signal_to_mitigation",
     "fama_mitigation_activated",
+    "fama_ssh_transport_circuit_breaker",
     "model_output_degenerate_loop_exhausted",
     "partial_tool_call_cancelled",
     "reflexion_created",
@@ -211,6 +212,16 @@ def format_run_log_row(row: dict[str, Any]) -> str:
         reason = str(data.get("reason") or "").strip()
         suffix = f" ({reason})" if reason else ""
         return f"[harness] FAMA mitigation active: {mitigation or 'mitigation'}{suffix}"
+    if event == "fama_ssh_transport_circuit_breaker":
+        failure_kind = str(data.get("failure_kind") or "transport").strip()
+        previous_mode = str(data.get("previous_task_mode") or "").strip()
+        next_mode = str(data.get("next_task_mode") or "").strip()
+        required_tool = str(data.get("required_tool") or "").strip()
+        mode_text = f": {previous_mode} -> {next_mode}" if previous_mode or next_mode else ""
+        tool_text = f"; retry with {required_tool}" if required_tool and required_tool != "ask_human" else ""
+        if required_tool == "ask_human":
+            tool_text = "; human remediation required"
+        return f"[harness] 🚨 FAMA SSH circuit breaker ({failure_kind}){mode_text}{tool_text}"
     if event == "verifier_loop_detected":
         rejection_count = data.get("rejection_count", "?")
         return f"[harness] ⚠️ Verifier loop detected ({rejection_count} rejections)"
@@ -366,6 +377,11 @@ def format_recovery_banner(event: str, data: dict[str, Any]) -> str:
         host = str(data.get("host") or "remote host").strip()
         command = str(data.get("suggested_command") or "ssh-keygen -R <host> -f ~/.ssh/known_hosts").strip()
         return f"Blocked: SSH host key changed for {host}. Approve `{command}` or fix known_hosts manually."
+    if event == "fama_ssh_transport_circuit_breaker":
+        failure_kind = str(data.get("failure_kind") or "transport").strip()
+        next_mode = str(data.get("next_task_mode") or "").strip()
+        suffix = f"; mode now {next_mode}" if next_mode else ""
+        return f"FAMA SSH circuit breaker: {failure_kind} failure{suffix}"
     interrupt = data.get("interrupt") if isinstance(data, dict) else None
     if isinstance(interrupt, dict) and str(interrupt.get("kind") or "").strip() == "apt_deb822_validator_approval":
         host = str(interrupt.get("host") or "").strip()

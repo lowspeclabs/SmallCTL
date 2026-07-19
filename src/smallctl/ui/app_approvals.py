@@ -65,6 +65,8 @@ async def prompt_for_generic_interrupt(app, interrupt: dict[str, Any]) -> Interr
         title=title,
         question=question,
         details=details,
+        kind=str(interrupt.get("kind") or "").strip(),
+        response_mode=str(interrupt.get("response_mode") or "").strip(),
     )
     app._active_approval_prompt = prompt
     app._refresh_status()
@@ -84,6 +86,12 @@ async def prompt_for_generic_interrupt(app, interrupt: dict[str, Any]) -> Interr
         return await decision_future
     except Exception as exc:
         app._app_logger.warning("Interrupt prompt failed: %s", exc)
+        append_line = getattr(app, "_append_system_line", None)
+        if callable(append_line):
+            try:
+                await append_line(f"Input required: {question}", force=True, kind="alert")
+            except Exception as alert_exc:
+                app._app_logger.warning("Interrupt alert fallback failed: %s", alert_exc)
     finally:
         app._active_approval_prompt = None
     return None

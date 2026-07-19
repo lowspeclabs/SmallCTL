@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Agent-Tools"))
 
 from run_diagnose import _classify_failure, _file_patch_target_loop_count
 from runscan import _classify_run
-from agent_tools_lib import warn_on_schema_mismatch
+from agent_tools_lib import detect_background_state_changing_shell, detect_primary_blockers, detect_shell_execution_anomalies, warn_on_schema_mismatch
 from trace_call import _filter_records, _trace_step, _trace_task
 
 
@@ -242,6 +242,163 @@ def test_diagnose_classifies_circuit_breaker_before_model_degeneration() -> None
     assert classification == "harness_circuit_breaker_false_positive"
 
 
+def test_diagnose_classifies_fama_ssh_circuit_breaker_before_model_degeneration() -> None:
+    events: Counter[str] = Counter({"model_output_degenerate_loop_exhausted": 1, "fama_ssh_transport_circuit_breaker": 3})
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = [{"event": "fama_ssh_transport_circuit_breaker"}]
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "ssh_transport_circuit_breaker_false_positive"
+
+
+def test_diagnose_classifies_prompt_budget_overflow_before_incomplete() -> None:
+    events: Counter[str] = Counter()
+    errors: list[dict] = []
+    session: dict = {
+        "overall_objective_status": "incomplete",
+        "deliverable_verified": False,
+        "postmortem_summary": "PROMPT BUDGET OVERFLOW: 12651 tokens assembled",
+    }
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records)
+
+    assert classification == "prompt_budget_overflow"
+
+
+def test_runscan_classifies_prompt_budget_overflow_before_incomplete() -> None:
+    events: Counter[str] = Counter()
+    errors: list[dict] = []
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    task_summary: dict = {"postmortem_summary": "PROMPT BUDGET OVERFLOW: 12651 tokens assembled"}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+
+    classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
+
+    assert classification == "prompt_budget_overflow"
+
+
+def test_primary_blockers_ignore_timeout_in_cli_usage() -> None:
+    failed_dispatches = [
+        {
+            "event": "dispatch_complete",
+            "data": {
+                "tool_name": "shell_exec",
+                "success": False,
+                "output": {
+                    "stderr": "usage: proxmox-cli lxc create [-h] [--timeout TIMEOUT]",
+                    "exit_code": 1,
+                },
+            },
+        }
+    ]
+
+    blockers = detect_primary_blockers([], failed_dispatches)
+
+    assert blockers == []
+
+
+def test_detect_background_state_changing_shell() -> None:
+    tools_records = [
+        {
+            "event": "dispatch_start",
+            "trace_id": "abc:task-1:step-8:call-8",
+            "data": {
+                "tool_name": "shell_exec",
+                "arguments": {
+                    "command": "python scripts/Proxmox-cli.py lxcs create --node pve --vmid 105",
+                    "background": True,
+                },
+            },
+        }
+    ]
+
+    blockers = detect_background_state_changing_shell(tools_records)
+
+    assert blockers
+    assert blockers[0]["pattern"] == "background_state_changing_shell"
+
+
+def test_detect_shell_execution_anomalies_flags_masked_cli_error_and_endpoint_loop() -> None:
+    tools_records = [
+        {
+            "event": "dispatch_start",
+            "trace_id": "abc:task-1:step-1:call-1",
+            "data": {"tool_name": "shell_exec", "arguments": {"command": "cli containers list 2>&1 | tail -40"}},
+        },
+        {
+            "event": "dispatch_complete",
+            "trace_id": "abc:task-1:step-1:call-1",
+            "data": {"tool_name": "shell_exec", "success": True, "output": {"stdout": "usage: cli [-h]\ncli: error: unrecognized arguments: list"}},
+        },
+    ]
+    for step in range(2, 5):
+        tools_records.append({
+            "event": "dispatch_start",
+            "trace_id": f"abc:task-1:step-{step}:call-{step}",
+            "data": {"tool_name": "shell_exec", "arguments": {"command": "curl https://192.0.2.1:8006/api2/json/nodes"}},
+        })
+        tools_records.append({
+            "event": "dispatch_complete",
+            "trace_id": f"abc:task-1:step-{step}:call-{step}",
+            "data": {"tool_name": "shell_exec", "success": True, "output": {"stdout": ""}},
+        })
+
+    patterns = {item["pattern"] for item in detect_shell_execution_anomalies(tools_records)}
+
+    assert "semantic_cli_failure_reported_success" in patterns
+    assert "pipeline_may_mask_command_failure" in patterns
+    assert "repeated_endpoint_probe_without_new_evidence" in patterns
+
+
+def test_detect_shell_execution_anomalies_flags_observed_placeholder_config() -> None:
+    tools_records = [
+        {
+            "event": "dispatch_start",
+            "trace_id": "abc:task-1:step-1:call-1",
+            "data": {"tool_name": "shell_exec", "arguments": {"command": "cat .env"}},
+        },
+        {
+            "event": "dispatch_complete",
+            "trace_id": "abc:task-1:step-1:call-1",
+            "data": {"tool_name": "shell_exec", "success": True, "output": {"stdout": "PROXMOX_API_URL=https://proxmox.example.local"}},
+        },
+    ]
+
+    patterns = {item["pattern"] for item in detect_shell_execution_anomalies(tools_records)}
+
+    assert "placeholder_configuration_observed" in patterns
+
+
+def test_diagnose_classifies_background_state_changing_shell_before_recovery() -> None:
+    events: Counter[str] = Counter({"recovery_failure_event_recorded": 1})
+    errors: list[dict] = [{"event": "recovery_failure_event_recorded"}]
+    session: dict = {"overall_objective_status": "incomplete", "deliverable_verified": False}
+    dispatches: list[dict] = []
+    harness_records: list[dict] = []
+    tools_records = [
+        {
+            "event": "dispatch_start",
+            "data": {
+                "tool_name": "shell_exec",
+                "arguments": {
+                    "command": "python scripts/Proxmox-cli.py lxcs create --node pve --vmid 105",
+                    "background": True,
+                },
+            },
+        }
+    ]
+
+    classification = _classify_failure(events, errors, session, dispatches, harness_records, tools_records=tools_records)
+
+    assert classification == "background_state_change_unverified"
+
+
 def test_diagnose_classifies_chat_terminal_repetition_stall() -> None:
     session = {"latest_task_id": "task-0005", "overall_objective_status": "incomplete"}
     harness_records: list[dict] = [
@@ -454,3 +611,198 @@ def test_runscan_classifies_reasoning_only_exhaustion_before_incomplete() -> Non
     classification = _classify_run(events, errors, session, task_summary, dispatches, harness_records)
 
     assert classification == "model_stream_stall"
+
+
+def test_harness_reported_blocker_from_session_summary() -> None:
+    from agent_tools_lib import harness_reported_blocker
+
+    summaries = {
+        "session_summary": {"primary_blocker": "ls: cannot access '/tmp/x/agents.md': No such file or directory"},
+        "task_summary": {},
+    }
+
+    assert harness_reported_blocker(summaries) == "ls: cannot access '/tmp/x/agents.md': No such file or directory"
+
+
+def test_harness_reported_blocker_falls_back_to_task_summaries() -> None:
+    from agent_tools_lib import harness_reported_blocker
+
+    summaries = {"session_summary": {}, "task_summary": {"primary_blocker": ""}}
+    task_summaries = [{"task_id": "task-0001", "primary_blocker": "disk full"}]
+
+    assert harness_reported_blocker(summaries, task_summaries) == "disk full"
+
+
+def test_harness_reported_blocker_none_when_absent() -> None:
+    from agent_tools_lib import harness_reported_blocker
+
+    assert harness_reported_blocker({"session_summary": {}, "task_summary": {}}) is None
+
+
+def test_detect_phantom_code_changes_flags_staged_missing_file(tmp_path: Path) -> None:
+    from agent_tools_lib import detect_phantom_code_changes
+
+    missing = str(tmp_path / "agents.md")
+    summaries = {
+        "session_summary": {
+            "challenge_progress": {"last_code_change_paths": [missing]},
+        },
+        "task_summary": {},
+    }
+    tools_records = [
+        {
+            "event": "dispatch_complete",
+            "data": {
+                "tool_name": "file_write",
+                "success": True,
+                "metadata": {"path": missing, "staged_only": True, "write_session_finalized": False},
+            },
+        }
+    ]
+
+    findings = detect_phantom_code_changes(summaries, tools_records)
+
+    assert len(findings) == 1
+    assert findings[0]["path"] == missing
+    assert findings[0]["staged_evidence"] is True
+
+
+def test_detect_phantom_code_changes_ignores_existing_files(tmp_path: Path) -> None:
+    from agent_tools_lib import detect_phantom_code_changes
+
+    existing = tmp_path / "bookstack_client.py"
+    existing.write_text("x = 1\n", encoding="utf-8")
+    summaries = {
+        "session_summary": {
+            "challenge_progress": {"last_code_change_paths": [str(existing)]},
+        },
+        "task_summary": {},
+    }
+
+    assert detect_phantom_code_changes(summaries, []) == []
+
+
+def test_detect_phantom_code_changes_lists_staging_copies(tmp_path: Path) -> None:
+    from agent_tools_lib import detect_phantom_code_changes
+
+    workspace = tmp_path / "repo"
+    run_dir = workspace / "logs" / "run-1"
+    staging_dir = workspace / ".smallctl" / "write_sessions"
+    staging_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (staging_dir / "ws_abc__agents__stage.md").write_text("staged\n", encoding="utf-8")
+
+    missing = str(workspace / "agents.md")
+    summaries = {
+        "session_summary": {
+            "challenge_progress": {"last_code_change_paths": [missing]},
+        },
+        "task_summary": {},
+    }
+
+    findings = detect_phantom_code_changes(summaries, [], run_dir)
+
+    assert len(findings) == 1
+    assert findings[0]["staged_evidence"] is False
+    assert findings[0]["staging_files"] == ["ws_abc__agents__stage.md"]
+
+
+def test_diagnose_surfaces_reported_blocker_and_phantom_changes(tmp_path: Path) -> None:
+    from run_diagnose import _diagnose
+
+    workspace = tmp_path / "repo"
+    run_dir = workspace / "logs" / "run-1"
+    run_dir.mkdir(parents=True)
+    missing = str(workspace / "agents.md")
+    (run_dir / "run_header.json").write_text(
+        json.dumps({"channels": ["harness", "tools"], "event_schema_version": 1}),
+        encoding="utf-8",
+    )
+    (run_dir / "harness.jsonl").write_text("", encoding="utf-8")
+    (run_dir / "tools.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "dispatch_complete",
+                "data": {
+                    "tool_name": "file_write",
+                    "success": True,
+                    "metadata": {"path": missing, "staged_only": True, "write_session_finalized": False},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "session_summary.json").write_text(
+        json.dumps(
+            {
+                "overall_objective_status": "incomplete",
+                "deliverable_verified": False,
+                "primary_blocker": f"ls: cannot access '{missing}': No such file or directory",
+                "challenge_progress": {"last_code_change_paths": [missing]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "task_summary.json").write_text(
+        json.dumps({"final_task_status": "cancelled", "total_tool_calls": 1}),
+        encoding="utf-8",
+    )
+
+    diagnosis = _diagnose(run_dir)
+
+    assert diagnosis["harness_reported_blocker"].startswith("ls: cannot access")
+    assert [p["path"] for p in diagnosis["phantom_code_changes"]] == [missing]
+    assert any("non-environmental" in step for step in diagnosis["recommended_next_steps"])
+    assert any("missing on disk" in step for step in diagnosis["recommended_next_steps"])
+
+
+def test_detect_phantom_code_changes_staging_match_excludes_unrelated_sessions(tmp_path: Path) -> None:
+    from agent_tools_lib import detect_phantom_code_changes
+
+    workspace = tmp_path / "repo"
+    run_dir = workspace / "logs" / "run-1"
+    staging_dir = workspace / ".smallctl" / "write_sessions"
+    staging_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (staging_dir / "ws_8dcbbc__env_sanitizer__stage.py").write_text("staged\n", encoding="utf-8")
+    (staging_dir / "ws_cbb9c2___env__stage.example").write_text("staged\n", encoding="utf-8")
+
+    missing = str(workspace / ".env.example")
+    summaries = {
+        "session_summary": {
+            "challenge_progress": {"last_code_change_paths": [missing]},
+        },
+        "task_summary": {},
+    }
+
+    findings = detect_phantom_code_changes(summaries, [], run_dir)
+
+    assert len(findings) == 1
+    assert findings[0]["staging_files"] == ["ws_cbb9c2___env__stage.example"]
+
+
+def test_detect_phantom_code_changes_staged_evidence_from_output_text(tmp_path: Path) -> None:
+    from agent_tools_lib import detect_phantom_code_changes
+
+    missing = str(tmp_path / "agents.md")
+    summaries = {
+        "session_summary": {
+            "challenge_progress": {"last_code_change_paths": [missing]},
+        },
+        "task_summary": {},
+    }
+    tools_records = [
+        {
+            "event": "dispatch_complete",
+            "data": {
+                "tool_name": "file_write",
+                "success": True,
+                "output": f"Section `content` written to `{missing}`. Next section inferred: `header`. Staged copy: `/x/.smallctl/write_sessions/ws_1__agents__stage.md`.",
+            },
+        }
+    ]
+
+    findings = detect_phantom_code_changes(summaries, tools_records)
+
+    assert findings[0]["staged_evidence"] is True

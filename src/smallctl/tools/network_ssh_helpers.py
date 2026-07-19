@@ -102,6 +102,40 @@ _SSH_ACCEPT_NEW_INCOMPATIBLE_MARKERS = (
     "keyword stricthostkeychecking extra arguments at end of line",
     "bad configuration option",
 )
+_SSH_STRICT_HOST_KEY_MODES = {"accept-new", "yes", "no", "off"}
+_DEFAULT_SSH_STRICT_HOST_KEY_MODE = "accept-new"
+
+
+class SSHStrictHostKeyConfigError(ValueError):
+    """Raised when ssh_strict_host_key_checking holds an unsupported value."""
+
+
+def normalize_strict_host_key_mode(value: Any) -> str:
+    """Return a supported StrictHostKeyChecking mode.
+
+    An empty/None value falls back to the default (accept-new). Any other
+    unsupported value raises a typed configuration error instead of silently
+    downgrading to a default the operator did not ask for.
+    """
+    mode = str(value or "").strip().lower()
+    if not mode:
+        return _DEFAULT_SSH_STRICT_HOST_KEY_MODE
+    if mode == "off":
+        return "no"
+    if mode in _SSH_STRICT_HOST_KEY_MODES:
+        return mode
+    supported = sorted(_SSH_STRICT_HOST_KEY_MODES)
+    raise SSHStrictHostKeyConfigError(
+        f"Invalid ssh_strict_host_key_checking value {value!r}; "
+        f"expected one of: {', '.join(supported)}."
+    )
+
+
+def resolve_ssh_strict_host_key_mode(harness: Any) -> str:
+    """Resolve the configured StrictHostKeyChecking mode from harness config."""
+    config = getattr(harness, "config", None)
+    configured = getattr(config, "ssh_strict_host_key_checking", "")
+    return normalize_strict_host_key_mode(configured)
 
 
 def build_ssh_command(
@@ -112,7 +146,7 @@ def build_ssh_command(
     port: int,
     identity_file: str | None,
     password: str | None,
-    strict_host_key_checking: str = "accept-new",
+    strict_host_key_checking: str = _DEFAULT_SSH_STRICT_HOST_KEY_MODE,
     force_tty: bool = False,
 ) -> tuple[str, dict[str, str] | None, str | None]:
     """Build an SSH command string.
@@ -123,6 +157,7 @@ def build_ssh_command(
     returned ``password_file_path`` once the process has completed.
     """
     host, user = normalize_ssh_target(host=host, user=user)
+    strict_host_key_checking = normalize_strict_host_key_mode(strict_host_key_checking)
     ssh_args = [
         "-p", str(port),
         "-o", "ConnectTimeout=10",
@@ -169,7 +204,7 @@ def build_ssh_command(
         ssh_args.append("-tt")
 
     target = f"{user}@{host}" if user else host
-    ssh_args.extend([target, command])
+    ssh_args.extend(["--", target, command])
     return shell_join([*command_args, *ssh_args]), env_overrides, password_file_path
 
 

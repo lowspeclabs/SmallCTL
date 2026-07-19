@@ -7,7 +7,8 @@ from ..models.conversation import ConversationMessage
 from ..models.events import UIEvent, UIEventType
 from ..state import json_safe_value
 from ..tools.fs_loop_guard import outline_mode_violation
-from .state import PendingToolCall
+from ..models.tool_result import ToolEnvelope
+from .state import PendingToolCall, ToolExecutionRecord, build_operation_id
 
 _FILE_WRITE_TOOLS = {
     "file_write",
@@ -86,6 +87,37 @@ def _long_running_remote_timeout_write_guard(state: Any, pending: PendingToolCal
     )
 
 
+def _synthetic_blocked_records(
+    graph_state: Any,
+    reason: str,
+) -> list[ToolExecutionRecord]:
+    records: list[ToolExecutionRecord] = []
+    for pending in graph_state.pending_tool_calls:
+        result = ToolEnvelope.make_error(
+            pending.tool_name,
+            reason,
+            status="blocked",
+            reason="pre_dispatch_guard_blocked",
+            tool_call_id=pending.tool_call_id,
+            args=json_safe_value(pending.args),
+        )
+        records.append(
+            ToolExecutionRecord(
+                operation_id=build_operation_id(
+                    thread_id=graph_state.thread_id,
+                    step_count=getattr(graph_state.loop_state, "step_count", 0),
+                    tool_call_id=pending.tool_call_id,
+                    tool_name=pending.tool_name,
+                ),
+                tool_name=pending.tool_name,
+                args=pending.args,
+                tool_call_id=pending.tool_call_id,
+                result=result,
+            )
+        )
+    return records
+
+
 async def _block_long_running_remote_timeout_write(
     *,
     graph_state: Any,
@@ -128,8 +160,10 @@ async def _block_long_running_remote_timeout_write(
             },
         ),
     )
+    graph_state.last_tool_results = _synthetic_blocked_records(
+        graph_state, reason=remote_timeout_write_guard
+    )
     graph_state.pending_tool_calls = []
-    graph_state.last_tool_results = []
     return True
 
 
@@ -183,6 +217,6 @@ async def _block_outline_mode_violation(
             },
         ),
     )
+    graph_state.last_tool_results = _synthetic_blocked_records(graph_state, reason=message)
     graph_state.pending_tool_calls = []
-    graph_state.last_tool_results = []
     return True

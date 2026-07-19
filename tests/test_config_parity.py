@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-import pytest
-
-from smallctl.config import SmallctlConfig
+from smallctl.config import SmallctlConfig, resolve_config
 from smallctl.config_projection import (
     HARNESS_ONLY_FIELDS,
     LOCAL_ONLY_FIELDS,
@@ -65,3 +63,27 @@ def test_env_config_covers_all_smallctl_fields() -> None:
         f"_env_raw_config is missing keys for SmallctlConfig fields: {missing}. "
         f"Add them to config_support._env_raw_config()."
     )
+
+
+def test_boolean_env_values_preserved_when_cli_flag_absent(monkeypatch, tmp_path) -> None:
+    """Optional store_true flags with absent CLI values must not override env/config."""
+    monkeypatch.setenv("SMALLCTL_DEBUG", "true")
+    monkeypatch.setenv("SMALLCTL_INDEXER", "true")
+    monkeypatch.setenv("SMALLCTL_FAMA_DISABLED", "true")
+    (tmp_path / ".smallctl.yaml").write_text("tui: true\ncleanup: true\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    config = resolve_config({})
+    assert config.debug is True
+    assert config.indexer is True
+    assert config.fama_disabled is True
+    assert config.tui is True
+    assert config.cleanup is True
+
+
+def test_package_version_matches_pyproject() -> None:
+    """smallctl.__version__ is derived from installed package metadata."""
+    import importlib.metadata
+    import smallctl
+
+    assert smallctl.__version__ == importlib.metadata.version("smallctl")
+    assert smallctl.__version__ != "0.0.0+unknown"

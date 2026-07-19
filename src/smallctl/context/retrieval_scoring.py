@@ -100,6 +100,29 @@ def score_artifact(
     if write_target and source_path and path_match(source_path, Path(write_target).as_posix().lower()):
         target_path_bonus += 2.0
 
+    # If this is a read-only user target (not an active write target) and it
+    # has already been fully read, downgrade it so instruction files like
+    # AGENTS.md do not keep dominating context after their first read.
+    if target_path_bonus > 0 and source_path:
+        is_write_target = bool(
+            write_target and path_match(source_path, Path(write_target).as_posix().lower())
+        )
+        if not is_write_target:
+            complete_file = bool(metadata.get("complete_file"))
+            total_lines = metadata.get("total_lines")
+            line_start = metadata.get("line_start")
+            line_end = metadata.get("line_end")
+            fully_read = complete_file or (
+                isinstance(total_lines, int)
+                and total_lines > 0
+                and isinstance(line_start, int)
+                and line_start <= 1
+                and isinstance(line_end, int)
+                and line_end >= total_lines
+            )
+            if fully_read:
+                target_path_bonus *= 0.25
+
     entity_bonus = 0.0
     entity_overlap = len(state_entity_tags(state) & (keyword_tokens | path_tokens | metadata_tokens))
     if entity_overlap:

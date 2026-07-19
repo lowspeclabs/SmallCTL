@@ -12,6 +12,7 @@ from .harness import Harness, HarnessConfig
 from .logging_utils import create_run_logger, log_kv, setup_logging
 from .memory_cli import build_memory_parser, handle_memory_command
 from .presets import list_presets
+from .redaction import redact_sensitive_data
 from .update_cli import build_update_parser, handle_update_command
 
 
@@ -22,18 +23,30 @@ def _escalation_harness_kwargs(config: object) -> dict[str, object]:
         "escalation_auto_trigger": getattr(config, "escalation_auto_trigger", False),
         "escalation_endpoint": getattr(config, "escalation_endpoint", None),
         "escalation_model": getattr(config, "escalation_model", None),
-        "escalation_provider_profile": getattr(config, "escalation_provider_profile", "auto"),
+        "escalation_provider_profile": getattr(
+            config, "escalation_provider_profile", "auto"
+        ),
         "escalation_api_key": getattr(config, "escalation_api_key", None),
         "escalation_api_key_env": getattr(config, "escalation_api_key_env", None),
-        "escalation_chat_endpoint": getattr(config, "escalation_chat_endpoint", "/chat/completions"),
-        "escalation_max_prompt_chars": getattr(config, "escalation_max_prompt_chars", 48000),
-        "escalation_max_response_tokens": getattr(config, "escalation_max_response_tokens", 1600),
+        "escalation_chat_endpoint": getattr(
+            config, "escalation_chat_endpoint", "/chat/completions"
+        ),
+        "escalation_max_prompt_chars": getattr(
+            config, "escalation_max_prompt_chars", 48000
+        ),
+        "escalation_max_response_tokens": getattr(
+            config, "escalation_max_response_tokens", 1600
+        ),
         "escalation_temperature": getattr(config, "escalation_temperature", 0.2),
         "escalation_timeout_sec": getattr(config, "escalation_timeout_sec", 120),
         "escalation_max_per_task": getattr(config, "escalation_max_per_task", 3),
         "escalation_cooldown_turns": getattr(config, "escalation_cooldown_turns", 2),
-        "escalation_repeated_failure_threshold": getattr(config, "escalation_repeated_failure_threshold", 2),
-        "escalation_require_tool_plan_evidence": getattr(config, "escalation_require_tool_plan_evidence", True),
+        "escalation_repeated_failure_threshold": getattr(
+            config, "escalation_repeated_failure_threshold", 2
+        ),
+        "escalation_require_tool_plan_evidence": getattr(
+            config, "escalation_require_tool_plan_evidence", True
+        ),
         "escalation_redact_secrets": getattr(config, "escalation_redact_secrets", True),
     }
 
@@ -44,9 +57,15 @@ def build_harness_config_kwargs(
     run_logger: logging.Logger,
     task: str | None = None,
 ) -> dict[str, object]:
-    strategy = {"thought_architecture": "staged_reasoning"} if config.staged_reasoning else None
+    strategy = (
+        {"thought_architecture": "staged_reasoning"}
+        if config.staged_reasoning
+        else None
+    )
     max_prompt_tokens_explicit = bool(
-        getattr(config, "max_prompt_tokens_explicit", config.max_prompt_tokens is not None)
+        getattr(
+            config, "max_prompt_tokens_explicit", config.max_prompt_tokens is not None
+        )
     )
     return {
         "endpoint": config.endpoint,
@@ -66,12 +85,36 @@ def build_harness_config_kwargs(
         "graph_checkpointer": config.graph_checkpointer,
         "graph_checkpoint_path": config.graph_checkpoint_path,
         "graph_node_timeout_sec": getattr(config, "graph_node_timeout_sec", 300),
-        "graph_model_call_timeout_sec": getattr(config, "graph_model_call_timeout_sec", 600),
-        "graph_dispatch_tools_timeout_sec": getattr(config, "graph_dispatch_tools_timeout_sec", 300),
+        "graph_model_call_timeout_sec": getattr(
+            config, "graph_model_call_timeout_sec", 600
+        ),
+        "graph_dispatch_tools_timeout_sec": getattr(
+            config, "graph_dispatch_tools_timeout_sec", 300
+        ),
         "graph_idle_watchdog_sec": getattr(config, "graph_idle_watchdog_sec", 300),
         "graph_recursion_limit": getattr(config, "graph_recursion_limit", 1024),
-        "graph_coding_recursion_limit": getattr(config, "graph_coding_recursion_limit", 2048),
+        "graph_coding_recursion_limit": getattr(
+            config, "graph_coding_recursion_limit", 2048
+        ),
         "needs_human_timeout_sec": getattr(config, "needs_human_timeout_sec", 600),
+        "langgraph_native_timeouts_enabled": getattr(
+            config, "langgraph_native_timeouts_enabled", False
+        ),
+        "langgraph_native_retries_enabled": getattr(
+            config, "langgraph_native_retries_enabled", False
+        ),
+        "langgraph_native_retry_max_attempts": getattr(
+            config, "langgraph_native_retry_max_attempts", 2
+        ),
+        "langgraph_error_handlers_enabled": getattr(
+            config, "langgraph_error_handlers_enabled", False
+        ),
+        "langgraph_stream_events_enabled": getattr(
+            config, "langgraph_stream_events_enabled", False
+        ),
+        "langgraph_cache_policy_enabled": getattr(
+            config, "langgraph_cache_policy_enabled", False
+        ),
         "fresh_run": config.fresh_run,
         "fresh_run_turns": config.fresh_run_turns,
         "planning_mode": config.planning_mode,
@@ -99,8 +142,12 @@ def build_harness_config_kwargs(
         "max_summary_items": config.max_summary_items,
         "max_artifact_snippets": config.max_artifact_snippets,
         "artifact_snippet_token_limit": config.artifact_snippet_token_limit,
-        "allow_artifact_read_large_context": getattr(config, "allow_artifact_read_large_context", False),
-        "artifact_summarization_threshold": getattr(config, "artifact_summarization_threshold", 1200),
+        "allow_artifact_read_large_context": getattr(
+            config, "allow_artifact_read_large_context", False
+        ),
+        "artifact_summarization_threshold": getattr(
+            config, "artifact_summarization_threshold", 1200
+        ),
         "multi_file_artifact_snippet_limit": config.multi_file_artifact_snippet_limit,
         "multi_file_primary_file_limit": config.multi_file_primary_file_limit,
         "remote_task_artifact_snippet_limit": config.remote_task_artifact_snippet_limit,
@@ -110,94 +157,201 @@ def build_harness_config_kwargs(
         "summarizer_api_key": getattr(config, "summarizer_api_key", None),
         "indexer": config.indexer,
         "run_mode": getattr(config, "run_mode", "auto"),
-        "tool_plan_runtime_enabled": getattr(config, "tool_plan_runtime_enabled", False),
+        "tool_plan_runtime_enabled": getattr(
+            config, "tool_plan_runtime_enabled", False
+        ),
         "tool_plan_auto_select": getattr(config, "tool_plan_auto_select", False),
         "tool_plan_readonly_only": getattr(config, "tool_plan_readonly_only", True),
         "tool_plan_max_steps": getattr(config, "tool_plan_max_steps", 6),
-        "tool_plan_max_repair_attempts": getattr(config, "tool_plan_max_repair_attempts", 1),
-        "schema_validation_max_repair_attempts": getattr(config, "schema_validation_max_repair_attempts", 2),
+        "tool_plan_max_repair_attempts": getattr(
+            config, "tool_plan_max_repair_attempts", 1
+        ),
+        "schema_validation_max_repair_attempts": getattr(
+            config, "schema_validation_max_repair_attempts", 2
+        ),
         "tool_call_repair_enabled": getattr(config, "tool_call_repair_enabled", True),
-        "tool_call_repair_log_only": getattr(config, "tool_call_repair_log_only", False),
-        "tool_call_repair_max_actions_per_call": getattr(config, "tool_call_repair_max_actions_per_call", 4),
-        "tool_plan_observation_token_limit": getattr(config, "tool_plan_observation_token_limit", 900),
-        "tool_plan_max_observation_chars_per_step": getattr(config, "tool_plan_max_observation_chars_per_step", 600),
-        "tool_plan_solver_fresh_output_limit": getattr(config, "tool_plan_solver_fresh_output_limit", 1200),
+        "tool_call_repair_log_only": getattr(
+            config, "tool_call_repair_log_only", False
+        ),
+        "tool_call_repair_max_actions_per_call": getattr(
+            config, "tool_call_repair_max_actions_per_call", 4
+        ),
+        "tool_plan_observation_token_limit": getattr(
+            config, "tool_plan_observation_token_limit", 900
+        ),
+        "tool_plan_max_observation_chars_per_step": getattr(
+            config, "tool_plan_max_observation_chars_per_step", 600
+        ),
+        "tool_plan_solver_fresh_output_limit": getattr(
+            config, "tool_plan_solver_fresh_output_limit", 1200
+        ),
         "tool_plan_allow_web": getattr(config, "tool_plan_allow_web", True),
-        "tool_plan_allow_artifact_read": getattr(config, "tool_plan_allow_artifact_read", True),
+        "tool_plan_allow_artifact_read": getattr(
+            config, "tool_plan_allow_artifact_read", True
+        ),
         "tool_plan_allow_git": getattr(config, "tool_plan_allow_git", False),
-        "tool_plan_fallback_to_loop_on_invalid_plan": getattr(config, "tool_plan_fallback_to_loop_on_invalid_plan", True),
+        "tool_plan_fallback_to_loop_on_invalid_plan": getattr(
+            config, "tool_plan_fallback_to_loop_on_invalid_plan", True
+        ),
         "tool_dag_enabled": getattr(config, "tool_dag_enabled", False),
         "tool_dag_max_parallel": getattr(config, "tool_dag_max_parallel", 4),
         "tool_dag_timeout_sec": getattr(config, "tool_dag_timeout_sec", 30),
-        "tool_dag_preserve_result_order": getattr(config, "tool_dag_preserve_result_order", True),
+        "tool_dag_preserve_result_order": getattr(
+            config, "tool_dag_preserve_result_order", True
+        ),
         "min_exploration_steps": getattr(config, "min_exploration_steps", 1),
         "chunk_mode_min_bytes": getattr(config, "chunk_mode_min_bytes", 4096),
         "chunk_mode_new_file_only": getattr(config, "chunk_mode_new_file_only", True),
-        "chunk_mode_supported_models": getattr(config, "chunk_mode_supported_models", ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"]),
-        "small_model_soft_write_chars": getattr(config, "small_model_soft_write_chars", 2000),
-        "small_model_hard_write_chars": getattr(config, "small_model_hard_write_chars", 4000),
-        "new_file_chunk_mode_line_estimate": getattr(config, "new_file_chunk_mode_line_estimate", 100),
-        "allow_multi_section_turns_for_small_edits": getattr(config, "allow_multi_section_turns_for_small_edits", True),
+        "chunk_mode_supported_models": getattr(
+            config,
+            "chunk_mode_supported_models",
+            ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"],
+        ),
+        "small_model_soft_write_chars": getattr(
+            config, "small_model_soft_write_chars", 2000
+        ),
+        "small_model_hard_write_chars": getattr(
+            config, "small_model_hard_write_chars", 4000
+        ),
+        "new_file_chunk_mode_line_estimate": getattr(
+            config, "new_file_chunk_mode_line_estimate", 100
+        ),
+        "allow_multi_section_turns_for_small_edits": getattr(
+            config, "allow_multi_section_turns_for_small_edits", True
+        ),
         "failed_local_patch_limit": getattr(config, "failed_local_patch_limit", 2),
-        "enable_write_intent_recovery": getattr(config, "enable_write_intent_recovery", True),
-        "enable_assistant_code_write_recovery": getattr(config, "enable_assistant_code_write_recovery", True),
-        "write_recovery_min_confidence": getattr(config, "write_recovery_min_confidence", "high"),
-        "write_recovery_allow_raw_text_targets": getattr(config, "write_recovery_allow_raw_text_targets", True),
+        "enable_write_intent_recovery": getattr(
+            config, "enable_write_intent_recovery", True
+        ),
+        "enable_assistant_code_write_recovery": getattr(
+            config, "enable_assistant_code_write_recovery", True
+        ),
+        "write_recovery_min_confidence": getattr(
+            config, "write_recovery_min_confidence", "high"
+        ),
+        "write_recovery_allow_raw_text_targets": getattr(
+            config, "write_recovery_allow_raw_text_targets", True
+        ),
         "solver_refine_enabled": getattr(config, "solver_refine_enabled", False),
         "solver_refine_max_passes": getattr(config, "solver_refine_max_passes", 1),
-        "solver_refine_on_final_answer": getattr(config, "solver_refine_on_final_answer", True),
-        "solver_refine_on_patch_plan": getattr(config, "solver_refine_on_patch_plan", True),
-        "solver_refine_on_task_complete": getattr(config, "solver_refine_on_task_complete", True),
-        "solver_refine_token_budget": getattr(config, "solver_refine_token_budget", 700),
-        "rewoo_lane_frames_enabled": getattr(config, "rewoo_lane_frames_enabled", False),
-        "rewoo_planner_frame_enabled": getattr(config, "rewoo_planner_frame_enabled", False),
-        "rewoo_solver_frame_enabled": getattr(config, "rewoo_solver_frame_enabled", False),
-        "rewoo_refiner_frame_enabled": getattr(config, "rewoo_refiner_frame_enabled", False),
+        "solver_refine_on_final_answer": getattr(
+            config, "solver_refine_on_final_answer", True
+        ),
+        "solver_refine_on_patch_plan": getattr(
+            config, "solver_refine_on_patch_plan", True
+        ),
+        "solver_refine_on_task_complete": getattr(
+            config, "solver_refine_on_task_complete", True
+        ),
+        "solver_refine_token_budget": getattr(
+            config, "solver_refine_token_budget", 700
+        ),
+        "rewoo_lane_frames_enabled": getattr(
+            config, "rewoo_lane_frames_enabled", False
+        ),
+        "rewoo_planner_frame_enabled": getattr(
+            config, "rewoo_planner_frame_enabled", False
+        ),
+        "rewoo_solver_frame_enabled": getattr(
+            config, "rewoo_solver_frame_enabled", False
+        ),
+        "rewoo_refiner_frame_enabled": getattr(
+            config, "rewoo_refiner_frame_enabled", False
+        ),
         "rewoo_frame_token_budget": getattr(config, "rewoo_frame_token_budget", 1200),
         "staged_execution_enabled": getattr(config, "staged_execution_enabled", False),
         "staged_step_prompt_tokens": getattr(config, "staged_step_prompt_tokens", 4096),
-        "test_time_scaling_enabled": getattr(config, "test_time_scaling_enabled", False),
-        "test_time_scaling_runtimes": getattr(config, "test_time_scaling_runtimes", ["staged_execution"]),
-        "test_time_scaling_trigger": getattr(config, "test_time_scaling_trigger", "retry_or_explicit"),
-        "test_time_scaling_max_candidates": getattr(config, "test_time_scaling_max_candidates", 3),
-        "test_time_scaling_min_candidates": getattr(config, "test_time_scaling_min_candidates", 2),
-        "test_time_scaling_policy": getattr(config, "test_time_scaling_policy", "proposal_then_execute"),
-        "test_time_scaling_strategy": getattr(config, "test_time_scaling_strategy", "diverse_nudges"),
-        "test_time_scaling_score_threshold": getattr(config, "test_time_scaling_score_threshold", 0.85),
-        "test_time_scaling_parallel_max": getattr(config, "test_time_scaling_parallel_max", 1),
-        "test_time_scaling_timeout_sec": getattr(config, "test_time_scaling_timeout_sec", 120),
-        "test_time_scaling_mutating_parallel_enabled": getattr(config, "test_time_scaling_mutating_parallel_enabled", False),
-        "test_time_scaling_all_fail_action": getattr(config, "test_time_scaling_all_fail_action", "fallback_normal_retry"),
+        "test_time_scaling_enabled": getattr(
+            config, "test_time_scaling_enabled", False
+        ),
+        "test_time_scaling_runtimes": getattr(
+            config, "test_time_scaling_runtimes", ["staged_execution"]
+        ),
+        "test_time_scaling_trigger": getattr(
+            config, "test_time_scaling_trigger", "retry_or_explicit"
+        ),
+        "test_time_scaling_max_candidates": getattr(
+            config, "test_time_scaling_max_candidates", 3
+        ),
+        "test_time_scaling_min_candidates": getattr(
+            config, "test_time_scaling_min_candidates", 2
+        ),
+        "test_time_scaling_policy": getattr(
+            config, "test_time_scaling_policy", "proposal_then_execute"
+        ),
+        "test_time_scaling_strategy": getattr(
+            config, "test_time_scaling_strategy", "diverse_nudges"
+        ),
+        "test_time_scaling_score_threshold": getattr(
+            config, "test_time_scaling_score_threshold", 0.85
+        ),
+        "test_time_scaling_parallel_max": getattr(
+            config, "test_time_scaling_parallel_max", 1
+        ),
+        "test_time_scaling_timeout_sec": getattr(
+            config, "test_time_scaling_timeout_sec", 120
+        ),
+        "test_time_scaling_mutating_parallel_enabled": getattr(
+            config, "test_time_scaling_mutating_parallel_enabled", False
+        ),
+        "test_time_scaling_all_fail_action": getattr(
+            config, "test_time_scaling_all_fail_action", "fallback_normal_retry"
+        ),
         **_escalation_harness_kwargs(config),
         "run_logger": run_logger,
-        "fama_enabled": False if getattr(config, "fama_disabled", False) else getattr(config, "fama_enabled", True),
+        "fama_enabled": False
+        if getattr(config, "fama_disabled", False)
+        else getattr(config, "fama_enabled", True),
         "fama_disabled": getattr(config, "fama_disabled", False),
         "fama_mode": getattr(config, "fama_mode", "lite"),
         "fama_default_ttl_steps": getattr(config, "fama_default_ttl_steps", 2),
-        "fama_max_active_mitigations": getattr(config, "fama_max_active_mitigations", 2),
+        "fama_max_active_mitigations": getattr(
+            config, "fama_max_active_mitigations", 2
+        ),
         "fama_signal_window": getattr(config, "fama_signal_window", 8),
         "fama_done_gate_on_failure": getattr(config, "fama_done_gate_on_failure", True),
         "fama_capsule_token_budget": getattr(config, "fama_capsule_token_budget", 180),
         "fama_llm_judge_enabled": getattr(config, "fama_llm_judge_enabled", False),
-        "fama_llm_judge_min_severity": getattr(config, "fama_llm_judge_min_severity", 3),
+        "fama_llm_judge_min_severity": getattr(
+            config, "fama_llm_judge_min_severity", 3
+        ),
         "loop_guard_enabled": getattr(config, "loop_guard_enabled", True),
-        "loop_guard_stagnation_threshold": getattr(config, "loop_guard_stagnation_threshold", 3),
-        "loop_guard_level2_threshold": getattr(config, "loop_guard_level2_threshold", 5),
-        "loop_guard_recent_writes_limit": getattr(config, "loop_guard_recent_writes_limit", 5),
+        "loop_guard_stagnation_threshold": getattr(
+            config, "loop_guard_stagnation_threshold", 3
+        ),
+        "loop_guard_level2_threshold": getattr(
+            config, "loop_guard_level2_threshold", 5
+        ),
+        "loop_guard_recent_writes_limit": getattr(
+            config, "loop_guard_recent_writes_limit", 5
+        ),
         "loop_guard_tail_lines": getattr(config, "loop_guard_tail_lines", 50),
-        "loop_guard_similarity_threshold": getattr(config, "loop_guard_similarity_threshold", 0.9),
-        "loop_guard_cumulative_write_gate": getattr(config, "loop_guard_cumulative_write_gate", True),
-        "loop_guard_checkpoint_gate": getattr(config, "loop_guard_checkpoint_gate", True),
+        "loop_guard_similarity_threshold": getattr(
+            config, "loop_guard_similarity_threshold", 0.9
+        ),
+        "loop_guard_cumulative_write_gate": getattr(
+            config, "loop_guard_cumulative_write_gate", True
+        ),
+        "loop_guard_checkpoint_gate": getattr(
+            config, "loop_guard_checkpoint_gate", True
+        ),
         "loop_guard_diff_gate": getattr(config, "loop_guard_diff_gate", True),
+        "max_consecutive_errors": getattr(config, "max_consecutive_errors", 8),
         "reflexion_enabled": getattr(config, "reflexion_enabled", True),
         "reflexion_max_items": getattr(config, "reflexion_max_items", 5),
         "reflexion_inject_top_k": getattr(config, "reflexion_inject_top_k", 3),
-        "reflexion_persist_cross_task": getattr(config, "reflexion_persist_cross_task", False),
-        "reflexion_min_failure_severity": getattr(config, "reflexion_min_failure_severity", "warning"),
+        "reflexion_persist_cross_task": getattr(
+            config, "reflexion_persist_cross_task", False
+        ),
+        "reflexion_min_failure_severity": getattr(
+            config, "reflexion_min_failure_severity", "warning"
+        ),
         "subtask_ledger_enabled": getattr(config, "subtask_ledger_enabled", True),
         "subtask_max_active": getattr(config, "subtask_max_active", 1),
         "subtask_max_history": getattr(config, "subtask_max_history", 12),
-        "subtask_inject_completed_limit": getattr(config, "subtask_inject_completed_limit", 3),
+        "subtask_inject_completed_limit": getattr(
+            config, "subtask_inject_completed_limit", 3
+        ),
         "sudo_password": getattr(config, "sudo_password", None),
         "verbose": getattr(config, "verbose", False),
         "debug_subsystems": getattr(config, "debug_subsystems", None),
@@ -220,7 +374,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase", help="Initial phase (explore|plan|execute|verify)")
     parser.add_argument(
         "--provider-profile",
-        choices=["auto", "generic", "openai", "ollama", "vllm", "lmstudio", "openrouter", "llamacpp"],
+        choices=[
+            "auto",
+            "generic",
+            "openai",
+            "ollama",
+            "vllm",
+            "lmstudio",
+            "openrouter",
+            "llamacpp",
+        ],
         help="Compatibility profile for OpenAI-compatible provider behavior",
     )
     parser.add_argument(
@@ -275,6 +438,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph-checkpoint-path",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--langgraph-native-timeouts",
+        dest="langgraph_native_timeouts_enabled",
+        action="store_true",
+        default=None,
+        help="Enable LangGraph native per-node timeouts for safe async nodes (default: False)",
+    )
+    parser.add_argument(
+        "--langgraph-native-retries",
+        dest="langgraph_native_retries_enabled",
+        action="store_true",
+        default=None,
+        help="Enable LangGraph native retries for safe, idempotent graph nodes (default: False)",
+    )
+    parser.add_argument(
+        "--langgraph-native-retry-max-attempts",
+        type=int,
+        default=None,
+        help="Maximum total attempts for safe LangGraph node retries, capped at 2 (default: 2)",
+    )
+    parser.add_argument(
+        "--langgraph-error-handlers",
+        dest="langgraph_error_handlers_enabled",
+        action="store_true",
+        default=None,
+        help="Enable LangGraph node error handlers for safe prompt/interpret nodes (default: False)",
+    )
+    parser.add_argument(
+        "--langgraph-stream-events",
+        dest="langgraph_stream_events_enabled",
+        action="store_true",
+        default=None,
+        help="Expose LangGraph task/checkpoint lifecycle events to the TUI/logs (default: False)",
+    )
+    parser.add_argument(
+        "--langgraph-cache-policy",
+        dest="langgraph_cache_policy_enabled",
+        action="store_true",
+        default=None,
+        help="Enable LangGraph native CachePolicy for deterministic nodes. NOT IMPLEMENTED: no candidate node has a provably correct cache key (default: False)",
     )
     parser.add_argument(
         "--resume",
@@ -388,19 +592,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cleanup",
         action="store_true",
+        default=None,
         help="Remove Python cache artifacts before starting harness",
     )
     parser.add_argument(
         "--tui",
         action="store_true",
+        default=None,
         help="Launch Textual UI shell",
     )
     parser.add_argument(
         "--indexer",
         action="store_true",
+        default=None,
         help="Run in code indexer mode",
     )
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--debug", action="store_true", default=None, help="Enable debug logging")
     parser.add_argument(
         "--debug-subsystem",
         dest="debug_subsystems",
@@ -408,27 +615,58 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Enable debug logging for a subsystem (client, graph, tools, context, fama, ui, memory, state). May be repeated.",
     )
-    parser.add_argument("--debug-tokens", action="store_true", default=None, help="Log every model token instead of sampling")
-    parser.add_argument("--log-max-mb", type=int, help="Per-run log size cap in megabytes (default: 100)")
+    parser.add_argument(
+        "--debug-tokens",
+        action="store_true",
+        default=None,
+        help="Log every model token instead of sampling",
+    )
+    parser.add_argument(
+        "--log-max-mb",
+        type=int,
+        help="Per-run log size cap in megabytes (default: 100)",
+    )
     parser.add_argument("--api-key", dest="api_key", help="API key for endpoint")
-    parser.add_argument("--context-limit", type=int, help="Context window/token budget override")
-    parser.add_argument("--max-prompt-tokens", type=int, help="Per-request prompt token budget")
+    parser.add_argument(
+        "--context-limit", type=int, help="Context window/token budget override"
+    )
+    parser.add_argument(
+        "--max-prompt-tokens", type=int, help="Per-request prompt token budget"
+    )
     parser.add_argument(
         "--swa-prompt-cap",
         type=int,
         help="Prompt-token hard cap for SWA/hybrid-memory models (default: 12288)",
     )
-    parser.add_argument("--max-completion-tokens", type=int, help="Per-turn maximum completion token budget")
-    parser.add_argument("--reserve-completion-tokens", type=int, help="Reserved completion tokens")
-    parser.add_argument("--reserve-tool-tokens", type=int, help="Reserved tool-call tokens")
+    parser.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        help="Per-turn maximum completion token budget",
+    )
+    parser.add_argument(
+        "--reserve-completion-tokens", type=int, help="Reserved completion tokens"
+    )
+    parser.add_argument(
+        "--reserve-tool-tokens", type=int, help="Reserved tool-call tokens"
+    )
     parser.add_argument(
         "--backend-unload-command",
         help="Shell command to unload a wedged backend model before retrying generation",
     )
-    parser.add_argument("--summarize-at-ratio", type=float, help="Prompt usage ratio that triggers compaction")
-    parser.add_argument("--recent-message-limit", type=int, help="Recent raw message retention limit")
-    parser.add_argument("--max-summary-items", type=int, help="Maximum retrieved summary items")
-    parser.add_argument("--max-artifact-snippets", type=int, help="Maximum retrieved artifact snippets")
+    parser.add_argument(
+        "--summarize-at-ratio",
+        type=float,
+        help="Prompt usage ratio that triggers compaction",
+    )
+    parser.add_argument(
+        "--recent-message-limit", type=int, help="Recent raw message retention limit"
+    )
+    parser.add_argument(
+        "--max-summary-items", type=int, help="Maximum retrieved summary items"
+    )
+    parser.add_argument(
+        "--max-artifact-snippets", type=int, help="Maximum retrieved artifact snippets"
+    )
     parser.add_argument(
         "--artifact-snippet-token-limit",
         type=int,
@@ -445,10 +683,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Minimum required steps in DISCOVERY phase before allowing task completion",
     )
-    parser.add_argument("--rewoo-lane-frames", dest="rewoo_lane_frames_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--rewoo-planner-frame", dest="rewoo_planner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--rewoo-solver-frame", dest="rewoo_solver_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--rewoo-refiner-frame", dest="rewoo_refiner_frame_enabled", action="store_true", default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--rewoo-lane-frames",
+        dest="rewoo_lane_frames_enabled",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--rewoo-planner-frame",
+        dest="rewoo_planner_frame_enabled",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--rewoo-solver-frame",
+        dest="rewoo_solver_frame_enabled",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--rewoo-refiner-frame",
+        dest="rewoo_refiner_frame_enabled",
+        action="store_true",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--rewoo-frame-token-budget", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--fama-enabled",
@@ -459,14 +721,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fama-disabled",
         action="store_true",
+        default=None,
         help="Explicitly disable FAMA failure-aware mitigation at runtime. This is the only override that prevents the loop-mode guard from auto-enabling FAMA.",
     )
-    
+    parser.add_argument(
+        "--max-consecutive-errors",
+        type=int,
+        help="Maximum consecutive countable errors before the guard trips (default: 8)",
+    )
+
     # Subcommands
     subparsers = parser.add_subparsers(dest="command")
     build_memory_parser(subparsers)
     build_update_parser(subparsers)
-    
+
     return parser
 
 
@@ -484,7 +752,13 @@ def _resolve_session_id(harness: object | None, fallback: str | None = None) -> 
     return ""
 
 
-def _print_shutdown_alert(session_id: str, status: str = "alert", *, reason: str | None = None, include_message: bool = True) -> None:
+def _print_shutdown_alert(
+    session_id: str,
+    status: str = "alert",
+    *,
+    reason: str | None = None,
+    include_message: bool = True,
+) -> None:
     payload = {
         "status": status,
         "session_id": session_id or "unknown",
@@ -493,9 +767,7 @@ def _print_shutdown_alert(session_id: str, status: str = "alert", *, reason: str
         payload["reason"] = reason
     if include_message:
         payload["message"] = (
-            "smallctl closed via Ctrl+C"
-            if status == "alert"
-            else "smallctl TUI closed"
+            "smallctl closed via Ctrl+C" if status == "alert" else "smallctl TUI closed"
         )
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -503,7 +775,7 @@ def _print_shutdown_alert(session_id: str, status: str = "alert", *, reason: str
 def cli(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    
+
     # Handle subcommands first
     if args.command == "memory":
         return handle_memory_command(args)
@@ -515,7 +787,7 @@ def cli(argv: list[str] | None = None) -> int:
     setup_logging(
         config.debug,
         log_file=config.log_file,
-        stream_to_terminal=not args.tui,
+        stream_to_terminal=not config.tui,
         debug_subsystems=config.debug_subsystems,
     )
     run_logger = create_run_logger(
@@ -540,19 +812,23 @@ def cli(argv: list[str] | None = None) -> int:
         phase=config.phase,
         provider_profile=config.provider_profile,
         staged_reasoning=config.staged_reasoning,
-        tui=bool(args.tui),
+        tui=bool(config.tui),
         run_log_dir=str(run_logger.run_dir),
     )
-    if not args.tui:
-        print(json.dumps({"status": "logging_ready", "run_log_dir": str(run_logger.run_dir)}))
+    if not config.tui:
+        print(
+            json.dumps(
+                {"status": "logging_ready", "run_log_dir": str(run_logger.run_dir)}
+            )
+        )
 
         if config.debug:
-            print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
+            print(json.dumps(redact_sensitive_data(config.to_dict()), indent=2, sort_keys=True))
 
     for warning in config.compatibility_warnings:
         log_kv(log, logging.WARNING, "config_compatibility_warning", warning=warning)
 
-    if args.cleanup:
+    if config.cleanup:
         cleanup_result = run_cleanup(".")
         print(
             json.dumps(
@@ -562,9 +838,11 @@ def cli(argv: list[str] | None = None) -> int:
             )
         )
 
-    if args.tui:
+    if config.tui:
         show_system_setting = getattr(config, "show_system_messages", None)
-        show_system_messages = bool(show_system_setting) if show_system_setting is not None else False
+        show_system_messages = (
+            bool(show_system_setting) if show_system_setting is not None else False
+        )
         include_shutdown_message = show_system_setting is not False
         if show_system_messages and not sys.stdin.isatty():
             print(
@@ -580,9 +858,15 @@ def cli(argv: list[str] | None = None) -> int:
         try:
             from .ui import SmallctlApp
         except Exception as exc:
-            print(json.dumps({"status": "failed", "reason": f"TUI unavailable: {exc}"}, indent=2))
+            print(
+                json.dumps(
+                    {"status": "failed", "reason": f"TUI unavailable: {exc}"}, indent=2
+                )
+            )
             return 1
-        harness_kwargs = build_harness_config_kwargs(config, run_logger=run_logger, task=config.task)
+        harness_kwargs = build_harness_config_kwargs(
+            config, run_logger=run_logger, task=config.task
+        )
         harness_kwargs["restore_graph_state_on_startup"] = config.restore_graph_state
         harness_kwargs["restore_thread_id"] = config.graph_thread_id
         harness_kwargs["show_system_messages"] = show_system_messages
@@ -603,7 +887,8 @@ def cli(argv: list[str] | None = None) -> int:
             _print_shutdown_alert(
                 _resolve_session_id(
                     getattr(app, "harness", None),
-                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
+                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip()
+                    or None,
                 ),
                 reason="keyboard_interrupt",
                 include_message=include_shutdown_message,
@@ -626,7 +911,8 @@ def cli(argv: list[str] | None = None) -> int:
             _print_shutdown_alert(
                 _resolve_session_id(
                     getattr(app, "harness", None),
-                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip() or None,
+                    fallback=str(getattr(app, "restore_thread_id", None) or "").strip()
+                    or None,
                 ),
                 status="exited",
                 reason="user_quit_confirmed",
@@ -634,7 +920,9 @@ def cli(argv: list[str] | None = None) -> int:
             )
             return 130
     elif config.task or config.restore_graph_state:
-        harness = Harness(HarnessConfig(**build_harness_config_kwargs(config, run_logger=run_logger)))
+        harness = Harness(
+            HarnessConfig(**build_harness_config_kwargs(config, run_logger=run_logger))
+        )
         if config.restore_graph_state and not config.fresh_run:
             restored = harness.restore_graph_state(thread_id=config.graph_thread_id)
             if not restored:
@@ -686,7 +974,9 @@ def cli(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 log.warning("Harness teardown failed: %s", exc)
         if interrupted:
-            _print_shutdown_alert(_resolve_session_id(harness), reason="keyboard_interrupt")
+            _print_shutdown_alert(
+                _resolve_session_id(harness), reason="keyboard_interrupt"
+            )
             return 130
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

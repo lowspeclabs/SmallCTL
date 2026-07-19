@@ -43,6 +43,28 @@ def _tool_call_stream_boundary(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _details_explicitly_indicate_content_policy(details: dict[str, Any]) -> bool:
+    """True only when the provider details explicitly say content policy.
+
+    A bare HTTP 403 can mean authorization, entitlement, or account policy
+    failures; it is a content-policy violation only when the reason/type or
+    the provider's own message names a content/safety policy block.
+    """
+    candidates = (
+        details.get("reason"),
+        details.get("type"),
+        details.get("provider_error"),
+        details.get("message"),
+    )
+    for value in candidates:
+        text = str(value or "").strip().lower().replace("_", " ")
+        if not text:
+            continue
+        if "content policy" in text or "safety filter" in text:
+            return True
+    return False
+
+
 def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
     details = details if isinstance(details, dict) else {}
     if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
@@ -50,6 +72,29 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
         model = str(details.get("model") or "").strip()
         suffix = f" for {model}" if model else ""
         return f"{provider} model is unloaded{suffix}"
+    if details.get("type") == "content_policy_violation" or details.get("reason") == "provider_content_policy_block":
+        provider = str(details.get("provider_profile") or "provider").strip() or "provider"
+        provider_error = str(details.get("provider_error") or "").strip()
+        suffix = f" ({provider_error})" if provider_error else ""
+        return (
+            f"{provider} content policy violation: the request was blocked by the "
+            f"provider's safety filter{suffix}. Remove credentials or sensitive data "
+            "from the prompt and retry."
+        )
+    if int(details.get("status_code", 0) or 0) == 403:
+        provider = str(details.get("provider_profile") or "provider").strip() or "provider"
+        if _details_explicitly_indicate_content_policy(details):
+            return (
+                f"{provider} content policy violation: the request was rejected (HTTP 403). "
+                "Remove credentials or sensitive data from the prompt and retry."
+            )
+        provider_error = str(details.get("provider_error") or "").strip()
+        detail = provider_error or str(details.get("message") or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            f"{provider} request rejected (HTTP 403){suffix}. "
+            "Check API key permissions, entitlements, or provider account policy."
+        )
     if details.get("reason") == "openrouter_authentication_failed":
         provider_error = str(details.get("provider_error") or "").strip()
         suffix = f" ({provider_error})" if provider_error else ""
@@ -71,6 +116,9 @@ def _chunk_error_failure_message(details: dict[str, Any] | None) -> str:
             label = f"{provider}/{upstream}"
         suffix = f": {provider_error}" if provider_error else ""
         return f"{label} input validation failed after retries (HTTP 400{suffix})"
+    message = str(details.get("message") or "").strip()
+    if message:
+        return f"Upstream chunk error after retries: {message}"
     return "Upstream chunk error after retries"
 
 
@@ -79,6 +127,12 @@ def _chunk_error_failure_type(details: dict[str, Any] | None) -> str:
     if details.get("reason") == "backend_stream_failure":
         return "backend_stream_failure"
     if details.get("reason") == "model_unloaded" or details.get("type") == "model_unloaded":
+        return "provider"
+    if details.get("type") == "content_policy_violation" or details.get("reason") == "provider_content_policy_block":
+        return "content_policy_violation"
+    if int(details.get("status_code", 0) or 0) == 403:
+        if _details_explicitly_indicate_content_policy(details):
+            return "content_policy_violation"
         return "provider"
     if details.get("reason") == "openrouter_authentication_failed":
         return "provider"

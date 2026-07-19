@@ -56,8 +56,8 @@ def test_shell_approval_request_emits_proof_bundle() -> None:
     assert asyncio.run(_run()) is True
 
 
-def test_shell_approval_grace_period_resolves_after_timeout() -> None:
-    """Late UI resolutions within the grace period should still be honoured."""
+def test_shell_approval_timeout_enforced_returns_false() -> None:
+    """A zero timeout should cause the approval to return False immediately."""
     events: list[object] = []
 
     class _FakeHarness:
@@ -80,17 +80,17 @@ def test_shell_approval_grace_period_resolves_after_timeout() -> None:
             )
         )
         await asyncio.sleep(0.05)
-        # Resolve within grace period (5 seconds)
+        # Late resolution should be a no-op because the future already timed out.
         approval_id = str(events[0].data.get("approval_id") or "")
         service.resolve_shell_approval(approval_id, True)
         return await approval_task
 
-    # Should return True because the late resolution is honoured during grace period
-    assert asyncio.run(_run()) is True
+    # Should return False because timeout is enforced.
+    assert asyncio.run(_run()) is False
 
 
-def test_shell_approval_past_grace_period_is_ignored() -> None:
-    """Resolutions after arbitrary delay are still accepted (no timeout)."""
+def test_shell_approval_late_resolution_after_timeout_is_ignored() -> None:
+    """Resolutions after the timeout has fired should be ignored."""
     events: list[object] = []
 
     class _FakeHarness:
@@ -109,18 +109,17 @@ def test_shell_approval_past_grace_period_is_ignored() -> None:
             service.request_shell_approval(
                 command="echo hello",
                 cwd="/tmp",
-                timeout_sec=0,  # No longer enforced; harness blocks indefinitely
+                timeout_sec=0,  # Immediate timeout
             )
         )
         await asyncio.sleep(0.1)
         approval_id = str(events[0].data.get("approval_id") or "")
-        # Resolve after arbitrary delay
+        # Resolve after the timeout has already fired
         service.resolve_shell_approval(approval_id, True)
         return await approval_task
 
-    # Should return True because the approval is resolved before the
-    # task is cancelled — there is no timeout to race against.
-    assert asyncio.run(_run()) is True
+    # Should return False because the approval timed out before the resolution.
+    assert asyncio.run(_run()) is False
 
 
 def test_approval_screen_renders_proof_bundle_details() -> None:

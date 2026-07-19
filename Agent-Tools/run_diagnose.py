@@ -23,6 +23,9 @@ from agent_tools_lib import (
     Colors,
     colorize,
     detect_apt_deb822_guard_misfire,
+    detect_background_state_changing_shell,
+    detect_phantom_code_changes,
+    detect_shell_execution_anomalies,
     detect_primary_blockers,
     error_records,
     event_counter,
@@ -31,10 +34,13 @@ from agent_tools_lib import (
     format_duration,
     format_record_summary,
     get_run_objective,
+    harness_reported_blocker,
     has_ask_human_resume_terminal_stall,
     has_chat_terminal_repetition_stall,
     has_continue_prompt_budget_loop,
+    has_fama_ssh_transport_circuit_breaker,
     has_patch_first_policy_loop,
+    has_prompt_budget_overflow,
     has_stderr_signature_circuit_breaker,
     has_strong_environment_blocker,
     has_tool_call_protocol_mismatch,
@@ -84,6 +90,7 @@ def _classify_failure(
     failed_dispatches: list[dict[str, Any]],
     harness_records: list[dict[str, Any]],
     *,
+    task_summary: dict[str, Any] | None = None,
     model_output_records: list[dict[str, Any]] | None = None,
     tools_records: list[dict[str, Any]] | None = None,
     chat_records: list[dict[str, Any]] | None = None,
@@ -95,6 +102,8 @@ def _classify_failure(
     has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
 
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    background_blockers = detect_background_state_changing_shell(tools_records or [])
+    shell_anomalies = detect_shell_execution_anomalies(tools_records or [])
 
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
@@ -112,10 +121,16 @@ def _classify_failure(
         return "file_patch_target_not_found_loop"
     if _has_ask_human_resume_terminal_stall(harness_records):
         return "ask_human_resume_terminal_tool_stall"
+    if has_prompt_budget_overflow(session, task_summary or {}, harness_records, chat_records or []):
+        return "prompt_budget_overflow"
+    if background_blockers:
+        return "background_state_change_unverified"
     if has_strong_environment_blocker(primary_blockers):
         return "environment_blocker"
     if has_stderr_signature_circuit_breaker(harness_records):
         return "harness_circuit_breaker_false_positive"
+    if has_fama_ssh_transport_circuit_breaker(harness_records):
+        return "ssh_transport_circuit_breaker_false_positive"
     if detect_apt_deb822_guard_misfire(harness_records):
         return "guard_misfire"
     if events.get("tool_blocked_not_exposed"):
@@ -168,7 +183,27 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
 
     last_error_trace_ids = [extract_trace_id(e) for e in errors[-5:]]
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    primary_blockers.extend(detect_background_state_changing_shell(tools_records))
+    shell_anomalies = detect_shell_execution_anomalies(tools_records)
     apt_deb822_misfires = detect_apt_deb822_guard_misfire(harness_records)
+    reported_blocker = harness_reported_blocker(summaries, task_summaries)
+    phantom_changes = detect_phantom_code_changes(summaries, tools_records, run_dir)
+
+    recommended = _recommend_next_steps(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records)
+    if reported_blocker and not primary_blockers:
+        recommended.insert(
+            0,
+            f"Harness-reported blocker (non-environmental): {reported_blocker[:200]}. "
+            "Verify the referenced path/state directly before chasing model-side causes.",
+        )
+    if phantom_changes:
+        staged = [p["path"] for p in phantom_changes if p.get("staged_evidence")]
+        detail = f" ({len(staged)} with staged-only write-session evidence)" if staged else ""
+        recommended.append(
+            f"{len(phantom_changes)} path(s) recorded as code changes are missing on disk{detail}: "
+            + ", ".join(p["path"] for p in phantom_changes[:3])
+            + ". Check .smallctl/write_sessions/ for unpromoted staging copies."
+        )
 
     diagnosis = {
         "run_dir": str(run_dir),
@@ -177,8 +212,11 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "objective": get_run_objective(session, task_summary, task_summaries),
         "session_summary": session,
         "task_summary": task_summary,
-        "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
+        "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records, task_summary=task_summary, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
         "primary_blockers": primary_blockers,
+        "harness_reported_blocker": reported_blocker,
+        "phantom_code_changes": phantom_changes,
+        "shell_execution_anomalies": shell_anomalies,
         "apt_deb822_guard_misfires": [format_record_summary(r) for r in apt_deb822_misfires],
         "event_counts": dict(events),
         "error_record_count": len(errors),
@@ -189,7 +227,7 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "tool_failures_by_name": dict(tool_failures_by_name),
         "task_count": len(task_summaries),
         "task_statuses": [{"task_id": t.get("task_id"), "status": t.get("status"), "reason": t.get("reason")} for t in task_summaries],
-        "recommended_next_steps": _recommend_next_steps(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
+        "recommended_next_steps": recommended,
     }
     return diagnosis
 
@@ -207,6 +245,7 @@ def _recommend_next_steps(
 ) -> list[str]:
     steps: list[str] = []
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    primary_blockers.extend(detect_background_state_changing_shell(tools_records or []))
     if primary_blockers:
         top = primary_blockers[0]
         steps.append(
@@ -215,10 +254,23 @@ def _recommend_next_steps(
         )
     if errors and (tid := extract_trace_id(errors[-1])):
         steps.append(f"Trace the most recent error: python3 Agent-Tools/trace_call.py --run <run> {tid}")
+    if has_prompt_budget_overflow(session, harness_records, chat_records or []):
+        steps.append("Prompt budget overflow ended the run; reduce context, start a fresh run, or lower retrieval/artifact volume before retrying.")
+    if detect_background_state_changing_shell(tools_records or []):
+        steps.append("A state-changing shell command was launched in the background; inspect the process/log output and require a foreground readback before treating it as successful.")
+    shell_anomalies = detect_shell_execution_anomalies(tools_records or [])
+    if any(item["pattern"] == "pipeline_may_mask_command_failure" for item in shell_anomalies):
+        steps.append("A pipeline hid a CLI error behind a successful shell dispatch; use pipefail or inspect PIPESTATUS before accepting the result.")
+    if any(item["pattern"] == "placeholder_configuration_observed" for item in shell_anomalies):
+        steps.append("Configuration output contains a placeholder value; replace or explicitly override it before diagnosing the target service.")
+    if any(item["pattern"] == "repeated_endpoint_probe_without_new_evidence" for item in shell_anomalies):
+        steps.append("The same endpoint was probed repeatedly without new evidence; inspect one verbose request or verify routing before retrying.")
     if events.get("model_output_degenerate_loop_exhausted"):
         steps.append("Investigate model stream degeneration; check model_output.log for repeated phrases.")
     if has_stderr_signature_circuit_breaker(harness_records):
         steps.append("Harness stderr-signature circuit breaker tripped on repeated identical stderr; use a different repair strategy instead of retrying the same command.")
+    if has_fama_ssh_transport_circuit_breaker(harness_records):
+        steps.append("FAMA SSH transport circuit breaker tripped; confirm whether SSH actually failed or a remote command returned exit 255 with remote stderr.")
     if detect_apt_deb822_guard_misfire(harness_records):
         steps.append("apt_deb822 preflight guard blocked after validator already passed; review guard state and whether the block is stale.")
     if _has_write_overwrite_guard_failures(failed_dispatches):
@@ -279,14 +331,33 @@ def _render_text(diagnosis: dict[str, Any]) -> str:
     lines.append(f"  final_task_status: {task_summary.get('final_task_status', 'n/a')}")
     lines.append(f"  deliverable_verified: {session.get('deliverable_verified', 'n/a')}")
 
+    anomalies = diagnosis.get("shell_execution_anomalies") or []
+    if anomalies:
+        lines.append("  shell execution findings:")
+        for item in anomalies:
+            lines.append(f"    {item['pattern']}: {item['sample'][:120]}")
+
     blockers = diagnosis.get("primary_blockers") or []
     lines.append("")
     lines.append(colorize("Primary blockers", Colors.BOLD + Colors.BLUE))
     if blockers:
         for b in blockers:
             lines.append(f"  {b['pattern']}: {b['count']}x  sample: {b['sample'][:120]}")
+    elif diagnosis.get("harness_reported_blocker"):
+        lines.append(colorize(f"  harness-reported blocker (non-environmental): {str(diagnosis['harness_reported_blocker'])[:160]}", Colors.YELLOW))
     else:
         lines.append("  none detected")
+
+    phantom = diagnosis.get("phantom_code_changes") or []
+    if phantom:
+        lines.append("")
+        lines.append(colorize("Phantom code changes (recorded but missing on disk)", Colors.BOLD + Colors.RED))
+        for item in phantom:
+            lines.append(colorize(f"  {item['path']}", Colors.RED))
+            if item.get("staged_evidence"):
+                lines.append("        write was staged_only / never finalized (write session not promoted)")
+            for staging in item.get("staging_files", []):
+                lines.append(f"        staging copy: .smallctl/write_sessions/{staging}")
 
     apt_misfires = diagnosis.get("apt_deb822_guard_misfires") or []
     if apt_misfires:

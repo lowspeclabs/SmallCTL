@@ -622,7 +622,7 @@ async def handle_file_patch(
         status_block = None
 
     if not dry_run:
-        _record_file_change(state, target)
+        _record_file_change(state, source_path if staged_only else target)
     metadata = _build_patch_metadata(
         path=target,
         requested_path=path,

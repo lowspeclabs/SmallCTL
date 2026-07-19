@@ -287,6 +287,61 @@ async def _maybe_recover_missing_first_write_session(
     return True
 
 
+def _maybe_emit_staged_content_already_current_nudge(harness: Any, record: ToolExecutionRecord) -> bool:
+    """When LoopGuard rejects an overlapping chunk whose payload is already in the
+    staged copy, tell the model to finalize instead of re-sending a chunk the
+    same guard will reject again."""
+    metadata = record.result.metadata if isinstance(record.result.metadata, dict) else {}
+    if str(metadata.get("error_kind") or "").strip() != "chunked_write_append_overlap_detected":
+        return False
+    state = getattr(harness, "state", None)
+    if state is None:
+        return False
+    session = getattr(state, "write_session", None)
+    staging_path = str(getattr(session, "write_staging_path", "") or "").strip() if session is not None else ""
+    content = str((record.args or {}).get("content") or "")
+    if not staging_path or not content.strip():
+        return False
+    path = str(metadata.get("path") or (record.args or {}).get("path") or "").strip()
+    nudge_key = f"_loop_guard_already_staged_nudged:{path}"
+    if state.scratchpad.get(nudge_key):
+        return False
+    try:
+        staged_content = Path(staging_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if content.strip() not in staged_content:
+        return False
+    state.scratchpad[nudge_key] = True
+    session_id = str(getattr(session, "write_session_id", "") or "").strip()
+    state.append_message(
+        ConversationMessage(
+            role="system",
+            content=(
+                f"The content you just tried to write to `{path}` is already present in the staged copy. "
+                "Do not re-send it as another section or chunk; the write guard will reject repeats. "
+                "Call `finalize_write_session` to promote the staged copy to the target "
+                "(or send the final section with no `next_section_name`), then verify and call `task_complete`."
+            ),
+            metadata={
+                "is_recovery_nudge": True,
+                "recovery_kind": "chunked_write_loop_guard_already_staged",
+                "target_path": path,
+                "write_session_id": session_id,
+            },
+        )
+    )
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        runlog(
+            "chunked_write_loop_guard_already_staged_nudge",
+            "told model the blocked chunk content is already staged; finalize instead of re-sending",
+            path=path,
+            write_session_id=session_id,
+        )
+    return True
+
+
 async def _maybe_finalize_chunked_write_loop_guard_abort(
     graph_state: GraphRunState,
     harness: Any,
@@ -951,6 +1006,7 @@ async def handle_failed_file_write_outcome(
             ),
         )
     elif _maybe_schedule_chunked_write_loop_guard_read(graph_state, harness, record):
+        _maybe_emit_staged_content_already_current_nudge(harness, record)
         await harness._emit(
             deps.event_handler,
             UIEvent(

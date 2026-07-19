@@ -37,8 +37,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--logs-dir", help="Custom logs directory")
     parser.add_argument("--list", action="store_true", help="List available checkpoints (default)")
     parser.add_argument("--diff", nargs=2, metavar=("A", "B"), help="Compare two checkpoints by key or index")
+    parser.add_argument("--history", action="store_true", help="Print a metadata-only checkpoint write-history summary")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     return parser.parse_args()
+
+
+def _print_history_summary(path: Path) -> int:
+    try:
+        from smallctl.graph.checkpoint import FileCheckpointSaver
+    except ImportError as exc:
+        print(colorize(f"Unable to load checkpoint diagnostics: {exc}", Colors.RED), file=sys.stderr)
+        print(json.dumps([]))
+        return 0
+
+    try:
+        saver = FileCheckpointSaver(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(colorize(f"Unable to read checkpoint file: {exc}", Colors.RED), file=sys.stderr)
+        print(json.dumps([]))
+        return 0
+
+    summary = saver.checkpoint_history_summary()
+    print(json.dumps(summary, indent=2, default=str))
+    return 0
 
 
 def _find_checkpoint_file(run_dir: Path) -> Path | None:
@@ -184,6 +205,13 @@ def main() -> int:
         return 1
 
     checkpoints = _load_checkpoints(run_dir)
+    ckpt_file = _find_checkpoint_file(run_dir)
+
+    if args.history:
+        if ckpt_file is None:
+            print(json.dumps([]))
+            return 0
+        return _print_history_summary(ckpt_file)
 
     if args.json:
         print(json.dumps({

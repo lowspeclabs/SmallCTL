@@ -23,6 +23,35 @@ _SYSADMIN_MARKERS = (
     "ssh_file_write",
 )
 _FILE_MUTATION_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
+_INFRASTRUCTURE_MUTATION_MARKERS = (
+    "create vm",
+    "create a vm",
+    "create container",
+    "create lxc",
+    "pct create",
+    "qm create",
+    "proxmox",
+    "vm called",
+    "vm named",
+    "container called",
+    "container named",
+    "lxc called",
+    "lxc named",
+)
+_INFRASTRUCTURE_INVENTORY_PATTERNS = (
+    r"\bnodes\s+list\b",
+    r"\bvm\s+list\b",
+    r"\bcontainer\s+list\b",
+    r"\bpct\s+list\b",
+    r"\bqm\s+list\b",
+    r"\bcluster\s+resources\b",
+    r"\bstatus\b.*\ball\b",
+    r"\bsubscriptions?\b",
+    r"\bversion\b",
+    r"\bhelp\b",
+    r"\-\-help\b",
+    r"\b-h\b",
+)
 _VERIFIER_SCAFFOLDING_RE = re.compile(
     r"(?:^|/)temp/(?:verify_[A-Za-z0-9_.-]*|run_verification)\.py$|(?:^|/)run_verification\.py$"
 )
@@ -99,6 +128,8 @@ def record_verifier_result(
     verifier_kind: str,
     verdict: str,
     exit_code: Any,
+    stdout: str = "",
+    stderr: str = "",
 ) -> None:
     if tool_name not in {"shell_exec", "ssh_exec"}:
         return
@@ -118,7 +149,7 @@ def record_verifier_result(
     except (TypeError, ValueError):
         progress.last_verifier_exit_code = None
     if progress.last_verifier_verdict == "pass":
-        if _verifier_matches_user_objective(state, command):
+        if _verifier_matches_user_objective(state, command, stdout=stdout, stderr=stderr):
             if progress.task_category == "coding":
                 # The change is verified only if a mutation has been recorded
                 # for this coding task and the verifier ran at or after it.
@@ -177,7 +208,49 @@ def _extract_target_package_names(task: str) -> list[str]:
     return names
 
 
-def _verifier_matches_user_objective(state: Any, command: str) -> bool:
+def _is_infrastructure_mutation_task(task: str) -> bool:
+    lowered = str(task or "").lower()
+    return any(marker in lowered for marker in _INFRASTRUCTURE_MUTATION_MARKERS)
+
+
+def _extract_requested_resource_names(task: str) -> list[str]:
+    """Extract likely resource names/IDs requested in infrastructure tasks."""
+    lowered = str(task or "").lower()
+    names: list[str] = []
+    for match in re.finditer(r'["\']([a-zA-Z0-9._+\-]{2,50})["\']', lowered):
+        name = match.group(1)
+        if name and name not in names:
+            names.append(name)
+    named_re = re.compile(
+        r"(?:named|called)\s+[\"\']?([a-zA-Z0-9._+\-]{2,50})[\"\']?",
+        re.IGNORECASE,
+    )
+    for match in named_re.finditer(lowered):
+        name = match.group(1).lower()
+        if name and name not in names:
+            names.append(name)
+    create_id_re = re.compile(
+        r"(?:qm|pct|vm|container|lxc)\s+create\s+(?:--?\S+\s+)*(\d{2,}|[a-zA-Z0-9._+\-]{3,50})",
+        re.IGNORECASE,
+    )
+    for match in create_id_re.finditer(lowered):
+        name = match.group(1).lower()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _is_generic_infrastructure_inventory_command(command: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    return any(re.search(pattern, normalized) for pattern in _INFRASTRUCTURE_INVENTORY_PATTERNS)
+
+
+def _verifier_matches_user_objective(
+    state: Any,
+    command: str,
+    stdout: str = "",
+    stderr: str = "",
+) -> bool:
     """Return True if the verifier command matches the user objective.
 
     For install/setup tasks, weak file-existence verifiers do not count as
@@ -190,6 +263,16 @@ def _verifier_matches_user_objective(state: Any, command: str) -> bool:
     ).strip().lower()
     if not task:
         return True
+
+    if _is_infrastructure_mutation_task(task):
+        if _is_generic_infrastructure_inventory_command(command):
+            return False
+        resource_names = _extract_requested_resource_names(task)
+        if resource_names:
+            combined = f"{command}\n{stdout}\n{stderr}".lower()
+            if not any(name in combined for name in resource_names):
+                return False
+
     install_markers = ("install", "setup", "deploy", "configure")
     if not any(m in task for m in install_markers):
         return True

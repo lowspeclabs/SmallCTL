@@ -289,6 +289,11 @@ def _store_verifier_verdict(
             normalized["latest_blocker"] = blocker
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
+    if verdict == "pass":
+        # An accepted (non-insufficient) pass supersedes the failed-verifier
+        # baseline; the gate above has already rejected passes that do not
+        # address it, and rejections never reach this point.
+        state.scratchpad.pop("_last_failed_verifier", None)
     record_verifier_result(
         state,
         tool_name=tool_name,
@@ -296,6 +301,8 @@ def _store_verifier_verdict(
         verifier_kind=str(normalized.get("verifier_kind") or current_verifier_kind),
         verdict=verdict,
         exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
     )
     if blocker:
         _store_latest_execution_blocker(state, blocker)

@@ -2505,8 +2505,9 @@ def test_dispatch_blocks_file_write_after_remote_installer_timeout() -> None:
     asyncio.run(dispatch_tools(graph_state, deps))
 
     assert dispatched == []
-    assert graph_state.last_tool_results == []
     assert graph_state.pending_tool_calls == []
+    assert len(graph_state.last_tool_results) == 1
+    assert graph_state.last_tool_results[0].result.status == "blocked"
     assert state.recent_messages[-1].metadata["recovery_kind"] == "long_running_remote_command"
     assert "larger `timeout_sec`" in state.recent_messages[-1].content
     assert any(event == "long_running_remote_timeout_write_guard" for event, _message, _data in runlog_events)
@@ -2656,7 +2657,9 @@ def test_dispatch_tools_blocks_local_shell_exec_for_remote_task_and_nudges() -> 
     asyncio.run(dispatch_tools(graph_state, deps))
 
     assert dispatched == []
-    assert graph_state.last_tool_results == []
+    assert graph_state.pending_tool_calls == []
+    assert len(graph_state.last_tool_results) == 1
+    assert graph_state.last_tool_results[0].result.status == "blocked"
     assert state.recent_messages
     assert state.recent_messages[-1].content == "This is a remote task. Use `ssh_exec`, not local `shell_exec`."
     assert state.recent_messages[-1].metadata["recovery_mode"] == "remote_task_guard"
@@ -2720,7 +2723,9 @@ def test_dispatch_tools_blocks_local_file_read_for_remote_absolute_path_and_nudg
     asyncio.run(dispatch_tools(graph_state, deps))
 
     assert dispatched == []
-    assert graph_state.last_tool_results == []
+    assert graph_state.pending_tool_calls == []
+    assert len(graph_state.last_tool_results) == 1
+    assert graph_state.last_tool_results[0].result.status == "blocked"
     assert state.recent_messages
     assert (
         state.recent_messages[-1].content
@@ -3625,7 +3630,7 @@ def test_task_complete_error_surfaces_latest_verifier_summary() -> None:
 
 def test_task_complete_allows_diagnostic_failure_report_with_failing_verifier() -> None:
     state = _make_state()
-    state.run_brief.original_task = "rca why the fog pxe server failed to install on the remote host"
+    state.run_brief.original_task = "rca why the fog pxe service is not responding on the remote host"
     state.last_verifier_verdict = {
         "tool": "ssh_exec",
         "target": "curl -Is https://192.168.1.89:8080/fog/",

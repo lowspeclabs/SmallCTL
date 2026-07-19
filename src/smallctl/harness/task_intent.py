@@ -73,12 +73,10 @@ _READONLY_INTENT_TOOLS = {
     "git_diff",
     "git_status",
     "grep",
-    "long_context_lookup",
     "loop_status",
     "read_file",
     "search",
     "ssh_file_read",
-    "summarize_report",
     "web_fetch",
     "web_search",
 }

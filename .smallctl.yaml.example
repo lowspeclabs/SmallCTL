@@ -117,3 +117,25 @@ subtask_ledger_enabled: true
 subtask_max_active: 1
 subtask_max_history: 12
 subtask_inject_completed_limit: 3
+# Opt-in native LangGraph per-node timeouts for safe async nodes. Enabled by
+# default for backward compatibility; disable to fall back to the harness's
+# historic timeout behavior.
+langgraph_native_timeouts_enabled: true
+# Opt-in native LangGraph retries for safe, idempotent prompt/retrieval nodes.
+# Disabled by default; when enabled, max attempts is capped at 2.
+langgraph_native_retries_enabled: false
+langgraph_native_retry_max_attempts: 2
+# Opt-in native LangGraph node error handlers for selected safe prompt/interpret
+# nodes. Disabled by default; when enabled, prompt/interpret failures are routed
+# back into the harness's recovery logic instead of ending the graph immediately.
+langgraph_error_handlers_enabled: false
+# Opt-in native LangGraph task/checkpoint streaming for the TUI. Disabled by
+# default; when enabled, lifecycle events expose the active graph node without
+# leaking prompts, tool args, or tool output.
+langgraph_stream_events_enabled: false
+# EXPERIMENTAL/REJECTED: Native LangGraph CachePolicy. Disabled by default and
+# not implemented. No existing graph node is pure for a single run with a
+# provably correct cache key: prompt preparation depends on the active
+# conversation and retrieval state, and the indexer pipeline relies on LLM
+# requests and mutating tool calls. Do not enable.
+langgraph_cache_policy_enabled: false

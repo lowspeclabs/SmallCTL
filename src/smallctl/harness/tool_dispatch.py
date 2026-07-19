@@ -8,7 +8,7 @@ from ..tools.fs_sessions import _normalize_replace_strategy
 from .tool_visibility import filter_tools_for_runtime_state
 from .task_classifier import (
     classify_runtime_intent,
-    classify_task_mode,
+    classify_task_decision,
     looks_like_author_write_request,
     looks_like_implementation_followup,
     looks_like_write_file_request,
@@ -28,7 +28,7 @@ from .tool_dispatch_cache import (
     _reuse_cached_file_read,  # noqa: F401  # re-exported for tests/backcompat
 )
 
-_CHAT_WRITE_TOOL_NAMES = {"file_write", "file_patch", "ast_patch"}
+_CHAT_WRITE_TOOL_NAMES = {"file_write", "file_append", "file_patch", "ast_patch"}
 _READONLY_CHAT_TOOL_BLOCKLIST = {
     "shell_exec",
     "ssh_exec",
@@ -38,6 +38,7 @@ _READONLY_CHAT_TOOL_BLOCKLIST = {
     "ssh_file_replace_between",
     "finalize_write_session",
     "file_write",
+    "file_append",
     "file_patch",
     "ast_patch",
     "file_delete",
@@ -140,8 +141,16 @@ def _resolved_followup_effective_task(harness: Any, task: str) -> str:
 
 
 def _refresh_task_mode(harness: Any, task: str) -> str:
-    task_mode = classify_task_mode(task)
+    decision = classify_task_decision(task)
+    task_mode = decision.mode
     harness.state.task_mode = task_mode
+    _scratchpad(harness)["_task_route_decision"] = {
+        "mode": decision.mode,
+        "matched_rule": decision.matched_rule,
+        "local_anchors": list(decision.local_anchors),
+        "remote_execution_anchors": list(decision.remote_execution_anchors),
+        "decision_source": decision.decision_source,
+    }
     return task_mode
 
 
@@ -522,16 +531,41 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
             ],
         )
 
-    # Hard block: SSH tools are never valid for local coding tasks.
+    # Dispatcher enforcement is the final route boundary: tool visibility can
+    # be stale or bypassed by a direct model tool call.
     task_mode = str(getattr(harness.state, "task_mode", "") or "").strip().lower()
+    task = _current_user_task(harness)
+    decision = classify_task_decision(task)
+    command = str(args.get("command") or "").strip()
+    cwd = str(getattr(harness.state, "cwd", "") or "").strip()
+    command_is_local = bool(command and ("./" in command or "../" in command or (cwd and cwd in command)))
     if (
-        tool_name in {"ssh_exec", "ssh_file_read", "ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
+        tool_name == "ssh_exec"
         and task_mode == "local_execute"
+        and decision.matched_rule.startswith("local_")
+        and command_is_local
+        and not any(anchor in task.lower() for anchor in ("ssh to", "over ssh", "via ssh", "run on the remote", "execute on the remote"))
     ):
+        harness._runlog(
+            "tool_dispatch_blocked",
+            "SSH tool blocked because a local workspace command requires shell_exec",
+            tool_name=tool_name,
+            tool_category="ssh",
+            task_mode=task_mode,
+            block_reason="local_command_requires_shell_exec",
+            matched_route_rule=decision.matched_rule,
+        )
         return ToolEnvelope(
             success=False,
-            error="SSH tools are not available for local coding tasks. Use local file_write, file_read, and shell_exec only.",
-            metadata={"tool_name": tool_name, "blocked_reason": "local_coding_ssh_block"},
+            error="This local workspace command must use shell_exec, not ssh_exec.",
+            metadata={
+                "tool_name": tool_name,
+                "reason": "local_command_requires_shell_exec",
+                "attempted_command_scope": "local_workspace",
+                "classified_task_scope": "local_execute",
+                "matched_route_rule": decision.matched_rule,
+                "required_tool": "shell_exec",
+            },
         )
 
     cached = maybe_reuse_file_read(harness, tool_name=tool_name, args=args)
@@ -610,8 +644,18 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
     timeout_override_metadata: dict[str, Any] = {}
     requested_timeout = args.get("timeout_sec")
     if requested_timeout is not None:
+        try:
+            requested_timeout_value = int(requested_timeout)
+        except (TypeError, ValueError):
+            # Leave non-numeric values for the dispatcher's schema validation,
+            # which reports a typed field error naming timeout_sec.
+            requested_timeout_value = None
         harness_timeout = getattr(getattr(harness, "config", None), "graph_dispatch_tools_timeout_sec", None)
-        if harness_timeout is not None and int(requested_timeout) > int(harness_timeout):
+        if (
+            harness_timeout is not None
+            and requested_timeout_value is not None
+            and requested_timeout_value > int(harness_timeout)
+        ):
             args = dict(args)
             args["timeout_sec"] = int(harness_timeout)
             timeout_override_metadata = {

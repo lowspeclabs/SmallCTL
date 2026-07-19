@@ -397,6 +397,31 @@ def test_shell_utils_identify_read_only_shell_evidence_actions() -> None:
     assert is_read_only_shell_evidence_action(mutating) is False
 
 
+def test_find_mutating_actions_are_not_read_only() -> None:
+    assert is_read_only_shell_evidence_action("find . -delete") is False
+    assert is_read_only_shell_evidence_action(r"find . -exec rm {} \;") is False
+    assert is_read_only_shell_evidence_action("find . -execdir rm {} +") is False
+    assert is_read_only_shell_evidence_action("find . -ok rm {} \\;") is False
+    assert is_read_only_shell_evidence_action("find . -name '*.py' -print") is True
+    assert is_read_only_shell_evidence_action("find . -type f") is True
+
+
+def test_find_file_writing_redirection_is_not_read_only() -> None:
+    assert is_read_only_shell_evidence_action("find . -name '*.py' > /tmp/output.txt") is False
+    assert is_read_only_shell_evidence_action("find . -name '*.py' -print") is True
+
+
+def test_awk_system_call_is_not_read_only() -> None:
+    assert is_read_only_shell_evidence_action("awk 'BEGIN{system(\"rm victim\")}'") is False
+    assert is_read_only_shell_evidence_action('awk "BEGIN { system(\\"rm victim\\") }"') is False
+    assert is_read_only_shell_evidence_action("awk '{print $1}' /etc/passwd") is True
+
+
+def test_awk_file_writing_redirection_is_not_read_only() -> None:
+    assert is_read_only_shell_evidence_action("awk '{print $1}' /etc/passwd > /tmp/output.txt") is False
+    assert is_read_only_shell_evidence_action("awk '{print $1}' /etc/passwd") is True
+
+
 def test_model_stream_fallback_helpers_skip_recovery_prompts() -> None:
     harness = SimpleNamespace(state=SimpleNamespace(run_brief=SimpleNamespace(original_task="")))
     messages = [

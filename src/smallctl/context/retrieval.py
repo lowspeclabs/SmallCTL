@@ -168,23 +168,54 @@ class LexicalRetriever:
         state: LoopState,
         history_key: str,
         ids: list[str],
+        *,
+        kind: str = "",
     ) -> None:
         if not ids:
             return
         scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
         history: list[dict[str, Any]] = list(scratchpad.get(history_key) or [])
+        step = int(getattr(state, "step_count", 0) or 0)
         for item_id in ids:
             item_id = str(item_id or "").strip()
             if not item_id:
                 continue
-            history.append({
+            entry: dict[str, Any] = {
                 "id": item_id,
-                "retrieved_at_step": int(getattr(state, "step_count", 0) or 0),
-            })
+                "retrieved_at_step": step,
+            }
+            if kind:
+                entry["kind"] = kind
+            history.append(entry)
         max_history = 32
         if len(history) > max_history:
             history = history[-max_history:]
         scratchpad[history_key] = history
+        runlog = getattr(state, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "retrieval_history_recorded",
+                "recorded retrieved item history",
+                history_key=history_key,
+                kind=kind or "unknown",
+                count=len(ids),
+                step=step,
+            )
+
+    def _record_retrieval_bundle_history(self, state: LoopState, bundle: RetrievalBundle) -> None:
+        self._record_retrieved_id_history(
+            state,
+            "_retrieved_artifact_history",
+            [snippet.artifact_id for snippet in bundle.artifacts if snippet.artifact_id],
+            kind="artifact",
+        )
+        self._record_retrieved_id_history(
+            state,
+            "_retrieved_summary_history",
+            [summary.summary_id for summary in bundle.summaries if summary.summary_id],
+            kind="summary",
+        )
+        self._record_retrieved_experience_history(state, bundle.experiences)
 
     @staticmethod
     def _id_repeat_counts(state: LoopState, history_key: str) -> dict[str, int]:
@@ -233,7 +264,7 @@ class LexicalRetriever:
         if not needs_refinement:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
-            self._record_retrieved_experience_history(state, first_pass.experiences)
+            self._record_retrieval_bundle_history(state, first_pass)
             result = first_pass
             self._log_retrieval_bundle(state, result)
             return result
@@ -242,7 +273,6 @@ class LexicalRetriever:
         if not refined_query or refined_query == base_query:
             state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
-            self._record_retrieved_experience_history(state, first_pass.experiences)
             bundle = RetrievalBundle(
                 query=base_query,
                 initial_query=base_query,
@@ -260,6 +290,7 @@ class LexicalRetriever:
             )
             if "artifact signal is weak" in reason:
                 self._inject_failure_artifacts(state, bundle)
+            self._record_retrieval_bundle_history(state, bundle)
             self._log_retrieval_bundle(state, bundle)
             return bundle
 
@@ -281,9 +312,9 @@ class LexicalRetriever:
             second_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
             state.retrieval_cache = [snippet.artifact_id for snippet in second_pass.artifacts]
             state.retrieved_experience_ids = [memory.memory_id for memory in second_pass.experiences]
-            self._record_retrieved_experience_history(state, second_pass.experiences)
             if "artifact signal is weak" in reason:
                 self._inject_failure_artifacts(state, second_pass)
+            self._record_retrieval_bundle_history(state, second_pass)
             self._log_retrieval_bundle(state, second_pass)
             return second_pass
 
@@ -291,9 +322,9 @@ class LexicalRetriever:
         first_pass.miss_reasons.setdefault("refinement", []).append(f"refinement_triggered:{reason}")
         state.retrieval_cache = [snippet.artifact_id for snippet in first_pass.artifacts]
         state.retrieved_experience_ids = [memory.memory_id for memory in first_pass.experiences]
-        self._record_retrieved_experience_history(state, first_pass.experiences)
         if "artifact signal is weak" in reason:
             self._inject_failure_artifacts(state, first_pass)
+        self._record_retrieval_bundle_history(state, first_pass)
         self._log_retrieval_bundle(state, first_pass)
         return first_pass
 
@@ -351,6 +382,7 @@ class LexicalRetriever:
             state,
             "_retrieved_artifact_history",
             [snippet.artifact_id for snippet in snippets if snippet.artifact_id],
+            kind="artifact",
         )
         return snippets
 
@@ -368,6 +400,7 @@ class LexicalRetriever:
             state,
             "_retrieved_summary_history",
             [summary.summary_id for summary in selected if summary.summary_id],
+            kind="summary",
         )
         return selected
 
@@ -433,11 +466,13 @@ class LexicalRetriever:
                 state,
                 "_retrieved_artifact_history",
                 [snippet.artifact_id for snippet in artifacts if snippet.artifact_id],
+                kind="artifact",
             )
             self._record_retrieved_id_history(
                 state,
                 "_retrieved_summary_history",
                 [summary.summary_id for summary in summaries if summary.summary_id],
+                kind="summary",
             )
 
         applied_decays = {
@@ -721,18 +756,34 @@ class LexicalRetriever:
         scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}
         history_key = "_retrieved_experience_history"
         history: list[dict[str, Any]] = list(scratchpad.get(history_key) or [])
+        step = int(getattr(state, "step_count", 0) or 0)
         for memory in experiences:
             memory_id = str(getattr(memory, "memory_id", "") or "").strip()
             if not memory_id:
                 continue
-            history.append({
+            entry: dict[str, Any] = {
                 "memory_id": memory_id,
-                "retrieved_at_step": int(getattr(state, "step_count", 0) or 0),
-            })
+                "retrieved_at_step": step,
+                "kind": "experience",
+            }
+            namespace = str(getattr(memory, "namespace", "") or "").strip()
+            if namespace:
+                entry["namespace"] = namespace
+            history.append(entry)
         max_history = 32
         if len(history) > max_history:
             history = history[-max_history:]
         scratchpad[history_key] = history
+        runlog = getattr(state, "_runlog", None)
+        if callable(runlog):
+            runlog(
+                "retrieval_history_recorded",
+                "recorded retrieved experience history",
+                history_key=history_key,
+                kind="experience",
+                count=len(experiences),
+                step=step,
+            )
 
     def _experience_repeat_counts(self, state: LoopState) -> dict[str, int]:
         scratchpad = state.scratchpad if isinstance(getattr(state, "scratchpad", None), dict) else {}

@@ -166,12 +166,13 @@ def _apply_file_mutation_updates(
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
     if bool(metadata.get("dry_run")) or metadata.get("changed") is False:
         return
+    staged_only = bool(metadata.get("staged_only")) or metadata.get("write_session_finalized") is False
     mutated_path = ""
     if isinstance(result.metadata, dict):
         mutated_path = str(result.metadata.get("path") or "").strip()
     if not mutated_path and isinstance(arguments, dict):
         mutated_path = str(arguments.get("path") or "").strip()
-    if mutated_path:
+    if mutated_path and not staged_only:
         _invalidate_file_read_cache(service.harness, mutated_path)
         _mark_prior_read_artifacts_stale(
             service,
@@ -192,12 +193,17 @@ def _apply_file_mutation_updates(
             tool_name=tool_name,
             paths=[mutated_path],
         )
-    record_code_change(
-        service.harness.state,
-        tool_name=tool_name,
-        path=mutated_path,
-        changed=True,
-    )
+    if staged_only:
+        staging_path = str(metadata.get("staging_path") or "").strip()
+        if staging_path:
+            _invalidate_file_read_cache(service.harness, staging_path)
+    else:
+        record_code_change(
+            service.harness.state,
+            tool_name=tool_name,
+            path=mutated_path,
+            changed=True,
+        )
     _record_touched_symbols_from_mutation(
         service,
         tool_name=tool_name,
@@ -355,6 +361,17 @@ def _apply_verifier_and_evidence_updates(
         result=result,
         arguments=arguments,
     )
+    if isinstance(verifier_verdict, dict):
+        service.harness._runlog(
+            "verifier_decision",
+            "recorded verifier verdict",
+            tool_name=tool_name,
+            verdict=str(verifier_verdict.get("verdict", "")),
+            verifier_kind=str(verifier_verdict.get("verifier_kind", "")),
+            command=str(verifier_verdict.get("command", "")),
+            target=str(verifier_verdict.get("target", "")),
+            failure_class=str(verifier_verdict.get("failure_class", "")),
+        )
     loop_info = track_verifier_rejection(service.harness.state, verifier_verdict)
     if loop_info.get("is_loop"):
         service.harness._runlog(

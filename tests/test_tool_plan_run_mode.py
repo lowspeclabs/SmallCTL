@@ -339,6 +339,48 @@ def test_auto_runtime_can_auto_select_tool_plan_when_enabled(monkeypatch, tmp_pa
     assert decisions == []
 
 
+def test_cli_debug_redacts_api_key_in_printed_config(monkeypatch, tmp_path, capsys) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    class _Harness:
+        def __init__(self, config: HarnessConfig) -> None:
+            captured_kwargs.update(config.__dict__)
+            self.state = SimpleNamespace(thread_id="thread-1")
+            self.conversation_id = "thread-1"
+
+        async def run_auto(self, task: str) -> dict[str, object]:
+            return {"status": "completed", "task": task}
+
+        async def teardown(self) -> None:
+            return None
+
+        def note_task_shutdown(self, reason: str) -> None:
+            del reason
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("smallctl.main.Harness", _Harness)
+
+    exit_code = cli(
+        [
+            "--task",
+            "inspect files",
+            "--endpoint",
+            "http://example.test/v1",
+            "--model",
+            "wrench-9b",
+            "--debug",
+            "--api-key",
+            "super-secret-api-key",
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr().out
+    assert "super-secret-api-key" not in captured
+    assert "[REDACTED]" in captured
+    assert '"api_key"' in captured
+
+
 def test_auto_runtime_does_not_auto_select_tool_plan_for_execution(monkeypatch, tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     decisions: list[str] = []

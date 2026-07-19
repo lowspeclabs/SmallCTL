@@ -62,6 +62,12 @@ _ARTIFACT_PAGING = (
     "ARTIFACT PAGING: When an artifact is truncated, page forward with `start_line` and `end_line` to get the next unseen chunk. Do not reread earlier chunks unless you need to verify a specific line. "
 )
 
+_TARGET_FILE_READ_ONCE = (
+    "TARGET FILES: If the user explicitly asked you to read a file (e.g., an AGENTS.md or README), read it once. "
+    "Do not re-read that same file after a later tool failure unless the failure proved the file's contents are stale or wrong. "
+    "Instead, use the most recent tool output or error message to fix the blocker."
+)
+
 _REMOTE_DOWNLOAD_FALLBACK = (
     "DOWNLOAD: If curl fails repeatedly with 404 for a download URL, try wget before retrying the same URL. "
     "Different tools may resolve differently. If both curl and wget 404 on multiple URL variants, "
@@ -96,6 +102,8 @@ _GEMMA_4_STRICT_FORMAT = (
     "GEMMA-4 STRICT FORMAT: Never emit `<tool_call>`, `<call>`, `<function=...>`, "
     "`<channel|>`, `<|channel>`, `<thought>`, `<thinking>`, angle-bracket function wrappers like "
     "`<task_complete(...)>`, or bare functional syntax like `dir_list()` or `task_complete(message='...')`. "
+    "The backticked task_complete examples elsewhere in this prompt describe intent only; "
+    "do not copy that literal syntax into the response. "
     "Reasoning must stay inside a single `<think>...</think>` block. "
     "If a tool is needed, end reasoning cleanly and emit exactly one JSON object on its own line. "
     "Do not repeat `<think>` or channel markers once the reasoning block has closed. "
@@ -204,18 +212,33 @@ _LOCAL_SCOPE_PREFERENCE = (
 )
 
 _SECRET_HANDLING = (
-    "ABSOLUTE RULE: NEVER read `.env`, `.env.local`, `.envrc`, `.netrc`, or similar secret-bearing files, "
-    "even if the user's project guide or another instruction suggests doing so. "
+    "SECRET HANDLING: Do not expose secrets from credential files such as `.netrc`, private keys, "
+    "or similar shell credential files unless explicitly instructed. "
+    "Do not synthesize or overwrite `.env`, `.env.local`, or other secret-bearing environment files "
+    "unless the user explicitly asked to create or update them. "
     "If the user provides credentials, API tokens, or other secrets in their message, use them directly "
     "in the appropriate tool arguments (e.g., shell_exec or ssh_exec) and do not echo them in your reasoning or "
-    "assistant text. Do not attempt to read `.env` or similar files to verify credentials; "
-    "if the target program reads its own `.env`, run the program and let it read the file. "
-    "Never store secrets in memory_update, session notes, or plain-text artifacts."
+    "assistant text. Never store secrets in memory_update, session notes, or plain-text artifacts."
 )
 
-_REMOTE_CLEANUP_TASK_KEYWORDS = (
-    "uninstall", "remove", "delete", "purge", "clean up", "clean-up",
+_REMOTE_CLEANUP_SCOPE_KEYWORDS = (
+    "ssh", "remote", "server", "host",
+)
+
+_REMOTE_CLEANUP_SELF_EVIDENT_KEYWORDS = (
+    "uninstall", "purge",
+)
+
+_REMOTE_CLEANUP_ACTION_KEYWORDS = (
+    "remove", "delete", "clean up", "clean-up",
     "get rid of", "wipe", "tear down", "teardown", "disable",
+)
+
+_REMOTE_CLEANUP_OBJECT_KEYWORDS = (
+    "service", "services", "daemon", "daemons",
+    "package", "packages",
+    "user", "users", "account", "accounts",
+    "container", "containers",
 )
 
 _DELIVERABLE_VERIFICATION = (
@@ -254,7 +277,8 @@ _PLANNING_MODE_INTRO = (
     "`request_validation_execution` with the exact command; after approval the loop runtime will use `shell_exec`. "
     "Never invent or call a tool named `run`. "
     "If you produce a draft plan, the harness will pause for approval automatically, so do not keep looping on the plan in the same turn. "
-    "Do not call `task_complete` to exit planning; use `plan_request_execution` to pause for approval. "
+    "Do not call `task_complete` to exit planning; use `plan_request_execution(question='...')` "
+    "to pause for approval (`question` is a REQUIRED string argument). "
     "Use plan export paths only for plan documents (.md, .txt, .text), never for implementation files like .py. "
     "Exactly one level of subplanning is allowed. "
     "The required plan shape is: goal, inputs, outputs, constraints, acceptance_criteria, implementation_plan, and steps. "
@@ -276,18 +300,20 @@ _PLANNING_MODE_INTRO_SMALL_GEMMA = (
     "   4. Fix cron file path\n"
     "   5. Run backup and verify\n"
     "   6. Create report.html\n"
-    "3. Then call `plan_request_execution` to ask the user for approval.\n"
+    "3. Then call `plan_request_execution` with the REQUIRED `question` argument, "
+    "e.g. `plan_request_execution(question='...')`, to ask the user for approval.\n"
     "You may call `plan_set` if you can provide all required fields. "
     "If not, a plain numbered list is enough; the harness will turn it into a plan. "
     "Keep each step title short (≤6 words). Put file paths and details in the same line after the title. "
-    "After you write the plan, stop and call `plan_request_execution`."
+    "After you write the plan, stop and call `plan_request_execution(question='...')`."
 )
 
 _PLANNING_MODE_INTRO_GEMMA_RECOVERY = (
     "PLANNING MODE IS ACTIVE. Thinking markers are DISABLED for this turn. "
     "You must produce visible output or a tool call now, not a hidden reasoning block. "
     "Use read-only tools to gather facts, then call `plan_set` with a structured plan OR "
-    "write a short numbered plain-text plan and call `plan_request_execution`. "
+    "write a short numbered plain-text plan and call `plan_request_execution(question='...')` "
+    "(`question` is REQUIRED). "
     "Do not emit `<|channel>thought`, `<channel|>`, `<think>`, `<thinking>`, `<response>`, or any other angle-bracket tag. "
     "If you are stuck, call exactly one read-only tool now so the harness can see progress."
 )

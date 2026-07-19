@@ -35,7 +35,6 @@ from .tool_call_parser_support import (  # noqa: F401
     _assistant_text_target_paths,
     _build_schema_repair_message,
     _clear_artifact_read_guard_state,
-    _clear_tool_attempt_history,
     _coerce_int_or_none,
     _consume_repeat_guard_one_shot_allowance,
     _declared_read_before_write_reason,
@@ -61,14 +60,9 @@ from .tool_call_parser_support import (  # noqa: F401
     _find_full_file_artifact_for_path,
     _infer_write_tool_path,
     _is_strict_subpath,
-    _normalize_json_like,
-    _normalize_path_token,
-    _normalize_shell_command,
     _normalize_token,
-    _normalize_tool_args,
     _placeholder_token,
     _placeholder_value_looks_generic,
-    _record_tool_attempt,
     _recover_declared_read_before_write,
     _repair_active_write_session_args,
     _repair_empty_target_file_patch_to_file_write,
@@ -83,11 +77,21 @@ from .tool_call_parser_support import (  # noqa: F401
     _should_suppress_resolved_plan_artifact_read,
     _suggested_chunk_sections,
     _tool_attempt_history,
-    _tool_call_fingerprint,
     _undo_tool_attempt_if_cached,
     allow_repeated_tool_call_once,
 )
 from .tool_inline_parsing import _extract_inline_tool_calls
+from .tool_loop_guards import (  # noqa: F401
+    _clear_tool_attempt_history,
+    _record_tool_attempt,
+)
+from .tool_loop_guards_support import (  # noqa: F401
+    _normalize_json_like,
+    _normalize_path_token,
+    _normalize_shell_command,
+    _normalize_tool_args,
+    _tool_call_fingerprint,
+)
 from .tool_model_rules import (
     _clean_reasoning_fallback_text,
     _normalize_model_specific_text,

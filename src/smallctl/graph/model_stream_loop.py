@@ -662,6 +662,7 @@ async def run_model_stream_loop(
             stream_state = StreamTagState()
             _retry_immediately = False
             _stop_after_reasoning_only_stall = False
+            retrying = True
             attempt_started_at = time.monotonic()
             first_token_time = None
             reasoning_only_chunks = 0
@@ -1194,6 +1195,8 @@ async def run_model_stream_loop(
                 break
             if _retry_immediately:
                 continue
+            if not retrying:
+                break
             if _model_attempt < _CHUNK_ERROR_MAX_RETRIES:
                 await asyncio.sleep(float(_model_attempt + 1))
         except _ModelOutputDegenerate as exc:
@@ -1300,7 +1303,7 @@ def _parse_context_window_overflow(err_msg: str, details: dict[str, Any]) -> tup
     match = re.search(r"n_keep=(\d+).*?n_ctx=(\d+)", f"{err_msg} {details!r}")
     if match is not None:
         return int(match.group(1)), int(match.group(2))
-    if details.get("context_overflow") is True:
+    if details.get("context_overflow") is True or details.get("reason") == "context_overflow":
         try:
             request_tokens = int(details.get("request_tokens") or 0)
             context_limit = int(details.get("context_limit") or 0)

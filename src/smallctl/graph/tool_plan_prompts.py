@@ -59,7 +59,7 @@ Required arguments (do not leave args empty; use the real path/host/query for th
 - ssh_file_read: {{"target": "user@host", "path": "/remote/path"}}
 - ssh_dir_list: {{"target": "user@host", "path": "/remote/dir"}}
 - artifact_read: {{"artifact_id": "..."}}
-- artifact_grep: {{"pattern": "term"}}
+- artifact_grep: {{"artifact_id": "A0001", "query": "term"}}
 - web_search: {{"query": "..."}}
 - web_fetch: {{"url": "https://..."}}
 - git_status: {{"path": "."}}

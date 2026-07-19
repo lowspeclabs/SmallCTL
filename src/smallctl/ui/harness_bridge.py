@@ -3,10 +3,15 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future as ConcurrentFuture
 import inspect
+import logging
 import threading
+import time
 from typing import Any, Callable
 
 from ..models.events import UIEvent
+
+
+_logger = logging.getLogger("smallctl.ui.harness_bridge")
 
 
 def _close_process_transports(proc: Any) -> None:
@@ -38,6 +43,10 @@ def _close_process_transports(proc: Any) -> None:
             pass
 
 
+class HarnessRunBusyError(RuntimeError):
+    """Raised when a run is submitted while another run is still active."""
+
+
 class HarnessBridge:
     def __init__(
         self,
@@ -45,16 +54,21 @@ class HarnessBridge:
         harness: Any,
         post_ui_event: Callable[[UIEvent], None],
         thread_name: str = "smallctl-harness",
+        shutdown_timeout_sec: float = 10.0,
     ) -> None:
         self.harness = harness
         self._post_ui_event = post_ui_event
         self._thread_name = thread_name
+        self._shutdown_timeout_sec = max(0.1, float(shutdown_timeout_sec))
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._closed = False
         self._close_lock = threading.Lock()
         self._inflight_future: ConcurrentFuture[Any] | None = None
+        self._run_future: ConcurrentFuture[Any] | None = None
+        self._run_state_lock = threading.Lock()
+        self._wedged = False
         # Fix 5: Bridge heartbeat for deadlock detection
         self._heartbeat_counter: int = 0
         self._heartbeat_task: asyncio.Task[Any] | None = None
@@ -74,12 +88,12 @@ class HarnessBridge:
             )
 
     async def run_auto(self, task: str) -> dict[str, Any]:
-        return await self._submit_coroutine(
+        return await self._submit_run(
             self.harness.run_auto_with_events(task, self._forward_event)
         )
 
     async def resume(self, human_input: str) -> dict[str, Any]:
-        return await self._submit_coroutine(
+        return await self._submit_run(
             self.harness.resume_task_with_events(human_input, self._forward_event)
         )
 
@@ -171,14 +185,50 @@ class HarnessBridge:
             self._thread = None
             return
 
+        # Abort any in-flight run first so teardown does not overlap it, then
+        # give the run a bounded window to finish unwinding on the bridge loop.
+        self.abort()
+        await self.wait_for_idle(timeout=self._shutdown_timeout_sec)
+
         future = asyncio.run_coroutine_threadsafe(self.harness.teardown(), loop)
-        await asyncio.wrap_future(future)
-        loop.call_soon_threadsafe(loop.stop)
+        wrapped = asyncio.wrap_future(future)
+        try:
+            # asyncio.wait does not cancel the wrapped future on timeout; the
+            # concurrent future is cancelled explicitly below instead. This
+            # avoids wait_for/wrap_future cancellation recursion wedging the
+            # bridge loop.
+            done, _pending = await asyncio.wait(
+                {wrapped}, timeout=self._shutdown_timeout_sec
+            )
+            if not done:
+                # Teardown wedged: cancel it and force-stop the loop rather
+                # than hanging shutdown forever. The thread's background-loop
+                # cleanup cancels whatever remains once run_forever returns.
+                future.cancel()
+                _logger.warning(
+                    "Harness teardown exceeded %.1fs; forcing bridge loop stop.",
+                    self._shutdown_timeout_sec,
+                )
+            else:
+                wrapped.result()
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=5.0)
         if thread.is_alive():
-            # The background thread is still cleaning up; do not null out the
-            # handles so a subsequent shutdown attempt can still wait for it.
+            # The background thread survived loop stop: a task suppressed
+            # cancellation. Python cannot safely kill a thread, so shutdown
+            # returns bounded here, but the bridge stays wedged and refuses
+            # new runs until the thread actually exits.
+            self._wedged = True
+            _logger.warning(
+                "Harness bridge thread %r is STILL ALIVE after shutdown (join "
+                "timed out); a run suppressed cancellation. Shutdown is "
+                "returning bounded, but the bridge will refuse new runs until "
+                "the wedged thread exits.",
+                thread.name,
+            )
             return
+        self._wedged = False
         self._loop = None
         self._thread = None
 
@@ -207,7 +257,11 @@ class HarnessBridge:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
-        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        pending = [
+            task
+            for task in asyncio.all_tasks(loop)
+            if task is not asyncio.current_task(loop) and not task.done()
+        ]
         for task in pending:
             task.cancel()
         if pending:
@@ -252,6 +306,61 @@ class HarnessBridge:
         finally:
             self._inflight_future = None
 
+    async def _submit_run(self, coro: Any) -> Any:
+        if self._wedged:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                coro.close()
+                raise HarnessRunBusyError(
+                    "A previous harness run suppressed cancellation and its "
+                    "bridge thread is still alive; no new run is admitted "
+                    "until that thread exits."
+                )
+            self._wedged = False
+        loop = self._require_loop()
+        with self._run_state_lock:
+            if self._run_future is not None:
+                coro.close()
+                raise HarnessRunBusyError(
+                    "A harness run is already active; wait for it to finish "
+                    "or cancel it before submitting another."
+                )
+            future: ConcurrentFuture[Any] = asyncio.run_coroutine_threadsafe(
+                self._run_and_release(coro), loop
+            )
+            self._run_future = future
+        self._inflight_future = future
+        try:
+            return await asyncio.wrap_future(future)
+        finally:
+            self._inflight_future = None
+
+    async def _run_and_release(self, coro: Any) -> Any:
+        try:
+            return await coro
+        finally:
+            # A cancelled concurrent future reports done() immediately, while
+            # the coroutine may still be unwinding on the bridge loop. Busy
+            # state is cleared only here so a new run is admitted solely after
+            # the previous run has truly terminated.
+            with self._run_state_lock:
+                self._run_future = None
+
+    def is_run_active(self) -> bool:
+        """Return True while a submitted run has not terminated."""
+        with self._run_state_lock:
+            return self._run_future is not None
+
+    async def wait_for_idle(self, timeout: float = 5.0) -> bool:
+        """Wait for an in-flight run to terminate, bounded by timeout."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            if not self.is_run_active():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+
     async def _submit_callable(self, callback: Callable[..., Any], *args: Any) -> Any:
         async def _invoke() -> Any:
             return callback(*args)
@@ -284,9 +393,12 @@ class HarnessBridge:
             cancel()
 
     def abort(self) -> None:
-        future = self._inflight_future
-        if future is not None and not future.done():
-            future.cancel()
+        futures = [self._inflight_future]
+        with self._run_state_lock:
+            futures.append(self._run_future)
+        for future in futures:
+            if future is not None and not future.done():
+                future.cancel()
 
     def _require_loop(self) -> asyncio.AbstractEventLoop:
         self.start()

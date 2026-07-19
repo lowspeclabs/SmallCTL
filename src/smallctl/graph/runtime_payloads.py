@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
+from datetime import datetime, timezone
 import time
 from typing import Any
 
+from langgraph.errors import GraphBubbleUp, NodeTimeoutError
 from langgraph.types import Command
 from typing_extensions import TypedDict
 
 from .checkpoint import create_graph_checkpointer
 from .state import GraphRunState, inflate_graph_state, serialize_graph_state
 from ..logging_utils import runlog as _runlog
+from ..models.events import UIEvent, UIEventType
+from ..redaction import redact_sensitive_text
 from ..state import json_safe_value
 
 
@@ -179,18 +184,57 @@ async def execute_streaming_graph(
     interrupt_payload: dict[str, Any] | None = None
     _touch_graph_activity(harness)
     watchdog_task = _start_graph_idle_watchdog(runtime)
+    from .runtime_base import begin_graph_retry_attempts, end_graph_retry_attempts
+
+    retry_attempts_token = begin_graph_retry_attempts()
+    stream_events_enabled = _config_value(harness, "langgraph_stream_events_enabled", False)
     try:
-        async for chunk in compiled.astream(payload, config):
-            _touch_graph_activity(harness)
-            if not isinstance(chunk, dict):
-                continue
-            interrupt_chunk = chunk.get("__interrupt__")
-            interrupt_payload = coerce_interrupt_payload(interrupt_chunk)
-            if interrupt_payload is not None:
-                break
-    except TimeoutError as exc:
+        if stream_events_enabled:
+            async for chunk in compiled.astream(
+                payload, config, stream_mode=["updates", "tasks", "checkpoints"]
+            ):
+                _touch_graph_activity(harness)
+                if not isinstance(chunk, tuple) or len(chunk) != 2:
+                    continue
+                mode, lg_payload = chunk
+                event = _normalize_langgraph_stream_event(mode, lg_payload, harness=harness)
+                if event is not None:
+                    await _forward_langgraph_event(runtime, event)
+                if isinstance(lg_payload, dict) and _contains_interrupt(lg_payload):
+                    interrupt_payload = coerce_interrupt_payload(
+                        _extract_interrupt_from_updates_payload(lg_payload)
+                    )
+                    if interrupt_payload is not None:
+                        break
+        else:
+            async for chunk in compiled.astream(payload, config):
+                _touch_graph_activity(harness)
+                if not isinstance(chunk, dict):
+                    continue
+                interrupt_chunk = chunk.get("__interrupt__")
+                interrupt_payload = coerce_interrupt_payload(interrupt_chunk)
+                if interrupt_payload is not None:
+                    break
+    except (NodeTimeoutError, TimeoutError) as exc:
+        if isinstance(exc, NodeTimeoutError):
+            from .runtime_base import GraphNodeTimeoutError, graph_node_timeout_sec
+
+            timeout_sec = graph_node_timeout_sec(harness, exc.node)
+            exc = GraphNodeTimeoutError(exc.node, timeout_sec or 0.0)
         node_name = str(getattr(exc, "node_name", "") or "")
         timeout_sec = getattr(exc, "timeout_sec", None)
+        elapsed = None
+        node_started = getattr(harness, "_active_graph_node_started_monotonic", None)
+        if isinstance(node_started, (int, float)):
+            elapsed = round(time.monotonic() - float(node_started), 3)
+        _runlog(
+            harness,
+            "runtime_timeout" if not node_name else f"{node_name}_timeout",
+            "graph node timed out",
+            node=node_name,
+            timeout_sec=timeout_sec,
+            elapsed_sec=elapsed,
+        )
         return harness._finalize(
             harness._failure(
                 str(exc),
@@ -209,11 +253,37 @@ async def execute_streaming_graph(
             }
         )
         raise
+    except GraphBubbleUp:
+        # LangGraph bubble-up signals (e.g. GraphInterrupt) must propagate
+        # unchanged; they are control flow, not unexpected errors.
+        raise
+    except Exception as exc:
+        # Final outer boundary: unexpected graph exceptions (node bugs, router
+        # surprises, LangGraph GraphRecursionError, ...) must still finalize
+        # exactly once so the summary/checkpoint/terminal path runs.
+        error_summary = _sanitize_error_summary(exc)
+        _runlog(
+            harness,
+            "runtime_graph_error",
+            "unexpected graph exception",
+            exception_type=type(exc).__name__,
+            error=error_summary,
+        )
+        return harness._finalize(
+            harness._failure(
+                error_summary,
+                error_type="runtime_graph_error",
+                details={
+                    "exception_type": type(exc).__name__,
+                },
+            )
+        )
     finally:
         if watchdog_task is not None:
             watchdog_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watchdog_task
+        end_graph_retry_attempts(retry_attempts_token)
     snapshot = compiled.get_state(config)
     values = coerce_graph_values_payload(getattr(snapshot, "values", None))
     if values:
@@ -338,3 +408,189 @@ def restore_runtime_state(runtime: Any, *, thread_id: str | None = None, recursi
             harness.state.thread_id = candidate_thread_id
         return True
     return False
+
+
+def _extract_interrupt_from_updates_payload(payload: Any) -> Any:
+    """Return the interrupt value from an updates-mode payload, even if nested."""
+    if not isinstance(payload, dict):
+        return None
+    if "__interrupt__" in payload:
+        return payload["__interrupt__"]
+    for value in payload.values():
+        if isinstance(value, dict) and "__interrupt__" in value:
+            return value["__interrupt__"]
+    return None
+
+
+def _contains_interrupt(payload: Any) -> bool:
+    """Return True if the payload contains an interrupt channel value."""
+    return _extract_interrupt_from_updates_payload(payload) is not None
+
+
+def _extract_node_from_update_payload(payload: Any) -> str:
+    """Return the node name from an updates-mode payload."""
+    if isinstance(payload, dict):
+        keys = [key for key in payload.keys() if key != "__interrupt__"]
+        if keys:
+            return str(keys[0])
+    return ""
+
+
+def _sanitize_error_summary(error: Any) -> str:
+    """Return a short, sanitized error summary with no state or secrets."""
+    if isinstance(error, BaseException):
+        name = type(error).__name__
+        message = str(error).strip()
+        if not message:
+            return name
+        redacted = redact_sensitive_text(message)
+        return f"{name}: {redacted[:200]}"
+    if isinstance(error, dict):
+        error_type = str(error.get("type") or error.get("error_type") or "error")
+        message = str(error.get("message") or error.get("error") or "").strip()
+        if not message:
+            return error_type
+        redacted = redact_sensitive_text(message)
+        return f"{error_type}: {redacted[:200]}"
+    text = str(error).strip()
+    if not text:
+        return "error"
+    redacted = redact_sensitive_text(text)
+    return redacted[:200]
+
+
+def _normalize_langgraph_stream_event(
+    mode: str, payload: Any, *, harness: Any | None = None
+) -> UIEvent | None:
+    """Normalize a LangGraph multi-mode stream event into a UIEvent.
+
+    The returned event contains only metadata: category, node name, task/checkpoint
+    ID, and status. Raw state, prompts, model output, tool args, and tool output are
+    deliberately excluded.
+    """
+    del harness
+    timestamp = datetime.now(timezone.utc).isoformat()
+    if mode == "updates":
+        node_name = _extract_node_from_update_payload(payload)
+        return UIEvent(
+            event_type=UIEventType.SYSTEM,
+            content=f"Graph update: {node_name or 'unknown'}",
+            data={
+                "graph_event": True,
+                "category": "update",
+                "node": node_name,
+                "task_id": None,
+                "status": "success",
+            },
+            timestamp=timestamp,
+        )
+    if mode == "tasks":
+        if not isinstance(payload, dict):
+            return None
+        task_id = str(payload.get("id") or "")
+        task_name = str(payload.get("name") or "")
+        has_input = "input" in payload
+        has_result = "result" in payload or "error" in payload or "interrupts" in payload
+        if not has_input and not has_result:
+            return None
+        interrupts = payload.get("interrupts")
+        if interrupts:
+            return UIEvent(
+                event_type=UIEventType.SYSTEM,
+                content=f"Graph interrupt: {task_name or 'unknown'}",
+                data={
+                    "graph_event": True,
+                    "category": "interrupt",
+                    "node": task_name,
+                    "task_id": task_id,
+                    "status": "needs_human",
+                },
+                timestamp=timestamp,
+            )
+        error = payload.get("error")
+        if error is not None:
+            return UIEvent(
+                event_type=UIEventType.SYSTEM,
+                content=f"Graph task error: {task_name or 'unknown'}",
+                data={
+                    "graph_event": True,
+                    "category": "task_finished",
+                    "node": task_name,
+                    "task_id": task_id,
+                    "status": "error",
+                    "error_summary": _sanitize_error_summary(error),
+                },
+                timestamp=timestamp,
+            )
+        category = "task_started" if has_input else "task_finished"
+        return UIEvent(
+            event_type=UIEventType.SYSTEM,
+            content=f"Graph task {category.replace('_', ' ')}: {task_name or 'unknown'}",
+            data={
+                "graph_event": True,
+                "category": category,
+                "node": task_name,
+                "task_id": task_id,
+                "status": "success",
+            },
+            timestamp=timestamp,
+        )
+    if mode == "checkpoints":
+        if not isinstance(payload, dict):
+            return None
+        config = payload.get("config") or {}
+        if not isinstance(config, dict):
+            config = {}
+        configurable = config.get("configurable") or {}
+        if not isinstance(configurable, dict):
+            configurable = {}
+        checkpoint_id = str(configurable.get("checkpoint_id") or "")
+        checkpoint_ns = str(
+            configurable.get("checkpoint_ns")
+            or (payload.get("metadata") or {}).get("checkpoint_ns")
+            or ""
+        )
+        tasks = payload.get("tasks") or []
+        node_name = ""
+        if isinstance(tasks, list) and tasks:
+            last_task = tasks[-1]
+            if isinstance(last_task, dict):
+                node_name = str(last_task.get("name") or "")
+        if not node_name:
+            next_nodes = payload.get("next") or []
+            if isinstance(next_nodes, (list, tuple)) and next_nodes:
+                node_name = str(next_nodes[0])
+        metadata = payload.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return UIEvent(
+            event_type=UIEventType.SYSTEM,
+            content=f"Graph checkpoint: {node_name or 'unknown'}",
+            data={
+                "graph_event": True,
+                "category": "checkpoint",
+                "node": node_name,
+                "task_id": checkpoint_id,
+                "status": "checkpoint",
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_source": str(metadata.get("source") or ""),
+            },
+            timestamp=timestamp,
+        )
+    return None
+
+
+async def _forward_langgraph_event(runtime: Any, event: UIEvent) -> None:
+    """Forward normalized event metadata to the runlog and optional UI handler."""
+    harness = getattr(runtime.deps, "harness", None)
+    runlog = getattr(harness, "_runlog", None)
+    if callable(runlog):
+        data = event.data if isinstance(event.data, dict) else {}
+        runlog("langgraph_stream_event", "LangGraph stream event", **data)
+    handler = getattr(runtime.deps, "event_handler", None)
+    if handler is None:
+        return
+    if inspect.iscoroutinefunction(handler):
+        await handler(event)
+    else:
+        handler(event)

@@ -17,7 +17,23 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover
 from .chunk_parser import chunk_contains_tool_call_delta
 from .client_transport_client_lifecycle import _get_async_client, _reset_async_client
 from .provider_adapters import get_provider_adapter
+from .transport_constants import (
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC,
+    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    STREAM_CONNECT_TIMEOUT_SEC,
+    STREAM_FIRST_TOKEN_TIMEOUT_SEC,
+    STREAM_POOL_TIMEOUT_SEC,
+    STREAM_READ_TIMEOUT_SEC,
+    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    STREAM_WRITE_TIMEOUT_SEC,
+    resolve_first_token_timeout_sec as _resolve_shared_first_token_timeout_sec,
+    resolve_tool_call_continuation_timeout_sec as _resolve_shared_continuation_timeout_sec,
+)
 from ..logging_utils import log_kv
+
+
+def _is_closed_client_runtime_error(exc: RuntimeError) -> bool:
+    return "has been closed" in str(exc)
 
 
 def summarize_stream_chunk(obj: Any) -> dict[str, Any]:
@@ -42,14 +58,14 @@ def summarize_stream_chunk(obj: Any) -> dict[str, Any]:
 class SSEStreamer:
     """SSE stream handler for model chat completions."""
 
-    STREAM_CONNECT_TIMEOUT_SEC = 10.0
-    STREAM_WRITE_TIMEOUT_SEC = 30.0
-    STREAM_READ_TIMEOUT_SEC = 120.0
-    STREAM_FIRST_TOKEN_TIMEOUT_SEC = 30.0
-    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = 45.0
-    STREAM_POOL_TIMEOUT_SEC = 30.0
-    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 30.0
-    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 12.0
+    STREAM_CONNECT_TIMEOUT_SEC = STREAM_CONNECT_TIMEOUT_SEC
+    STREAM_WRITE_TIMEOUT_SEC = STREAM_WRITE_TIMEOUT_SEC
+    STREAM_READ_TIMEOUT_SEC = STREAM_READ_TIMEOUT_SEC
+    STREAM_FIRST_TOKEN_TIMEOUT_SEC = STREAM_FIRST_TOKEN_TIMEOUT_SEC
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC
+    STREAM_POOL_TIMEOUT_SEC = STREAM_POOL_TIMEOUT_SEC
+    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
+    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
 
     def __init__(
         self,
@@ -61,18 +77,19 @@ class SSEStreamer:
         log: logging.Logger | None = None,
         api_client: Any | None = None,
         prompt_processing_timeout_sec: float | None = None,
+        is_small_model: bool | None = None,
     ) -> None:
         self.provider_profile = provider_profile
         self.adapter = get_provider_adapter(provider_profile)
         self.aggressive_tool_call_timeout = bool(aggressive_tool_call_timeout)
+        self.is_small_model = self.aggressive_tool_call_timeout if is_small_model is None else bool(is_small_model)
         self.first_token_timeout_sec = self._resolve_first_token_timeout_sec(first_token_timeout_sec)
-        if tool_call_continuation_timeout_sec is None:
-            default_timeout = float(self.adapter.stream_policy.tool_call_continuation_timeout_sec)
-            if default_timeout <= 0:
-                default_timeout = float(self.STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
-            self.tool_call_continuation_timeout_sec = default_timeout
-        else:
-            self.tool_call_continuation_timeout_sec = max(1.0, float(tool_call_continuation_timeout_sec))
+        self.tool_call_continuation_timeout_sec = _resolve_shared_continuation_timeout_sec(
+            tool_call_continuation_timeout_sec,
+            self.adapter,
+            self.provider_profile,
+            self.is_small_model,
+        )
         if prompt_processing_timeout_sec is None:
             adapter_prompt_timeout = float(self.adapter.stream_policy.prompt_processing_timeout_sec)
             self.prompt_processing_timeout_sec = adapter_prompt_timeout if adapter_prompt_timeout > 0 else 0.0
@@ -83,14 +100,11 @@ class SSEStreamer:
         self.api_client = api_client
 
     def _resolve_first_token_timeout_sec(self, override: float | None) -> float:
-        if override is not None:
-            return max(1.0, float(override))
-        adapter_timeout = float(self.adapter.stream_policy.first_token_timeout_sec)
-        if adapter_timeout > 0:
-            return adapter_timeout
-        if self.provider_profile == "lmstudio":
-            return float(self.LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC)
-        return float(self.STREAM_FIRST_TOKEN_TIMEOUT_SEC)
+        return _resolve_shared_first_token_timeout_sec(
+            override,
+            self.adapter,
+            self.provider_profile,
+        )
 
     def _next_stream_read_timeout(self, *, chunk_count: int = 1, tool_call_stream_active: bool) -> float:
         """Determine the appropriate read timeout for the next stream chunk."""
@@ -127,13 +141,51 @@ class SSEStreamer:
         )
         attempt = 0
         max_attempts = 2
+        saw_chunk = False
+        saw_done = False
+        refetched_closed_client = False
         while attempt < max_attempts:
             attempt += 1
             try:
                 async for event in self._stream_sse_once(client, url, headers, payload, timeout):
+                    event_type = event.get("type")
+                    if event_type == "chunk":
+                        saw_chunk = True
+                    elif event_type == "done":
+                        saw_done = True
                     yield event
                 return
             except httpx.RemoteProtocolError as exc:
+                if saw_done:
+                    log_kv(
+                        self.log,
+                        logging.WARNING,
+                        "chat_stream_remote_protocol_error_after_done",
+                        attempt=attempt,
+                        error=str(exc),
+                        provider_profile=self.provider_profile,
+                    )
+                    return
+                if saw_chunk:
+                    log_kv(
+                        self.log,
+                        logging.WARNING,
+                        "chat_stream_remote_protocol_error_after_chunks",
+                        attempt=attempt,
+                        error=str(exc),
+                        provider_profile=self.provider_profile,
+                    )
+                    yield {
+                        "type": "stream_ended_without_done",
+                        "details": {
+                            "reason": "remote_protocol_error_after_chunks",
+                            "provider_profile": self.provider_profile,
+                            "attempt_count": attempt,
+                            "exception_type": "httpx.RemoteProtocolError",
+                            "message": str(exc),
+                        },
+                    }
+                    return
                 if attempt < max_attempts:
                     log_kv(
                         self.log,
@@ -159,6 +211,64 @@ class SSEStreamer:
                     },
                 }
                 return
+            except RuntimeError as exc:
+                if not _is_closed_client_runtime_error(exc):
+                    raise
+                if saw_done:
+                    log_kv(
+                        self.log,
+                        logging.WARNING,
+                        "chat_stream_closed_client_after_done",
+                        attempt=attempt,
+                        error=str(exc),
+                        provider_profile=self.provider_profile,
+                    )
+                    return
+                if saw_chunk:
+                    log_kv(
+                        self.log,
+                        logging.WARNING,
+                        "chat_stream_closed_client_after_chunks",
+                        attempt=attempt,
+                        error=str(exc),
+                        provider_profile=self.provider_profile,
+                    )
+                    yield {
+                        "type": "stream_ended_without_done",
+                        "details": {
+                            "reason": "closed_client_after_chunks",
+                            "provider_profile": self.provider_profile,
+                            "attempt_count": attempt,
+                            "exception_type": "RuntimeError",
+                            "message": str(exc),
+                        },
+                    }
+                    return
+                if refetched_closed_client or self.api_client is None:
+                    yield {
+                        "type": "chunk_error",
+                        "error": "Shared HTTP client was closed",
+                        "details": {
+                            "reason": "backend_stream_failure",
+                            "provider_profile": self.provider_profile,
+                            "attempt_count": attempt,
+                            "exception_type": "RuntimeError",
+                            "message": str(exc),
+                        },
+                    }
+                    return
+                refetched_closed_client = True
+                log_kv(
+                    self.log,
+                    logging.WARNING,
+                    "chat_stream_closed_client_refetch",
+                    attempt=attempt,
+                    error=str(exc),
+                    provider_profile=self.provider_profile,
+                )
+                await _reset_async_client(self.api_client)
+                client = _get_async_client(self.api_client)
+                continue
 
     async def _stream_sse_once(
         self,
@@ -172,12 +282,19 @@ class SSEStreamer:
         saw_done = False
         tool_call_stream_active = False
         recent_chunks: deque[dict[str, Any]] = deque(maxlen=5)
+        pending_data_lines: list[str] = []
+        flush_unterminated = False
+        deferred_read_error: Exception | None = None
         headers_received_at: float | None = None
         async with client.stream("POST", url, headers=headers, json=payload, timeout=timeout) as response:
+            if int(getattr(response, "status_code", 200) or 200) >= 400:
+                await response.aread()
             response.raise_for_status()
             headers_received_at = time.monotonic()
             line_iter = response.aiter_lines()
             while True:
+                if deferred_read_error is not None:
+                    raise deferred_read_error
                 read_timeout = self._next_stream_read_timeout(
                     chunk_count=chunk_count,
                     tool_call_stream_active=tool_call_stream_active,
@@ -188,7 +305,12 @@ class SSEStreamer:
                 try:
                     raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=effective_timeout)
                 except StopAsyncIteration:
-                    break
+                    if not pending_data_lines:
+                        break
+                    # Flush a trailing event that was not terminated by a blank
+                    # line before the stream closed.
+                    raw_line = ""
+                    flush_unterminated = True
                 except asyncio.TimeoutError as exc:
                     if chunk_count == 0:
                         # If the backend has already received the headers but has
@@ -294,11 +416,48 @@ class SSEStreamer:
                                 },
                             }
                             return
-                    raise httpx.ReadTimeout(message) from exc
+                    if pending_data_lines:
+                        deferred_read_error = httpx.ReadTimeout(message)
+                        deferred_read_error.__cause__ = exc
+                        raw_line = ""
+                        flush_unterminated = True
+                    else:
+                        raise httpx.ReadTimeout(message) from exc
+                except (GeneratorExit, asyncio.CancelledError):
+                    raise
+                except Exception as exc:
+                    if not pending_data_lines:
+                        raise
+                    # A transport failure must not silently drop buffered
+                    # data lines: flush them at the event boundary before the
+                    # exception propagates to the retry/salvage handlers.
+                    deferred_read_error = exc
+                    raw_line = ""
+                    flush_unterminated = True
                 line = raw_line.strip()
-                if not line or not line.startswith("data:"):
+                if line.startswith(":"):
+                    # SSE comment/keep-alive line; never part of an event payload.
                     continue
-                chunk = line[5:].strip()
+                if line.startswith("data:"):
+                    data_text = line[5:].strip()
+                    if not data_text:
+                        continue
+                    pending_data_lines.append(data_text)
+                    # Data lines accumulate until the blank-line event
+                    # boundary; the event dispatches exactly once with its
+                    # lines joined per SSE rules.
+                    continue
+                if line:
+                    # Other SSE fields (event:, id:, retry:) are not used here.
+                    continue
+                if not pending_data_lines:
+                    continue
+                # Dispatch the accumulated event: a complete JSON document or
+                # the [DONE] sentinel at the blank-line event separator (per
+                # SSE rules, multiple data lines join with "\n").
+                buffered_lines = pending_data_lines
+                pending_data_lines = []
+                chunk = "\n".join(buffered_lines)
                 if chunk == "[DONE]":
                     saw_done = True
                     log_kv(
@@ -316,69 +475,104 @@ class SSEStreamer:
                         )
                     yield {"type": "done"}
                     break
+                flush_done = False
                 try:
-                    obj = json.loads(chunk)
+                    parsed_objects: list[Any] = [json.loads(chunk)]
                 except json.JSONDecodeError:
-                    log_kv(self.log, logging.DEBUG, "chat_stream_decode_error", raw=chunk)
-                    if self.run_logger:
-                        self.run_logger.log(
-                            "chat",
-                            "decode_error",
-                            "unable to decode chunk",
-                            raw=chunk,
-                        )
-                    continue
-                chunk_count += 1
-                recent_chunks.append(summarize_stream_chunk(obj))
-                if chunk_contains_tool_call_delta(obj):
-                    tool_call_stream_active = True
-                if isinstance(obj, dict) and "error" in obj:
-                    error_info = obj["error"]
-                    if isinstance(error_info, dict):
-                        message = str(
-                            error_info.get("message")
-                            or error_info.get("error")
-                            or error_info.get("detail")
-                            or "Provider returned error"
-                        ).strip()
-                        details = dict(error_info)
-                    else:
-                        message = str(error_info).strip()
-                        details = {"message": message}
-                    if not message:
-                        message = "Provider returned error"
-                    log_kv(
-                        self.log,
-                        logging.ERROR,
-                        "chat_stream_chunk_error",
-                        error=message,
-                        details=details,
-                    )
-                    if self.run_logger:
-                        self.run_logger.log(
-                            "chat",
-                            "chunk_error",
-                            "server reported error in stream chunk",
+                    parsed_objects = []
+                    if flush_unterminated and len(buffered_lines) > 1:
+                        # Non-conformant providers may omit blank-line event
+                        # boundaries entirely; flush each buffered line
+                        # independently so their payloads are not lost.
+                        for buffered_line in buffered_lines:
+                            if buffered_line == "[DONE]":
+                                flush_done = True
+                                continue
+                            try:
+                                parsed_objects.append(json.loads(buffered_line))
+                            except json.JSONDecodeError:
+                                log_kv(self.log, logging.DEBUG, "chat_stream_decode_error", raw=buffered_line)
+                    if not parsed_objects and not flush_done:
+                        log_kv(self.log, logging.DEBUG, "chat_stream_decode_error", raw=chunk)
+                        if self.run_logger:
+                            self.run_logger.log(
+                                "chat",
+                                "decode_error",
+                                "unable to decode chunk",
+                                raw=chunk,
+                            )
+                        continue
+                for obj in parsed_objects:
+                    chunk_count += 1
+                    recent_chunks.append(summarize_stream_chunk(obj))
+                    if chunk_contains_tool_call_delta(obj):
+                        tool_call_stream_active = True
+                    if isinstance(obj, dict) and "error" in obj:
+                        error_info = obj["error"]
+                        if isinstance(error_info, dict):
+                            message = str(
+                                error_info.get("message")
+                                or error_info.get("error")
+                                or error_info.get("detail")
+                                or "Provider returned error"
+                            ).strip()
+                            details = dict(error_info)
+                        else:
+                            message = str(error_info).strip()
+                            details = {"message": message}
+                        if not message:
+                            message = "Provider returned error"
+                        log_kv(
+                            self.log,
+                            logging.ERROR,
+                            "chat_stream_chunk_error",
                             error=message,
                             details=details,
                         )
-                    # Yield a retryable error event instead of raising immediately.
-                    # The outer stream_chat retry loop will re-attempt the full call
-                    # rather than crashing the run on transient upstream errors
-                    # (e.g. Venice "list index out of range" mid-stream).
-                    details["last_chunks"] = list(recent_chunks)
-                    yield {"type": "chunk_error", "error": message, "details": details}
-                    return
+                        if self.run_logger:
+                            self.run_logger.log(
+                                "chat",
+                                "chunk_error",
+                                "server reported error in stream chunk",
+                                error=message,
+                                details=details,
+                            )
+                        # Yield the provider error event. The outer retry loop only
+                        # re-attempts when the error is classified as
+                        # `backend_stream_failure` (e.g. remote protocol errors) or
+                        # another recoverable transport condition; other provider
+                        # stream errors are yielded as-is so the harness can decide
+                        # whether to surface or recover from them.
+                        details["last_chunks"] = list(recent_chunks)
+                        yield {"type": "chunk_error", "error": message, "details": details}
+                        return
 
-                if self.run_logger:
-                    self.run_logger.log(
-                        "chat",
-                        "chunk",
-                        "chat stream chunk",
-                        index=chunk_count,
-                        chunk=obj,
+                    if self.run_logger:
+                        self.run_logger.log(
+                            "chat",
+                            "chunk",
+                            "chat stream chunk",
+                            index=chunk_count,
+                            chunk=obj,
+                        )
+                    yield {"type": "chunk", "data": obj}
+                if flush_done:
+                    saw_done = True
+                    log_kv(
+                        self.log,
+                        logging.INFO,
+                        "chat_stream_complete",
+                        chunk_count=chunk_count,
                     )
-                yield {"type": "chunk", "data": obj}
+                    if self.run_logger:
+                        self.run_logger.log(
+                            "chat",
+                            "stream_complete",
+                            "chat stream completed",
+                            chunk_count=chunk_count,
+                        )
+                    yield {"type": "done"}
+                    break
         if not saw_done:
             log_kv(
                 self.log,

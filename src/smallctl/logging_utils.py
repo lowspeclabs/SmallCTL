@@ -438,7 +438,17 @@ class RunLogger:
                     gf.write(json.dumps(row, ensure_ascii=True, default=str) + "\n")
             self._enforce_size_cap()
         if self._listener:
-            self._listener(row)
+            try:
+                self._listener(row)
+            except Exception as exc:
+                log_kv(
+                    logging.getLogger("smallctl.logging"),
+                    logging.WARNING,
+                    "run_log_listener_failed",
+                    error=str(exc),
+                    event=event,
+                    channel=channel,
+                )
 
     @staticmethod
     def _bound_payload(data: dict[str, Any]) -> dict[str, Any]:

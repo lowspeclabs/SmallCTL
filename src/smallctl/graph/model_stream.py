@@ -67,11 +67,13 @@ async def _run_nonstream_model_call(
     chunks: list[dict[str, Any]] = []
     first_token_time: float | None = None
     stream_state = StreamTagState()
+    last_chunk_error_details: dict[str, Any] | None = None
+    stream_completed_cleanly = True
     try:
         async for event in harness.client.stream_chat(messages=messages, tools=tools, force_nonstream=True):
             if event.get("type") == "chunk":
                 if first_token_time is None:
-                    first_token_time = time.perf_counter()
+                    first_token_time = time.monotonic()
                 stream_state, first_token_time = await handle_model_stream_chunk(
                     harness=harness,
                     deps=deps,
@@ -87,6 +89,11 @@ async def _run_nonstream_model_call(
             elif event.get("type") == "done":
                 break
             elif event.get("type") == "chunk_error":
+                stream_completed_cleanly = False
+                last_chunk_error_details = {
+                    "error": str(event.get("error") or ""),
+                    "details": event.get("details"),
+                }
                 harness._runlog(
                     "nonstream_chunk_error",
                     "non-stream fallback returned a chunk error",
@@ -95,6 +102,11 @@ async def _run_nonstream_model_call(
                 )
                 break
     except Exception as exc:
+        stream_completed_cleanly = False
+        last_chunk_error_details = {
+            "error": str(exc),
+            "exception_type": exc.__class__.__name__,
+        }
         harness.log.exception("nonstream model call failed")
         harness._runlog("nonstream_model_call_error", "non-stream fallback failed", error=str(exc))
 
@@ -109,10 +121,10 @@ async def _run_nonstream_model_call(
     )
     return {
         "chunks": chunks,
-        "stream_completed_cleanly": True,
+        "stream_completed_cleanly": stream_completed_cleanly,
         "trigger_early_4b_fallback": False,
         "salvage_partial_stream": None,
-        "last_chunk_error_details": None,
+        "last_chunk_error_details": last_chunk_error_details,
         "stream_ended_without_done": False,
         "stream_ended_without_done_details": {},
         "partial_assistant_text": "",
@@ -141,7 +153,7 @@ async def process_model_stream(
     graph_state.last_assistant_text = ""
     graph_state.last_thinking_text = ""
     graph_state.last_usage = {}
-    start_time = time.perf_counter()
+    start_time = time.monotonic()
 
     start_tag = str(harness.thinking_start_tag or "<think>")
     end_tag = str(harness.thinking_end_tag or "</think>")

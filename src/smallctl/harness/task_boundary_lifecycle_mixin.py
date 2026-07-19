@@ -18,6 +18,7 @@ from ..state import (
 )
 from ..recovery_schema import FailureEvent
 from ..task_targets import extract_task_target_paths
+from ..context.summarizer import _next_sequential_id
 from ..state_memory import trim_recent_messages
 from .task_boundary_constants import (
     _SEMANTIC_RECENT_TAIL_TOKEN_CAP,
@@ -612,7 +613,9 @@ class TaskBoundaryLifecycleMixin:
         state = self.harness.state
         if not getattr(state, "recent_messages", None):
             return None
-        brief_id = f"B{len(state.context_briefs) + 1:04d}"
+        brief_id = _next_sequential_id(
+            (b.brief_id for b in state.context_briefs), prefix="B"
+        )
         from ..context.policy import ContextPolicy
         policy = getattr(self.harness, "context_policy", None)
         if policy is None:

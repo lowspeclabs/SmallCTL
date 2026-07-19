@@ -210,10 +210,12 @@ def _looks_like_complete_pipe_table(text: str) -> bool:
             if not stripped:
                 break
             if "|" not in stripped:
-                return False
+                break
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
             if len(cells) != expected_cells:
-                return False
+                if body_count == 0:
+                    return False
+                break
             body_count += 1
         if body_count > 0:
             return True
@@ -227,36 +229,39 @@ def _inline_code_backticks_balanced(text: str) -> bool:
     triple-backtick code fences and checks each inline span independently.
     Markdown allows runs of one or more backticks to delimit inline code,
     so `` ` `` and ```` ``code`` ```` are both valid.
+
+    The scan is single-pass over the input; it tracks fenced code blocks by
+    triple+ backtick runs at the start of a line and uses a small stack to
+    track open inline runs.  This avoids the previous O(n^2) backtracking
+    regex and nested search.
     """
-    # Remove fenced code blocks so their backticks are not counted as inline
-    # spans.  A crude strip is enough because we only care about balance.
-    without_fences = re.sub(r"```[\s\S]*?```", "", text)
-    pos = 0
-    while pos < len(without_fences):
-        if without_fences[pos] != "`":
-            pos += 1
+    stack: list[int] = []
+    in_fence = False
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "`":
+            i += 1
             continue
-        # Count the length of the backtick run that opens the span.
-        start_run = pos
-        while pos < len(without_fences) and without_fences[pos] == "`":
-            pos += 1
-        run_len = pos - start_run
-        # Look for a matching run of the same length.
-        match_pos = pos
-        while match_pos < len(without_fences):
-            if without_fences[match_pos] != "`":
-                match_pos += 1
-                continue
-            end_run = match_pos
-            while end_run < len(without_fences) and without_fences[end_run] == "`":
-                end_run += 1
-            if end_run - match_pos == run_len:
-                pos = end_run
-                break
-            match_pos = end_run
-        else:
-            return False
-    return True
+        start = i
+        while i < n and text[i] == "`":
+            i += 1
+        run_len = i - start
+        # Triple+ backticks at the start of a line toggle a fenced code block.
+        at_line_start = start == 0 or text[start - 1] == "\n"
+        if run_len >= 3 and at_line_start:
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        # Inline code span: a matching run of the same length closes the
+        # current span; runs of a different length are content inside the
+        # span (e.g. `` ` ``) and are ignored.
+        if not stack:
+            stack.append(run_len)
+        elif stack[-1] == run_len:
+            stack.pop()
+    return not stack
 
 
 def _markdown_render_ready(text: str) -> bool:

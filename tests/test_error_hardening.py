@@ -5,9 +5,11 @@ import pytest
 from unittest.mock import MagicMock
 
 from smallctl.graph.error_hardening import (
+    _is_dns_resolution_failure,
     _maybe_emit_ground_truth_diffusion,
     _maybe_emit_nginx_sites_enabled_nudge,
     _maybe_schedule_web_search_for_repeated_error,
+    _recent_errors_are_dns_resolution_failures,
 )
 from smallctl.graph.state import GraphRunState, ToolExecutionRecord
 from smallctl.harness.tool_results import _store_verifier_verdict
@@ -517,3 +519,85 @@ class TestWebSearchOnRepeatedError:
         assert "webmin/webmin" in query
         assert "docker" in query
         assert "pull access denied" not in query
+
+    def test_detects_dns_resolution_failure(self):
+        assert _is_dns_resolution_failure("[Errno -3] Temporary failure in name resolution")
+        assert _is_dns_resolution_failure("Could not resolve host 'example.local'")
+        assert _is_dns_resolution_failure("Name or service not known")
+        assert not _is_dns_resolution_failure("permission denied")
+
+    def test_repeated_dns_error_does_not_schedule_web_search(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = "## Error\n\n- Type: api_error\n- Message: [Errno -3] Temporary failure in name resolution"
+        command = "cd /tmp/proxmox-manager && python3 scripts/proxmox-cli.py doctor 2>&1"
+        record = _make_record("shell_exec", success=False, error=error, command=command)
+
+        # First occurrence: nothing scheduled.
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert gs.pending_tool_calls == []
+        harness.state.append_message.assert_not_called()
+
+        # Second occurrence: targeted DNS nudge, no web search.
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+        assert gs.pending_tool_calls == []
+        assert harness.state.append_message.call_count == 1
+        msg = harness.state.append_message.call_args[0][0]
+        assert msg.metadata["recovery_kind"] == "repeated_dns_failure"
+        assert "DNS resolution failure" in msg.content
+        assert "example.local" in msg.content
+
+    def test_repeated_dns_error_flags_placeholder_host(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = "[Errno -3] Temporary failure in name resolution"
+        command = "python3 scripts/proxmox-cli.py --url https://proxmox.example.local:8006 nodes"
+        record = _make_record("shell_exec", success=False, error=error, command=command)
+
+        _maybe_schedule_web_search_for_repeated_error(gs, harness, record)
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+
+        msg = harness.state.append_message.call_args[0][0]
+        assert msg.metadata["placeholder_host"] is True
+
+    def test_repeated_dns_error_escalates_after_fourth(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        error = "[Errno -3] Temporary failure in name resolution"
+        command = "python3 scripts/app.py --host api.example.local"
+        record = _make_record("shell_exec", success=False, error=error, command=command)
+
+        for _ in range(3):
+            _maybe_schedule_web_search_for_repeated_error(gs, harness, record)
+        harness.state.append_message.reset_mock()
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is True
+        assert gs.pending_tool_calls == []
+        assert harness.state.append_message.call_count == 1
+        msg = harness.state.append_message.call_args[0][0]
+        assert msg.metadata["recovery_kind"] == "repeated_dns_failure"
+        assert "environmental or configuration blocker" in msg.content
+
+    def test_recent_errors_are_dns_resolution_failures(self):
+        harness = _make_harness()
+        assert _recent_errors_are_dns_resolution_failures(harness) is False
+
+        harness.state.recent_errors = ["shell_exec: [Errno -3] Temporary failure in name resolution"]
+        assert _recent_errors_are_dns_resolution_failures(harness) is True
+
+        harness.state.recent_errors.append("file_read: permission denied")
+        assert _recent_errors_are_dns_resolution_failures(harness) is False
+
+    def test_routing_failures_are_not_dns_resolution_failures(self):
+        from smallctl.graph.error_hardening import _is_dns_resolution_failure, _is_network_routing_failure
+
+        assert _is_dns_resolution_failure("Temporary failure in name resolution") is True
+        assert _is_dns_resolution_failure("Could not resolve host 'example.local'") is True
+        assert _is_network_routing_failure("No route to host") is True
+        assert _is_network_routing_failure("Network is unreachable") is True
+        assert _is_dns_resolution_failure("No route to host") is False
+        assert _is_dns_resolution_failure("Network is unreachable") is False
+        assert _is_network_routing_failure("Temporary failure in name resolution") is False

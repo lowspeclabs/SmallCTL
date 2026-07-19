@@ -10,6 +10,48 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("smallctl.harness.prompt_builder")
 
+_PROMPT_BUDGET_REMEDIATION = (
+    "reduce the tools exposed for this turn, clear stale artifacts/summaries, "
+    "lower the recent-message limit, or raise the max prompt token limit / backend context size"
+)
+
+
+def prompt_budget_overflow_error(
+    *,
+    estimated_tokens: int,
+    limit: int,
+    section_tokens: dict[str, int],
+) -> RuntimeError:
+    """Build a RuntimeError carrying actionable prompt-budget diagnostics."""
+    top_contributors = [
+        {"section": name, "tokens": tokens}
+        for name, tokens in sorted(section_tokens.items(), key=lambda item: item[1], reverse=True)
+        if tokens > 0
+    ][:5]
+    contributor_text = ", ".join(
+        f"{item['section']}={item['tokens']}" for item in top_contributors
+    ) or "none"
+    message = (
+        f"PROMPT BUDGET OVERFLOW: {estimated_tokens} tokens assembled, which exceeds the max prompt limit of {limit}. "
+        f"Top contributors: {contributor_text}. "
+        f"Remediation: {_PROMPT_BUDGET_REMEDIATION}."
+    )
+    error = RuntimeError(message)
+    error.prompt_budget_details = {  # type: ignore[attr-defined]
+        "type": "prompt_budget_failure",
+        "estimated_prompt_tokens": estimated_tokens,
+        "max_prompt_tokens": limit,
+        "top_contributors": top_contributors,
+        "remediation": _PROMPT_BUDGET_REMEDIATION,
+    }
+    return error
+
+
+def is_prompt_budget_overflow(exc: BaseException) -> bool:
+    return getattr(exc, "prompt_budget_details", None) is not None or str(exc).startswith(
+        "PROMPT BUDGET OVERFLOW"
+    )
+
 class PromptBuilderService:
     def __init__(self, harness: Harness):
         self.harness = harness
@@ -348,9 +390,21 @@ class PromptBuilderService:
                     active_intent=frame.spine.active_intent,
                 )
 
+        # The assembler recounts and enforces the tighter of the policy max and
+        # the caller budget (soft_limit, passed as token_budget) on the final
+        # emitted message list; an estimate above the effective budget here
+        # means mandatory content alone could not fit, so surface the typed
+        # budget failure instead of emitting an over-budget prompt.
         limit = self.harness.context_policy.max_prompt_tokens
-        if limit and assembly.estimated_prompt_tokens > limit:
-             raise RuntimeError(f"PROMPT BUDGET OVERFLOW: {assembly.estimated_prompt_tokens} tokens assembled, which exceeds the max prompt limit of {limit}.")
+        effective_limit = limit if limit and limit > 0 else None
+        if soft_limit and soft_limit > 0 and (effective_limit is None or soft_limit < effective_limit):
+            effective_limit = soft_limit
+        if effective_limit and assembly.estimated_prompt_tokens > effective_limit:
+            raise prompt_budget_overflow_error(
+                estimated_tokens=assembly.estimated_prompt_tokens,
+                limit=int(effective_limit),
+                section_tokens=current_sections,
+            )
 
         return assembly.messages
 

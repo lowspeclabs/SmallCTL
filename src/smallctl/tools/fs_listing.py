@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import difflib
 from pathlib import Path
 from typing import Any
 
+from ..redaction import REDACTED
 from ..state import LoopState
 from .common import fail, ok
 from .fs_loop_guard import clear_loop_guard_verification_requirement
@@ -13,9 +15,6 @@ from .fs_sessions import _record_repair_cycle_read
 
 
 _SENSITIVE_FILE_NAMES = {
-    ".env",
-    ".env.local",
-    ".envrc",
     ".netrc",
 }
 _SENSITIVE_FILE_SUFFIXES = (
@@ -24,6 +23,22 @@ _SENSITIVE_FILE_SUFFIXES = (
     ".p12",
     ".pfx",
 )
+_SENSITIVE_ENV_FILE_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".env.testing",
+    ".env.test",
+    ".envrc",
+}
+_ENV_FILE_TEMPLATE_NAMES = {
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.defaults",
+    ".env.dist",
+}
 
 # Out-of-workspace locations that require explicit approval before mutation.
 _SENSITIVE_LOCATION_PATTERNS = (
@@ -182,11 +197,63 @@ def _looks_like_sensitive_read_path(path: str | Path) -> bool:
     name = target.name.lower()
     if name in _SENSITIVE_FILE_NAMES:
         return True
-    if name.startswith(".env."):
-        return True
     if name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}:
         return True
     return any(name.endswith(suffix) for suffix in _SENSITIVE_FILE_SUFFIXES)
+
+
+def _looks_like_sensitive_env_path(path: str | Path) -> bool:
+    """Return True for real .env files that should not be blindly overwritten.
+
+    Template files such as `.env.example` and `.env.sample` are intentionally
+    excluded so agents can read/write them as documentation.
+    """
+    target = Path(str(path or ""))
+    name = target.name.lower()
+    if name in _ENV_FILE_TEMPLATE_NAMES:
+        return False
+    if name in _SENSITIVE_ENV_FILE_NAMES:
+        return True
+    if name.startswith(".env.") and not any(name.endswith(suffix) for suffix in (".example", ".sample", ".template", ".defaults")):
+        return True
+    return False
+
+
+_DOTENV_ASSIGNMENT_RE = re.compile(r"^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(.*)$")
+
+
+def _redact_dotenv_text(text: str) -> str:
+    """Redact assignment values in dotenv content, preserving keys and comments."""
+    redacted_lines: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            redacted_lines.append(line)
+            continue
+        match = _DOTENV_ASSIGNMENT_RE.match(line)
+        if match is None:
+            redacted_lines.append(line)
+            continue
+        value = match.group(2).strip()
+        if not value:
+            redacted_lines.append(line)
+            continue
+        redacted_lines.append(f"{match.group(1)}{REDACTED}")
+    return "\n".join(redacted_lines)
+
+
+def _dotenv_permission_warning(path: Path) -> str:
+    """Warn when a dotenv file is group/other-readable without exposing values."""
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return ""
+    if mode & 0o044:
+        return (
+            f"Dotenv file `{path.name}` is readable by group/other users "
+            f"(mode {oct(mode & 0o777)}); restrict it with `chmod 600`."
+        )
+    return ""
 
 
 def _active_session_staging_path(
@@ -442,6 +509,7 @@ async def file_read(
     target = _resolve(path, cwd)
     source = _active_session_staging_path(state, path, cwd) or target
     session = getattr(state, "write_session", None) if state is not None else None
+    sensitive_dotenv_read = _looks_like_sensitive_env_path(target)
     if _looks_like_sensitive_read_path(target):
         return fail(
             f"Refusing to read likely secret-bearing file `{path}`. "
@@ -482,6 +550,9 @@ async def file_read(
         text = raw.decode("utf-8", errors="replace")
     except Exception as exc:
         return fail(f"Unable to read file: {exc}")
+
+    if sensitive_dotenv_read:
+        text = _redact_dotenv_text(text)
 
     lines = text.splitlines()
     total_lines = len(lines)
@@ -529,6 +600,10 @@ async def file_read(
             "truncated": truncated,
             "read_from_staging": source != target,
             "staged_only": source != target,
+            "dotenv_read_redacted": sensitive_dotenv_read,
+            "dotenv_permissions_warning": (
+                _dotenv_permission_warning(source) if sensitive_dotenv_read else ""
+            ),
             "write_session_id": (
                 str(getattr(session, "write_session_id", "") or "") if source != target else ""
             ),

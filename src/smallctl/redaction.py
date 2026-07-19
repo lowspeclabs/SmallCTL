@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Redaction utilities for transport, logging, and exported boundaries.
 
 Live runtime state may temporarily contain plaintext secrets when needed for task
 continuity, but provider payloads and observability/export surfaces must redact
 them before serialization or transport.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -51,23 +51,62 @@ _SENSITIVE_SUFFIXES = (
     "_secret",
     "_token",
     "_api_key",
+    "_access_key",
+    "_key",
     "_pass",
 )
 
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?P<name>(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|token|secret|passwd|password|authorization)"
+    r"(?:[_-][A-Za-z0-9]+)*)(?P<key_quote>[\"']?)(?P<before>[ \t]*)"
+    r"(?P<separator>[=:])(?P<after>[ \t]*)"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,\"'\]}]+)"
+    r"(?P<trailing_quote>[\"']?)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(\bauthorization[ \t]*(?:=|:)[ \t]*[\"']?(?:Bearer|Token|Basic|ApiKey)[ \t]+)"
+    r"([^\s,\"'\]}]+)([\"']?)",
+    re.IGNORECASE,
+)
+_PYTHON_ANNOTATION_ROOTS = {
+    "annotated",
+    "any",
+    "bool",
+    "bytearray",
+    "bytes",
+    "callable",
+    "dict",
+    "float",
+    "frozenset",
+    "int",
+    "iterable",
+    "list",
+    "literal",
+    "mapping",
+    "none",
+    "object",
+    "optional",
+    "sequence",
+    "set",
+    "str",
+    "tuple",
+    "type",
+    "union",
+}
+
 _SENSITIVE_TEXT_PATTERNS = (
+    # Bearer tokens first so a generic authorization handler never strands the JWT.
+    re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]+)", re.IGNORECASE),
+    re.compile(r"(\bsshpass\s+-p\s*[\"']?)([^\s\"',;\]}]+)([\"']?)", re.IGNORECASE),
+    re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]+:)([^\s@]+)(@)", re.IGNORECASE),
+    _AUTHORIZATION_SCHEME_RE,
     re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)=)([^\s,;]+)", re.IGNORECASE),
     re.compile(r"(\bpassword\s+is\s+)([^\s,;]+)", re.IGNORECASE),
     re.compile(r'(\bpassword\s*(?:is\s+|=|:)?\s*")([^"\r\n]+)(")', re.IGNORECASE),
     re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s*')([^'\r\n]+)(')", re.IGNORECASE),
-    re.compile(r"(\bpassword\s*[=:]\s*)([^\s,;]+)", re.IGNORECASE),
-    re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s+)([^\s,;]+)", re.IGNORECASE),
-    re.compile(r'(("|\')password("|\')\s*:\s*("|\'))([^"\r\n]+)(("|\'))', re.IGNORECASE),
-    re.compile(
-        r"(\b(?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|authorization|secret)\s*(?:=|:)\s*[\"']?)([^\s,\"'\]}]+)([\"']?)",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]+)", re.IGNORECASE),
 )
 
 
@@ -90,6 +129,69 @@ def _is_sensitive_key(key: str) -> bool:
     if normalized in _EXACT_SENSITIVE_KEYS:
         return True
     return any(normalized.endswith(suffix) for suffix in _SENSITIVE_SUFFIXES)
+
+
+def _is_sensitive_assignment_name(name: str) -> bool:
+    normalized = _normalize_key(name)
+    parts = [part for part in normalized.split("_") if part]
+    if normalized in {"apikey", "authorization"}:
+        return True
+    if any(part in {"token", "secret", "passwd", "password"} for part in parts):
+        return True
+    return any(parts[index : index + 2] == ["api", "key"] for index in range(len(parts) - 1))
+
+
+def _looks_like_python_annotation(value: str) -> bool:
+    candidate = value.strip().rstrip("):")
+    root = re.split(r"[\[|]", candidate, maxsplit=1)[0]
+    leaf = root.rsplit(".", maxsplit=1)[-1]
+    lowered = leaf.lower()
+    if lowered in _PYTHON_ANNOTATION_ROOTS or lowered.endswith(("_type", "_t")):
+        return True
+    return bool(leaf and leaf[0].isupper() and leaf.replace("_", "").isalnum())
+
+
+def _looks_like_code_assignment(match: re.Match[str]) -> bool:
+    value = match.group("value")
+    if value.startswith(("\"", "'")):
+        return False
+
+    separator = match.group("separator")
+    if separator == ":" and _looks_like_python_annotation(value):
+        return True
+
+    if re.fullmatch(r"(?:None|True|False|Ellipsis|NotImplemented)", value):
+        return True
+    if re.match(r"(?:await[ \t]+)?[A-Za-z_][A-Za-z0-9_.]*[\[(]", value):
+        return True
+    if re.fullmatch(r"(?:self|cls|typing|os|sys|config|settings|env)(?:\.[A-Za-z_][A-Za-z0-9_]*)+", value):
+        return True
+
+    if separator == ":" and match.group("key_quote"):
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value))
+
+    if separator == "=" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        if match.group("before") or match.group("after"):
+            return True
+        return _is_sensitive_assignment_name(value)
+    return False
+
+
+def _redact_sensitive_assignment(match: re.Match[str]) -> str:
+    name = match.group("name")
+    value = match.group("value")
+    if not _is_sensitive_assignment_name(name) or "REDACTED" in value:
+        return match.group(0)
+    if _looks_like_code_assignment(match):
+        return match.group(0)
+    prefix = (
+        name
+        + match.group("key_quote")
+        + match.group("before")
+        + match.group("separator")
+        + match.group("after")
+    )
+    return prefix + _hash_credential(value) + match.group("trailing_quote")
 
 
 def redact_sensitive_data(value: Any, *, parent_key: str | None = None) -> Any:
@@ -188,7 +290,46 @@ def redact_sensitive_text(text: str) -> str:
             return _repl
 
         redacted = pattern.sub(_get_repl(pattern.groups), redacted)
-    return redacted
+    return _SENSITIVE_ASSIGNMENT_RE.sub(_redact_sensitive_assignment, redacted)
+
+
+def _redact_arguments_text(arguments: Any) -> Any:
+    if not isinstance(arguments, str):
+        return arguments
+    stripped = arguments.strip()
+    if stripped[:1] not in {"{", "["}:
+        return redact_sensitive_text(arguments)
+    try:
+        parsed = json.loads(arguments)
+    except Exception:
+        return redact_sensitive_text(arguments)
+    redacted = redact_sensitive_data(parsed)
+    if redacted == parsed:
+        return arguments
+    return json.dumps(redacted, ensure_ascii=True, sort_keys=True)
+
+
+def _redact_tool_calls(tool_calls: Any) -> Any:
+    if not isinstance(tool_calls, list):
+        return tool_calls
+    redacted_calls: list[Any] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            redacted_calls.append(call)
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            redacted_calls.append(call)
+            continue
+        arguments = function.get("arguments")
+        redacted_arguments = _redact_arguments_text(arguments)
+        if redacted_arguments == arguments:
+            redacted_calls.append(call)
+            continue
+        redacted_call = dict(call)
+        redacted_call["function"] = {**function, "arguments": redacted_arguments}
+        redacted_calls.append(redacted_call)
+    return redacted_calls
 
 
 def redact_sensitive_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -202,5 +343,9 @@ def redact_sensitive_messages(messages: list[dict[str, Any]]) -> list[dict[str, 
         content = redacted.get("content")
         if isinstance(content, str):
             redacted["content"] = redact_sensitive_text(content)
+        elif isinstance(content, list):
+            redacted["content"] = redact_sensitive_data(content)
+        if "tool_calls" in redacted:
+            redacted["tool_calls"] = _redact_tool_calls(redacted["tool_calls"])
         redacted_messages.append(redacted)
     return redacted_messages

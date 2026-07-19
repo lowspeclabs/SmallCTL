@@ -272,7 +272,7 @@ class PlanApprovalScreen(ModalScreen[PlanApprovalDecision]):
         return "\n".join(parts)
 
 
-class InterruptPromptScreen(ModalScreen[InterruptDecision]):
+class InterruptPromptScreen(ModalScreen[InterruptDecision | None]):
     BINDINGS = [
         ("y", "approve", "Yes"),
         ("n", "deny", "No"),
@@ -285,11 +285,39 @@ class InterruptPromptScreen(ModalScreen[InterruptDecision]):
         title: str,
         question: str,
         details: str = "",
+        kind: str = "",
+        response_mode: str = "",
     ) -> None:
         super().__init__()
         self.title = title
         self.question = question
         self.details = details
+        self.kind = kind
+        self.response_mode = response_mode
+        self.affirmative_reply, self.negative_reply = self._canonical_replies()
+
+    def _canonical_replies(self) -> tuple[str, str | None]:
+        mode = " ".join(str(self.response_mode or "").strip().lower().split())
+        if not mode:
+            kind = str(self.kind or "").strip()
+            if kind == "plan_execute_approval":
+                mode = "yes/no/revise"
+            elif kind == "staged_step_blocked":
+                mode = "revise/skip/retry"
+            elif kind == "apt_deb822_validator_approval":
+                mode = "yes/no"
+            else:
+                mode = "continue"
+        tokens = {
+            token.strip()
+            for token in mode.replace(",", "/").split("/")
+            if token.strip()
+        }
+        if tokens & {"yes", "approve", "execute"}:
+            return "yes", "no"
+        if tokens & {"continue", "proceed", "resume"}:
+            return "continue", None
+        return "yes", "no"
 
     def compose(self) -> ComposeResult:
         with Container(id="approve-prompt-overlay"):
@@ -298,24 +326,33 @@ class InterruptPromptScreen(ModalScreen[InterruptDecision]):
                     yield Static(self.title or "Input required", id="approve-prompt-title")
                     yield Static(self._build_body(), id="approve-prompt-body", markup=False)
                     with Horizontal(id="approve-prompt-buttons"):
-                        yield Button("Yes", id="interrupt-yes", variant="success")
-                        yield Button("No", id="interrupt-no", variant="error")
+                        yield Button(self._affirmative_label(), id="interrupt-yes", variant="success")
+                        yield Button(self._negative_label(), id="interrupt-no", variant="error")
 
     async def on_mount(self) -> None:
         self.query_one("#interrupt-yes", Button).focus()
 
     def action_approve(self) -> None:
-        self.dismiss(InterruptDecision("yes"))
+        self.dismiss(InterruptDecision(self.affirmative_reply))
 
     def action_deny(self) -> None:
-        self.dismiss(InterruptDecision("no"))
+        if self.negative_reply is None:
+            self.dismiss(None)
+            return
+        self.dismiss(InterruptDecision(self.negative_reply))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "interrupt-yes":
-            self.dismiss(InterruptDecision("yes"))
+            self.dismiss(InterruptDecision(self.affirmative_reply))
             return
         if event.button.id == "interrupt-no":
-            self.dismiss(InterruptDecision("no"))
+            self.action_deny()
+
+    def _affirmative_label(self) -> str:
+        return "Continue" if self.affirmative_reply == "continue" else "Yes"
+
+    def _negative_label(self) -> str:
+        return "Dismiss" if self.negative_reply is None else "No"
 
     def _build_body(self) -> str:
         parts = [
@@ -325,10 +362,11 @@ class InterruptPromptScreen(ModalScreen[InterruptDecision]):
         if self.details:
             parts.append(self.details)
             parts.append("")
-        parts.extend([
-            "Use left/right to choose, then Enter.",
-            "Y approves, N denies.",
-        ])
+        parts.append("Use left/right to choose, then Enter.")
+        if self.negative_reply is None:
+            parts.append("Y resumes the paused task, N dismisses this prompt.")
+        else:
+            parts.append("Y approves, N denies.")
         return "\n".join(parts)
 
 

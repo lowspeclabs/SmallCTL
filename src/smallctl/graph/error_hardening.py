@@ -49,6 +49,44 @@ _HARNESS_POLICY_BLOCK_RE = re.compile(
 )
 _TERMINAL_UNKNOWN_RE = re.compile(r"\berror\s+opening\s+terminal:\s*unknown\b", re.IGNORECASE)
 _ANSI_ART_NOISE_RE = re.compile(r"^[\s.,;:'`\-_/\\|()\[\]{}<>~=+*!?A-Za-z0-9]*$")
+_DNS_RESOLUTION_FAILURE_RE = re.compile(
+    r"(?:"
+    r"Temporary failure in name resolution"
+    r"|Name or service not known"
+    r"|Could not resolve(?: host)? ['\"]?\S+['\"]?"
+    r"|getaddrinfo failed"
+    r"|No such host is known"
+    r"|Unknown host"
+    r")\b",
+    re.IGNORECASE,
+)
+_NETWORK_ROUTING_FAILURE_RE = re.compile(
+    r"(?:"
+    r"No route to host"
+    r"|Network is unreachable"
+    r")\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_HOST_RE = re.compile(
+    r"(?:example\.(?:local|com|org|net)|replace[-_]?me|changeme|localhost\.localdomain)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_dns_resolution_failure(text: str) -> bool:
+    return bool(_DNS_RESOLUTION_FAILURE_RE.search(str(text or "")))
+
+
+def _is_network_routing_failure(text: str) -> bool:
+    return bool(_NETWORK_ROUTING_FAILURE_RE.search(str(text or "")))
+
+
+def _command_host_looks_placeholder(command: str) -> bool:
+    match = _URL_HOST_RE.search(str(command or ""))
+    if match:
+        host = str(match.group(1) or "").strip()
+        return bool(host and _PLACEHOLDER_HOST_RE.search(host))
+    return False
 
 
 def _record_output_text(record: ToolExecutionRecord) -> str:
@@ -299,6 +337,23 @@ def _maybe_emit_ground_truth_diffusion(
 # ---------------------------------------------------------------------------
 
 _MAX_ERROR_SIGNATURE_LEN = 200
+_SCRATCHPAD_COUNTER_MAP_CAP = 128
+
+
+def _bounded_counter_increment(counts: dict[str, int], key: str) -> int:
+    """Increment counts[key], keeping the map bounded to the newest cap keys.
+
+    Scratchpad counter maps are checkpointed, so they must stay bounded:
+    updated keys move to the newest position and the oldest keys are evicted
+    once the map exceeds ``_SCRATCHPAD_COUNTER_MAP_CAP`` entries.
+    """
+    count = int(counts.get(key, 0) or 0) + 1
+    if key in counts:
+        del counts[key]
+    counts[key] = count
+    while len(counts) > _SCRATCHPAD_COUNTER_MAP_CAP:
+        counts.pop(next(iter(counts)))
+    return count
 _URL_HOST_RE = re.compile(r"https?://([^/\s'\"]+)", re.IGNORECASE)
 _HTML_FETCH_RE = re.compile(r"<(?:!doctype\s+html|html|head|body)\b", re.IGNORECASE)
 _HTML_SHELL_ERROR_RE = re.compile(r"syntax error near unexpected token\s+`?<", re.IGNORECASE)
@@ -398,7 +453,6 @@ def _install_source_invalid_query(harness: Any) -> str:
         return f"current official install instructions Debian {host} NXDOMAIN"
     return f"{host} NXDOMAIN official install instructions"
 
-
 def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRecord | None = None, harness: Any = None) -> str:
     if harness is not None:
         diagnosis = _install_source_diagnosis(harness)
@@ -434,6 +488,78 @@ def _web_search_query_for_repeated_error(error: str, *, record: ToolExecutionRec
     return f"{prefix}: {cleaned_error[:150] or str(error or '')[:150]}"
 
 
+_DNS_RESOLUTION_FAILURE_NUDGE_COUNTS = {2, 4, 5, 6}
+
+
+def _maybe_emit_repeated_dns_failure_nudge(
+    graph_state: GraphRunState,
+    harness: Any,
+    record: ToolExecutionRecord,
+    error: str,
+    signature: str,
+    count: int,
+) -> bool:
+    """If the same error is a DNS resolution failure, emit a targeted nudge
+    instead of a generic web search or stagnation prompt.
+    """
+    if not _is_dns_resolution_failure(error):
+        return False
+    if count not in _DNS_RESOLUTION_FAILURE_NUDGE_COUNTS:
+        return False
+
+    command = _record_command(record)
+    host = _extract_command_host(command)
+    placeholder_host = _command_host_looks_placeholder(command)
+    host_hint = f" (`{host}`)" if host else ""
+
+    if count == 2:
+        message = (
+            "The same DNS resolution failure is repeating. Running the same command again will not fix it. "
+            "Check the relevant configuration file (e.g., `.env`) for the actual endpoint, verify network connectivity, "
+            f"and confirm the hostname{host_hint} is reachable. If it is a placeholder like `example.local` or `replace-me`, "
+            "ask the user for the real value before continuing."
+        )
+    else:
+        message = (
+            f"The same DNS resolution failure has occurred {count} times. "
+            "Stop retrying the same command. This is an environmental or configuration blocker, not a code bug. "
+            "Report the blocker to the user and ask for the correct endpoint or network access."
+        )
+
+    metadata: dict[str, Any] = {
+        "is_recovery_nudge": True,
+        "recovery_kind": "repeated_dns_failure",
+        "error_signature": signature[:200],
+        "count": count,
+        "placeholder_host": placeholder_host,
+    }
+    if host:
+        metadata["host"] = host
+
+    harness.state.append_message(
+        ConversationMessage(role="system", content=message, metadata=metadata)
+    )
+    harness._runlog(
+        "repeated_dns_failure_nudge",
+        "injected targeted nudge for repeated DNS resolution failure",
+        error_signature=signature[:200],
+        count=count,
+        placeholder_host=placeholder_host,
+    )
+    return True
+
+
+def _recent_errors_are_dns_resolution_failures(harness: Any) -> bool:
+    """Return True when every recent error is a DNS resolution failure."""
+    recent_errors = getattr(getattr(harness, "state", None), "recent_errors", None) or []
+    if not recent_errors:
+        return False
+    relevant = [str(err) for err in recent_errors[-6:] if str(err).strip()]
+    if not relevant:
+        return False
+    return all(_is_dns_resolution_failure(err) for err in relevant)
+
+
 def _maybe_schedule_web_search_for_repeated_error(
     graph_state: GraphRunState,
     harness: Any,
@@ -466,9 +592,11 @@ def _maybe_schedule_web_search_for_repeated_error(
     if not isinstance(seen_errors, dict):
         seen_errors = {}
 
-    count = seen_errors.get(signature, 0) + 1
-    seen_errors[signature] = count
+    count = _bounded_counter_increment(seen_errors, signature)
     scratchpad["_repeated_error_signatures"] = seen_errors
+
+    if _maybe_emit_repeated_dns_failure_nudge(graph_state, harness, record, error, signature, count):
+        return True
 
     # Act on 2nd occurrence: web search. Escalate on 4th+: stagnation nudge.
     if count == 2:
@@ -747,8 +875,7 @@ def _maybe_nudge_repeated_404_remote_url(
     url_counts: dict[str, int] = scratchpad.get("_repeated_404_url_counts", {})
     if not isinstance(url_counts, dict):
         url_counts = {}
-    count = url_counts.get(family, 0) + 1
-    url_counts[family] = count
+    count = _bounded_counter_increment(url_counts, family)
     scratchpad["_repeated_404_url_counts"] = url_counts
 
     # Nudge at count 2 (second 404 from same URL family)
@@ -790,7 +917,26 @@ _SSH_AUTH_FAILURE_RE = re.compile(
 )
 
 
-_SSH_FAILURE_COUNT_KEY = "_ssh_auth_failure_count"
+_SSH_FAILURE_COUNTS_KEY = "_ssh_auth_failure_counts"
+_SSH_AUTH_FAILURE_NUDGE_THRESHOLD = 2
+
+
+def _ssh_auth_target_key(record: ToolExecutionRecord) -> str:
+    """Normalized user@host key for per-target SSH auth failure accounting."""
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    user = str(args.get("user") or "").strip().lower()
+    host = str(args.get("host") or "").strip().lower()
+    target = str(args.get("target") or "").strip().lower()
+    if target and not host:
+        if "@" in target:
+            target_user, _, target_host = target.partition("@")
+            user = user or target_user
+            host = target_host
+        else:
+            host = target
+    if not host:
+        return ""
+    return f"{user}@{host}" if user else host
 
 
 def _maybe_nudge_ssh_auth_fallback(
@@ -800,25 +946,38 @@ def _maybe_nudge_ssh_auth_fallback(
 ) -> bool:
     """After repeated SSH auth failures, nudge the model to try a different
     host, use local shell_exec, or ask the user for corrected credentials.
+
+    Counts are keyed by normalized user@host, the nudge fires only on the
+    threshold crossing for a target, and a successful non-failing call clears
+    that target's count.
     """
     if record.tool_name != "ssh_exec":
-        return False
-    if not _record_has_failure_evidence(record):
-        return False
-    error = _record_output_text(record)
-    if not error or not _SSH_AUTH_FAILURE_RE.search(error):
         return False
 
     scratchpad = getattr(harness.state, "scratchpad", {})
     if not isinstance(scratchpad, dict):
         scratchpad = {}
-    count = int(scratchpad.get(_SSH_FAILURE_COUNT_KEY, 0) or 0) + 1
-    scratchpad[_SSH_FAILURE_COUNT_KEY] = count
+    counts: dict[str, int] = scratchpad.get(_SSH_FAILURE_COUNTS_KEY, {})
+    if not isinstance(counts, dict):
+        counts = {}
+    target_key = _ssh_auth_target_key(record)
 
-    if count < 2:
+    if not _record_has_failure_evidence(record):
+        if target_key in counts:
+            counts.pop(target_key, None)
+            scratchpad[_SSH_FAILURE_COUNTS_KEY] = counts
+        return False
+    error = _record_output_text(record)
+    if not error or not _SSH_AUTH_FAILURE_RE.search(error):
         return False
 
-    host = str(getattr(record.args, "get", lambda k: None)("host") or "").strip()
+    count = _bounded_counter_increment(counts, target_key)
+    scratchpad[_SSH_FAILURE_COUNTS_KEY] = counts
+
+    if count != _SSH_AUTH_FAILURE_NUDGE_THRESHOLD:
+        return False
+
+    host = target_key or str(getattr(record.args, "get", lambda k: None)("host") or "").strip()
     harness.state.append_message(
         ConversationMessage(
             role="system",
@@ -832,6 +991,7 @@ def _maybe_nudge_ssh_auth_fallback(
                 "is_recovery_nudge": True,
                 "recovery_kind": "ssh_auth_fallback",
                 "host": host,
+                "target": target_key,
                 "count": count,
             },
         )
@@ -840,6 +1000,7 @@ def _maybe_nudge_ssh_auth_fallback(
         "ssh_auth_fallback_nudge",
         "nudged model to stop retrying SSH after auth failures",
         host=host,
+        target=target_key,
         count=count,
     )
     return True

@@ -12,6 +12,7 @@ from .fs_sessions import (
     _normalize_section_name,
     _repair_cycle_allows_patch,
     _repair_cycle_read_required_metadata,
+    _replace_strategy_external_error,
     _record_file_change,
 )
 from .fs_write_session_policy import _guard_suspicious_temp_root_path, _guard_write_session_staging_mutation
@@ -37,6 +38,14 @@ async def file_append(
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
         return suspicious_path
+
+    strategy_error = _replace_strategy_external_error(
+        replace_strategy,
+        session_active=True,
+        path=path,
+    )
+    if strategy_error is not None:
+        return strategy_error
 
     workspace = cwd or (state.cwd if state is not None else None)
     if workspace:
@@ -114,6 +123,7 @@ async def file_delete(
     path: str,
     cwd: str | None = None,
     state: LoopState | None = None,
+    harness: Any = None,
 ) -> dict[str, Any]:
     suspicious_path = _guard_suspicious_temp_root_path(path)
     if suspicious_path is not None:
@@ -141,8 +151,11 @@ async def file_delete(
             "Repair cycle requires reading the target file before patching it again.",
             metadata=_repair_cycle_read_required_metadata(state, target, requested_path=path),
         )
+    policy_state = state if state is not None else LoopState(cwd=str(Path.cwd()))
+    approval_fn = getattr(harness, "request_shell_approval", None)
+    approval_available = callable(approval_fn) and getattr(harness, "event_handler", None) is not None
     risk_decision = evaluate_risk_policy(
-        state if state is not None else LoopState(cwd=str(Path.cwd())),
+        policy_state,
         tool_name="file_delete",
         tool_risk="high",
         phase=str((state.current_phase if state is not None else "") or ""),
@@ -150,6 +163,7 @@ async def file_delete(
         expected_effect="Remove the target file.",
         rollback="Restore the file from version control or backup if needed.",
         verification="Confirm the file is gone and the task state still matches expectations.",
+        approval_available=approval_available,
     )
     if not risk_decision.allowed:
         return fail(
@@ -161,7 +175,29 @@ async def file_delete(
             },
         )
 
-    result_metadata: dict[str, Any] = {"path": str(target)}
+    # file_delete is a high-risk mutation; when an approval channel exists it
+    # must confirm even though the generic risk policy only tracks shell tools.
+    requires_approval = bool(risk_decision.requires_approval or approval_available)
+    if requires_approval and callable(approval_fn) and approval_available:
+        approved = await approval_fn(
+            command=f"file_delete {path}",
+            cwd=str(cwd or getattr(policy_state, "cwd", ".") or "."),
+            timeout_sec=30,
+            proof_bundle=risk_decision.proof_bundle,
+        )
+        if not approved:
+            denied = fail(
+                "File deletion denied by user.",
+                metadata={
+                    "approval_denied": True,
+                    "path": str(target),
+                    "requires_approval": True,
+                },
+            )
+            denied["status"] = "denied"
+            return denied
+
+    result_metadata: dict[str, Any] = {"path": str(target), "requires_approval": requires_approval}
 
     # Abort an active write session targeting this path so the model can start fresh.
     if state is not None:

@@ -250,6 +250,7 @@ class ToolPlanRuntime(LoopGraphRuntime):
 
     async def run(self, task: str) -> dict[str, object]:
         result = await super().run(task)
+        await self._after_run(self.deps.harness, result)
         self._restore_tool_plan_active_subtask()
         return result
 

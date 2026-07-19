@@ -22,22 +22,37 @@ from .request_budget import (
     client_context_limit as _request_budget_client_context_limit,
 )
 from .request_budget import approx_token_count as _request_budget_approx_token_count
+from .transport_constants import (
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC,
+    LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    STREAM_CONNECT_TIMEOUT_SEC,
+    STREAM_FIRST_TOKEN_TIMEOUT_SEC,
+    STREAM_POOL_TIMEOUT_SEC,
+    STREAM_READ_TIMEOUT_SEC,
+    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC,
+    STREAM_WRITE_TIMEOUT_SEC,
+    resolve_first_token_timeout_sec as _resolve_shared_first_token_timeout_sec,
+    resolve_tool_call_continuation_timeout_sec as _resolve_shared_tool_call_continuation_timeout_sec,
+)
+from .usage import _normalize_parameter_name
 
 
 class OpenAICompatClient:
     """Client for OpenAI-compatible chat completion APIs."""
 
     STREAM_RETRY_ATTEMPTS = 3
-    STREAM_CONNECT_TIMEOUT_SEC = 10.0
-    STREAM_WRITE_TIMEOUT_SEC = 30.0
-    STREAM_READ_TIMEOUT_SEC = 120.0
-    STREAM_FIRST_TOKEN_TIMEOUT_SEC = 30.0
-    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = 45.0
-    STREAM_POOL_TIMEOUT_SEC = 30.0
-    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 30.0
-    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 12.0
-    LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 135.0
-    LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = 90.0
+    STREAM_CONNECT_TIMEOUT_SEC = STREAM_CONNECT_TIMEOUT_SEC
+    STREAM_WRITE_TIMEOUT_SEC = STREAM_WRITE_TIMEOUT_SEC
+    STREAM_READ_TIMEOUT_SEC = STREAM_READ_TIMEOUT_SEC
+    STREAM_FIRST_TOKEN_TIMEOUT_SEC = STREAM_FIRST_TOKEN_TIMEOUT_SEC
+    LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC = LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC
+    STREAM_POOL_TIMEOUT_SEC = STREAM_POOL_TIMEOUT_SEC
+    STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
+    SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
+    LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
+    LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC = LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC
     WRITE_HEAVY_TOOL_CALL_CONTINUATION_TIMEOUT_MULTIPLIER = 2.0
     WRITE_HEAVY_FIRST_TOKEN_TIMEOUT_MULTIPLIER = 2.0
     WRITE_HEAVY_MAX_COMPLETION_TOKENS_MULTIPLIER = 2.0
@@ -134,43 +149,11 @@ class OpenAICompatClient:
         self.backend_recovery_handler = backend_recovery_handler
 
     def _resolve_first_token_timeout_sec(self, override: float | None) -> float:
-        if override is not None:
-            return max(1.0, float(override))
-        adapter_timeout = float(self.adapter.stream_policy.first_token_timeout_sec)
-        if adapter_timeout > 0:
-            return adapter_timeout
-        if self.provider_profile == "lmstudio":
-            return float(self.LMSTUDIO_FIRST_TOKEN_TIMEOUT_SEC)
-        return float(self.STREAM_FIRST_TOKEN_TIMEOUT_SEC)
-
-    def _request_first_token_timeout_sec(self, tools: list[dict[str, Any]]) -> float:
-        """Increase the first-token watchdog for heavy LM Studio tool requests.
-
-        Larger local models can take noticeably longer to emit the first stream
-        chunk once the prompt includes the full tool schema. The baseline LM
-        Studio timeout remains intentionally short for plain chat, but we relax
-        it for tool-bearing requests on non-small models to avoid false
-        "backend wedged" failures.
-        """
-        timeout = float(self.first_token_timeout_sec)
-        if self._request_has_write_heavy_tool(tools):
-            return max(timeout, timeout * float(self.WRITE_HEAVY_FIRST_TOKEN_TIMEOUT_MULTIPLIER))
-        if self.provider_profile != "lmstudio":
-            return timeout
-        # Tool-bearing requests on LM Studio often need more time for prompt ingestion,
-        # even for small models, due to the complexity of the schema and system prompt.
-        # We skip the early return for small models if tools are present.
-        if self.is_small_model and not tools:
-            return timeout
-
-        tool_count = len(tools)
-        if tool_count >= 12:
-            return max(timeout, 60.0)
-        if tool_count > 0:
-            normalized_model = str(self.model or "").strip().lower()
-            if "gemma" in normalized_model:
-                return max(timeout, 60.0)
-        return timeout
+        return _resolve_shared_first_token_timeout_sec(
+            override,
+            self.adapter,
+            self.provider_profile,
+        )
 
     def _request_has_write_heavy_tool(self, tools: list[dict[str, Any]]) -> bool:
         if not tools:
@@ -196,22 +179,12 @@ class OpenAICompatClient:
         return False
 
     def _resolve_tool_call_continuation_timeout_sec(self, override: float | None) -> float:
-        if override is not None:
-            return max(1.0, float(override))
-
-        if self.provider_profile == "lmstudio":
-            if self.is_small_model:
-                return float(self.LMSTUDIO_SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
-            return float(self.LMSTUDIO_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
-
-        adapter_timeout = float(self.adapter.stream_policy.tool_call_continuation_timeout_sec)
-        if self.adapter.name != "generic" and adapter_timeout > 0:
-            return adapter_timeout
-
-        timeout = float(self.STREAM_TOOL_CALL_CONTINUATION_TIMEOUT_SEC)
-        if self.is_small_model:
-            return min(timeout, float(self.SMALL_MODEL_TOOL_CALL_CONTINUATION_TIMEOUT_SEC))
-        return timeout
+        return _resolve_shared_tool_call_continuation_timeout_sec(
+            override,
+            self.adapter,
+            self.provider_profile,
+            self.is_small_model,
+        )
 
     def _request_tool_call_continuation_timeout_sec(self, tools: list[dict[str, Any]]) -> float:
         timeout = float(self.tool_call_continuation_timeout_sec)
@@ -238,23 +211,13 @@ class OpenAICompatClient:
         supported = getattr(self, "model_supported_parameters", None)
         if not isinstance(supported, list):
             return True
-        expected = self._normalize_request_parameter_name(parameter_name)
+        expected = _normalize_parameter_name(parameter_name)
         normalized = {
-            self._normalize_request_parameter_name(str(item or ""))
+            _normalize_parameter_name(str(item or ""))
             for item in supported
             if str(item or "").strip()
         }
         return expected in normalized
-
-    @staticmethod
-    def _normalize_request_parameter_name(value: str) -> str:
-        text = str(value or "").strip().replace("-", "_")
-        normalized: list[str] = []
-        for index, char in enumerate(text):
-            if char.isupper() and index > 0 and normalized and normalized[-1] != "_":
-                normalized.append("_")
-            normalized.append(char.lower())
-        return "".join(normalized)
 
     def _metadata_max_completion_tokens(self) -> int | None:
         try:
@@ -342,10 +305,8 @@ class OpenAICompatClient:
 
     @classmethod
     async def aclose_shared_clients(cls) -> None:
-        from .client_transport_client_lifecycle import _shared_client_lock
-        with _shared_client_lock:
-            clients = list(cls._shared_clients.values())
-            cls._shared_clients.clear()
+        from .client_transport_client_lifecycle import _drain_shared_clients
+        clients = _drain_shared_clients(cls._shared_clients)
         log = logging.getLogger("smallctl.client")
         for client in clients:
             try:

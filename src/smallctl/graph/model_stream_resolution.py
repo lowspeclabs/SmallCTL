@@ -45,8 +45,11 @@ def _track_empty_write_failure(harness: Any, path: str) -> int:
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
     last_path = scratchpad.get(_EMPTY_WRITE_FAILURE_PATH_KEY, "")
     if last_path != path:
+        # A path change starts a new failure episode; re-arm the strategy
+        # switch nudge so the new episode can emit it once.
         scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY] = 1
         scratchpad[_EMPTY_WRITE_FAILURE_PATH_KEY] = path
+        scratchpad.pop(_EMPTY_WRITE_STRATEGY_SWITCHED_KEY, None)
     else:
         scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY] = scratchpad.get(_EMPTY_WRITE_FAILURE_COUNT_KEY, 0) + 1
     return int(scratchpad[_EMPTY_WRITE_FAILURE_COUNT_KEY])
@@ -56,6 +59,7 @@ def _reset_empty_write_failure(harness: Any) -> None:
     scratchpad = getattr(getattr(harness, "state", None), "scratchpad", {}) or {}
     scratchpad.pop(_EMPTY_WRITE_FAILURE_COUNT_KEY, None)
     scratchpad.pop(_EMPTY_WRITE_FAILURE_PATH_KEY, None)
+    scratchpad.pop(_EMPTY_WRITE_STRATEGY_SWITCHED_KEY, None)
 
 
 def _try_synthesize_from_stream_text(
@@ -238,7 +242,7 @@ async def resolve_model_stream_result(
                 thinking_start_tag=harness.thinking_start_tag,
                 thinking_end_tag=harness.thinking_end_tag,
             )
-            end_time = time.perf_counter()
+            end_time = time.monotonic()
             duration = end_time - start_time
             ttft = (first_token_time - start_time) if first_token_time else duration
             return StreamProcessingResult(
@@ -272,7 +276,7 @@ async def resolve_model_stream_result(
             thinking_start_tag=harness.thinking_start_tag,
             thinking_end_tag=harness.thinking_end_tag,
         )
-        end_time = time.perf_counter()
+        end_time = time.monotonic()
         duration = end_time - start_time
         ttft = (first_token_time - start_time) if first_token_time else duration
         return StreamProcessingResult(
@@ -421,7 +425,7 @@ async def resolve_model_stream_result(
         if partial_text:
             existing_text = str(getattr(stream, "assistant_text", "") or "")
             stream.assistant_text = (existing_text + "\n" + partial_text).strip()
-        end_time = time.perf_counter()
+        end_time = time.monotonic()
         duration = end_time - start_time
         ttft = (first_token_time - start_time) if first_token_time else duration
         return StreamProcessingResult(
@@ -533,7 +537,7 @@ async def resolve_model_stream_result(
         usage_payload = salvage_partial_stream.usage
         if not isinstance(usage_payload, dict):
             usage_payload = {}
-        end_time = time.perf_counter()
+        end_time = time.monotonic()
         duration = end_time - start_time
         ttft = (first_token_time - start_time) if first_token_time else duration
         return StreamProcessingResult(
@@ -607,7 +611,7 @@ async def resolve_model_stream_result(
             usage_payload = stream.usage
             if not isinstance(usage_payload, dict):
                 usage_payload = {}
-            end_time = time.perf_counter()
+            end_time = time.monotonic()
             duration = end_time - start_time
             ttft = (first_token_time - start_time) if first_token_time else duration
             return StreamProcessingResult(
@@ -740,7 +744,7 @@ async def resolve_model_stream_result(
         usage_payload = stream.usage
         if not isinstance(usage_payload, dict):
             usage_payload = {}
-        end_time = time.perf_counter()
+        end_time = time.monotonic()
         duration = end_time - start_time
         ttft = (first_token_time - start_time) if first_token_time else duration
         return StreamProcessingResult(
@@ -801,7 +805,7 @@ async def resolve_model_stream_result(
                 thinking_start_tag=harness.thinking_start_tag,
                 thinking_end_tag=harness.thinking_end_tag,
             )
-            end_time = time.perf_counter()
+            end_time = time.monotonic()
             duration = end_time - start_time
             ttft = (first_token_time - start_time) if first_token_time else duration
             return StreamProcessingResult(

@@ -14,8 +14,10 @@ async def grep(
     regex: bool = True,
     case_sensitive: bool = False,
     max_results: int = 200,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    root = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    root = (base / path).resolve()
     if not root.exists():
         return fail(f"Path does not exist: {root}")
     flags = 0 if case_sensitive else re.IGNORECASE
@@ -51,8 +53,10 @@ async def find_files(
     path: str = ".",
     regex: bool = False,
     max_results: int = 500,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    root = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    root = (base / path).resolve()
     if not root.exists():
         return fail(f"Path does not exist: {root}")
     results: list[str] = []

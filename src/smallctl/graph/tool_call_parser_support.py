@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
-from ..state import WriteSession, json_safe_value
+from ..state import WriteSession
 from ..task_targets import extract_task_target_paths, primary_task_target_path
 from .state import PendingToolCall
 from .tool_artifact_recovery import (
@@ -36,19 +36,26 @@ from .tool_loop_guard_progress import (
     _resolve_file_read_path,
     _tool_attempt_history,
 )
-from .tool_loop_guards import (
+from .tool_loop_guards import (  # noqa: F401
+    _clear_tool_attempt_history,
     _consume_repeat_guard_one_shot_allowance,
     _detect_timeout_recovered_incomplete_tool_call,
     _detect_hallucinated_tool_call,
     _detect_placeholder_tool_call,
     _detect_repeated_tool_loop,
+    _record_tool_attempt,
     _repeat_loop_limits,
     allow_repeated_tool_call_once,
 )
-from .tool_loop_guards_support import (
+from .tool_loop_guards_support import (  # noqa: F401
+    _normalize_json_like,
+    _normalize_path_token,
+    _normalize_shell_command,
     _normalize_token,
+    _normalize_tool_args,
     _placeholder_token,
     _placeholder_value_looks_generic,
+    _tool_call_fingerprint,
 )
 from .tool_write_session_policy import (
     _active_write_session_for_target,
@@ -69,41 +76,7 @@ from .tool_write_session_support import (
     _salvage_active_write_session_append,
 )
 
-_REPEATED_TOOL_HISTORY_LIMIT = 24
-_IDENTICAL_TOOL_CALL_STREAK_LIMIT = 6
-_REPEATED_TOOL_WINDOW = 12
-_REPEATED_TOOL_UNIQUE_LIMIT = 6
-_STRICT_LOOP_GUARD_TOOLS = {"dir_list", "file_read", "artifact_read"}
-_REPEAT_GUARD_ONE_SHOT_FINGERPRINTS_KEY = "_repeat_guard_one_shot_fingerprints"
 _PATCH_EXISTING_STAGE_READ_CONTRACT_KEY = "_patch_existing_stage_read_contract"
-_PLACEHOLDER_ARG_KEY_TOKENS = {
-    "arg",
-    "args",
-    "argument",
-    "arguments",
-    "param",
-    "params",
-    "parameter",
-    "parameters",
-    "value",
-    "field",
-}
-_PLACEHOLDER_ARG_VALUE_TOKENS = {
-    "",
-    "arg",
-    "args",
-    "value",
-    "parameter",
-    "parameters",
-    "param",
-    "params",
-    "tool_name",
-    "function_name",
-    "action_name",
-    "placeholder",
-    "string",
-    "text",
-}
 
 
 def _detect_missing_required_tool_arguments(harness: Any, pending: PendingToolCall) -> tuple[str, dict[str, Any]] | None:
@@ -375,23 +348,6 @@ def _detect_patch_existing_stage_read_contract_violation(
     }
 
 
-def _record_tool_attempt(harness: Any, pending: PendingToolCall) -> None:
-    history = _tool_attempt_history(harness)
-    fingerprint = _tool_call_fingerprint(pending.tool_name, pending.args)
-    history.append(
-        {
-            "tool_name": pending.tool_name,
-            "fingerprint": fingerprint,
-            "_recorded_fingerprint": fingerprint,
-        }
-    )
-    harness.state.scratchpad["_tool_attempt_history"] = history[-_REPEATED_TOOL_HISTORY_LIMIT:]
-
-
-def _clear_tool_attempt_history(harness: Any) -> None:
-    harness.state.scratchpad.pop("_tool_attempt_history", None)
-
-
 def _undo_tool_attempt_if_cached(harness: Any, pending: PendingToolCall, result: ToolEnvelope) -> None:
     if not isinstance(getattr(result, "metadata", None), dict):
         return
@@ -417,47 +373,3 @@ def _undo_tool_attempt_if_cached(harness: Any, pending: PendingToolCall, result:
         history.pop()
         if not history:
             scratchpad.pop("_tool_attempt_history", None)
-
-
-def _normalize_shell_command(command: str) -> str:
-    parts = command.strip().split()
-    if not parts:
-        return ""
-    normalized_parts = [_normalize_path_token(part) for part in parts]
-    return " ".join(normalized_parts)
-
-
-def _normalize_path_token(value: str) -> str:
-    stripped = value.strip()
-    if len(stripped) > 1 and stripped.endswith("/") and "/" in stripped[:-1]:
-        return stripped.rstrip("/")
-    return stripped
-
-
-def _normalize_json_like(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _normalize_json_like(item) for key, item in sorted(value.items(), key=lambda item: str(item[0]))}
-    if isinstance(value, list):
-        return [_normalize_json_like(item) for item in value]
-    if isinstance(value, str):
-        collapsed = " ".join(value.strip().split())
-        return _normalize_path_token(collapsed)
-    return json_safe_value(value)
-
-
-def _tool_call_fingerprint(tool_name: str, args: dict[str, Any]) -> str:
-    normalized_args = _normalize_tool_args(tool_name, args)
-    return json.dumps({"tool_name": tool_name, "args": normalized_args}, sort_keys=True, ensure_ascii=True)
-
-
-def _normalize_tool_args(tool_name: str, args: dict[str, Any]) -> Any:
-    if not isinstance(args, dict):
-        return {}
-    normalized = json_safe_value(args)
-    if not isinstance(normalized, dict):
-        return {}
-    if tool_name == "shell_exec":
-        command = normalized.get("command")
-        if command is not None:
-            normalized["command"] = _normalize_shell_command(str(command))
-    return _normalize_json_like(normalized)

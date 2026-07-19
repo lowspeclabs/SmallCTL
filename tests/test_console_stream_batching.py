@@ -261,3 +261,18 @@ def test_hidden_system_boundary_flushes_pending_assistant_stream() -> None:
         ]
 
     asyncio.run(_run())
+
+
+def test_assistant_stream_finalize_is_scheduled_and_cancelled_on_flush() -> None:
+    async def _run() -> None:
+        console = _RecordingConsole()
+        await console.append_event(UIEvent(UIEventType.ASSISTANT, "hello"))
+        assert console._stream_finalize_handle is not None
+        assert not console._stream_finalize_handle.cancelled()
+
+        await console.flush_stream_buffers()
+
+        assert console._stream_finalize_handle is None
+        assert console.calls == [("assistant", "hello", None, None)]
+
+    asyncio.run(_run())

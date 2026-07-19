@@ -28,10 +28,11 @@ async def json_query(data: Any, expression: str) -> dict[str, Any]:
         return fail(str(exc))
 
 
-async def yaml_read(path: str) -> dict[str, Any]:
+async def yaml_read(path: str, cwd: str | None = None) -> dict[str, Any]:
     if yaml is None:
         return fail("Dependency missing: pyyaml")
-    target = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    target = (base / path).resolve()
     if not target.exists():
         return fail(f"File does not exist: {target}")
     try:

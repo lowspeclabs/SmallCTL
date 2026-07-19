@@ -110,6 +110,14 @@ class TestSystemPromptSnapshots:
         prompt = build_system_prompt(state, "execute")
         assert "PRIVILEGES: Do not invent or guess a sudo password" in prompt
 
+    def test_all_models_include_secret_handling_rule(self) -> None:
+        for model in ["qwen3:32b", "qwen3.5:4b"]:
+            state = _make_state(model)
+            prompt = build_system_prompt(state, "execute")
+            assert ".netrc" in prompt
+            assert "SECRET HANDLING" in prompt
+            assert "do not echo them" in prompt
+
     def test_repair_phase_includes_failure_class(self) -> None:
         state = _make_state("qwen3:32b")
         state.last_failure_class = "syntax_error"
@@ -170,12 +178,13 @@ class TestSystemPromptSnapshots:
         for model in ["qwen3:32b", "qwen3.5:4b", "gemma-4-e2b-it", "google_gemma-4-26b-a4b-it"]:
             state = _make_state(model)
             prompt = build_system_prompt(state, "execute")
-            assert "ABSOLUTE RULE: NEVER read `.env`" in prompt, f"missing absolute rule for {model}"
-            assert "even if the user's project guide" in prompt, f"missing override note for {model}"
+            assert "SECRET HANDLING" in prompt, f"missing secret handling for {model}"
+            assert "`.netrc`" in prompt, f"missing .netrc mention for {model}"
+            assert "NEVER read `.env`" not in prompt, f"env read gate still present for {model}"
             assert "do not echo them" in prompt, f"missing echo prohibition for {model}"
             # Should be near the top of the prompt, before most other directives
             system_lines = [line.strip() for line in prompt.split("  ") if line.strip()]
-            secret_idx = next(i for i, line in enumerate(system_lines) if line.startswith("ABSOLUTE RULE: NEVER read"))
+            secret_idx = next(i for i, line in enumerate(system_lines) if line.startswith("SECRET HANDLING"))
             assert secret_idx < 5, f"secret handling too late in prompt for {model}: index {secret_idx}"
 
     def test_all_models_include_installer_timeout_recovery(self) -> None:
@@ -184,4 +193,3 @@ class TestSystemPromptSnapshots:
             prompt = build_system_prompt(state, "execute")
             assert "INSTALLER TIMEOUT RECOVERY" in prompt
             assert "larger `timeout_sec`" in prompt
-

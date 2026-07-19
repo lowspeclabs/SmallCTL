@@ -183,14 +183,14 @@ def test_artifact_read_hidden_above_32k_context_window(tmp_path) -> None:
     assert any(args and args[0] == "artifact_read_exposure_disabled" for args, _kwargs in events)
 
 
-def test_artifact_read_hidden_for_large_model_name(tmp_path) -> None:
+def test_artifact_read_exposed_for_large_model_name_when_context_small(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
     state.active_tool_profiles = ["core"]
     state.artifacts = {"A0001": object()}
     harness = SimpleNamespace(
         client=SimpleNamespace(model="deepseek-v4-flash"),
-        config=SimpleNamespace(allow_artifact_read_large_context=False),
+        config=SimpleNamespace(allow_artifact_read_large_context=False, max_prompt_tokens=32768),
         state=state,
         registry=SimpleNamespace(
             export_openai_tools=lambda **kwargs: [
@@ -205,7 +205,7 @@ def test_artifact_read_hidden_for_large_model_name(tmp_path) -> None:
 
     exposure = resolve_turn_tool_exposure(harness, "loop")
 
-    assert exposure["names"] == ["dir_list"]
+    assert exposure["names"] == ["dir_list", "artifact_read"]
 
 
 def test_artifact_read_large_context_override_keeps_tool(tmp_path) -> None:
@@ -217,6 +217,32 @@ def test_artifact_read_large_context_override_keeps_tool(tmp_path) -> None:
         client=SimpleNamespace(model="deepseek-v4-flash"),
         config=SimpleNamespace(allow_artifact_read_large_context=True),
         server_context_limit=65536,
+        state=state,
+        registry=SimpleNamespace(
+            export_openai_tools=lambda **kwargs: [
+                _tool_schema("dir_list"),
+                _tool_schema("artifact_read"),
+            ],
+            get=lambda name: None,
+        ),
+        _runlog=lambda *args, **kwargs: None,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+    )
+
+    exposure = resolve_turn_tool_exposure(harness, "loop")
+
+    assert exposure["names"] == ["dir_list", "artifact_read"]
+
+
+def test_artifact_read_not_hidden_when_prompt_budget_capped_below_threshold(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.active_tool_profiles = ["core"]
+    state.artifacts = {"A0001": object()}
+    harness = SimpleNamespace(
+        client=SimpleNamespace(model="deepseek-v4-flash"),
+        config=SimpleNamespace(allow_artifact_read_large_context=False, max_prompt_tokens=32768),
+        server_context_limit=1048576,
         state=state,
         registry=SimpleNamespace(
             export_openai_tools=lambda **kwargs: [

@@ -203,6 +203,7 @@ def test_dispatch_cancellation_records_synthetic_tool_result() -> None:
         _dispatch_tool_call=_dispatch,
         _active_dispatch_task=None,
         _cancel_source="ui_stop_button",
+        _cancel_requested=True,
         _runlog=lambda *args, **kwargs: runlog.append((args, kwargs)),
         _emit=_emit,
         log=SimpleNamespace(log=lambda *args, **kwargs: None),

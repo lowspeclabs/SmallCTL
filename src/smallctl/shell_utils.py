@@ -33,7 +33,6 @@ _READ_ONLY_ROOT_COMMANDS = {
     "cat",
     "head",
     "tail",
-    "awk",
     "wc",
     "stat",
     "which",
@@ -58,6 +57,50 @@ _READ_ONLY_ROOT_COMMANDS = {
     "ps",
     "top",
     "file",
+}
+
+# Exact read-only subcommand allowlist for container CLIs. Anything not listed
+# here (rm, rmi, prune, kill, stop, start, restart, pause, unpause, create,
+# run, exec, build, pull, push, tag, commit, cp, rename, update, save, load,
+# import, export, wait, attach, ...) fails closed toward NOT read-only.
+_CONTAINER_READ_ONLY_ACTIONS = {
+    "--version",
+    "version",
+    "ps",
+    "images",
+    "inspect",
+    "info",
+    "logs",
+    "stats",
+    "top",
+    "port",
+}
+_CONTAINER_READ_ONLY_GROUP_ACTIONS = {
+    "container": {"ls", "inspect", "logs", "stats", "top", "port"},
+    "image": {"ls", "inspect"},
+    "network": {"ls", "inspect"},
+    "volume": {"ls", "inspect"},
+    "system": {"info", "version"},
+}
+
+_SED_MUTATING_SCRIPT_COMMANDS = frozenset("erwRW")
+_SED_TEXT_COMMANDS = frozenset("aic")
+_SED_LABEL_COMMANDS = frozenset(":btT")
+_SED_SAFE_SHORT_OPTIONS = frozenset("nrEsuz")
+_SED_SAFE_LONG_OPTIONS = {
+    "--quiet",
+    "--silent",
+    "--regexp-extended",
+    "--extended-regexp",
+    "--posix",
+    "--debug",
+    "--follow-symlinks",
+    "--separate",
+    "--sandbox",
+    "--unbuffered",
+    "--null-data",
+    "--version",
+    "--help",
 }
 
 _SSH_KEYGEN_SHELL_METACHAR_TOKENS = {
@@ -286,6 +329,196 @@ def strip_benign_shell_redirections(command: str, *, preserve_newlines: bool = F
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _has_file_writing_redirection(command: str) -> bool:
+    """Return True if the command redirects output to a real file path."""
+    cleaned = strip_benign_shell_redirections(command)
+    if re.search(r"[\d\s]?>", cleaned):
+        return True
+    return False
+
+
+def _is_read_only_container_command(tokens: list[str]) -> bool:
+    """Classify docker/podman/docker-compose invocations via an exact subcommand allowlist."""
+    if len(tokens) < 2:
+        return False
+    action = tokens[1].lower()
+    if action in _CONTAINER_READ_ONLY_ACTIONS:
+        return True
+    group = _CONTAINER_READ_ONLY_GROUP_ACTIONS.get(action)
+    if group is None or len(tokens) < 3:
+        return False
+    return tokens[2].lower() in group
+
+
+def _skip_sed_delimited(script: str, index: int, delimiter: str) -> int:
+    """Skip a delimited sed section (regex, replacement), honoring backslash escapes."""
+    length = len(script)
+    while index < length:
+        char = script[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == delimiter:
+            return index + 1
+        index += 1
+    return length
+
+
+def _sed_script_is_read_only(script: str) -> bool:
+    """Return False when a sed script can execute commands or read/write files.
+
+    Rejects the GNU `e` execute command, the `w`/`W` write-file commands, the
+    `r`/`R` read-file commands, and the `s///w` and `s///e` substitution flags.
+    """
+    index = 0
+    length = len(script)
+    while index < length:
+        char = script[index]
+        if char in " \t\n;{}":
+            index += 1
+            continue
+        if char.isdigit() or char in "$,~+!":
+            index += 1
+            continue
+        if char == "#":
+            newline = script.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        if char == "/":
+            index = _skip_sed_delimited(script, index + 1, "/")
+            continue
+        if char == "\\":
+            # Address form \%re% uses the next character as the delimiter.
+            if index + 1 >= length:
+                return False
+            index = _skip_sed_delimited(script, index + 2, script[index + 1])
+            continue
+        if char in _SED_MUTATING_SCRIPT_COMMANDS:
+            return False
+        if char in {"s", "y"}:
+            delimiter_index = index + 1
+            if delimiter_index >= length or script[delimiter_index] in " \t\n":
+                return False
+            delimiter = script[delimiter_index]
+            index = _skip_sed_delimited(script, delimiter_index + 1, delimiter)
+            if index >= length:
+                return False
+            index = _skip_sed_delimited(script, index + 1, delimiter)
+            if char == "s":
+                flags_start = index
+                while index < length and script[index].isalnum():
+                    index += 1
+                flags = script[flags_start:index]
+                if "w" in flags or "e" in flags:
+                    return False
+            continue
+        if char in _SED_LABEL_COMMANDS:
+            index += 1
+            while index < length and script[index] not in ";\n":
+                index += 1
+            continue
+        if char in _SED_TEXT_COMMANDS:
+            # GNU one-line a/i/c text runs to an unescaped newline.
+            index += 1
+            while index < length and script[index] in " \t":
+                index += 1
+            while index < length:
+                if script[index] == "\\" and index + 1 < length:
+                    index += 2
+                    continue
+                if script[index] == "\n":
+                    break
+                index += 1
+            continue
+        index += 1
+    return True
+
+
+def _sed_scripts_from_tokens(tokens: list[str]) -> list[str] | None:
+    """Extract sed script arguments, or None when invocation safety is undecidable.
+
+    Returns None for in-place editing (-i/--in-place), scripts loaded from a
+    file (-f/--file), and unrecognized options (fail closed).
+    """
+    scripts: list[str] = []
+    saw_script = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            if not saw_script and index < len(tokens):
+                scripts.append(tokens[index])
+            break
+        if token.startswith("--"):
+            name, _, attached = token.partition("=")
+            if name == "--in-place":
+                return None
+            if name == "--expression":
+                if attached:
+                    scripts.append(attached)
+                else:
+                    index += 1
+                    if index >= len(tokens):
+                        return None
+                    scripts.append(tokens[index])
+                saw_script = True
+            elif name == "--file":
+                return None
+            elif name in _SED_SAFE_LONG_OPTIONS:
+                pass
+            else:
+                return None
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            cluster = token[1:]
+            position = 0
+            while position < len(cluster):
+                letter = cluster[position]
+                if letter == "i":
+                    return None
+                if letter == "e":
+                    attached_script = cluster[position + 1 :]
+                    if attached_script:
+                        scripts.append(attached_script)
+                    else:
+                        index += 1
+                        if index >= len(tokens):
+                            return None
+                        scripts.append(tokens[index])
+                    saw_script = True
+                    break
+                if letter == "f":
+                    return None
+                if letter == "l":
+                    # -l consumes a line-length argument when not attached.
+                    if position + 1 >= len(cluster):
+                        index += 1
+                        if index >= len(tokens):
+                            return None
+                    break
+                if letter not in _SED_SAFE_SHORT_OPTIONS:
+                    return None
+                position += 1
+            index += 1
+            continue
+        if not saw_script:
+            scripts.append(token)
+            saw_script = True
+        index += 1
+    return scripts
+
+
+def _is_read_only_sed_invocation(command: str, tokens: list[str]) -> bool:
+    scripts = _sed_scripts_from_tokens(tokens)
+    if scripts is None:
+        return False
+    if not all(_sed_script_is_read_only(script) for script in scripts):
+        return False
+    return not _has_file_writing_redirection(command)
+
+
 def is_read_only_shell_segment(segment: str) -> bool:
     command = str(segment or "").strip()
     if not command:
@@ -307,11 +540,22 @@ def is_read_only_shell_segment(segment: str) -> bool:
 
     root = tokens[0].lower()
     if root in _READ_ONLY_ROOT_COMMANDS:
+        if root == "find":
+            mutating_actions = {
+                "-delete", "-exec", "-execdir", "-ok", "-okdir",
+            }
+            if any(tok.lower() in mutating_actions for tok in tokens):
+                return False
+            return not _has_file_writing_redirection(command)
         return True
+    if root == "awk":
+        if "system(" in command or "system (" in command:
+            return False
+        return not _has_file_writing_redirection(command)
     if root == "apt":
         return len(tokens) >= 2 and tokens[1] in {"list", "show", "search", "policy"}
     if root == "sed":
-        return len(tokens) >= 2 and tokens[1] == "-n"
+        return _is_read_only_sed_invocation(command, tokens)
     if root == "command":
         return len(tokens) >= 2 and tokens[1] == "-v"
     if root == "git":
@@ -325,25 +569,7 @@ def is_read_only_shell_segment(segment: str) -> bool:
     if root == "systemctl":
         return len(tokens) >= 2 and tokens[1] in {"status", "show", "is-active", "is-enabled", "list-units", "list-unit-files"}
     if root in {"docker", "podman", "docker-compose"}:
-        if len(tokens) < 2:
-            return False
-        return tokens[1] in {
-            "--version",
-            "version",
-            "ps",
-            "images",
-            "inspect",
-            "info",
-            "logs",
-            "stats",
-            "top",
-            "port",
-            "network",
-            "volume",
-            "container",
-            "image",
-            "system",
-        }
+        return _is_read_only_container_command(tokens)
     return False
 
 

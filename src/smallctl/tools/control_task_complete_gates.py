@@ -647,13 +647,42 @@ def _remote_service_task_text(state: LoopState) -> str:
     )
 
 
+_REMOTE_ANCHOR_SSH_RE = re.compile(r"\bssh(?://[^\s]+)?\b", re.IGNORECASE)
+_REMOTE_ANCHOR_USER_AT_HOST_RE = re.compile(
+    r"\b[A-Za-z0-9._-]+@(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\d{1,3}(?:\.\d{1,3}){3})\b"
+)
+_IPV4_CANDIDATE_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_REMOTE_DEPLOY_ACTION_RE = re.compile(
+    r"\b(?:install|deploy|spin\s+up|launch|start|run|provision|set\s+up)\b"
+)
+_REMOTE_SERVICE_NOUN_RE = re.compile(
+    r"\b(?:service|container|docker|app|apps|application|stack|netbox)\b"
+)
+
+
+def _has_remote_ipv4_anchor(text: str) -> bool:
+    for match in _IPV4_CANDIDATE_RE.finditer(text):
+        octets = match.group(0).split(".")
+        if any(int(octet) > 255 for octet in octets):
+            continue
+        if octets[0] in {"0", "127"}:
+            continue
+        return True
+    return False
+
+
 def _is_remote_service_install_task(state: LoopState) -> bool:
     text = _remote_service_task_text(state).lower()
-    if not any(marker in text for marker in ("ssh", "remote", "host", "192.168.", "10.")):
+    has_remote_anchor = bool(
+        _REMOTE_ANCHOR_SSH_RE.search(text)
+        or _REMOTE_ANCHOR_USER_AT_HOST_RE.search(text)
+        or _has_remote_ipv4_anchor(text)
+    )
+    if not has_remote_anchor:
         return False
-    if not any(marker in text for marker in ("install", "deploy", "spin up", "run", "launch", "start")):
+    if _REMOTE_DEPLOY_ACTION_RE.search(text) is None:
         return False
-    return any(marker in text for marker in ("service", "container", "docker", "app", "application", "netbox"))
+    return _REMOTE_SERVICE_NOUN_RE.search(text) is not None
 
 
 def _remote_service_readiness_evidence(state: LoopState) -> dict[str, Any]:

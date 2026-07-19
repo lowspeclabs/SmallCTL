@@ -108,6 +108,37 @@ def _try_parse_data(data: Any) -> PendingToolCall | None:
     return pending
 
 
+def _balanced_json_object_end(text: str, start: int) -> int:
+    """Return the index just past the balanced JSON object starting at ``start``.
+
+    Tracks JSON string state and backslash escapes so braces inside string
+    literals (e.g. shell commands containing ``{`` or ``}``) do not affect the
+    depth count. Returns -1 when the object is unbalanced.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return -1
+
+
 def _try_recover_truncated_inline_json(text: str, start: int) -> dict[str, Any] | None:
     """Attempt to recover a truncated inline JSON tool call by adding closing braces.
 
@@ -554,16 +585,7 @@ def _extract_inline_tool_calls(
 
     def _try_strip_lfm_plan_json_object(start: int) -> bool:
         nonlocal cleaned_text
-        brace_count = 0
-        end = -1
-        for i in range(start, len(cleaned_text)):
-            if cleaned_text[i] == "{":
-                brace_count += 1
-            elif cleaned_text[i] == "}":
-                brace_count -= 1
-            if brace_count == 0:
-                end = i + 1
-                break
+        end = _balanced_json_object_end(cleaned_text, start)
         if end == -1:
             return False
         try:
@@ -740,16 +762,7 @@ def _extract_inline_tool_calls(
             start = cleaned_text.find("{", start)
         start = cleaned_text.find("{")
         while start != -1:
-            brace_count = 0
-            end = -1
-            for i in range(start, len(cleaned_text)):
-                if cleaned_text[i] == "{":
-                    brace_count += 1
-                elif cleaned_text[i] == "}":
-                    brace_count -= 1
-                if brace_count == 0:
-                    end = i + 1
-                    break
+            end = _balanced_json_object_end(cleaned_text, start)
 
             if end != -1:
                 try:

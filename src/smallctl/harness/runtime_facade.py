@@ -17,6 +17,32 @@ async def _run_sync_persistence_task(
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+class HarnessRunAlreadyActiveError(RuntimeError):
+    """Raised when a harness run starts while another run is in flight."""
+
+
+def _reset_cancel_flag_at_run_start(self: Any) -> None:
+    reset = getattr(self, "_reset_cancel_requested", None)
+    if callable(reset):
+        reset()
+        return
+    self._cancel_requested = False
+
+
+def _begin_run_guard(self: Any) -> None:
+    if getattr(self, "_run_guard_in_flight", False) is True:
+        raise HarnessRunAlreadyActiveError(
+            "A harness run is already active on this harness; wait for it to "
+            "finish or cancel it before starting another."
+        )
+    self._run_guard_in_flight = True
+    _reset_cancel_flag_at_run_start(self)
+
+
+def _end_run_guard(self: Any) -> None:
+    self._run_guard_in_flight = False
+
+
 def _track_background_persistence_task(self: Any, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
     tasks = getattr(self, "_background_persistence_tasks", None)
     if tasks is None:
@@ -154,6 +180,17 @@ async def _run_teardown(self: Any) -> None:
             reason=shutdown_reason,
         )
         self._pending_task_shutdown_reason = ""
+
+    try:
+        from ..graph.lifecycle_nodes_support import _flush_open_write_sessions
+
+        await _flush_open_write_sessions(
+            self,
+            reason="teardown_abandoned",
+            event_suffix="teardown",
+        )
+    except Exception:
+        pass
 
     # Session closure audit log (Fix 7)
     state = getattr(self, "state", None)
@@ -299,33 +336,37 @@ async def run_chat_with_events(
     from ..graph.runtime import ChatGraphRuntime
     from datetime import datetime, timezone
 
-    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
-    if redirected is not None:
-        return redirected
+    _begin_run_guard(self)
+    try:
+        redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+        if redirected is not None:
+            return redirected
 
-    # Track task receipt time (Fix 2)
-    state = getattr(self, "state", None)
-    if state is not None:
-        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        touch = getattr(state, "touch", None)
-        if callable(touch):
-            touch()
+        # Track task receipt time (Fix 2)
+        state = getattr(self, "state", None)
+        if state is not None:
+            state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            touch = getattr(state, "touch", None)
+            if callable(touch):
+                touch()
 
-    log_kv(
-        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
-        logging.INFO,
-        "task_received",
-        mode="chat",
-        task_length=len(task),
-        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
-    )
+        log_kv(
+            self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+            logging.INFO,
+            "task_received",
+            mode="chat",
+            task_length=len(task),
+            session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+        )
 
-    self.event_handler = event_handler
-    runtime = ChatGraphRuntime.from_harness(
-        self,
-        event_handler=event_handler,
-    )
-    return await runtime.run(task)
+        self.event_handler = event_handler
+        runtime = ChatGraphRuntime.from_harness(
+            self,
+            event_handler=event_handler,
+        )
+        return await runtime.run(task)
+    finally:
+        _end_run_guard(self)
 
 
 async def run_auto_with_events(
@@ -336,33 +377,37 @@ async def run_auto_with_events(
     from ..graph.runtime import AutoGraphRuntime
     from datetime import datetime, timezone
 
-    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
-    if redirected is not None:
-        return redirected
+    _begin_run_guard(self)
+    try:
+        redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+        if redirected is not None:
+            return redirected
 
-    # Track task receipt time (Fix 2)
-    state = getattr(self, "state", None)
-    if state is not None:
-        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        touch = getattr(state, "touch", None)
-        if callable(touch):
-            touch()
+        # Track task receipt time (Fix 2)
+        state = getattr(self, "state", None)
+        if state is not None:
+            state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            touch = getattr(state, "touch", None)
+            if callable(touch):
+                touch()
 
-    # Lifecycle telemetry (Fix 1)
-    log_kv(
-        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
-        logging.INFO,
-        "task_received",
-        task_length=len(task),
-        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
-    )
+        # Lifecycle telemetry (Fix 1)
+        log_kv(
+            self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+            logging.INFO,
+            "task_received",
+            task_length=len(task),
+            session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+        )
 
-    self.event_handler = event_handler
-    runtime = AutoGraphRuntime.from_harness(
-        self,
-        event_handler=event_handler,
-    )
-    return await runtime.run(task)
+        self.event_handler = event_handler
+        runtime = AutoGraphRuntime.from_harness(
+            self,
+            event_handler=event_handler,
+        )
+        return await runtime.run(task)
+    finally:
+        _end_run_guard(self)
 
 
 def set_interactive_shell_approval(self: Any, enabled: bool) -> None:
@@ -575,8 +620,9 @@ async def request_sudo_password(
     *,
     command: str,
     prompt_text: str,
+    timeout_sec: int = 300,
 ) -> str | None:
-    return await self.approvals.request_sudo_password(command=command, prompt_text=prompt_text)
+    return await self.approvals.request_sudo_password(command=command, prompt_text=prompt_text, timeout_sec=timeout_sec)
 
 
 def get_sudo_password(self: Any, *, command: str = "") -> str | None:
@@ -625,42 +671,46 @@ async def run_task_with_events(
     from ..graph.runtime_staged import StagedExecutionRuntime
     from datetime import datetime, timezone
 
-    redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
-    if redirected is not None:
-        return redirected
+    _begin_run_guard(self)
+    try:
+        redirected = await _maybe_resume_pending_interrupt(self, task, event_handler=event_handler)
+        if redirected is not None:
+            return redirected
 
-    # Track task receipt time (Fix 2)
-    state = getattr(self, "state", None)
-    if state is not None:
-        state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        touch = getattr(state, "touch", None)
-        if callable(touch):
-            touch()
+        # Track task receipt time (Fix 2)
+        state = getattr(self, "state", None)
+        if state is not None:
+            state.task_received_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            touch = getattr(state, "touch", None)
+            if callable(touch):
+                touch()
 
-    log_kv(
-        self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
-        logging.INFO,
-        "task_received",
-        mode="loop",
-        task_length=len(task),
-        session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
-    )
+        log_kv(
+            self.log if hasattr(self, "log") else logging.getLogger("smallctl.harness"),
+            logging.INFO,
+            "task_received",
+            mode="loop",
+            task_length=len(task),
+            session_id=str(getattr(state, "thread_id", "") or "").strip() if state else "",
+        )
 
-    self.event_handler = event_handler
-    if _should_use_staged_execution_runtime(self):
-        runtime = StagedExecutionRuntime.from_harness(
+        self.event_handler = event_handler
+        if _should_use_staged_execution_runtime(self):
+            runtime = StagedExecutionRuntime.from_harness(
+                self,
+                event_handler=event_handler,
+            )
+            return await runtime.run(task)
+        runtime = LoopGraphRuntime.from_harness(
             self,
             event_handler=event_handler,
         )
         return await runtime.run(task)
-    runtime = LoopGraphRuntime.from_harness(
-        self,
-        event_handler=event_handler,
-    )
-    return await runtime.run(task)
+    finally:
+        _end_run_guard(self)
 
 
-async def resume_task_with_events(
+async def _resume_task_with_events_impl(
     self: Any,
     human_input: str,
     event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
@@ -687,6 +737,18 @@ async def resume_task_with_events(
         event_handler=event_handler,
     )
     return await runtime.resume(human_input)
+
+
+async def resume_task_with_events(
+    self: Any,
+    human_input: str,
+    event_handler: Callable[[UIEvent], Awaitable[None] | None] | None = None,
+) -> dict[str, Any]:
+    _begin_run_guard(self)
+    try:
+        return await _resume_task_with_events_impl(self, human_input, event_handler)
+    finally:
+        _end_run_guard(self)
 
 
 def has_pending_interrupt(self: Any) -> bool:
@@ -719,7 +781,13 @@ async def _maybe_resume_pending_interrupt(
     interrupt = get_pending_interrupt() or {}
     if not is_interrupt_response(interrupt, task):
         return None
-    return await self.resume_task_with_events(task, event_handler=event_handler)
+    # The caller already holds the run guard, so the redirect must not
+    # re-enter it. Harnesses (or test doubles) that override the facade
+    # resume entrypoint still get their override honored.
+    resume = getattr(self, "resume_task_with_events", None)
+    if callable(resume) and getattr(resume, "__func__", resume) is not resume_task_with_events:
+        return await resume(task, event_handler=event_handler)
+    return await _resume_task_with_events_impl(self, task, event_handler)
 
 
 def _staged_execution_enabled(self: Any) -> bool:

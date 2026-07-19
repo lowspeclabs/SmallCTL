@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,13 +34,33 @@ def session_index_path(cwd: str | Path) -> Path:
 
 
 def session_state_path(cwd: str | Path, thread_id: str) -> Path:
-    safe_thread_id = _sanitize_filename(thread_id)
-    return Path(cwd).resolve() / ".smallctl" / SESSION_STATE_DIR_NAME / f"{safe_thread_id}.json"
+    return _session_state_dir(cwd) / f"{_session_file_stem(thread_id)}.json"
 
 
 def session_ui_transcript_path(cwd: str | Path, thread_id: str) -> Path:
+    return _session_state_dir(cwd) / f"{_session_file_stem(thread_id)}.ui.json"
+
+
+def _session_state_dir(cwd: str | Path) -> Path:
+    return Path(cwd).resolve() / ".smallctl" / SESSION_STATE_DIR_NAME
+
+
+def _legacy_session_state_path(cwd: str | Path, thread_id: str) -> Path:
+    return _session_state_dir(cwd) / f"{_sanitize_filename(thread_id)}.json"
+
+
+def _legacy_session_ui_transcript_path(cwd: str | Path, thread_id: str) -> Path:
+    return _session_state_dir(cwd) / f"{_sanitize_filename(thread_id)}.ui.json"
+
+
+def _session_file_stem(thread_id: str) -> str:
     safe_thread_id = _sanitize_filename(thread_id)
-    return Path(cwd).resolve() / ".smallctl" / SESSION_STATE_DIR_NAME / f"{safe_thread_id}.ui.json"
+    digest = hashlib.sha1(str(thread_id or "").encode("utf-8")).hexdigest()[:8]
+    return f"{safe_thread_id}-{digest}"
+
+
+def _session_backup_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.bak")
 
 
 def record_chat_session_prompt(
@@ -53,31 +77,32 @@ def record_chat_session_prompt(
         return
 
     path = session_index_path(cwd)
-    records = _read_index(path)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    existing = next(
-        (record for record in records if str(record.get("thread_id") or "") == resolved_thread_id),
-        None,
-    )
-    if existing is None:
-        records.append(
-            {
-                "thread_id": resolved_thread_id,
-                "first_user_message": first_message,
-                "created_at": created_at or now,
-                "updated_at": now,
-                "model": str(model or "").strip(),
-            }
+    with _file_lock(path):
+        records = _read_index(path)
+        existing = next(
+            (record for record in records if str(record.get("thread_id") or "") == resolved_thread_id),
+            None,
         )
-    else:
-        existing.setdefault("first_user_message", first_message)
-        if not str(existing.get("first_user_message") or "").strip():
-            existing["first_user_message"] = first_message
-        existing.setdefault("created_at", created_at or now)
-        existing["updated_at"] = now
-        if model:
-            existing["model"] = str(model).strip()
-    _write_index(path, records)
+        if existing is None:
+            records.append(
+                {
+                    "thread_id": resolved_thread_id,
+                    "first_user_message": first_message,
+                    "created_at": created_at or now,
+                    "updated_at": now,
+                    "model": str(model or "").strip(),
+                }
+            )
+        else:
+            existing.setdefault("first_user_message", first_message)
+            if not str(existing.get("first_user_message") or "").strip():
+                existing["first_user_message"] = first_message
+            existing.setdefault("created_at", created_at or now)
+            existing["updated_at"] = now
+            if model:
+                existing["model"] = str(model).strip()
+        _write_index(path, records)
 
 
 def persist_chat_session_state(
@@ -101,7 +126,7 @@ def persist_chat_session_state(
     }
     started = time.perf_counter()
     serialized = json.dumps(payload, indent=2, sort_keys=True)
-    state_path.write_text(serialized, encoding="utf-8")
+    _write_session_file(state_path, serialized)
     _log_session_write(
         "chat_runtime_state_write",
         path=state_path,
@@ -145,7 +170,7 @@ def persist_chat_session_ui_transcript(
     }
     started = time.perf_counter()
     serialized = json.dumps(payload, indent=2, sort_keys=True)
-    path.write_text(serialized, encoding="utf-8")
+    _write_session_file(path, serialized)
     _log_session_write(
         "chat_ui_transcript_write",
         path=path,
@@ -161,10 +186,12 @@ def load_chat_session_ui_transcript(
     cwd: str | Path,
     thread_id: str,
 ) -> list[dict[str, Any]]:
-    path = session_ui_transcript_path(cwd, thread_id)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    path = _resolve_session_read_path(
+        session_ui_transcript_path(cwd, thread_id),
+        _legacy_session_ui_transcript_path(cwd, thread_id),
+    )
+    payload = _read_json_payload(path)
+    if not isinstance(payload, dict):
         payload = _read_legacy_session_payload(cwd=cwd, thread_id=thread_id)
     if not isinstance(payload, dict):
         return []
@@ -179,11 +206,11 @@ def load_chat_session_state(
     cwd: str | Path,
     thread_id: str,
 ) -> dict[str, Any] | None:
-    path = session_state_path(cwd, thread_id)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    path = _resolve_session_read_path(
+        session_state_path(cwd, thread_id),
+        _legacy_session_state_path(cwd, thread_id),
+    )
+    payload = _read_json_payload(path)
     if not isinstance(payload, dict):
         return None
     state = payload.get("state")
@@ -191,12 +218,148 @@ def load_chat_session_state(
 
 
 def _read_legacy_session_payload(*, cwd: str | Path, thread_id: str) -> dict[str, Any] | None:
-    path = session_state_path(cwd, thread_id)
+    path = _resolve_session_read_path(
+        session_state_path(cwd, thread_id),
+        _legacy_session_state_path(cwd, thread_id),
+    )
+    return _read_json_payload(path)
+
+
+def _resolve_session_read_path(path: Path, legacy_path: Path) -> Path:
+    """Migrate a legacy unhashed session file to the hashed name when needed."""
+    if path.exists() or legacy_path == path or not legacy_path.exists():
+        return path
+    legacy_payload = _read_json_payload(legacy_path)
+    if legacy_payload is None:
+        return path
+    try:
+        _write_session_file(path, json.dumps(legacy_payload, indent=2, sort_keys=True))
+    except OSError as exc:
+        logger.warning(
+            "chat_session_legacy_migration_failed %s",
+            {"event": "chat_session_legacy_migration_failed", "path": str(path), "error": str(exc)},
+        )
+        return legacy_path
+    with contextlib.suppress(OSError):
+        legacy_path.unlink()
+    logger.info(
+        "chat_session_legacy_migration %s",
+        {"event": "chat_session_legacy_migration", "from": str(legacy_path), "to": str(path)},
+    )
+    return path
+
+
+def _parse_json_file(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _read_json_payload(path: Path) -> dict[str, Any] | None:
+    payload = _parse_json_file(path)
+    if payload is not None:
+        return payload
+    backup_path = _session_backup_path(path)
+    if not backup_path.exists():
+        return None
+    payload = _parse_json_file(backup_path)
+    if payload is None:
+        return None
+    logger.warning(
+        "chat_session_backup_recovery %s",
+        {
+            "event": "chat_session_backup_recovery",
+            "path": str(path),
+            "backup_path": str(backup_path),
+        },
+    )
+    return payload
+
+
+def _atomic_write_text(path: Path, serialized: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            os.chmod(temp_path, 0o600)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                temp_path.unlink()
+
+
+def _write_session_file(path: Path, serialized: str) -> None:
+    """Atomically persist session JSON, preserving a .bak of the last good state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and _parse_json_file(path) is None:
+        corrupt_path = path.with_name(f"{path.name}.corrupt")
+        try:
+            os.replace(path, corrupt_path)
+        except OSError as exc:
+            logger.error(
+                "chat_session_corrupt_preserve_failed %s",
+                {
+                    "event": "chat_session_corrupt_preserve_failed",
+                    "path": str(path),
+                    "error": str(exc),
+                },
+            )
+            raise
+        logger.warning(
+            "chat_session_corrupt_preserved %s",
+            {
+                "event": "chat_session_corrupt_preserved",
+                "path": str(path),
+                "corrupt_path": str(corrupt_path),
+            },
+        )
+    _atomic_write_text(path, serialized)
+    backup_path = _session_backup_path(path)
+    try:
+        _atomic_write_text(backup_path, serialized)
+    except OSError as exc:
+        logger.warning(
+            "chat_session_backup_write_failed %s",
+            {
+                "event": "chat_session_backup_write_failed",
+                "backup_path": str(backup_path),
+                "error": str(exc),
+            },
+        )
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Serialize read-modify-write transactions across threads and processes."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            import fcntl
+        except ImportError:
+            yield
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
 
 
 def _migrate_legacy_ui_transcript(*, cwd: str | Path, thread_id: str) -> None:
@@ -399,7 +562,7 @@ def _read_index(path: Path) -> list[dict[str, Any]]:
 def _write_index(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"sessions": records}
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _first_user_message(messages: Any) -> str:

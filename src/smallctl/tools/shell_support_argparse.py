@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .shell_support_constants import _ARGPARSE_REQUIRED_ARGS_PATTERN, _ARGPARSE_UNRECOGNIZED_ARGS_PATTERN
 
 
@@ -49,6 +51,39 @@ def _build_argparse_unrecognized_args_hint(command: str, unrecognized_args: list
         "exact flags the script lists (e.g., --url, --token). "
         "If this is a CLI with subcommands, place global flags BEFORE the "
         "subcommand (e.g., `script.py --url X --token Y subcommand`)."
+    )
+
+
+_DRY_RUN_MARKERS = (
+    "dry_run: true",
+    "dry_run: True",
+    "dry run only",
+    "dry-run only",
+    "re-run with --execute",
+    "rerun with --execute",
+    "run with --execute",
+)
+
+
+def _extract_dry_run_hint(output: dict[str, Any] | str) -> str | None:
+    """
+    Detect when a command only performed a dry run and the caller needs to
+    re-run with an explicit execution flag (e.g. --execute).
+    """
+    text = ""
+    if isinstance(output, dict):
+        stdout = output.get("stdout")
+        stderr = output.get("stderr")
+        text = f"{stdout if isinstance(stdout, str) else ''}\n{stderr if isinstance(stderr, str) else ''}"
+    elif isinstance(output, str):
+        text = output
+    text_lower = text.lower()
+    has_dry_run_marker = any(marker.lower() in text_lower for marker in _DRY_RUN_MARKERS)
+    if not has_dry_run_marker:
+        return None
+    return (
+        "This command performed a dry run only. "
+        "Re-run the same command with the explicit execution flag (e.g., `--execute`) to actually apply the change."
     )
 
 

@@ -78,6 +78,14 @@ def normalize_optional_ssh_string(value: Any) -> str | None:
     return normalized or None
 
 
+def _reject_dash_prefixed_ssh_value(name: str, value: str | None) -> None:
+    if value is not None and value.startswith("-"):
+        raise ValueError(
+            f"SSH {name} must not start with `-`; values beginning with a dash "
+            "are parsed by ssh as options and can inject local commands."
+        )
+
+
 def normalize_ssh_target(*, host: str, user: str | None = None) -> tuple[str, str | None]:
     host_text = str(host or "").strip()
     user_text = normalize_optional_ssh_string(user)
@@ -86,6 +94,8 @@ def normalize_ssh_target(*, host: str, user: str | None = None) -> tuple[str, st
     if host_text.count("@") > 1:
         raise ValueError("SSH target must contain at most one `@` separator.")
     if "@" not in host_text:
+        _reject_dash_prefixed_ssh_value("host", host_text)
+        _reject_dash_prefixed_ssh_value("user", user_text)
         return host_text, user_text
 
     embedded_user, bare_host = host_text.rsplit("@", 1)
@@ -95,6 +105,8 @@ def normalize_ssh_target(*, host: str, user: str | None = None) -> tuple[str, st
         raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
     if user_text is not None and user_text != embedded_user:
         raise ValueError("SSH target must be either `host` plus `user` or `user@host`.")
+    _reject_dash_prefixed_ssh_value("host", bare_host)
+    _reject_dash_prefixed_ssh_value("user", embedded_user)
     return bare_host, embedded_user
 
 
@@ -139,6 +151,8 @@ def normalize_ssh_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         normalized["user"] = user_text
     else:
         normalized.pop("user", None)
+    identity_file_text = normalize_optional_ssh_string(normalized.get("identity_file"))
+    _reject_dash_prefixed_ssh_value("identity_file", identity_file_text)
     return normalized
 
 

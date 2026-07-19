@@ -92,3 +92,17 @@ Redo/
 refactor_case/
 phase_plans/
 home/
+
+# opencode Vikunja skill (negate broader ignores above)
+!.opencode/
+!.opencode/opencode.json
+!.opencode/skills/
+!.opencode/skills/vikunja/
+!.opencode/skills/vikunja/SKILL.md
+!.opencode/skills/vikunja/vikunja.py
+!.opencode/skills/vikunja/agents.md
+!.opencode/skills/vikunja/vikunja_api_guide.md
+!.opencode/skills/vikunja/.env.example
+!.opencode/command/
+!.opencode/command/vikunja.md
+!vikunja-skill-plan.md

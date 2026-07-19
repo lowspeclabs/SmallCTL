@@ -60,6 +60,7 @@ from .network_ssh_helpers import (
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
     filter_ssh_known_hosts_warning as _filter_ssh_known_hosts_warning,
+    resolve_ssh_strict_host_key_mode as _resolve_ssh_strict_host_key_mode_helper,
     ssh_command_is_package_manager_install as _ssh_command_is_package_manager_install,
     ssh_diagnostic_not_found as _ssh_diagnostic_not_found,
     ssh_error_class as _ssh_error_class,
@@ -87,6 +88,11 @@ if TYPE_CHECKING:
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>|]+")
+
+
+def _resolve_ssh_strict_host_key_mode(harness: Any) -> str:
+    """Resolve the configured StrictHostKeyChecking mode (default: accept-new)."""
+    return _resolve_ssh_strict_host_key_mode_helper(harness)
 
 
 def _get_ssh_recovery_state(state: Any) -> dict[str, Any]:
@@ -173,7 +179,7 @@ async def ssh_exec(
     """
     Execute a command on a remote host via SSH with live streaming support.
     """
-    strict_host_key_mode = "accept-new"
+    strict_host_key_mode = _resolve_ssh_strict_host_key_mode(harness)
     plan = getattr(state, "active_plan", None) or getattr(state, "draft_plan", None)
     if plan is not None and not getattr(plan, "approved", False):
         return fail(
@@ -328,7 +334,7 @@ async def run_ssh_command(
                 "reason": "redacted_password_provided",
             },
         )
-    strict_host_key_mode = "accept-new"
+    strict_host_key_mode = _resolve_ssh_strict_host_key_mode(harness)
     try:
         host, user = normalize_ssh_target(host=host, user=user)
     except ValueError as exc:
@@ -540,6 +546,7 @@ async def run_ssh_command(
             port=port,
             identity_file=identity_file,
             password=password,
+            strict_host_key_checking=strict_host_key_mode,
         )
     except FileNotFoundError as exc:
         if str(exc) == "sshpass":
@@ -553,7 +560,7 @@ async def run_ssh_command(
                     **_ssh_execution_debug_metadata(
                         password=password,
                         identity_file=identity_file,
-                        strict_host_key_checking="accept-new",
+                        strict_host_key_checking=strict_host_key_mode,
                     ),
                 },
             )
@@ -597,6 +604,21 @@ async def run_ssh_command(
         if had_known_hosts_warning:
             metadata = output.setdefault("metadata", {})
             metadata["ssh_known_hosts_added"] = True
+            warning_text = (
+                f"SSH trusted a first-seen host key for {host} "
+                f"(StrictHostKeyChecking={strict_host_key_mode}). "
+                "Verify the host fingerprint out-of-band if this host is new."
+            )
+            metadata["ssh_host_key_trust_warning"] = warning_text
+            if harness is not None and hasattr(harness, "_runlog"):
+                harness._runlog(
+                    "ssh_host_key_trusted",
+                    warning_text,
+                    level="warning",
+                    host=host,
+                    user=user or "",
+                    strict_host_key_checking=strict_host_key_mode,
+                )
         return output
 
     async def _run_ssh_process(command_text: str, stdin_payload: str | None = None) -> tuple[dict[str, Any], asyncio.subprocess.Process | None]:

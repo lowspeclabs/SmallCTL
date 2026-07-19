@@ -21,5 +21,4 @@ def record_failure_outcome(service: Any, *, tool_name: str, result: Any) -> None
                 service.harness.state.working_memory.failures + [f"{tool_name}: {result.error}"],
                 limit=8,
             )
-            service.harness.state.recent_errors.append(f"{tool_name}: {result.error}")
             _note_anchor(service.harness, content=f"{tool_name} failed: {str(result.error).strip()}", tag="fail")

@@ -8,6 +8,8 @@ from .usage import extract_context_limit, extract_max_completion_tokens, extract
 
 _logger = logging.getLogger("smallctl.client.lifecycle")
 _shared_client_lock = threading.Lock()
+_shared_client_leases: dict[tuple[str, str], int] = {}
+_shared_client_pending_close: dict[tuple[str, str], list[Any]] = {}
 
 
 def _client_key(client: Any) -> tuple[str, str]:
@@ -28,12 +30,26 @@ def _get_async_client(client: Any) -> Any:
     return async_client
 
 
-async def _reset_async_client(client: Any) -> None:
+def acquire_stream_lease(client: Any) -> None:
     key = _client_key(client)
     with _shared_client_lock:
-        async_client = client._shared_clients.pop(key, None)
-    if async_client is None:
-        return
+        _shared_client_leases[key] = _shared_client_leases.get(key, 0) + 1
+
+
+async def release_stream_lease(client: Any) -> None:
+    key = _client_key(client)
+    with _shared_client_lock:
+        remaining = _shared_client_leases.get(key, 0) - 1
+        if remaining > 0:
+            _shared_client_leases[key] = remaining
+            return
+        _shared_client_leases.pop(key, None)
+        drained = _shared_client_pending_close.pop(key, [])
+    for async_client in drained:
+        await _close_shared_client(client, async_client)
+
+
+async def _close_shared_client(client: Any, async_client: Any) -> None:
     try:
         await async_client.aclose()
     except Exception as exc:
@@ -42,6 +58,36 @@ async def _reset_async_client(client: Any) -> None:
             client.base_url,
             exc,
         )
+
+
+def _defer_close_if_leased(key: tuple[str, str], async_client: Any) -> Any | None:
+    if _shared_client_leases.get(key, 0) > 0:
+        _shared_client_pending_close.setdefault(key, []).append(async_client)
+        return None
+    return async_client
+
+
+def _drain_shared_clients(shared_clients: dict[tuple[str, str], Any]) -> list[Any]:
+    with _shared_client_lock:
+        entries = list(shared_clients.items())
+        shared_clients.clear()
+        immediate: list[Any] = []
+        for key, async_client in entries:
+            closable = _defer_close_if_leased(key, async_client)
+            if closable is not None:
+                immediate.append(closable)
+    return immediate
+
+
+async def _reset_async_client(client: Any) -> None:
+    key = _client_key(client)
+    with _shared_client_lock:
+        async_client = client._shared_clients.pop(key, None)
+        if async_client is not None:
+            async_client = _defer_close_if_leased(key, async_client)
+    if async_client is None:
+        return
+    await _close_shared_client(client, async_client)
 
 
 def _remember_context_limit(client: Any, limit: int | None) -> int | None:

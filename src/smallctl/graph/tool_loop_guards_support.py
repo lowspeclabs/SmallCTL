@@ -64,7 +64,7 @@ def _normalize_tool_args(tool_name: str, args: dict[str, Any], *, cwd: str | Non
     if not isinstance(args, dict):
         return args
     normalized = {str(key): _normalize_json_like(value) for key, value in args.items()}
-    if tool_name in {"shell_exec", "bash_exec", "ssh_exec"} and "command" in normalized:
+    if tool_name in {"shell_exec", "ssh_exec"} and "command" in normalized:
         normalized["command"] = _normalize_shell_command(str(normalized["command"]))
     if tool_name in {
         "file_read",

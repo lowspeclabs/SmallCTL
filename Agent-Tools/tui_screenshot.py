@@ -52,6 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-profiles", help="Comma-separated tool profiles")
     parser.add_argument("--fresh-run", action="store_true", help="Start without prior memory/state")
     parser.add_argument("--config-path", help="Path to custom .smallctl.yaml config")
+    parser.add_argument("--local-config-only", action="store_true", help="Use only --config-path and explicit CLI settings; ignore workspace and environment configuration")
     parser.add_argument("--keep-svg", action="store_true", help="Keep the intermediate SVG file")
     parser.add_argument("--json", action="store_true", help="Output JSON with paths")
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
@@ -142,6 +143,8 @@ def _build_cli_config(args: argparse.Namespace) -> dict[str, Any]:
         cfg["fresh_run"] = True
     if args.config_path is not None:
         cfg["config_path"] = args.config_path
+    if args.local_config_only:
+        cfg["_local_config_only"] = True
     return cfg
 
 
@@ -200,7 +203,7 @@ async def _shutdown_app(app: Any) -> None:
     await asyncio.sleep(0)
 
 
-async def _run_tui_and_capture(args: argparse.Namespace, output_dir: Path, base_name: str) -> dict[str, str]:
+async def _run_tui_and_capture(args: argparse.Namespace, output_dir: Path, base_name: str) -> dict[str, Any]:
     sys.path.insert(0, str(SRC_DIR))
 
     from smallctl.config import resolve_config
@@ -271,6 +274,19 @@ async def _run_tui_and_capture(args: argparse.Namespace, output_dir: Path, base_
         "png": str(png_path),
         "svg": str(actual_svg) if args.keep_svg else None,
         "run_log_dir": str(run_logger.run_dir) if run_logger else None,
+        "effective_config": {
+            "config_path": args.config_path,
+            "endpoint": config.endpoint,
+            "model": config.model,
+            "provider_profile": config.provider_profile,
+            "sources": {
+                "config_path": "explicit_cli" if args.config_path else "default",
+                "endpoint": "explicit_cli" if args.endpoint else ("user_config" if args.config_path and args.local_config_only else "resolved"),
+                "model": "explicit_cli" if args.model else ("user_config" if args.config_path and args.local_config_only else "resolved"),
+                "provider_profile": "explicit_cli" if args.provider_profile else ("user_config" if args.config_path and args.local_config_only else "resolved"),
+            },
+            "local_config_only": args.local_config_only,
+        },
     }
 
 

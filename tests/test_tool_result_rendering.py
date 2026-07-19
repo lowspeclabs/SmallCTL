@@ -140,3 +140,26 @@ async def test_build_tool_result_message_skips_recovery_hint_on_success() -> Non
     content = str(message.content or "")
     assert message.role == "tool"
     assert "Recovery hint:" not in content
+
+
+@pytest.mark.asyncio
+async def test_build_tool_result_message_appends_dry_run_hint_on_success() -> None:
+    service = _FakeService()
+    result = ToolEnvelope(
+        success=True,
+        output={"stdout": "Dry run only. Re-run with --execute to apply.", "stderr": "", "exit_code": 0},
+        metadata={"dry_run_hint": "This command performed a dry run only. Re-run with --execute."},
+    )
+
+    message = await build_tool_result_message(
+        service,
+        tool_name="shell_exec",
+        result=result,
+        artifact=None,
+        tool_call_id="call_123",
+    )
+
+    content = str(message.content or "")
+    assert message.role == "tool"
+    assert "Hint:" in content
+    assert "dry run" in content.lower()

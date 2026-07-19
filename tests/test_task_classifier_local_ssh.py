@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from smallctl.context.frame_run_rendering import render_run_brief
-from smallctl.harness.task_classifier import classify_runtime_intent, classify_task_mode
+from smallctl.harness.task_classifier import classify_runtime_intent, classify_task_decision, classify_task_mode
 from smallctl.harness.task_intent import infer_requested_tool_name
 from smallctl.harness.task_classifier_support import (
     task_is_local_ssh_file_target,
@@ -158,3 +158,13 @@ def test_system_prompt_includes_local_scope_preference() -> None:
 
     assert "Do NOT use ssh_exec" in prompt
     assert "local_execute" in prompt
+
+
+def test_local_tool_remote_api_decision_preserves_route_provenance() -> None:
+    decision = classify_task_decision(
+        "read temp/proxmox-manager/AGENTS.md and run the local Proxmox CLI doctor against its configured API on 192.168.1.74"
+    )
+
+    assert decision.mode == "local_execute"
+    assert decision.matched_rule == "local_tool_remote_api"
+    assert decision.decision_source == "task_classifier"

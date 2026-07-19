@@ -538,3 +538,112 @@ def test_interpret_model_output_does_not_auto_finalize_non_chat_execution_with_t
     assert route == LoopRoute.NEXT_STEP
     assert graph_state.final_result is None
     assert "auto_finalize" not in runlog_events
+
+
+def test_interpret_model_output_auto_finalizes_readonly_lookup_blocked_by_dns_error(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.task_mode = "loop"
+    state.active_tool_profiles = ["core"]
+    state.run_brief.original_task = "load the proxmox cli and list the hosts you see"
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.recent_messages = [
+        ConversationMessage(
+            role="tool",
+            content="## Error\n\n- Type: api_error\n- Message: [Errno -3] Temporary failure in name resolution",
+        )
+    ]
+
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        registry=_make_registry("shell_exec", "task_complete"),
+        summarizer=None,
+        summarizer_client=None,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+        _record_experience=lambda *args, **kwargs: None,
+        _emit=_emit,
+        _extract_planning_request=lambda _task: None,
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-loop-dns-block",
+        run_mode="loop",
+        pending_tool_calls=[],
+        last_assistant_text=(
+            "The Proxmox CLI loaded successfully, but it cannot connect because the `.env` file "
+            "contains placeholder values (`proxmox.example.local` and a `replace-me` token). "
+            "DNS resolution fails for the placeholder hostname, so I cannot list the hosts."
+        ),
+        last_thinking_text="The CLI is blocked by the placeholder endpoint in .env.",
+    )
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.FINALIZE
+    assert graph_state.final_result is not None
+    assert graph_state.final_result["status"] == "blocked"
+    assert "auto_finalize_blocked_environmental_failure" in runlog_events
+    assert "auto_finalize" not in runlog_events
+
+
+def test_interpret_model_output_auto_finalizes_action_task_blocked_by_missing_credentials(tmp_path) -> None:
+    state = LoopState(cwd=str(tmp_path))
+    state.current_phase = "execute"
+    state.task_mode = "loop"
+    state.active_tool_profiles = ["core"]
+    state.run_brief.original_task = (
+        "read /home/stephen/Scripts/Agent-Skills/proxmox-manager/README.md, "
+        "then load the proxmox manager cli and use it to list the lxcs on the remote proxmox node"
+    )
+    state.working_memory.current_goal = state.run_brief.original_task
+    state.recent_messages = [
+        ConversationMessage(
+            role="tool",
+            content=(
+                "ls: cannot access '/home/stephen/Scripts/Agent-Skills/proxmox-manager/.env': "
+                "No such file or directory\n# .env.example with placeholder values ..."
+            ),
+        )
+    ]
+
+    runlog_events: list[str] = []
+    harness = SimpleNamespace(
+        state=state,
+        registry=_make_registry("shell_exec", "task_complete"),
+        summarizer=None,
+        summarizer_client=None,
+        _runlog=lambda event, *args, **kwargs: runlog_events.append(event),
+        _record_experience=lambda *args, **kwargs: None,
+        _emit=_emit,
+        _extract_planning_request=lambda _task: None,
+    )
+    deps = GraphRuntimeDeps(harness=harness, event_handler=None)
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-missing-creds-action",
+        run_mode="loop",
+        pending_tool_calls=[],
+        last_assistant_text=(
+            "README has been read (110 lines). The project layout shows the main script at "
+            "`scripts/Proxmox-cli.py` and the command to list LXCs/VMs would be:\n\n"
+            "```bash\npython scripts/Proxmox-cli.py vms list --node pve1\n```\n\n"
+            "However, there is no `.env` file in the project directory. Only a template at "
+            "`.env.example` exists with placeholder values. Without a real `.env` containing "
+            "valid credentials, the CLI cannot authenticate. I will not invent credentials or "
+            "fabricate API secrets. To proceed, please provide a valid PROXMOX_API_URL, "
+            "PROXMOX_API_TOKEN_ID, and PROXMOX_API_TOKEN_SECRET."
+        ),
+        last_thinking_text="The CLI is blocked by missing credentials.",
+    )
+
+    route = asyncio.run(interpret_model_output(graph_state, deps))
+
+    assert route == LoopRoute.FINALIZE
+    assert graph_state.final_result is not None
+    assert graph_state.final_result["status"] == "blocked"
+    assert "auto_finalize_hard_blocker" in runlog_events
+    assert "auto_finalize" not in runlog_events
+    assert "action_stall" not in runlog_events
+

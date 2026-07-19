@@ -13,13 +13,56 @@ def _normalize_section_name(section_name: str | None, section_id: str | None) ->
     return str(section_name or section_id or "unnamed").strip() or "unnamed"
 
 
+_REPLACE_STRATEGY_SCHEMA_ENUM = ("append", "overwrite")
+
+
 def _normalize_replace_strategy(replace_strategy: str | None) -> str:
     strategy = str(replace_strategy or "auto").strip().lower()
-    if strategy in {"overwrite", "replace", "rewrite"}:
-        return "overwrite"
-    if strategy == "append":
-        return "append"
+    if strategy in _REPLACE_STRATEGY_SCHEMA_ENUM:
+        return strategy
     return "auto"
+
+
+def _replace_strategy_external_error(
+    replace_strategy: Any,
+    *,
+    session_active: bool,
+    path: str | None = None,
+) -> dict[str, Any] | None:
+    """Typed validation for externally supplied `replace_strategy` values.
+
+    External tool calls may only use the schema enum values; aliases such as
+    "replace" or "rewrite" are rejected instead of silently coerced. Omission
+    is valid only while a tracked write session owns the target path;
+    standalone writes must name a strategy explicitly.
+    """
+    from .common import fail
+
+    raw = str(replace_strategy or "").strip()
+    if not raw:
+        if session_active:
+            return None
+        return fail(
+            "file_write requires `replace_strategy` ('append' or 'overwrite') for standalone writes. "
+            "Omit `replace_strategy` only while a tracked write session owns the target path.",
+            metadata={
+                "error_kind": "replace_strategy_required_standalone",
+                "path": str(path or ""),
+                "allowed_values": list(_REPLACE_STRATEGY_SCHEMA_ENUM),
+            },
+        )
+    if raw.lower() not in _REPLACE_STRATEGY_SCHEMA_ENUM:
+        return fail(
+            f"Invalid `replace_strategy` value `{raw}`. Use exactly one of the schema enum values: "
+            "'append' or 'overwrite'.",
+            metadata={
+                "error_kind": "invalid_replace_strategy",
+                "path": str(path or ""),
+                "supplied_value": raw,
+                "allowed_values": list(_REPLACE_STRATEGY_SCHEMA_ENUM),
+            },
+        )
+    return None
 
 
 def _write_session_can_finalize(session: Any) -> bool:

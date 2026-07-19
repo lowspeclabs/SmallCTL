@@ -225,7 +225,7 @@ def test_stream_chat_openrouter_auth_preflight_returns_actionable_chunk_error(mo
         text = '{"error":{"message":"User not found.","code":401}}'
 
     class _FakeAsyncClient:
-        async def get(self, url, headers):
+        async def get(self, url, headers, timeout=None):
             assert url == "https://openrouter.ai/api/v1/credits"
             assert headers["Authorization"] == "Bearer bad-key"
             return _Response()
@@ -273,8 +273,8 @@ def test_stream_chat_openrouter_401_chat_error_returns_actionable_chunk_error(mo
         text = '{"data":{"total_credits":1}}'
 
     class _FakeAsyncClient:
-        async def get(self, url, headers):
-            del url, headers
+        async def get(self, url, headers, timeout=None):
+            del url, headers, timeout
             return _AuthResponse()
 
     class _FakeStreamer:
@@ -334,8 +334,8 @@ def test_stream_chat_openrouter_caps_auto_max_tokens_with_large_context_limit(mo
         text = '{"data":{"total_credits":1}}'
 
     class _FakeAsyncClient:
-        async def get(self, url, headers):
-            del url, headers
+        async def get(self, url, headers, timeout=None):
+            del url, headers, timeout
             return _AuthResponse()
 
     class _FakeStreamer:
@@ -512,8 +512,8 @@ def test_stream_chat_openrouter_omits_unsupported_max_tokens_from_metadata(monke
         text = '{"data":{"total_credits":1}}'
 
     class _FakeAsyncClient:
-        async def get(self, url, headers):
-            del url, headers
+        async def get(self, url, headers, timeout=None):
+            del url, headers, timeout
             return _AuthResponse()
 
     class _FakeStreamer:
@@ -1875,4 +1875,114 @@ def test_maybe_emit_swa_cache_warning_logs_for_gemma4_llamacpp() -> None:
     _maybe_emit_swa_cache_warning(harness, usage)
     assert any(c.get("event") == "swa_cache_inactive" for c in runlog_calls)
     assert any("--swa-full" in str(c.get("recommendation", "")) for c in runlog_calls)
+
+
+def test_stream_chat_non_backend_chunk_error_is_not_retried(monkeypatch) -> None:
+    """Generic provider stream errors are surfaced, not silently retried."""
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="generic",
+    )
+    attempts = {"count": 0}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            attempts["count"] += 1
+            yield {
+                "type": "chunk_error",
+                "error": "list index out of range",
+                "details": {"message": "list index out of range"},
+            }
+            return
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run for chunk_error")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk_error"]
+    assert attempts["count"] == 1
+
+
+def test_stream_chat_backend_stream_failure_is_retried(monkeypatch) -> None:
+    """Only backend_stream_failure chunk errors trigger the retry path."""
+    recovery_calls: list[dict[str, object]] = []
+
+    async def _recover(payload: dict[str, object]) -> dict[str, object]:
+        recovery_calls.append(payload)
+        return {"status": "recovered", "action": "restart_command"}
+
+    client = OpenAICompatClient(
+        base_url="http://127.0.0.1:8080/v1",
+        model="demo-model",
+        provider_profile="generic",
+        backend_recovery_handler=_recover,
+    )
+    attempts = {"count": 0}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def stream_sse(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                yield {
+                    "type": "chunk_error",
+                    "error": "Remote protocol error after retry",
+                    "details": {
+                        "reason": "backend_stream_failure",
+                        "provider_profile": "generic",
+                        "exception_type": "httpx.RemoteProtocolError",
+                    },
+                }
+                return
+            yield {"type": "chunk", "data": {"choices": [{"delta": {"content": "ok"}}]}}
+            yield {"type": "done"}
+
+        async def nonstream_chat(self, async_client, url, headers, payload):
+            del async_client, url, headers, payload
+            raise AssertionError("nonstream fallback should not run")
+            yield {}
+
+    monkeypatch.setattr(client_transport, "SSEStreamer", _FakeStreamer)
+    monkeypatch.setattr(client_transport, "_get_async_client", lambda _client: object())
+
+    async def _run() -> list[dict[str, object]]:
+        events: list[dict[str, object]] = []
+        async for event in client_transport.stream_chat(
+            client,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run())
+
+    assert [event["type"] for event in events] == ["chunk", "done"]
+    assert attempts["count"] == 2
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["details"]["reason"] == "backend_stream_failure"
 

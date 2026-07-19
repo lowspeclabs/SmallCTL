@@ -13,7 +13,6 @@ from .tool_result_verification_constants import (
     _ZERO_TESTS_RAN_RE,
 )
 from .tool_result_verification_helpers import snip_text as _snip_text, verifier_kind_for_command, verifier_strength
-from ..diagnostic_tasks import diagnostic_failure_task
 
 
 _DOCKER_INVENTORY_HEADERS = (
@@ -30,6 +29,33 @@ _DOCKER_NON_SWARM_DIAGNOSTIC_MARKERS = (
     "usage:  docker swarm command",
     "run 'docker swarm command --help'",
 )
+
+_STRUCTURED_ERROR_HEADING_RE = re.compile(r"^##\s+error\b", re.IGNORECASE)
+_TRAILING_NONZERO_EXIT_MARKER_RE = re.compile(r"^-{2,}\s*EXIT\s*:\s*([1-9][0-9]*)\s*$", re.IGNORECASE)
+_FAMILY_INTERPRETER_RE = re.compile(r"^(?:python(?:3(?:\.\d+)?)?|node|ruby|perl|php|bash|sh)$")
+
+
+def _app_level_failure_marker(*, stdout: str, stderr: str) -> str:
+    """Detect app-level failure reports that contradict a zero shell exit code.
+
+    Some CLIs print a structured error report (a leading ``## Error`` block)
+    or an explicit trailing exit marker (``---EXIT:4``) while the surrounding
+    pipeline still exits 0. Anchoring to the leading block and the trailing
+    marker keeps benign mid-output mentions (e.g. file contents that contain
+    ``## Error``) from tripping the detector.
+    """
+    for stream in (stdout, stderr):
+        stripped = str(stream or "").strip()
+        if not stripped:
+            continue
+        first_line = stripped.splitlines()[0].strip()
+        if _STRUCTURED_ERROR_HEADING_RE.match(first_line):
+            return "output begins with a structured '## Error' failure report"
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        match = _TRAILING_NONZERO_EXIT_MARKER_RE.match(lines[-1]) if lines else None
+        if match:
+            return f"trailing '---EXIT:{match.group(1)}' marker reports a nonzero app-level exit"
+    return ""
 
 
 def _docker_segment_is_readonly_diagnostic(segment: str) -> bool:
@@ -93,6 +119,9 @@ def _semantic_verifier_failure(*, command: str, stdout: str, stderr: str) -> str
     combined = "\n".join(part for part in (stdout, stderr) if str(part or "").strip())
     if not combined:
         return ""
+    app_failure = _app_level_failure_marker(stdout=stdout, stderr=stderr)
+    if app_failure:
+        return app_failure
     normalized_command = re.sub(r"\s+", " ", str(command or "").strip().lower())
     normalized_output = re.sub(r"\s+", " ", combined.strip().lower())
     if (
@@ -194,8 +223,116 @@ def _prior_failed_verifier_command(state: Any) -> str:
                 return command
     prior = getattr(state, "last_verifier_verdict", None)
     if isinstance(prior, dict) and str(prior.get("verdict") or "").strip().lower() == "fail":
-        return str(prior.get("command") or "").strip()
+        # An insufficient-verifier rejection must never become the baseline;
+        # only genuine execution failures seed the prior-failed verifier.
+        failure_mode = str(prior.get("failure_mode") or "").strip().lower()
+        if failure_mode != "insufficient_verifier" and not prior.get("insufficient_verifier"):
+            return str(prior.get("command") or "").strip()
     return ""
+
+
+def _canonical_family_path_token(token: str) -> str:
+    """Canonicalize a path-like verifier target without erasing its identity.
+
+    Equal-strength verifiers against DIFFERENT path targets (``pytest
+    tests/a.py`` vs ``pytest tests/b.py``) must not share a family signature,
+    so the path itself is preserved in canonical relative/absolute form
+    instead of collapsing to a wildcard.
+    """
+    raw = str(token or "").strip().strip("'\"")
+    raw = raw.replace("\\", "/")
+    while raw.startswith("./"):
+        raw = raw[2:]
+    return re.sub(r"/+", "/", raw).rstrip("/")
+
+
+def _verifier_family_signature(command: str) -> tuple[str, ...]:
+    """Return a stable family signature for a verifier command.
+
+    The signature captures the tool/executable and its action words while
+    discarding corrected-argument noise: shell wrappers (``cd``/``sudo``/
+    ``timeout``), redirections, pipe tails (``| head -50``), and flags with
+    their values. Path-like positional tokens keep their canonical identity so
+    an equal-strength pass against a different file target cannot clear a
+    prior failure, while a passing rerun with corrected args
+    (``--node pve1`` -> ``--node pve``) addresses the prior failure instead of
+    sidestepping it.
+    """
+    import shlex
+
+    text = re.sub(r"\s+", " ", str(command or "").strip().lower())
+    if not text:
+        return ()
+    text = re.split(r"\s*(?:&&|\|\||;)\s*", text)[-1].strip()
+    text = re.split(r"\s*\|\s*", text)[0].strip()
+    text = re.sub(r"(?:\s*\d?>&\d+)+\s*$", "", text)
+    text = re.sub(r"\s*\d?>+\s*\S+\s*$", "", text).strip()
+    if not text:
+        return ()
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    while tokens:
+        head = tokens[0]
+        if head == "sudo":
+            tokens = tokens[1:]
+        elif head == "timeout" and len(tokens) >= 2:
+            tokens = tokens[2:]
+        elif head == "env":
+            tokens = tokens[1:]
+            while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+                tokens = tokens[1:]
+        else:
+            break
+    if not tokens:
+        return ()
+    signature = [tokens[0].rsplit("/", 1)[-1]]
+    rest = tokens[1:]
+    if _FAMILY_INTERPRETER_RE.match(signature[0]) and rest and not rest[0].startswith("-"):
+        script = rest[0]
+        if "/" in script or re.search(r"\.[a-z0-9]+$", script):
+            signature.append(_canonical_family_path_token(script))
+            rest = rest[1:]
+    consume_next = False
+    for token in rest:
+        if consume_next:
+            consume_next = False
+            continue
+        if token.startswith("-"):
+            # Flags are corrected-argument surface; a bare long flag consumes
+            # the following token as its value (``--node pve``).
+            if token.startswith("--") and "=" not in token:
+                consume_next = True
+            continue
+        if "/" in token or re.search(r"\.[a-z0-9]{1,5}$", token):
+            signature.append(_canonical_family_path_token(token))
+        else:
+            signature.append(token)
+    return tuple(signature)
+
+
+def _diagnostic_task_exemption(state: Any) -> bool:
+    """Pure-diagnostic exemption based on the immutable original task only.
+
+    The working-memory goal is mutable and can drift mid-run (moving the
+    goalpost); ``run_brief.original_task`` is the authoritative objective.
+    """
+    from ..diagnostic_tasks import (
+        _DIAGNOSTIC_MARKERS,
+        _MUTATION_REMEDIATION_MARKERS,
+        _NEGATIVE_VERIFICATION_MARKERS,
+    )
+
+    task = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().casefold()
+    if not task:
+        return False
+    padded = f" {task} "
+    if any(marker in padded for marker in _DIAGNOSTIC_MARKERS):
+        if any(marker in padded for marker in _MUTATION_REMEDIATION_MARKERS):
+            return False
+        return True
+    return any(marker in task for marker in _NEGATIVE_VERIFICATION_MARKERS)
 
 
 def _passing_verifier_is_weaker_than_prior_failure(
@@ -207,7 +344,7 @@ def _passing_verifier_is_weaker_than_prior_failure(
     # Pure diagnostic/observation tasks gather multiple distinct read-only checks.
     # A later diagnostic command should not be considered "weaker" than an earlier
     # failed diagnostic command; each probe contributes independent evidence.
-    if diagnostic_failure_task(state):
+    if _diagnostic_task_exemption(state):
         return False
     current_strength = verifier_strength(current_kind)
     prior_command = _prior_failed_verifier_command(state)
@@ -215,17 +352,30 @@ def _passing_verifier_is_weaker_than_prior_failure(
         return False
     prior_kind = verifier_kind_for_command(prior_command)
     prior_strength = verifier_strength(prior_kind)
+    # A strictly stronger verifier can overwrite a prior failure, even if the
+    # command differs (e.g., a more comprehensive integration test after a
+    # narrower unit test failed).
+    if current_strength > prior_strength:
+        return False
     # If the current verifier is strictly weaker than a prior failed verifier,
     # it cannot overwrite that failure.
     if current_strength < prior_strength:
         return True
-    # Even if strengths are equal, a read-only diagnostic (e.g. journalctl, cat)
+    # Even if strengths are equal, a read-only diagnostic (e.g., journalctl, cat)
     # should not overwrite a prior functional status/command verifier that failed.
     if current_strength == prior_strength and current_kind == "diagnostic" and prior_kind != "diagnostic":
         return True
     normalized_current = re.sub(r"\s+", " ", str(current_command or "").strip().lower())
     normalized_prior = re.sub(r"\s+", " ", prior_command.strip().lower())
-    return normalized_current != normalized_prior
+    if normalized_current == normalized_prior:
+        return False
+    if current_kind == prior_kind:
+        current_signature = _verifier_family_signature(current_command)
+        if current_signature and current_signature == _verifier_family_signature(prior_command):
+            # Same verifier family addressing the same objective with corrected
+            # arguments: the pass answers the prior failure and clears it.
+            return False
+    return True
 
 
 def _insufficient_verifier_message(state: Any, *, command: str) -> str:

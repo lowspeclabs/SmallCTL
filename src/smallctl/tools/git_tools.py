@@ -28,8 +28,10 @@ def _run_git(*args: str, cwd: Path | None = None) -> tuple[int, str, str]:
 async def git_status(
     path: str = ".",
     short: bool = True,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    target = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    target = (base / path).resolve()
     if not target.exists():
         return fail(f"Path does not exist: {target}")
     args = ["-C", str(target), "status"]
@@ -53,8 +55,10 @@ async def git_diff(
     path: str = ".",
     cached: bool = False,
     target: str | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    target_dir = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    target_dir = (base / path).resolve()
     if not target_dir.exists():
         return fail(f"Path does not exist: {target_dir}")
     args = ["-C", str(target_dir), "diff"]
@@ -79,8 +83,10 @@ async def read_log(
     path: str,
     lines: int = 100,
     offset: int | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any]:
-    target = Path(path).resolve()
+    base = Path(cwd).resolve() if cwd else Path.cwd()
+    target = (base / path).resolve()
     if not target.exists():
         return fail(f"Path does not exist: {target}")
     if not target.is_file():

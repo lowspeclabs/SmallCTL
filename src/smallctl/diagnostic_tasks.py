@@ -17,6 +17,28 @@ _DIAGNOSTIC_MARKERS = (
     "health check",
     "system health",
     "resource utilization",
+    "report back",
+    "report on",
+    "report the",
+    "show me",
+    "tell me",
+    "list the",
+    "what are the",
+    "what is the",
+)
+
+_MUTATION_REMEDIATION_MARKERS = (
+    "fix",
+    "repair",
+    "change",
+    "update",
+    "create",
+    "install",
+    "configure",
+    "then fix",
+    "then repair",
+    "then update",
+    "then change",
 )
 
 _NEGATIVE_VERIFICATION_MARKERS = (
@@ -63,6 +85,8 @@ def diagnostic_failure_task(state: Any) -> bool:
         return False
     padded = f" {text} "
     if any(marker in padded for marker in _DIAGNOSTIC_MARKERS):
+        if any(marker in padded for marker in _MUTATION_REMEDIATION_MARKERS):
+            return False
         return True
     return any(marker in text for marker in _NEGATIVE_VERIFICATION_MARKERS)
 

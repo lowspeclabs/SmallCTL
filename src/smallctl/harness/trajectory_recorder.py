@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..redaction import redact_sensitive_data
+
 
 class TrajectoryRecorder:
     """Records clean tool_plan trajectories for future fine-tuning data."""
@@ -80,7 +82,7 @@ class TrajectoryRecorder:
 
         out_path = self.base_dir / f"{session_id}.jsonl"
         with out_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+            handle.write(json.dumps(redact_sensitive_data(payload), ensure_ascii=True, sort_keys=True) + "\n")
         return out_path
 
     def record_escalation(
@@ -134,5 +136,5 @@ class TrajectoryRecorder:
 
         out_path = self.base_dir / f"{session_id}.jsonl"
         with out_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+            handle.write(json.dumps(redact_sensitive_data(payload), ensure_ascii=True, sort_keys=True) + "\n")
         return out_path

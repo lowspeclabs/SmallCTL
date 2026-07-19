@@ -18,6 +18,7 @@ HARNESS_ONLY_FIELDS = {
     "policy",
     "run_logger",
     "shell_approval_session_default",
+    "ssh_strict_host_key_checking",
     "strategy",
     "strategy_prompt",
     "tool_result_inline_token_limit",

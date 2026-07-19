@@ -219,6 +219,7 @@ async def _async_dispatcher_marks_legacy_coercion_on_success() -> None:
             description="test",
             schema=build_tool_schema(properties={"path": {"type": "string"}}, required=["path"]),
             handler=lambda **kwargs: {"success": True, "output": kwargs, "error": None, "metadata": {}},
+            risk="low",
         )
     )
     dispatcher = ToolDispatcher(registry, phase="execute")
@@ -226,7 +227,8 @@ async def _async_dispatcher_marks_legacy_coercion_on_success() -> None:
     result = await dispatcher.dispatch("read_path", {"path": "a.py", "extra": "ignored"})
 
     assert result.success is True
-    assert result.output == {"path": "a.py"}
+    assert result.output["path"] == "a.py"
+    assert "extra" in result.output["warning"]
     assert result.metadata["legacy_dispatch_coercion"] is True
     assert result.metadata["ignored_arguments"] == ["extra"]
 

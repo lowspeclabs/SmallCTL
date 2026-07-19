@@ -191,6 +191,82 @@ def _resolve_followup_task(harness: Any, task: str) -> tuple[str, bool]:
     return resolved_task, bool(is_continue_task)
 
 
+async def _flush_open_write_sessions(
+    harness: Any,
+    *,
+    reason: str,
+    event_suffix: str = "cancel",
+) -> None:
+    from ..tools.fs_sessions import _write_session_can_finalize
+    from ..write_session_fsm import (
+        archive_interrupted_write_session,
+        is_terminal_write_session,
+    )
+    from .write_session_outcomes import _attempt_write_session_finalize
+    from .write_session_recovery import _register_write_session_stage_artifact
+
+    state = getattr(harness, "state", None)
+    if state is None:
+        return
+    sessions: list[Any] = []
+    active_map = getattr(state, "active_write_sessions_by_path", None)
+    if isinstance(active_map, dict):
+        for session in active_map.values():
+            if (
+                session is not None
+                and not is_terminal_write_session(session)
+                and session not in sessions
+            ):
+                sessions.append(session)
+    alias_session = getattr(state, "write_session", None)
+    if (
+        alias_session is not None
+        and not is_terminal_write_session(alias_session)
+        and alias_session not in sessions
+    ):
+        sessions.append(alias_session)
+    if not sessions:
+        return
+    for session in sessions:
+        ready = (
+            not str(getattr(session, "write_next_section", "") or "").strip()
+            and bool(getattr(session, "write_sections_completed", []) or [])
+            and _write_session_can_finalize(session)
+        )
+        if not ready:
+            continue
+        try:
+            finalized, _detail = await _attempt_write_session_finalize(harness, session)
+        except Exception:
+            finalized = False
+        if finalized:
+            harness._runlog(
+                f"write_session_finalized_on_{event_suffix}",
+                "promoted complete staged write session during shutdown",
+                session_id=str(getattr(session, "write_session_id", "") or ""),
+                path=str(getattr(session, "write_target_path", "") or ""),
+                reason=reason,
+            )
+    abandoned = [session for session in sessions if not is_terminal_write_session(session)]
+    if not abandoned:
+        return
+    for session in abandoned:
+        try:
+            _register_write_session_stage_artifact(harness, session)
+        except Exception:
+            pass
+        harness._runlog(
+            f"write_session_abandoned_on_{event_suffix}",
+            "staged write session abandoned during shutdown",
+            session_id=str(getattr(session, "write_session_id", "") or ""),
+            staging_path=str(getattr(session, "write_staging_path", "") or ""),
+            target_path=str(getattr(session, "write_target_path", "") or ""),
+            status=str(getattr(session, "status", "") or ""),
+            reason=reason,
+        )
+    archive_interrupted_write_session(state, reason=reason)
+
+
 async def _handle_cancel_requested(graph_state: Any, deps: Any) -> bool:
     harness = deps.harness
     if not getattr(harness, "_cancel_requested", False):
@@ -200,6 +276,7 @@ async def _handle_cancel_requested(graph_state: Any, deps: Any) -> bool:
         UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
     )
     graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
+    await _flush_open_write_sessions(harness, reason="cancel_requested")
     return True
 
 

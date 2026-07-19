@@ -156,6 +156,10 @@ async def build_tool_result_message(
         if recovery_hint:
             compact_content = f"{compact_content}{recovery_hint}"
 
+    dry_run_hint = (result.metadata.get("dry_run_hint") if isinstance(result.metadata, dict) else None)
+    if dry_run_hint and result.success and tool_name in {"shell_exec", "ssh_exec"}:
+        compact_content = f"{compact_content}\n\nHint: {dry_run_hint}"
+
     if tool_name in {"plan_set", "plan_step_update", "plan_request_execution", "plan_export"}:
         playbook_artifact_id = str(result.metadata.get("artifact_id", "") or "").strip()
         if playbook_artifact_id:

@@ -8,16 +8,12 @@ from .runtime_base import (
     LoopGraphPayload,
     RuntimeGraphSpec,
     apply_outcomes_node,
-    checkpoint_config,
-    coerce_graph_values_payload,
-    interpret_node,
     load_runtime_state,
     model_call_node,
     prepare_prompt_node,
     route_if_final_else,
     serialize_runtime_state,
 )
-from .nodes import interpret_chat_output
 
 
 class IndexerGraphRuntime(LoopGraphRuntime):
@@ -25,6 +21,8 @@ class IndexerGraphRuntime(LoopGraphRuntime):
 
     _run_mode = "indexer"
     _run_execution_message = "executing indexer runtime"
+    _empty_result_message = "Indexer graph ended without a terminal result."
+    _recursion_limit = 512
 
     GRAPH_SPEC = RuntimeGraphSpec(
         node_map={
@@ -60,19 +58,6 @@ class IndexerGraphRuntime(LoopGraphRuntime):
         },
         static_edges=[("persist_tool_results", "apply_indexer_tool_outcomes")],
     )
-
-    async def _execute_langgraph(self, payload: LoopGraphPayload) -> dict[str, object]:
-        harness = self.deps.harness
-        compiled = self._build_compiled_graph()
-        config = checkpoint_config(harness, recursion_limit=512)
-        values = await compiled.ainvoke(payload, config)
-        graph_state = load_runtime_state(self, coerce_graph_values_payload(values))
-        harness.state = graph_state.loop_state
-        result = graph_state.final_result or harness._failure(
-            "Indexer graph ended without a terminal result.",
-            error_type="runtime",
-        )
-        return harness._finalize(result)
 
     async def _prepare_indexer_prompt_node(self, payload: LoopGraphPayload) -> LoopGraphPayload:
         return await prepare_prompt_node(self, payload, prepare_indexer_prompt)

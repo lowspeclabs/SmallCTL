@@ -158,6 +158,11 @@ def fama_hidden_tools_for_exposure(
         # blocker rather than cycling indefinitely.
         elif _verifier_rejection_count(state) < 5 or _same_target_rejection_streak(state) < 4:
             hidden_tools.add("task_fail")
+        # Never expose task_fail as an escape hatch when the harness itself is
+        # uncertain about verifier strength; the model should run a stronger or
+        # corrected verifier instead of claiming failure.
+        elif _latest_verifier_is_insufficient_verifier(state):
+            hidden_tools.add("task_fail")
     if "remote_tool_exposure_guard" in active:
         # Don't hide local mutating tools when the current task explicitly
         # references local paths — the model needs them to complete the task.
@@ -165,7 +170,15 @@ def fama_hidden_tools_for_exposure(
             hidden_tools.update(_LOCAL_MUTATING_TOOLS & exported)
     if "tool_exposure_narrowing" in active:
         repeated_tool = _latest_loop_repeated_tool(state)
-        if repeated_tool in _READ_LOOP_TOOLS and repeated_tool in exported:
+        # Never hide file_read for a repeated-read loop: the loop_guard already
+        # blocks the repeated call on the specific path, and removing the whole
+        # tool starves the model of file content and pushes it onto worse
+        # substitutes (e.g. artifact_read EOF loops).
+        if (
+            repeated_tool in _READ_LOOP_TOOLS
+            and repeated_tool != "file_read"
+            and repeated_tool in exported
+        ):
             hidden_tools.add(repeated_tool)
     # Interactive SSH installer stall: the prompt has not advanced despite prior
     # sends. Force the model to send one exact answer to the existing session and
@@ -374,6 +387,13 @@ def _latest_verifier_is_remote_transport_failure(state: Any) -> bool:
     )
 
 
+def _latest_verifier_is_insufficient_verifier(state: Any) -> bool:
+    verifier = _latest_verifier(state)
+    if not isinstance(verifier, dict):
+        return False
+    return str(verifier.get("failure_mode") or "").strip() == "insufficient_verifier"
+
+
 def _current_task_has_explicit_local_targets(state: Any) -> bool:
     """Return True if the current task or goal references local-only paths."""
     if state is None:
@@ -429,9 +449,11 @@ def _swa_stable_tool_exposure(state: Any, config: Any) -> bool:
         provider_profile = str(getattr(config, "provider_profile", "") or "").strip()
     if not model_name:
         scratchpad = getattr(state, "scratchpad", None) or {}
-        model_name = str(getattr(scratchpad, "_model_name", "") or "").strip()
+        model_name = str(scratchpad.get("_model_name", "") or "").strip()
     if not model_name:
         model_name = str(getattr(state, "model", "") or "").strip()
+    if not provider_profile:
+        provider_profile = str(scratchpad.get("_provider_profile", "") or "").strip() if isinstance(scratchpad, dict) else ""
     if not provider_profile:
         provider_profile = str(getattr(state, "provider_profile", "") or "").strip()
     return _is_swa_model(model_name, provider_profile)
@@ -471,20 +493,10 @@ def _verifier_rejection_count(state: Any) -> int:
 
 
 def _same_target_rejection_streak(state: Any) -> int:
-    scratchpad = getattr(state, "scratchpad", None)
+    scratchpad = getattr(state, "scratchpad", None) or {}
     if not isinstance(scratchpad, dict):
         return 0
-    verdict = scratchpad.get("_last_verifier_rejection")
-    if not isinstance(verdict, dict):
-        return 0
-    command = str(verdict.get("command") or verdict.get("target") or "").strip()
-    if not command:
-        return 0
-    key = "_fama_same_target_streak"
-    last = scratchpad.get(key)
-    if isinstance(last, dict) and last.get("command") == command:
-        streak = int(last.get("streak", 0) or 0) + 1
-    else:
-        streak = 1
-    scratchpad[key] = {"command": command, "streak": streak}
-    return streak
+    last = scratchpad.get("_fama_same_target_streak")
+    if isinstance(last, dict):
+        return int(last.get("streak", 0) or 0)
+    return 0

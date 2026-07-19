@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any, AsyncIterator
-from urllib.parse import quote
 
 try:
     import httpx
@@ -12,25 +10,45 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover
     httpx = None
 
 from ..logging_utils import log_kv
-from ..redaction import redact_sensitive_messages, redact_sensitive_text
-from .adapters.common import merge_system_messages_for_single_system_providers
+from ..redaction import redact_sensitive_messages
 from .chunk_parser import chunk_contains_tool_call_delta
-from .provider_adapters import sanitize_messages_for_openrouter
-from .request_budget import RequestEstimator
-from .request_budget import approx_token_count as _budget_approx_token_count
-from .request_budget import build_request_budget
-from .request_budget import client_context_limit as _budget_client_context_limit
-from .request_budget import json_size_bytes as _budget_json_size_bytes
-from .streaming import SSEStreamer, summarize_stream_chunk
-from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
-
-MAX_RETRY_AFTER_SEC = 120
-from .transport_constants import (
-    _DEFAULT_MAX_COMPLETION_TOKENS,
-    _LOCAL_PATCH_INTENT_RE,
-    _LOCAL_WRITE_INTENT_RE,
-    _UNSET,
+from .client_transport_audit import _log_request_audit
+from .client_transport_client_lifecycle import (
+    _get_async_client,
+    _remember_context_limit,
+    _reset_async_client,
+    acquire_stream_lease,
+    release_stream_lease,
 )
+from .client_transport_context_limits import _client_context_limit
+from .client_transport_helpers import (
+    llamacpp_model_unloaded_details as _llamacpp_model_unloaded_details,
+)
+from .client_transport_helpers import (
+    parse_retry_after_seconds as _parse_retry_after_seconds,
+)
+from .client_transport_helpers import (
+    request_first_token_timeout_sec as _request_first_token_timeout_sec,
+)
+from .client_transport_helpers import (
+    resolve_prompt_processing_timeout_sec as _resolve_prompt_processing_timeout_sec,
+)
+from .client_transport_llamacpp_repair import (
+    _repair_llamacpp_system_messages_for_transport,
+)
+from .client_transport_openrouter_preflight import _preflight_openrouter_auth
+from .llamacpp_preflight import (
+    _build_minimal_context_payload,
+    _llamacpp_budget_preflight,
+)
+from .openrouter_preflight import (
+    _build_openrouter_recovery_payload,
+    _preflight_openrouter_payload,
+    _summarize_400_payload,
+)
+from .request_budget import build_request_budget
+from .streaming import SSEStreamer, summarize_stream_chunk
+from .transport_constants import _DEFAULT_MAX_COMPLETION_TOKENS  # noqa: F401
 from .transport_error_classification import (
     _content_policy_violation_details,
     _content_policy_violation_message,
@@ -38,63 +56,37 @@ from .transport_error_classification import (
     _is_llamacpp_jinja_system_message_error,
     _is_llamacpp_malformed_tool_call_json_error,
     _is_llamacpp_model_unloaded_chunk_error,
+    _is_tool_call_continuation_timeout,
     _llamacpp_context_overflow_chunk_error_details,
     _llamacpp_malformed_tool_call_chunk_error_details,
-    _is_tool_call_continuation_timeout,
     _log_http_error,
     _log_transport_error,
     _openrouter_auth_failure_details,
     _openrouter_auth_failure_message,
-    _openrouter_error_message_from_body,
     _provider_400_chunk_error_details,
     _provider_400_error_message,
     _summarize_http_error_body,
-    _transport_error_details,
 )
-from .llamacpp_preflight import (
-    _build_llamacpp_reduced_tools_payload,
-    _build_minimal_context_payload,
-    _llamacpp_budget_preflight,
-)
-from .openrouter_preflight import (
-    _build_openrouter_recovery_payload,
-    _message_role_counts,
-    _normalize_openrouter_tool_calls,
-    _normalize_tool_schemas_for_openrouter,
-    _preflight_openrouter_payload,
-    _summarize_400_payload,
-)
-from .client_transport_helpers import (
-    context_pressure_diagnostics as _context_pressure_diagnostics,
-    extract_available_tool_names as _extract_available_tool_names,
-    latest_user_message_audit as _latest_user_message_audit,
-    llamacpp_model_unloaded_details as _llamacpp_model_unloaded_details,
-    parse_retry_after_seconds as _parse_retry_after_seconds,
-    provider_root as _provider_root,
-    request_first_token_timeout_sec as _request_first_token_timeout_sec,
-    resolve_prompt_processing_timeout_sec as _resolve_prompt_processing_timeout_sec,
-    tool_name as _tool_name,
-)
-from .client_transport_context_limits import (
-    _client_context_limit,
-    _json_size_bytes,
-    _approx_token_count,
-)
-from .client_transport_client_lifecycle import (
-    _client_key,
-    _get_async_client,
-    _remember_context_limit,
-    _remember_model_metadata,
-    _reset_async_client,
-)
-from .client_transport_llamacpp_repair import _repair_llamacpp_system_messages_for_transport
-from .client_transport_openrouter_preflight import _preflight_openrouter_auth
-from .client_transport_audit import _log_request_audit
-from .usage import extract_context_limit, extract_max_completion_tokens, extract_runtime_context_limit
-from .usage import extract_supported_parameters
+
+MAX_RETRY_AFTER_SEC = 120
 
 
 async def stream_chat(
+    client: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    *,
+    force_nonstream: bool = False,
+) -> AsyncIterator[dict[str, Any]]:
+    acquire_stream_lease(client)
+    try:
+        async for event in _stream_chat_events(client, messages, tools, force_nonstream=force_nonstream):
+            yield event
+    finally:
+        await release_stream_lease(client)
+
+
+async def _stream_chat_events(
     client: Any,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
@@ -224,6 +216,7 @@ async def stream_chat(
     openrouter_minimal_context_attempted = False
     llamacpp_reduced_tools_attempted = False
     llamacpp_jinja_repair_attempted = False
+    transient_server_error_retry_attempted = False
 
     def _openrouter_recovery_stages_attempted() -> int:
         return (
@@ -714,13 +707,34 @@ async def stream_chat(
                                 "attempting OpenRouter non-stream fallback after repeated 400 stream errors",
                                 attempt=attempt,
                             )
+                        fallback_saw_chunk = False
+                        fallback_saw_tool_call_chunk = False
                         try:
                             async for event in streamer.nonstream_chat(async_client, url, headers, current_payload):
+                                if event.get("type") == "chunk":
+                                    fallback_saw_chunk = True
+                                    recent_chunks = (recent_chunks + [summarize_stream_chunk(event.get("data", {}))])[-5:]
+                                    if chunk_contains_tool_call_delta(event.get("data", {})):
+                                        fallback_saw_tool_call_chunk = True
                                 yield event
                             return
                         except httpx.HTTPStatusError as fallback_exc:
                             last_error = fallback_exc
                             _log_http_error(client, "chat_nonstream_http_error", fallback_exc)
+                            if fallback_saw_chunk:
+                                yield {
+                                    "type": "stream_ended_without_done",
+                                    "details": {
+                                        "reason": "http_error_after_chunks",
+                                        "attempt": attempt,
+                                        "provider_profile": client.provider_profile,
+                                        "status_code": int(fallback_exc.response.status_code),
+                                        "message": str(fallback_exc),
+                                        "tool_call_stream_active": fallback_saw_tool_call_chunk,
+                                        "last_chunks": recent_chunks,
+                                    },
+                                }
+                                return
                             if int(fallback_exc.response.status_code) == 403:
                                 body = _http_error_body(fallback_exc)
                                 details = _content_policy_violation_details(
@@ -747,6 +761,36 @@ async def stream_chat(
                             async_client = _get_async_client(client)
                             continue
                         except (httpx.TimeoutException, httpx.TransportError) as fallback_exc:
+                            if fallback_saw_chunk:
+                                # C3: fallback chunks were already delivered
+                                # to the graph; salvage instead of re-POSTing.
+                                log_kv(
+                                    client.log,
+                                    logging.WARNING,
+                                    "chat_nonstream_stalled_after_chunks",
+                                    error=str(fallback_exc),
+                                    attempt=attempt,
+                                )
+                                if client.run_logger:
+                                    client.run_logger.log(
+                                        "chat",
+                                        "nonstream_stalled_after_chunks",
+                                        "treating stalled non-stream fallback as salvageable stream end",
+                                        error=str(fallback_exc),
+                                        attempt=attempt,
+                                    )
+                                yield {
+                                    "type": "stream_ended_without_done",
+                                    "details": {
+                                        "reason": "transport_error_after_chunks",
+                                        "attempt": attempt,
+                                        "provider_profile": client.provider_profile,
+                                        "message": str(fallback_exc),
+                                        "tool_call_stream_active": fallback_saw_tool_call_chunk,
+                                        "last_chunks": recent_chunks,
+                                    },
+                                }
+                                return
                             last_error = fallback_exc
                             await _reset_async_client(client)
                             async_client = _get_async_client(client)
@@ -893,6 +937,40 @@ async def stream_chat(
                             )
                         continue
 
+            if saw_chunk:
+                # C3: chunks were already delivered to the graph, so the
+                # retryable status handling below must not re-POST. Surface a
+                # non-retryable salvage event instead.
+                log_kv(
+                    client.log,
+                    logging.WARNING,
+                    "chat_stream_http_error_after_chunks",
+                    status=status_code,
+                    attempt=attempt,
+                    provider_profile=client.provider_profile,
+                )
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "stream_http_error_after_chunks",
+                        "treating post-chunk HTTP error as salvageable stream end",
+                        status=status_code,
+                        attempt=attempt,
+                        provider_profile=client.provider_profile,
+                    )
+                yield {
+                    "type": "stream_ended_without_done",
+                    "details": {
+                        "reason": "http_error_after_chunks",
+                        "attempt": attempt,
+                        "provider_profile": client.provider_profile,
+                        "status_code": status_code,
+                        "message": str(exc),
+                        "tool_call_stream_active": saw_tool_call_chunk,
+                        "last_chunks": recent_chunks,
+                    },
+                }
+                return
             if status_code == 429:
                 retry_after_seconds = _parse_retry_after_seconds(exc.response)
                 if retry_after_seconds is not None:
@@ -912,6 +990,33 @@ async def stream_chat(
                             retry_after_sec=retry_after_seconds,
                         )
             if status_code in {429, 502, 503, 504, 530}:
+                last_error = exc
+                await _reset_async_client(client)
+                async_client = _get_async_client(client)
+            elif (
+                status_code == 500
+                and not saw_chunk
+                and not transient_server_error_retry_attempted
+            ):
+                # Bounded retry for unclassified transient 500s: one retry, and
+                # only before the first chunk has been yielded (post-chunk
+                # failures stay on the salvage path). 404/422 remain terminal.
+                transient_server_error_retry_attempted = True
+                log_kv(
+                    client.log,
+                    logging.WARNING,
+                    "chat_stream_transient_500_retry",
+                    attempt=attempt,
+                    provider_profile=client.provider_profile,
+                )
+                if client.run_logger:
+                    client.run_logger.log(
+                        "chat",
+                        "stream_transient_500_retry",
+                        "retrying stream once after unclassified HTTP 500",
+                        attempt=attempt,
+                        provider_profile=client.provider_profile,
+                    )
                 last_error = exc
                 await _reset_async_client(client)
                 async_client = _get_async_client(client)
@@ -939,29 +1044,33 @@ async def stream_chat(
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if saw_chunk:
                 if saw_tool_call_chunk or _is_tool_call_continuation_timeout(exc):
+                    # C3: chunks (including tool-call deltas) were already
+                    # delivered to the graph, so retrying the request would
+                    # duplicate them. Surface a salvageable stream end instead
+                    # of a retryable chunk error.
                     log_kv(
                         client.log,
                         logging.WARNING,
-                        "chat_stream_incomplete_tool_call",
+                        "chat_stream_stalled_after_tool_call_chunks",
                         error=str(exc),
                         attempt=attempt,
                     )
                     if client.run_logger:
                         client.run_logger.log(
                             "chat",
-                            "stream_incomplete_tool_call",
-                            "treating stalled tool call as retryable chunk error",
+                            "stream_stalled_after_tool_call_chunks",
+                            "treating post-tool-call disconnect as salvageable stream end",
                             error=str(exc),
                             attempt=attempt,
                         )
                     yield {
-                        "type": "chunk_error",
-                        "error": "Incomplete tool call from provider stream",
+                        "type": "stream_ended_without_done",
                         "details": {
-                            "reason": "tool_call_continuation_timeout",
+                            "reason": "transport_error_after_chunks",
                             "attempt": attempt,
                             "provider_profile": client.provider_profile,
                             "message": str(exc),
+                            "tool_call_stream_active": True,
                             "last_chunks": recent_chunks,
                         },
                     }
@@ -1004,9 +1113,45 @@ async def stream_chat(
             )
             try:
                 async for event in streamer.nonstream_chat(async_client, url, headers, current_payload):
+                    if event.get("type") == "chunk":
+                        saw_chunk = True
+                        recent_chunks = (recent_chunks + [summarize_stream_chunk(event.get("data", {}))])[-5:]
+                        if chunk_contains_tool_call_delta(event.get("data", {})):
+                            saw_tool_call_chunk = True
                     yield event
                 return
             except (httpx.TimeoutException, httpx.TransportError) as fallback_exc:
+                if saw_chunk:
+                    # C3: fallback chunks were already delivered to the graph,
+                    # so surface the same typed salvage event as the stream
+                    # path instead of returning silently.
+                    log_kv(
+                        client.log,
+                        logging.WARNING,
+                        "chat_nonstream_stalled_after_chunks",
+                        error=str(fallback_exc),
+                        attempt=attempt,
+                    )
+                    if client.run_logger:
+                        client.run_logger.log(
+                            "chat",
+                            "nonstream_stalled_after_chunks",
+                            "treating stalled non-stream fallback as salvageable stream end",
+                            error=str(fallback_exc),
+                            attempt=attempt,
+                        )
+                    yield {
+                        "type": "stream_ended_without_done",
+                        "details": {
+                            "reason": "transport_error_after_chunks",
+                            "attempt": attempt,
+                            "provider_profile": client.provider_profile,
+                            "message": str(fallback_exc),
+                            "tool_call_stream_active": saw_tool_call_chunk,
+                            "last_chunks": recent_chunks,
+                        },
+                    }
+                    return
                 last_error = fallback_exc
                 _log_transport_error(
                     client,
@@ -1030,22 +1175,22 @@ async def stream_chat(
                 attempt=attempt,
                 phase="stream",
             )
-            await _reset_async_client(client)
-            async_client = _get_async_client(client)
-            if saw_chunk and attempt >= client.STREAM_RETRY_ATTEMPTS:
+            if saw_chunk:
                 yield {
-                    "type": "chunk_error",
-                    "error": f"Unexpected stream error: {exc}",
+                    "type": "stream_ended_without_done",
                     "details": {
-                        "reason": "unexpected_stream_error",
+                        "reason": "unexpected_error_after_chunks",
                         "attempt": attempt,
                         "provider_profile": client.provider_profile,
                         "message": str(exc),
                         "exception_type": exc.__class__.__name__,
+                        "tool_call_stream_active": saw_tool_call_chunk,
                         "last_chunks": recent_chunks,
                     },
                 }
                 return
+            await _reset_async_client(client)
+            async_client = _get_async_client(client)
         if attempt < client.STREAM_RETRY_ATTEMPTS:
             backoff = float(attempt)
             if retry_after_seconds is not None:
@@ -1092,4 +1237,4 @@ async def stream_chat(
 
 
 # Re-export for backward compatibility
-from .context_limit_probe import fetch_model_context_limit
+from .context_limit_probe import fetch_model_context_limit  # noqa: E402,F401

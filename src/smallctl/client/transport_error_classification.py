@@ -119,6 +119,7 @@ def _llamacpp_context_overflow_chunk_error_details(
     return {
         "type": "context_budget_exceeded",
         "reason": "context_overflow",
+        "context_overflow": True,
         "request_tokens": body_summary.get("request_tokens", 0),
         "context_limit": body_summary.get("context_limit", 0),
         "recoverable": True,
@@ -154,6 +155,7 @@ def _provider_400_chunk_error_details(
         "role_counts": role_counts,
         "attempt": attempt,
         "recovery_stages_attempted": recovery_stages_attempted,
+        "recoverable": False,
         "error_kind": "provider_400_exhausted",
     }
 

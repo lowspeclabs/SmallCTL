@@ -51,9 +51,12 @@ _LOCAL_TOOL_FOR_REMOTE_API_MARKERS = (
     "via the",
     "via a",
     "run the",
+    "run the local",
     "run a",
+    "run local",
     "execute the",
     "execute a",
+    "execute local",
     "load the",
     "load",
 )
@@ -255,6 +258,13 @@ def task_uses_local_tool_for_remote_api(task: str) -> bool:
         return False
     if _SSH_COMMAND_TARGET_RE.search(text):
         return False
+    # "run the local CLI ... against an API on <host>" describes an endpoint,
+    # not a request to execute on that host. Preserve the explicit local anchor
+    # before applying the broader imperative "run ... on <host>" fallback.
+    if any(marker in text for marker in ("local cli", "local client", "local script", "local tool")) or (
+        "local" in text and any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
+    ):
+        return True
     if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+" + IP_ADDRESS_PATTERN.pattern + r"\b", text):
         return False
     if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+(?:the\s+)?(?:remote\s+host|remote\s+server)\b", text):

@@ -1,9 +1,34 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .prompt_fragments import _REMOTE_CLEANUP_TASK_KEYWORDS
+from .prompt_fragments import (
+    _REMOTE_CLEANUP_ACTION_KEYWORDS,
+    _REMOTE_CLEANUP_OBJECT_KEYWORDS,
+    _REMOTE_CLEANUP_SCOPE_KEYWORDS,
+    _REMOTE_CLEANUP_SELF_EVIDENT_KEYWORDS,
+)
 from .state import LoopState, normalize_intent_label
+
+
+def _keyword_pattern(keywords: tuple[str, ...]) -> str:
+    return "|".join(re.escape(keyword).replace("\\ ", r"[ \t]+") for keyword in keywords)
+
+
+_REMOTE_CLEANUP_SCOPE_RE = re.compile(
+    rf"\b(?:{_keyword_pattern(_REMOTE_CLEANUP_SCOPE_KEYWORDS)})\b", re.IGNORECASE
+)
+_REMOTE_CLEANUP_SELF_EVIDENT_RE = re.compile(
+    rf"\b(?:{_keyword_pattern(_REMOTE_CLEANUP_SELF_EVIDENT_KEYWORDS)})\b", re.IGNORECASE
+)
+_REMOTE_CLEANUP_ACTION_RE = re.compile(
+    rf"\b(?:{_keyword_pattern(_REMOTE_CLEANUP_ACTION_KEYWORDS)})\b", re.IGNORECASE
+)
+_REMOTE_CLEANUP_OBJECT_RE = re.compile(
+    rf"\b(?:{_keyword_pattern(_REMOTE_CLEANUP_OBJECT_KEYWORDS)})\b", re.IGNORECASE
+)
+_REMOTE_CLEANUP_PROXIMITY_WINDOW = 48
 
 
 def _readonly_lookup_hint(state: LoopState) -> str | None:
@@ -82,7 +107,22 @@ def _state_has_remote_cleanup_intent(state: LoopState) -> bool:
     ).lower()
     if not text:
         return False
-    return any(keyword in text for keyword in _REMOTE_CLEANUP_TASK_KEYWORDS)
+    # Require explicit remote scope (ssh/host/server/remote context) so that
+    # bare cleanup verbs in unrelated local tasks do not activate the playbook.
+    if not _REMOTE_CLEANUP_SCOPE_RE.search(text):
+        return False
+    # Package-removal verbs are cleanup objects in their own right.
+    if _REMOTE_CLEANUP_SELF_EVIDENT_RE.search(text):
+        return True
+    # Otherwise require a cleanup action near a cleanup object
+    # (service/package/user/container removal).
+    for match in _REMOTE_CLEANUP_ACTION_RE.finditer(text):
+        window = text[
+            max(0, match.start() - _REMOTE_CLEANUP_PROXIMITY_WINDOW) : match.end() + _REMOTE_CLEANUP_PROXIMITY_WINDOW
+        ]
+        if _REMOTE_CLEANUP_OBJECT_RE.search(window):
+            return True
+    return False
 
 
 def _is_write_first_task(state: LoopState) -> bool:

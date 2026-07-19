@@ -156,7 +156,11 @@ class MessageTierManager:
         limit = getattr(self.policy, "cold_fact_limit", 12)
         while len(state.context_brief_ids if hasattr(state, 'context_brief_ids') else state.context_briefs) > self.warm_limit:
             oldest = state.context_briefs.pop(0)
-            summary_id = f"S{len(state.episodic_summaries) + 1:04d}"
+            from .summarizer import _next_sequential_id
+
+            summary_id = _next_sequential_id(
+                (s.summary_id for s in state.episodic_summaries), prefix="S"
+            )
             summary_notes = []
             if oldest.new_facts:
                 summary_notes.extend(oldest.new_facts[:3])
@@ -239,11 +243,16 @@ class MessageTierManager:
             if len(state.working_memory.known_facts) > limit and artifact_store:
                 overflow = state.working_memory.known_facts[:-limit]
                 overflow_text = "\n".join(overflow)
-                artifact_store.persist_thinking(
-                    raw_thinking=overflow_text,
-                    summary=f"Cold overflow from {source_id}",
-                    source="tier_promote",
-                )
+                try:
+                    artifact = artifact_store.persist_thinking(
+                        raw_thinking=overflow_text,
+                        summary=f"Cold overflow from {source_id}",
+                        source="tier_promote",
+                    )
+                    state.artifacts[artifact.artifact_id] = artifact
+                except Exception:
+                    # Keep legacy behavior if artifact persistence is unavailable.
+                    pass
             state.working_memory.known_facts = state.working_memory.known_facts[-limit:]
 
     def should_compact_predictive(self, state: LoopState, soft_limit: int) -> bool:

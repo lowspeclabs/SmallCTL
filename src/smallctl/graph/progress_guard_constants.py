@@ -38,7 +38,6 @@ _READ_ONLY_LOOP_TOOLS = {
     "web_fetch",
     "web_search",
     "search",
-    "long_context_lookup",
 }
 _MUTATION_TASK_READ_BUDGET_PER_FILE = 5
 _MUTATION_TASK_READ_ONLY_LOOP_THRESHOLD = 6

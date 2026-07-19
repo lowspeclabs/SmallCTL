@@ -463,9 +463,11 @@ class LoopState(LoopStateFlowMixin):
             "reasoning_graph_max_records_per_lane": self.reasoning_graph_max_records_per_lane,
             "artifact_limit": self.artifact_limit,
             "tool_execution_records_limit": self.tool_execution_records_limit,
-            "last_completion_tokens": self.last_completion_tokens,
+             "last_completion_tokens": self.last_completion_tokens,
         }
-        payload["conversation_history"] = list(serialized_transcript_messages)
+        # L19: the legacy "conversation_history" key is no longer written; the
+        # transcript is serialized once under "transcript_messages". from_dict
+        # still accepts old payloads that only carry "conversation_history".
         _log_loop_state_serialization(
             self.log,
             payload,

@@ -199,12 +199,12 @@ def test_sequential_branch_scaling_isolates_failed_local_file_mutation(tmp_path:
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def broken(:\n"},
+            {"path": "answer.py", "content": "def broken(:\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -423,12 +423,12 @@ def test_sequential_branch_scaling_restores_loser_file_and_commits_winner(tmp_pa
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def broken(:\n    pass\n"},
+            {"path": "answer.py", "content": "def broken(:\n    pass\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -505,12 +505,12 @@ def test_sequential_branch_scaling_restores_loser_undeclared_file(tmp_path: Path
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "side.txt", "content": "loser side effect\n"},
+            {"path": "side.txt", "content": "loser side effect\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-side-write",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -675,17 +675,17 @@ def test_sequential_branch_scaling_all_fail_falls_back_to_normal_retry(tmp_path:
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def broken(:\n    pass\n"},
+            {"path": "answer.py", "content": "def broken(:\n    pass\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write-1",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def still_broken(:\n    pass\n"},
+            {"path": "answer.py", "content": "def still_broken(:\n    pass\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write-2",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-normal-write",
         ),
         _step_complete_stream("tc-normal-complete", "normal retry winner"),
@@ -762,7 +762,7 @@ def test_sequential_branch_scaling_skips_mutating_shell_candidate(tmp_path: Path
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -837,7 +837,7 @@ def test_sequential_branch_scaling_skips_remote_mutation_candidate(tmp_path: Pat
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -906,12 +906,12 @@ def test_sequential_branch_scaling_cleans_failed_candidate_parent_dirs(tmp_path:
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "scratch/candidate/answer.py", "content": "def wrong_location():\n    return 0\n"},
+            {"path": "scratch/candidate/answer.py", "content": "def wrong_location():\n    return 0\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-wrong-location",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def answer():\n    return 42\n"},
+            {"path": "answer.py", "content": "def answer():\n    return 42\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-good-write",
         ),
     ]
@@ -983,12 +983,12 @@ def test_sequential_branch_scaling_all_fail_can_fail_step(tmp_path: Path, monkey
     stream_sequences = [
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def broken(:\n    pass\n"},
+            {"path": "answer.py", "content": "def broken(:\n    pass\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write-1",
         ),
         _tool_call_stream(
             "file_write",
-            {"path": "answer.py", "content": "def still_broken(:\n    pass\n"},
+            {"path": "answer.py", "content": "def still_broken(:\n    pass\n", "replace_strategy": "overwrite"},
             tool_call_id="tc-bad-write-2",
         ),
     ]

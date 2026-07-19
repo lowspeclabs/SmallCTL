@@ -41,14 +41,16 @@ class SourceIndex:
         self.events: list[dict[str, Any]] = []
         self.tools: list[dict[str, Any]] = []
         self.decorators: list[dict[str, Any]] = []
+        self.metadata: dict[str, Any] = {}
 
-    def to_dict(self) -> dict[str, list[dict[str, Any]]]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "functions": self.functions,
             "classes": self.classes,
             "events": self.events,
             "tools": self.tools,
             "decorators": self.decorators,
+            "metadata": self.metadata,
         }
 
     @classmethod
@@ -59,6 +61,7 @@ class SourceIndex:
         idx.events = data.get("events", [])
         idx.tools = data.get("tools", [])
         idx.decorators = data.get("decorators", [])
+        idx.metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
         return idx
 
 
@@ -156,6 +159,35 @@ def _build_ast_index(src_dir: Path) -> SourceIndex:
     return idx
 
 
+def _source_fingerprint(src_dir: Path) -> dict[str, Any]:
+    py_files = [path for path in src_dir.rglob("*.py") if path.is_file()]
+    newest_mtime_ns = 0
+    for path in py_files:
+        try:
+            newest_mtime_ns = max(newest_mtime_ns, path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return {
+        "cache_version": 2,
+        "src_dir": str(src_dir.resolve()),
+        "file_count": len(py_files),
+        "newest_mtime_ns": newest_mtime_ns,
+    }
+
+
+def _cache_is_current(data: dict[str, Any], src_dir: Path) -> bool:
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    current = _source_fingerprint(src_dir)
+    return (
+        metadata.get("cache_version") == current["cache_version"]
+        and metadata.get("src_dir") == current["src_dir"]
+        and int(metadata.get("file_count") or -1) == current["file_count"]
+        and int(metadata.get("newest_mtime_ns") or 0) >= current["newest_mtime_ns"]
+    )
+
+
 def _rg_search(src_dir: Path, pattern: str, extra_args: list[str] | None = None) -> list[dict[str, Any]]:
     """Run ripgrep and return matches."""
     args = ["rg", "--json", "--no-heading"] + (extra_args or []) + [pattern, str(src_dir)]
@@ -182,11 +214,13 @@ def build_index(src_dir: Path, use_cache: bool = True) -> SourceIndex:
     if use_cache and INDEX_PATH.exists():
         try:
             data = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-            return SourceIndex.from_dict(data)
+            if _cache_is_current(data, src_dir):
+                return SourceIndex.from_dict(data)
         except (OSError, json.JSONDecodeError) as exc:
             logging.warning("Could not load cached index: %s", exc)
 
     idx = _build_ast_index(src_dir)
+    idx.metadata = _source_fingerprint(src_dir)
     try:
         INDEX_PATH.write_text(json.dumps(idx.to_dict(), indent=2), encoding="utf-8")
     except OSError as exc:

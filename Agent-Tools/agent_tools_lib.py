@@ -368,7 +368,6 @@ ENV_BLOCKER_PATTERNS = (
     "network is unreachable",
     "host is unreachable",
     "timed out",
-    "timeout",
     "errno 111",
     "errno 113",
     "http 401",
@@ -376,6 +375,34 @@ ENV_BLOCKER_PATTERNS = (
     "invalid token",
     "token provided",
 )
+
+PROMPT_BUDGET_OVERFLOW_RE = re.compile(r"PROMPT\s+BUDGET\s+OVERFLOW", re.IGNORECASE)
+
+STATE_CHANGING_SHELL_RE = re.compile(
+    r"\b(?:"
+    r"proxmox-cli\.py\s+(?:lxcs?|lxc|vms?|vm)\s+(?:create|delete|start|stop|shutdown|reboot)"
+    r"|pct\s+(?:create|destroy|start|stop|reboot|set)"
+    r"|qm\s+(?:create|destroy|start|stop|shutdown|reboot|set)"
+    r"|docker\s+(?:run|create|rm|start|stop|restart|compose\s+up)"
+    r"|podman\s+(?:run|create|rm|start|stop|restart)"
+    r"|kubectl\s+(?:apply|create|delete|scale|rollout)"
+    r"|terraform\s+(?:apply|destroy)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_SHELL_SEMANTIC_FAILURE_RE = re.compile(
+    r"(?:^|\n)(?:usage:\s|proxmox-cli:\s+error:|## Error\b|error:\s+unrecognized arguments)",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_CONFIG_RE = re.compile(
+    r"(?:https?://(?:proxmox|example)\.example(?:\.local)?|(?:TOKEN_SECRET|TOKEN_ID)=?(?:replace-me|changeme|placeholder))",
+    re.IGNORECASE,
+)
+_ENV_CONFIG_READ_RE = re.compile(
+    r"\b(?:cat|source|grep|sed)\s+(?:[^\s]+/)?(?:\./)?\.env(?:[\s|;&]|$)"
+)
+_ENDPOINT_RE = re.compile(r"https?://[^\s'\"|;]+", re.IGNORECASE)
 
 
 # Patterns used to detect tool-call protocol mismatches in model output.
@@ -516,6 +543,152 @@ def has_continue_prompt_budget_loop(
     return continue_after_fail >= threshold and overflow_count >= threshold
 
 
+def has_prompt_budget_overflow(
+    *payloads: Any,
+) -> bool:
+    """Return True if run summaries or records mention prompt-budget overflow."""
+    for payload in payloads:
+        if payload is None:
+            continue
+        text = json.dumps(payload, default=str, ensure_ascii=False) if not isinstance(payload, str) else payload
+        if PROMPT_BUDGET_OVERFLOW_RE.search(text):
+            return True
+    return False
+
+
+def has_fama_ssh_transport_circuit_breaker(records: Iterable[dict[str, Any]]) -> bool:
+    """Detect FAMA's SSH transport circuit-breaker event."""
+    for rec in records:
+        event = str(rec.get("event") or "")
+        if event == "fama_ssh_transport_circuit_breaker":
+            return True
+        data = rec.get("data") or {}
+        if isinstance(data, dict):
+            if data.get("fama_ssh_transport_circuit_breaker"):
+                return True
+            if str(data.get("event") or "") == "fama_ssh_transport_circuit_breaker":
+                return True
+    return False
+
+
+def is_background_state_changing_shell_dispatch(dispatch: dict[str, Any]) -> bool:
+    """Return True when a parsed dispatch is a background shell mutation."""
+    if str(dispatch.get("tool_name") or "") != "shell_exec":
+        return False
+    args = dispatch.get("arguments") or {}
+    if not isinstance(args, dict) or args.get("background") is not True:
+        return False
+    command = str(args.get("command") or "")
+    return bool(STATE_CHANGING_SHELL_RE.search(command))
+
+
+def detect_background_state_changing_shell(
+    tools_records: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return blockers for successful background shell mutations with no final output.
+
+    Background process launches only prove that a process was started; they do
+    not prove that an infrastructure mutation completed. Surface these as
+    objective blockers so RCA tools do not report the run as merely generic
+    recovery failure.
+    """
+    blockers: list[dict[str, Any]] = []
+    for rec in tools_records:
+        if rec.get("event") != "dispatch_start":
+            continue
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        dispatch = {
+            "tool_name": data.get("tool_name"),
+            "arguments": data.get("arguments") or {},
+            "trace_id": extract_trace_id(rec) or "",
+        }
+        if not is_background_state_changing_shell_dispatch(dispatch):
+            continue
+        args = dispatch["arguments"] if isinstance(dispatch.get("arguments"), dict) else {}
+        command = str(args.get("command") or "").strip()
+        blockers.append(
+            {
+                "type": "harness",
+                "pattern": "background_state_changing_shell",
+                "count": 1,
+                "sample": command[:200],
+                "trace_id": dispatch.get("trace_id", ""),
+            }
+        )
+    if not blockers:
+        return []
+    count = len(blockers)
+    first = blockers[0]
+    return [{**first, "count": count}]
+
+
+def detect_shell_execution_anomalies(
+    tools_records: Iterable[dict[str, Any]], *, endpoint_threshold: int = 3
+) -> list[dict[str, Any]]:
+    """Find successful shell dispatches whose output or command warrants review.
+
+    These are diagnostic findings, not dispatch failures: many CLIs deliberately
+    print messages on stderr or use nonzero exit codes for status information.
+    """
+    commands: dict[str, str] = {}
+    findings: list[dict[str, Any]] = []
+    endpoint_counts: Counter[str] = Counter()
+    endpoint_traces: dict[str, str] = {}
+    for rec in tools_records:
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        trace_id = extract_trace_id(rec) or ""
+        if rec.get("event") == "dispatch_start" and data.get("tool_name") == "shell_exec":
+            arguments = data.get("arguments") or {}
+            if isinstance(arguments, dict):
+                commands[trace_id] = str(arguments.get("command") or "")
+            continue
+        if rec.get("event") != "dispatch_complete" or data.get("tool_name") != "shell_exec":
+            continue
+        if data.get("success") is not True:
+            continue
+        command = commands.get(trace_id, "")
+        output = data.get("output")
+        if isinstance(output, dict):
+            output_text = "\n".join(str(output.get(key) or "") for key in ("stdout", "stderr"))
+        else:
+            output_text = str(output or "")
+        if _SHELL_SEMANTIC_FAILURE_RE.search(output_text):
+            findings.append({
+                "pattern": "semantic_cli_failure_reported_success",
+                "sample": output_text.strip()[:200],
+                "trace_id": trace_id,
+            })
+            if "|" in command:
+                findings.append({
+                    "pattern": "pipeline_may_mask_command_failure",
+                    "sample": command[:200],
+                    "trace_id": trace_id,
+                })
+        if _ENV_CONFIG_READ_RE.search(command) and _PLACEHOLDER_CONFIG_RE.search(output_text):
+            findings.append({
+                "pattern": "placeholder_configuration_observed",
+                "sample": "Configuration output contains an example or placeholder value.",
+                "trace_id": trace_id,
+            })
+        for endpoint in _ENDPOINT_RE.findall(command):
+            normalized = endpoint.rstrip("/)")
+            endpoint_counts[normalized] += 1
+            endpoint_traces.setdefault(normalized, trace_id)
+    for endpoint, count in endpoint_counts.items():
+        if count >= endpoint_threshold:
+            findings.append({
+                "pattern": "repeated_endpoint_probe_without_new_evidence",
+                "sample": endpoint,
+                "count": count,
+                "trace_id": endpoint_traces[endpoint],
+            })
+    return findings
+
+
 def detect_primary_blockers(
     harness_records: Iterable[dict[str, Any]],
     failed_dispatches: Iterable[dict[str, Any]],
@@ -559,6 +732,108 @@ def detect_primary_blockers(
 
 def has_strong_environment_blocker(blockers: list[dict[str, Any]], threshold: int = 2) -> bool:
     return any(b.get("count", 0) >= threshold for b in blockers)
+
+
+def harness_reported_blocker(
+    summaries: dict[str, Any],
+    task_summaries: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Return the harness-computed primary_blocker from run summaries, if any.
+
+    The harness writes a `primary_blocker` field into session_summary.json /
+    task_summary.json that is broader than the environmental patterns matched
+    by detect_primary_blockers (e.g. missing-file verifier failures).
+    """
+    sources: list[Any] = [summaries.get("session_summary"), summaries.get("task_summary")]
+    sources.extend(task_summaries or [])
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        blocker = str(source.get("primary_blocker") or "").strip()
+        if blocker:
+            return blocker
+    return None
+
+
+def detect_phantom_code_changes(
+    summaries: dict[str, Any],
+    tools_records: Iterable[dict[str, Any]],
+    run_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Flag paths recorded as code changes that do not exist on disk.
+
+    A write staged through a write session (staged_only=True or
+    write_session_finalized=False in dispatch metadata) records the target
+    path in challenge_progress.last_code_change_paths even though the file
+    never landed on disk.
+    """
+    paths: list[str] = []
+    for source in (summaries.get("session_summary"), summaries.get("task_summary")):
+        if not isinstance(source, dict):
+            continue
+        progress = source.get("challenge_progress")
+        if not isinstance(progress, dict):
+            continue
+        for raw in progress.get("last_code_change_paths") or []:
+            path = str(raw or "").strip()
+            if path and path not in paths:
+                paths.append(path)
+    if not paths:
+        return []
+
+    staged_paths: set[str] = set()
+    staged_text_paths: set[str] = set()
+    for rec in tools_records:
+        if rec.get("event") != "dispatch_complete":
+            continue
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        metadata = data.get("metadata") or {}
+        if isinstance(metadata, dict):
+            staged = bool(metadata.get("staged_only")) or metadata.get("write_session_finalized") is False
+            if staged:
+                path = str(metadata.get("path") or "").strip()
+                if path:
+                    staged_paths.add(path)
+        text = json.dumps(data, default=str, ensure_ascii=False).lower()
+        if "staged copy" in text or "staged_only" in text or "not yet written to" in text:
+            for path in paths:
+                if path.lower() in text:
+                    staged_text_paths.add(path)
+
+    staging_dir: Path | None = None
+    if run_dir is not None:
+        candidate = run_dir.parent.parent / ".smallctl" / "write_sessions"
+        if candidate.is_dir():
+            staging_dir = candidate
+
+    findings: list[dict[str, Any]] = []
+    for path in paths:
+        if Path(path).exists():
+            continue
+        target = Path(path)
+        stem = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in (target.stem or "target"))
+        suffix = target.suffix or ".txt"
+        staging_files: list[str] = []
+        if staging_dir is not None:
+            staging_files = sorted(
+                p.name
+                for p in staging_dir.iterdir()
+                if p.is_file()
+                and re.match(
+                    rf"^.+__{re.escape(stem)}__(stage|attempt|original){re.escape(suffix)}$",
+                    p.name,
+                )
+            )
+        findings.append(
+            {
+                "path": path,
+                "staged_evidence": path in staged_paths or path in staged_text_paths,
+                "staging_files": staging_files,
+            }
+        )
+    return findings
 
 
 def has_write_overwrite_guard_failures(failed_dispatches: Iterable[dict[str, Any]]) -> bool:

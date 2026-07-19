@@ -7,6 +7,7 @@ from ..logging_utils import RunLogger, log_kv
 from ..models.tool_result import ToolEnvelope
 from ..state import json_safe_value
 from ..challenge_progress import redundant_verifier_block
+from .base import ToolSpec
 from .dispatcher_normalization_flow import normalize_tool_request
 from .registry import ToolRegistry
 from .dispatcher_schema_helpers import (
@@ -35,6 +36,29 @@ _REMOTE_GUARDED_FILE_TOOLS = {
 }
 _STAGED_CONTROL_TOOLS = {"loop_status", "step_complete", "step_fail", "ask_human"}
 _SSH_AUTH_RECOVERY_KEY = "_ssh_auth_recovery_state"
+# Tools with these risk levels only observe state; unknown arguments are
+# surfaced as a visible warning instead of a hard rejection. Everything else
+# is treated as mutating and unknown arguments reject the call.
+_READ_ONLY_TOOL_RISKS = {"low", "network_read"}
+# Low-risk tools that still mutate state or disk (planning state, phase
+# contracts, memory, index writes, plan exports). They are classified as
+# mutating despite their low risk level so unknown arguments reject the call.
+_LOW_RISK_MUTATING_TOOLS = {
+    "phase_contract_update",
+    "plan_set",
+    "plan_step_update",
+    "plan_request_execution",
+    "request_validation_execution",
+    "plan_export",
+    "memory_update",
+    "log_note",
+    "index_write_symbol",
+    "index_write_reference",
+    "index_write_import",
+    "index_finalize",
+    "index_batch_write",
+    "escalate_to_bigger_model",
+}
 
 
 @runtime_checkable
@@ -315,10 +339,12 @@ class ToolDispatcher:
                 coerced_entries=coerced_entries,
             )
 
-        # Reject empty shell/ssh commands before dispatch
+        # Reject empty shell/ssh commands before dispatch. A `job_id` poll is a
+        # valid command-less invocation for tools that support it (shell_exec).
         if tool_name in {"shell_exec", "ssh_exec"} and isinstance(args, dict):
             cmd = str(args.get("command") or "").strip()
-            if not cmd:
+            job_id = str(args.get("job_id") or "").strip()
+            if not cmd and not job_id:
                 validation_error = f"{tool_name} requires a non-empty command string"
                 log_kv(
                     self.log,
@@ -343,7 +369,34 @@ class ToolDispatcher:
                 )
 
         validation_issues = self._validate_arg_issues(spec.schema, args)
+        unknown_arg_issues: list[ToolCallValidationIssue] = []
+        if dropped_keys and not self._tool_is_read_only(spec):
+            # Unknown arguments were stripped by legacy coercion. For any tool
+            # that can mutate state, never execute with fields silently
+            # dropped: a typo such as `dryrun` for `dry_run` must not turn a
+            # preview into a live mutation.
+            unknown_arg_issues = [
+                ToolCallValidationIssue(
+                    path=(key,),
+                    kind="additional_property",
+                    message=f"unknown field {key}",
+                )
+                for key in dropped_keys
+            ]
+            validation_issues = unknown_arg_issues + validation_issues
         validation_error = self._format_validation_error(validation_issues)
+        if unknown_arg_issues and len(unknown_arg_issues) > 1:
+            unknown_names = ", ".join(
+                str(issue.path[-1]) for issue in unknown_arg_issues
+            )
+            rest_error = self._format_validation_error(
+                validation_issues[len(unknown_arg_issues):]
+            )
+            validation_error = (
+                f"Unknown fields: {unknown_names}. {rest_error}"
+                if rest_error
+                else f"Unknown fields: {unknown_names}"
+            )
         if validation_error:
             log_kv(
                 self.log,
@@ -445,21 +498,27 @@ class ToolDispatcher:
                     output=result_output,
                     error=result.get("error"),
                 )
-            return ToolEnvelope(
-                success=bool(result["success"]),
-                status=result.get("status"),
-                output=result_output,
-                error=result.get("error"),
-                metadata=result_metadata,
+            return self._attach_ignored_arguments_warning(
+                ToolEnvelope(
+                    success=bool(result["success"]),
+                    status=result.get("status"),
+                    output=result_output,
+                    error=result.get("error"),
+                    metadata=result_metadata,
+                ),
+                dropped_keys,
             )
-        return ToolEnvelope(
-            success=True,
-            output=result,
-            metadata={
-                **dispatch_metadata,
-                **normalization_metadata,
-                **self._legacy_coercion_metadata(dropped_keys, coerced_entries),
-            },
+        return self._attach_ignored_arguments_warning(
+            ToolEnvelope(
+                success=True,
+                output=result,
+                metadata={
+                    **dispatch_metadata,
+                    **normalization_metadata,
+                    **self._legacy_coercion_metadata(dropped_keys, coerced_entries),
+                },
+            ),
+            dropped_keys,
         )
 
     @staticmethod
@@ -472,6 +531,8 @@ class ToolDispatcher:
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         if not properties and not required:
+            if schema.get("additionalProperties") is False:
+                return {}, list(arguments), []
             return {}, [], []
         coerced = dict(arguments)
         dropped: list[str] = []
@@ -494,6 +555,46 @@ class ToolDispatcher:
                     )
                 coerced[key] = new_value
         return coerced, dropped, coerced_entries
+
+    @staticmethod
+    def _tool_is_read_only(spec: ToolSpec) -> bool:
+        if str(getattr(spec, "name", "") or "") in _LOW_RISK_MUTATING_TOOLS:
+            return False
+        return str(getattr(spec, "risk", "") or "") in _READ_ONLY_TOOL_RISKS
+
+    @staticmethod
+    def _attach_ignored_arguments_warning(
+        envelope: ToolEnvelope, dropped_keys: list[str]
+    ) -> ToolEnvelope:
+        """Surface silently dropped unknown arguments in model-visible output.
+
+        Read-only tools are allowed to proceed after legacy coercion strips
+        unknown fields, but the model must see that its extra parameters were
+        not applied instead of finding out only via metadata.
+        """
+        if not dropped_keys or not envelope.success:
+            return envelope
+        warning = (
+            f"Warning: ignored unknown parameter{'s' if len(dropped_keys) > 1 else ''}: "
+            f"{', '.join(dropped_keys)}. "
+            "They are not declared in the tool schema and were not applied."
+        )
+        output = envelope.output
+        if output is None:
+            envelope.output = warning
+        elif isinstance(output, str):
+            envelope.output = f"{output}\n\n{warning}"
+        elif isinstance(output, dict):
+            updated = dict(output)
+            content = updated.get("content")
+            if isinstance(content, str) and content:
+                updated["content"] = f"{content}\n\n{warning}"
+            else:
+                updated["warning"] = warning
+            envelope.output = updated
+        else:
+            envelope.output = f"{output}\n\n{warning}"
+        return envelope
 
     @staticmethod
     def _validate_args(schema: dict[str, Any], arguments: dict[str, Any]) -> str | None:

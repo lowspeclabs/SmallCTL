@@ -404,6 +404,35 @@ def test_scheduled_stream_flush_defers_markdown_render_until_boundary() -> None:
     asyncio.run(_run())
 
 
+def test_complete_assistant_markdown_table_followed_by_prose_renders_as_markdown() -> None:
+    async def _run() -> None:
+        app = _ConsoleApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            console = app.query_one(ConsolePane)
+
+            table = (
+                "The Docker containers are:\n\n"
+                "| CONTAINER ID | IMAGE | COMMAND | STATUS | NAMES |\n"
+                "| :--- | :--- | :--- | :--- | :--- |\n"
+                "| be793d0eb63a | ghcr.io/dagucloud/dagu:latest | /usr/local/bin/tini | Exited | dagu |\n"
+                "Summary: one container listed."
+            )
+            await console.append_event(UIEvent(UIEventType.ASSISTANT, table))
+            await console.flush_stream_buffers()
+            await pilot.pause()
+
+            turn = console._active_assistant_turn
+            assert turn is not None
+            assert turn.get_assistant_text() == table
+
+            content = turn.query_one(".assistant-turn-content", Vertical)
+            block = content.children[0]
+            assert isinstance(block, TextBlockWidget)
+            assert isinstance(block._rendered_content, RichMarkdown)
+
+    asyncio.run(_run())
+
+
 def test_inline_code_markdown_renders_as_markdown() -> None:
     async def _run() -> None:
         app = _ConsoleApp()

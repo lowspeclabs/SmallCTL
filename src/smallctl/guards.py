@@ -17,11 +17,13 @@ if TYPE_CHECKING:
 class GuardConfig:
     max_steps: int = 50
     max_tokens: int | None = None
-    max_consecutive_errors: int = 5
+    max_consecutive_errors: int = 8
     max_repeated_actions: int = 6
 
 
-_SMALL_MODEL_SIZE_RE = re.compile(r"(?<![xX])\b(?P<size>\d+(?:\.\d+)?)b\b", re.IGNORECASE)
+_SMALL_MODEL_SIZE_RE = re.compile(
+    r"(?<![xX])\b(?P<size>\d+(?:\.\d+)?)b\b", re.IGNORECASE
+)
 _SMALL_MODEL_HINTS = ("tiny", "mini", "small", "compact")
 _KNOWN_LARGE_MODEL_RE = re.compile(
     r"(?:^|-)(?:"
@@ -151,7 +153,13 @@ def _state_model_name(state: LoopState) -> str:
 def _repeated_action_directive_hint(state: LoopState, tool_name: str) -> str:
     if not is_four_b_or_under_model_name(_state_model_name(state)):
         return ""
-    if tool_name in {"file_read", "artifact_read", "artifact_print", "artifact_grep", "dir_list"}:
+    if tool_name in {
+        "file_read",
+        "artifact_read",
+        "artifact_print",
+        "artifact_grep",
+        "dir_list",
+    }:
         return (
             "Directive Hint: use the evidence already in Working Memory instead of repeating the same read/list action. "
             "Move to `file_patch`, `ast_patch`, `shell_exec`, or `task_complete` as appropriate."
@@ -162,12 +170,8 @@ def _repeated_action_directive_hint(state: LoopState, tool_name: str) -> str:
             "or run `shell_exec` to verify the current state."
         )
     if tool_name == "shell_exec":
-        return (
-            "Directive Hint: use the existing command output or artifact; only run a different focused command if it will produce new evidence."
-        )
-    return (
-        f"Directive Hint: stop repeating `{tool_name}` with identical outcome; choose a different concrete next action or complete the task."
-    )
+        return "Directive Hint: use the existing command output or artifact; only run a different focused command if it will produce new evidence."
+    return f"Directive Hint: stop repeating `{tool_name}` with identical outcome; choose a different concrete next action or complete the task."
 
 
 _RECOVERY_NUDGE_ERROR_MARKERS = (
@@ -202,14 +206,15 @@ def check_guards(state: LoopState, cfg: GuardConfig) -> str | None:
     countable_recent_errors = _guard_countable_recent_errors(state)
     if len(countable_recent_errors) >= cfg.max_consecutive_errors:
         return f"Guard tripped: max_consecutive_errors ({cfg.max_consecutive_errors}) - Errors: {countable_recent_errors}"
-    
+
     no_progress = int(state.stagnation_counters.get("no_progress", 0))
     if no_progress >= 2:
         return f"Guard tripped: stagnation limit - no progress made in {no_progress} steps."
-    
+
     # Repeat detection (Detects loops even if some steps succeed)
     if state.tool_history:
         from collections import Counter
+
         counts = Counter(state.tool_history)
         for fingerprint, count in counts.items():
             tool_name = fingerprint.split("|")[0]
@@ -230,7 +235,7 @@ def apply_triple_answer_guard(
     threshold: float = 0.9,
 ) -> str:
     """Detect 'Triple-Answer' (model repeats itself in text and tool).
-    
+
     If any task_complete or task_fail tool call has a message that matches
     the assistant_text by > threshold, we strip the redundant text.
     We also strip meta-commentary that only narrates the upcoming terminal
@@ -238,7 +243,7 @@ def apply_triple_answer_guard(
     """
     if not assistant_text or not pending_tool_calls:
         return assistant_text
-    
+
     # Normalize assistant text for comparison
     clean_assistant = assistant_text.strip().lower()
     if not clean_assistant:
@@ -252,16 +257,18 @@ def apply_triple_answer_guard(
             message = str(call.args.get("message", "")).strip().lower()
             if not message:
                 continue
-                
+
             # Quick check: if exactly equal, 100% match
             if message == clean_assistant:
                 return ""
-            
+
             # Fuzzy match
             matcher = difflib.SequenceMatcher(None, clean_assistant, message)
             ratio = matcher.ratio()
 
-            if ratio >= threshold and _assistant_and_message_are_similarly_scoped(clean_assistant, message):
+            if ratio >= threshold and _assistant_and_message_are_similarly_scoped(
+                clean_assistant, message
+            ):
                 # Redundancy detected! Return empty string to strip the text
                 return ""
 
@@ -272,7 +279,11 @@ def _looks_like_terminal_tool_meta_commentary(
     assistant_text: str,
     pending_tool_calls: list["PendingToolCall"],
 ) -> bool:
-    terminal_calls = [call for call in pending_tool_calls if call.tool_name in ("task_complete", "task_fail")]
+    terminal_calls = [
+        call
+        for call in pending_tool_calls
+        if call.tool_name in ("task_complete", "task_fail")
+    ]
     if not terminal_calls:
         return False
 
@@ -311,7 +322,9 @@ def _looks_like_terminal_tool_meta_commentary(
     return any(phrase in normalized for phrase in planning_phrases)
 
 
-def _assistant_and_message_are_similarly_scoped(assistant_text: str, message: str) -> bool:
+def _assistant_and_message_are_similarly_scoped(
+    assistant_text: str, message: str
+) -> bool:
     assistant_len = len(assistant_text.strip())
     message_len = len(message.strip())
     if assistant_len == 0 or message_len == 0:

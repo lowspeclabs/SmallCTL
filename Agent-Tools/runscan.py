@@ -24,6 +24,7 @@ from agent_tools_lib import (
     Colors,
     colorize,
     detect_apt_deb822_guard_misfire,
+    detect_background_state_changing_shell,
     detect_primary_blockers,
     discover_runs,
     error_records,
@@ -34,7 +35,9 @@ from agent_tools_lib import (
     has_ask_human_resume_terminal_stall,
     has_chat_terminal_repetition_stall,
     has_continue_prompt_budget_loop,
+    has_fama_ssh_transport_circuit_breaker,
     has_patch_first_policy_loop,
+    has_prompt_budget_overflow,
     has_stderr_signature_circuit_breaker,
     has_strong_environment_blocker,
     has_tool_call_protocol_mismatch,
@@ -53,6 +56,9 @@ FAILURE_CLASS_LABELS = {
     "environment_blocker": "environment_blocker",
     "harness_circuit_breaker_false_positive": "harness_circuit_breaker_false_positive",
     "guard_misfire": "guard_misfire",
+    "prompt_budget_overflow": "prompt_budget_overflow",
+    "background_state_change_unverified": "background_state_change_unverified",
+    "ssh_transport_circuit_breaker_false_positive": "ssh_transport_circuit_breaker_false_positive",
     "model_degeneration": "model_degeneration",
     "model_stream_stall": "model_stream_stall",
     "model_tool_loop_stall": "model_tool_loop_stall",
@@ -112,6 +118,7 @@ def _classify_run(
     harness_records: list[dict[str, Any]],
     *,
     model_output_records: list[dict[str, Any]] | None = None,
+    tools_records: list[dict[str, Any]] | None = None,
     chat_records: list[dict[str, Any]] | None = None,
 ) -> str:
     overall = session.get("overall_objective_status")
@@ -121,6 +128,7 @@ def _classify_run(
     incomplete_ids = session.get("incomplete_task_ids")
     has_incomplete_tasks = bool(incomplete_ids) if isinstance(incomplete_ids, list) else False
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
+    background_blockers = detect_background_state_changing_shell(tools_records or [])
 
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
@@ -142,10 +150,16 @@ def _classify_run(
         return "file_patch_target_not_found_loop"
     if _has_ask_human_resume_terminal_stall(harness_records):
         return "ask_human_resume_terminal_tool_stall"
+    if has_prompt_budget_overflow(session, task_summary, harness_records, chat_records or []):
+        return "prompt_budget_overflow"
+    if background_blockers:
+        return "background_state_change_unverified"
     if has_strong_environment_blocker(primary_blockers):
         return "environment_blocker"
     if has_stderr_signature_circuit_breaker(harness_records):
         return "harness_circuit_breaker_false_positive"
+    if has_fama_ssh_transport_circuit_breaker(harness_records):
+        return "ssh_transport_circuit_breaker_false_positive"
     if detect_apt_deb822_guard_misfire(harness_records):
         return "guard_misfire"
     if events.get("tool_blocked_not_exposed"):
@@ -202,7 +216,7 @@ def _summarize_run(run_dir: Path) -> dict[str, Any]:
         "failed_dispatch_count": len(failed_dispatches),
         "error_count": len(errors),
         "warning_count": len(warnings),
-        "classification": _classify_run(events, errors, session, task_summary, failed_dispatches, harness_records, model_output_records=model_output_records, chat_records=chat_records),
+        "classification": _classify_run(events, errors, session, task_summary, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
         "top_events": dict(events.most_common(5)),
     }
 
@@ -228,6 +242,9 @@ def _status_color(status: str | None) -> str:
         "environment_blocker",
         "harness_circuit_breaker_false_positive",
         "guard_misfire",
+        "prompt_budget_overflow",
+        "background_state_change_unverified",
+        "ssh_transport_circuit_breaker_false_positive",
         "continue_prompt_budget_loop",
         "tool_call_protocol_mismatch",
     }:

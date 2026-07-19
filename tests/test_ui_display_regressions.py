@@ -8,7 +8,7 @@ from smallctl.state import LoopState
 from smallctl.tools import control
 from smallctl.ui.app_flow import _terminal_status_detail
 from smallctl.ui.bubbles import LiveOutputBubbleWidget, ToolCallDetailWidget
-from smallctl.ui.bubbles import _style_text_lite
+from smallctl.ui.bubbles import _inline_code_backticks_balanced, _style_text_lite
 from smallctl.ui.console import ConsolePane
 from smallctl.ui.display import (
     _build_backend_rca_strip,
@@ -733,3 +733,14 @@ def test_text_block_lite_markdown_streaming_chunk_boundary_safe() -> None:
     rendered = _style_text_lite(acc + "\n")
     assert "•   CPU:" in rendered.plain
     assert any(span.style == "bold" for span in rendered.spans)
+
+
+def test_inline_code_backticks_balanced_ignores_fences_and_embedded_ticks() -> None:
+    assert _inline_code_backticks_balanced("plain text") is True
+    assert _inline_code_backticks_balanced("`code`") is True
+    assert _inline_code_backticks_balanced("`` ` ``") is True
+    assert _inline_code_backticks_balanced("`unclosed") is False
+    assert _inline_code_backticks_balanced("```\ncode\n```") is True
+    assert _inline_code_backticks_balanced("```\ncode\n```\n`inline`") is True
+    assert _inline_code_backticks_balanced("```\n`nested`\n```") is True
+    assert _inline_code_backticks_balanced("`a` ``b``") is True

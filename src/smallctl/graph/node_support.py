@@ -453,7 +453,7 @@ class ToolNotFoundError(Exception):
 
 HALLUCINATION_MAP = {
     "file_read": "artifact_read",
-    "grep": "summarize_report",
+    "grep": "artifact_grep",
     "ls": "dir_list",
 }
 

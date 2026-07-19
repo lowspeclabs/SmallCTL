@@ -396,10 +396,8 @@ def handle_file_write_session(
         and _looks_like_complete_html_document(updated_content)
     ):
         final_chunk = True
-    infer_next_section = not (
-        target.suffix.lower() in {".html", ".htm"}
-        and not _section_matches_any_suggestion(session, normalized_section_name)
-    )
+    section_matches_outline = _section_matches_any_suggestion(session, normalized_section_name)
+    infer_next_section = section_matches_outline
     if not normalized_next_section and not final_chunk and infer_next_section:
         inferred = _infer_next_suggested_section(session, normalized_section_name)
         if inferred:
@@ -413,6 +411,17 @@ def handle_file_write_session(
             replace_strategy=strategy,
             content=content,
         )
+    if (
+        not final_chunk
+        and not normalized_next_section
+        and not section_matches_outline
+        and strategy == "overwrite"
+    ):
+        # The section name is not part of the declared outline, so any inferred
+        # "next" section would be a guess that keeps a complete staged document
+        # trapped in an open session. An overwrite with no declared follow-up
+        # section replaces the whole staged file; treat it as the final chunk.
+        final_chunk = True
 
     append_overlap_ratio = 0.0
     if effective_strategy == "append" and staged_content and len(content) >= 0.5 * len(staged_content):
@@ -539,7 +548,7 @@ def handle_file_write_session(
         status_snapshot["finalized"] = "pending"
     status_block = format_write_session_status_block(status_snapshot)
 
-    msg = f"Section `{normalized_section_name}` written to `{path}`."
+    msg = f"Section `{normalized_section_name}` staged; not yet written to `{path}`."
     if normalized_next_section:
         if inferred_next_section:
             msg += f" Next section inferred: `{normalized_next_section}`."
@@ -555,7 +564,10 @@ def handle_file_write_session(
         else:
             msg += " Final section candidate recorded. Awaiting verifier."
     else:
-        msg += " Session remains active for local repair."
+        msg += (
+            " Session remains active for local repair."
+            " Call `finalize_write_session` (or supply the final section) to write the staged copy to the target."
+        )
     msg += f" Staged copy: `{staging_path}`."
     msg += f"\n{status_block}"
 

@@ -40,6 +40,7 @@ from .fs_listing import (
     _active_session_staging_path,
     _build_dir_tree,
     _guard_workspace_containment,
+    _looks_like_sensitive_env_path,
     _missing_dir_error,
     _missing_path_error,
     _workspace_relative_hint,
@@ -87,6 +88,33 @@ def _looks_like_sensitive_known_hosts_path(path: str, cwd: str | None = None) ->
         resolved = Path(str(path or "")).expanduser()
     normalized = resolved.as_posix().lower()
     return normalized.endswith("/.ssh/known_hosts") or normalized.endswith("/.ssh/known_hosts2")
+
+
+def _env_file_write_explicitly_requested(state: LoopState | None) -> bool:
+    """Return True when the user/task context clearly asks to create or update a .env file."""
+    if state is None:
+        return False
+    run_brief = getattr(state, "run_brief", None)
+    working_memory = getattr(state, "working_memory", None)
+    parts = [
+        getattr(run_brief, "original_task", "") if run_brief is not None else "",
+        getattr(run_brief, "current_phase_objective", "") if run_brief is not None else "",
+        getattr(working_memory, "current_goal", "") if working_memory is not None else "",
+        str(getattr(state, "active_intent", "") or ""),
+        " ".join(str(item) for item in (getattr(state, "secondary_intents", []) or [])),
+        " ".join(str(item) for item in (getattr(state, "intent_tags", []) or [])),
+    ]
+    text = " ".join(str(part or "").strip() for part in parts if str(part or "").strip()).casefold()
+    if not text:
+        return False
+    env_markers = (".env", "dotenv")
+    mutation_markers = (
+        "update", "create", "write", "set", "configure", "populate",
+        "generate", "make", "edit", "modify", "change", "add", "fill",
+    )
+    has_env = any(marker in text for marker in env_markers)
+    has_mutation = any(marker in text for marker in mutation_markers)
+    return has_env and has_mutation
 
 FILE_MUTATING_TOOLS = {"file_write", "file_append", "file_patch", "ast_patch", "file_delete"}
 
@@ -356,6 +384,29 @@ async def file_write(
                     "notes": [
                         "Do not synthesize full-file overwrites for SSH trust stores.",
                         "Ask the user before changing host-key trust entries.",
+                    ],
+                },
+            },
+        )
+
+    if (
+        _looks_like_sensitive_env_path(path)
+        and _normalize_replace_strategy(replace_strategy) == "overwrite"
+        and not _env_file_write_explicitly_requested(state)
+    ):
+        return fail(
+            f"Refusing to overwrite `.env` file `{path}` because the task did not explicitly ask to create or update it. "
+            "If the user provided credentials, use them directly in tool arguments or environment variables. "
+            "Only write `.env` files when the user explicitly requested it.",
+            metadata={
+                "path": str(target),
+                "error_kind": "sensitive_env_file_overwrite_blocked",
+                "requires_approval": True,
+                "next_required_tool": {
+                    "tool_name": "file_patch",
+                    "notes": [
+                        "Use file_patch for targeted .env changes only when the user explicitly requested them.",
+                        "Pass credentials directly to shell_exec or other tools via arguments or environment variables.",
                     ],
                 },
             },

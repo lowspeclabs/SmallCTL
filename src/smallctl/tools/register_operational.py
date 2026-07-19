@@ -381,7 +381,7 @@ def register_operational_tools(
                 handler=inject_state_and_harness(shell.shell_exec),
                 category="shell",
                 risk="high",
-                allowed_modes={"loop"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(

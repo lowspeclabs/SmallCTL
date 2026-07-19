@@ -65,6 +65,7 @@ from .lifecycle_tool_validation import _validate_pending_tool_calls
 from .lifecycle_nodes_support import (
     _apply_guard_trip_resteer_or_escalate,
     _apply_small_model_remote_constraints,
+    _flush_open_write_sessions,
     _handle_cancel_requested,
     _initialize_chat_mode_scratchpad,
     _resolve_followup_task,
@@ -1024,6 +1025,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
             UIEvent(event_type=UIEventType.SYSTEM, content="Run cancelled."),
         )
         graph_state.final_result = {"status": "cancelled", "reason": "cancel_requested"}
+        await _flush_open_write_sessions(harness, reason="cancel_requested")
         return
     if graph_state.run_mode == "chat":
         chat_rounds = (

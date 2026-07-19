@@ -53,8 +53,81 @@ def _extract_shell_delete_targets(command: str) -> list[str]:
             targets.append(".")
             index += 2
             continue
+        if token == "shred":
+            index += 1
+            while index < len(parts):
+                current = parts[index]
+                if current in _SHELL_CONTROL_TOKENS:
+                    break
+                if current.startswith("-"):
+                    index += 1
+                    continue
+                targets.append(current)
+                index += 1
+            continue
+        if token == "dd":
+            segment = []
+            index += 1
+            while index < len(parts) and parts[index] not in _SHELL_CONTROL_TOKENS:
+                segment.append(parts[index])
+                index += 1
+            if _dd_segment_is_write_capable(segment):
+                output = next(
+                    (arg.split("=", 1)[1] for arg in segment if arg.startswith("of=")),
+                    "",
+                )
+                targets.append(output or ".")
+            continue
         index += 1
     return targets
+
+
+def _dd_segment_is_write_capable(segment: list[str]) -> bool:
+    """Return True when a dd segment can write to a file or device."""
+    return any(
+        arg.startswith(("of=", "oflag=", "conv="))
+        for arg in segment
+    )
+
+
+def _classify_shell_destructive_family(command: str) -> str | None:
+    """Classify destructive command families that have no safe in-workspace form.
+
+    Returns a short reason token, or None when the command is not in one of the
+    destructive families (force-inclusive ``git clean -x``, ``git reset --hard``,
+    ``shred``, and write-capable ``dd``).
+    """
+    raw = str(command or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return None
+    index = 0
+    while index < len(parts):
+        token = parts[index]
+        if token in _SHELL_CONTROL_TOKENS:
+            index += 1
+            continue
+        segment: list[str] = []
+        while index < len(parts) and parts[index] not in _SHELL_CONTROL_TOKENS:
+            segment.append(parts[index])
+            index += 1
+        if not segment:
+            continue
+        if segment[0] == "git" and len(segment) >= 2:
+            if segment[1] == "clean":
+                flags = "".join(arg for arg in segment[2:] if arg.startswith("-"))
+                if "x" in flags and ("f" in flags or "--force" in segment[2:]):
+                    return "git_clean_force_include_ignored"
+            if segment[1] == "reset" and "--hard" in segment[2:]:
+                return "git_reset_hard"
+        if segment[0] == "shred":
+            return "shred"
+        if segment[0] == "dd" and _dd_segment_is_write_capable(segment[1:]):
+            return "dd_write_capable"
+    return None
 
 
 def _is_disposable_delete_target(path: Path) -> bool:
@@ -123,7 +196,49 @@ def _explicit_delete_requested(state: LoopState, target: Path) -> bool:
     return target_name in text or target_text in text
 
 
+def _explicit_delete_requested_text(state: LoopState, command: str) -> bool:
+    """Return True when the task text explicitly requests the destructive command."""
+    task_text_parts = [
+        str(getattr(getattr(state, "run_brief", None), "original_task", "") or ""),
+        str(getattr(getattr(state, "working_memory", None), "current_goal", "") or ""),
+    ]
+    text = "\n".join(task_text_parts).lower()
+    if not any(
+        word in text
+        for word in ("delete", "remove", "rm -rf", "clean up", "cleanup", "reset", "shred", "wipe", "git clean")
+    ):
+        return False
+    command_text = str(command or "").lower()
+    return any(
+        anchor in text and anchor in command_text
+        for anchor in ("git clean", "git reset", "shred", "dd ")
+    )
+
+
 def _shell_workspace_destructive_delete_guard(state: LoopState, command: str) -> dict[str, Any] | None:
+    family = _classify_shell_destructive_family(command)
+    if family is not None and not _explicit_delete_requested_text(state, command):
+        return fail(
+            "Shell command blocked: destructive command families "
+            "(git clean -x, git reset --hard, shred, write-capable dd) are not an "
+            "acceptable repair/reset operation unless the user explicitly requested "
+            "that exact operation.",
+            metadata={
+                "reason": "workspace_destructive_delete_blocked",
+                "command": command,
+                "error_kind": "workspace_destructive_delete_blocked",
+                "destructive_family": family,
+                "next_required_tool": {
+                    "tool_name": "file_read",
+                    "required_fields": ["path"],
+                    "notes": [
+                        "Read the target and repair it with file_patch.",
+                        "For generated code you own, use file_write with replace_strategy='overwrite'.",
+                        "If the destructive operation is intentional, ask_human with the exact command and reason.",
+                    ],
+                },
+            },
+        )
     targets = _extract_shell_delete_targets(command)
     if not targets:
         return None
@@ -134,10 +249,17 @@ def _shell_workspace_destructive_delete_guard(state: LoopState, command: str) ->
     allowed: list[str] = []
     for raw_target in targets:
         resolved = _safe_resolve_path(raw_target, cwd=cwd)
+        if not _is_within_path(resolved, workspace):
+            blocked.append(
+                {
+                    "raw_target": raw_target,
+                    "resolved_target": str(resolved),
+                    "reasons": ["outside_workspace"],
+                }
+            )
+            continue
         if _is_disposable_delete_target(resolved):
             allowed.append(str(resolved))
-            continue
-        if not _is_within_path(resolved, workspace):
             continue
         if _explicit_delete_requested(state, resolved):
             allowed.append(str(resolved))

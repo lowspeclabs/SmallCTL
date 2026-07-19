@@ -24,8 +24,10 @@ class ConsolePane(VerticalScroll):
         self._last_system_message: str = ""
         self._verbose = bool(verbose)
         self._stream_flush_handle: asyncio.Handle | None = None
+        self._stream_finalize_handle: asyncio.Handle | None = None
         self._stream_buffer_groups: list[dict[str, Any]] = []
         self._stream_flush_interval = 0.05
+        self._stream_finalize_interval = 0.25
         self._stream_flush_soon_once = False
         self._visible_transcript_limit = 250
         self._hidden_transcript_entries = 0
@@ -35,6 +37,30 @@ class ConsolePane(VerticalScroll):
         self._json_suppress_mode = "raw"
         self._json_suppress_trim_next_newline = False
         self._json_suppress_max_len = 5000
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn_background_task(self, coro: Any, *, name: str) -> asyncio.Task[Any]:
+        """Run an auxiliary coroutine with retention so exceptions are observed."""
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning("Console background task %s failed: %s", name, exc)
+
+        task.add_done_callback(_on_done)
+        return task
+
+    async def _cancel_background_tasks(self) -> None:
+        tasks = [task for task in self._background_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def set_verbose(self, verbose: bool) -> None:
         self._verbose = bool(verbose)
@@ -46,6 +72,8 @@ class ConsolePane(VerticalScroll):
         await self.mount(Vertical(id="bubble-stack"))
 
     async def on_unmount(self) -> None:
+        self._cancel_stream_finalize()
+        await self._cancel_background_tasks()
         await self.flush_stream_buffers()
 
     async def append_line(self, line: str, kind: str = "system") -> None:
@@ -55,6 +83,7 @@ class ConsolePane(VerticalScroll):
 
     async def clear_bubbles(self) -> None:
         self._cancel_stream_flush()
+        self._cancel_stream_finalize()
         self._clear_stream_buffers()
         self._json_suppress_active = False
         self._json_suppress_buffer = ""
@@ -581,7 +610,10 @@ class ConsolePane(VerticalScroll):
         except RuntimeError:
             return
         def callback() -> None:
-            asyncio.create_task(self.flush_stream_buffers(finalize_assistant=False))
+            self._spawn_background_task(
+                self.flush_stream_buffers(finalize_assistant=False),
+                name="console_stream_flush",
+            )
 
         if self._stream_flush_soon_once:
             self._stream_flush_soon_once = False
@@ -592,9 +624,42 @@ class ConsolePane(VerticalScroll):
                 callback,
             )
 
+    def _cancel_stream_finalize(self) -> None:
+        handle = self._stream_finalize_handle
+        if handle is not None and not handle.cancelled():
+            handle.cancel()
+        self._stream_finalize_handle = None
+
+    def _schedule_stream_finalize(self) -> None:
+        """Schedule a deferred markdown finalization for the active assistant text.
+
+        While assistant tokens are streaming rapidly, each new chunk resets this
+        timer.  Once the stream has been idle briefly, the pending assistant
+        text is flushed with markdown finalization so the user does not have to
+        wait until the end of the turn (or a tool call) to see formatted output.
+        """
+        self._cancel_stream_finalize()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        def callback() -> None:
+            self._spawn_background_task(
+                self.flush_stream_buffers(finalize_assistant=True),
+                name="console_stream_finalize",
+            )
+
+        self._stream_finalize_handle = loop.call_later(
+            self._stream_finalize_interval,
+            callback,
+        )
+
     async def flush_stream_buffers(self, *, finalize_assistant: bool = True) -> None:
         started = time.perf_counter()
         self._cancel_stream_flush()
+        if finalize_assistant:
+            self._cancel_stream_finalize()
         # If we were suppressing a JSON tool-call block that never terminated,
         # flush the buffered text as ordinary assistant text so it is not lost.
         if self._json_suppress_active:
@@ -737,6 +802,8 @@ class ConsolePane(VerticalScroll):
                 "parts": [text],
             }
         )
+        if kind == "assistant":
+            self._schedule_stream_finalize()
 
     async def _append_critical_interrupt(self, event: UIEvent) -> None:
         text = str(event.data.get("display_text") or event.content)

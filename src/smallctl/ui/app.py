@@ -93,6 +93,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         self._goal_bar_expanded = False
         self._goal_bar_goal = "No active goal"
         self._goal_bar_tasks: list[str] = []
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -163,11 +164,12 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
                 restored_messages = restore_status.get("recent_messages") if isinstance(restore_status, dict) else None
             if isinstance(restored_messages, list):
                 await self._render_restored_chat(messages=restored_messages)
-            asyncio.create_task(
+            self._spawn_background_task(
                 self._append_system_line(
                     self._format_restore_status(restore_status),
                     force=True,
-                )
+                ),
+                name="restore_status_line",
             )
         if self.initial_task:
             self.task_history.append(self.initial_task)
@@ -177,24 +179,26 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
         else:
             # Fix 4: Startup confirmation when no pre-loaded task
             if restore_status is None:
-                asyncio.create_task(
+                self._spawn_background_task(
                     self._append_system_line(
                         f"Ready. SmallCTL v{smallctl_version}. Type a message to begin.",
                         force=True,
                         kind="system",
-                    )
+                    ),
+                    name="ready_line",
                 )
             # Fix 3: FAMA disabled warning in TUI
             fama_config = getattr(
                 getattr(self.harness, "state", None), "scratchpad", {}
             ).get("_fama_config", {})
             if fama_config.get("enabled") is False and not fama_config.get("_tui_warning_shown"):
-                asyncio.create_task(
+                self._spawn_background_task(
                     self._append_system_line(
                         "Warning: FAMA (failure-aware mitigation) is disabled. "
                         "Retry loops and tool misuse will not be auto-detected.",
                         force=True,
-                    )
+                    ),
+                    name="fama_disabled_warning",
                 )
                 fama_config["_tui_warning_shown"] = True
         self.query_one(InputPane).focus()
@@ -202,6 +206,7 @@ class SmallctlApp(SmallctlAppActionsMixin, SmallctlAppFlowMixin, App[None]):
     async def on_unmount(self) -> None:
         self._flush_ui_transcript_persist()
         self._dismiss_active_approval_prompt()
+        await self._cancel_background_tasks()
         bridge = self._harness_bridge
         if bridge is not None:
             try:

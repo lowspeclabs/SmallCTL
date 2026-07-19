@@ -46,6 +46,7 @@ from .tool_loop_guard_progress import (
 )
 from .tool_loop_guard_read_predicates import (
     _artifact_read_past_eof_is_loop,
+    _artifact_read_target_path_re_read_is_loop,
     _artifact_read_targets_mutation_result_loop,
     _ssh_file_read_after_remote_mutation_is_progress,
 )
@@ -254,7 +255,7 @@ def _detect_command_placeholder(harness: Any, pending: PendingToolCall) -> tuple
     syntax error, so treat it as a missing-argument validation failure instead.
     """
     tool_name = str(getattr(pending, "tool_name", "") or "").strip()
-    if tool_name not in {"shell_exec", "bash_exec", "ssh_exec"}:
+    if tool_name not in {"shell_exec", "ssh_exec"}:
         return None
     args = dict(getattr(pending, "args", {}) or {})
     command = str(args.get("command", "") or "").strip()
@@ -441,7 +442,6 @@ def _file_read_immediate_full_repeat_is_loop(harness: Any, pending: PendingToolC
         "ast_patch",
         "file_delete",
         "shell_exec",
-        "bash_exec",
         "ssh_exec",
     }
     for item in reversed(history[-6:]):
@@ -568,6 +568,16 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
             harness,
             pending,
             "Guard tripped: repeated artifact_read EOF overread loop",
+        )
+    if _artifact_read_target_path_re_read_is_loop(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            (
+                "Guard tripped: repeated read-only loop "
+                "(re-reading an instruction/target file that was already read; "
+                "use the most recent tool output to fix the blocker instead)"
+            ),
         )
     if _artifact_read_line_progress_is_progress(harness, pending):
         return None

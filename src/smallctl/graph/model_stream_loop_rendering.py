@@ -280,7 +280,7 @@ async def handle_model_stream_chunk(
     # reasoning-only guard to measure elapsed time from request start and abort
     # slow-but-healthy Gemma-4 streams before they produced any output.
     if first_token_time is None:
-        first_token_time = time.perf_counter()
+        first_token_time = time.monotonic()
 
     if reason_field:
         stream_state.field_reasoning_seen = True

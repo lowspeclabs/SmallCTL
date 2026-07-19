@@ -23,7 +23,7 @@ async def _preflight_openrouter_auth(client: Any, async_client: Any) -> dict[str
         }
     )
     try:
-        response = await async_client.get(credits_url, headers=headers)
+        response = await async_client.get(credits_url, headers=headers, timeout=10.0)
     except Exception as exc:
         log_kv(
             client.log,

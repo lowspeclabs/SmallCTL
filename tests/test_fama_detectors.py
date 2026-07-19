@@ -100,7 +100,7 @@ def test_detect_verifier_failure_classifies_zero_discovered_tests() -> None:
 
 def test_detect_verifier_failure_ignores_expected_diagnostic_failure() -> None:
     state = LoopState(step_count=2)
-    state.run_brief.original_task = "rca why the fog install is not working"
+    state.run_brief.original_task = "rca why the fog service is not responding"
     result = ToolEnvelope(
         success=True,
         output={

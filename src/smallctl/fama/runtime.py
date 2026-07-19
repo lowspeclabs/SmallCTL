@@ -108,29 +108,29 @@ async def observe_tool_result(
                     step=current_step(state),
                 )
 
-        # Fix 5 (RCA 8b79ca76): successful shell/ssh re-execution can also
-        # clear done_gate when it verifies a previously failing target.
-        if not latest_verifier_passed(state, result=result):
-            if _successful_execution_clears_done_gate(
+        # A re-verification may add harmless shell syntax (for example,
+        # ``&& echo VERIFIED_OK``), causing exact verifier fingerprints to
+        # differ even though it checks the same target.
+        if _successful_execution_clears_done_gate(
+            state,
+            result=result,
+            tool_name=tool_name,
+            arguments=arguments,
+        ):
+            cleared = clear_mitigations(
                 state,
-                result=result,
-                tool_name=tool_name,
-                arguments=arguments,
-            ):
-                cleared = clear_mitigations(
-                    state,
-                    {"done_gate", "acceptance_checklist_capsule"},
+                {"done_gate", "acceptance_checklist_capsule"},
+                reason="re_verification_passed",
+            )
+            for mitigation in cleared:
+                _runlog(
+                    harness,
+                    "fama_mitigation_expired",
+                    "FAMA mitigation cleared",
+                    mitigation=mitigation.name,
                     reason="re_verification_passed",
+                    step=current_step(state),
                 )
-                for mitigation in cleared:
-                    _runlog(
-                        harness,
-                        "fama_mitigation_expired",
-                        "FAMA mitigation cleared",
-                        mitigation=mitigation.name,
-                        reason="re_verification_passed",
-                        step=current_step(state),
-                    )
 
         early_stop = detect_early_stop_from_result(
             state,
@@ -157,8 +157,22 @@ async def observe_tool_result(
                 signal=verifier_failure,
                 dedupe=True,
             )
-            # Circuit-breaker: SSH auth impossibility should not trap the agent
-            if _is_ssh_transport_impossibility(result, tool_name=tool_name):
+            # Recovery outcomes are intentionally typed. A failed remote login
+            # is not evidence that the task became local.
+            if _is_local_route_contradiction(result, tool_name=tool_name):
+                previous_mode = str(getattr(state, "task_mode", "") or "")
+                state.task_mode = "local_execute"
+                state.active_intent = "requested_shell_exec"
+                _record_pinned_recovery(
+                    state,
+                    kind="route_contradiction",
+                    blocker="A local workspace command was submitted through ssh_exec.",
+                    next_allowed_action="Retry once with shell_exec.",
+                    required_tool="shell_exec",
+                    result=result,
+                )
+                _runlog(harness, "fama_ssh_transport_circuit_breaker", "Local route contradiction requires shell_exec retry", previous_task_mode=previous_mode, next_task_mode="local_execute", failure_kind="route_contradiction", required_tool="shell_exec", retry_eligible=True, next_required_action="retry_with_shell_exec")
+            elif _is_ssh_transport_impossibility(result, tool_name=tool_name):
                 cleared = clear_mitigations(
                     state,
                     {"done_gate", "acceptance_checklist_capsule"},
@@ -173,14 +187,31 @@ async def observe_tool_result(
                         reason="ssh_transport_impossible",
                         step=current_step(state),
                     )
-                # Reset remote intent so local tools become available
-                state.task_mode = "local_execute"
-                state.active_intent = "general_task"
+                previous_mode = str(getattr(state, "task_mode", "") or "")
+                state.task_mode = "remote_execute"
+                state.active_intent = "requested_ssh_exec"
+                metadata = getattr(result, "metadata", None)
+                metadata = metadata if isinstance(metadata, dict) else {}
+                _record_pinned_recovery(
+                    state,
+                    kind="ssh_auth_blocker",
+                    blocker="SSH authentication or transport failed before remote execution.",
+                    next_allowed_action="Provide corrected non-secret SSH credentials or resolve remote connectivity.",
+                    required_tool="ask_human",
+                    result=result,
+                )
                 _runlog(
                     harness,
                     "fama_ssh_transport_circuit_breaker",
-                    "SSH transport failure triggered circuit breaker; released done_gate and reset to local_execute",
+                    "SSH transport failure requires remote credential or connectivity remediation",
                     step=current_step(state),
+                    previous_task_mode=previous_mode,
+                    next_task_mode="remote_execute",
+                    failure_kind=str(metadata.get("failure_kind") or "transport"),
+                    attempted_command_scope="remote",
+                    required_tool="ask_human",
+                    retry_eligible=False,
+                    next_required_action="request_remote_credential_or_connectivity_remediation",
                 )
 
         record_bad_tool_arg_failure(state, tool_name=tool_name, result=result)
@@ -888,23 +919,65 @@ def _is_ssh_transport_impossibility(result: Any, *, tool_name: str = "") -> bool
         stderr = str(metadata.get("stderr") or "").lower()
         exit_code = metadata.get("exit_code")
     combined = f"{error}\n{stderr}"
+    if metadata.get("failure_kind") == "remote_command":
+        return False
+    if metadata.get("ssh_transport_succeeded") is True:
+        return False
+    transport_markers = (
+        "permission denied (publickey",
+        "permission denied, please try again",
+        "no route to host",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "could not resolve hostname",
+        "name or service not known",
+        "temporary failure in name resolution",
+    )
+    if any(marker in combined for marker in transport_markers):
+        return True
     try:
-        if int(exit_code) == 255:
+        if int(exit_code) == 255 and not stderr:
             return True
     except (TypeError, ValueError):
         pass
-    return any(
-        marker in combined
-        for marker in (
-            "permission denied (publickey",
-            "permission denied, please try again",
-            "no route to host",
-            "connection refused",
-            "connection timed out",
-            "network is unreachable",
-            "could not resolve hostname",
-        )
+    return False
+
+
+def _is_local_route_contradiction(result: Any, *, tool_name: str) -> bool:
+    metadata = getattr(result, "metadata", None)
+    return bool(
+        tool_name == "ssh_exec"
+        and isinstance(metadata, dict)
+        and metadata.get("reason") == "local_command_requires_shell_exec"
     )
+
+
+def _record_pinned_recovery(
+    state: Any,
+    *,
+    kind: str,
+    blocker: str,
+    next_allowed_action: str,
+    required_tool: str,
+    result: Any,
+) -> None:
+    scratchpad = getattr(state, "scratchpad", None)
+    if not isinstance(scratchpad, dict):
+        return
+    metadata = getattr(result, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    scratchpad["_pinned_recovery"] = {
+        "recovery_id": f"{kind}:{current_step(state)}",
+        "kind": kind,
+        "current_blocker": blocker,
+        "next_allowed_action": next_allowed_action,
+        "required_tool": required_tool,
+        "target": str(metadata.get("host") or ""),
+        "command_fingerprint": str(metadata.get("command_fingerprint") or ""),
+        "creation_step": current_step(state),
+        "source_event": "fama_ssh_transport_circuit_breaker",
+    }
 
 
 def _is_ssh_auth_impossibility(result: Any) -> bool:

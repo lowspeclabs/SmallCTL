@@ -352,7 +352,6 @@ def test_registry_excludes_removed_general_surface_tools() -> None:
     for removed in {
         "show_artifact",
         "artifact_recall",
-        "file_append",
         "cwd_get",
         "cwd_set",
         "env_get",

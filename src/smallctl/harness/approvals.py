@@ -57,7 +57,21 @@ class ApprovalService:
         )
         try:
             await self.harness._emit(self.harness.event_handler, event)
-            return await future
+            return await asyncio.wait_for(future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            self._reject_shell_approval(approval_id)
+            logger.warning("Shell approval timeout for command: %s", command)
+            try:
+                self.harness._runlog(
+                    "approval_timeout",
+                    "Shell approval request timed out",
+                    command=command,
+                    approval_id=approval_id,
+                    timeout_sec=timeout_sec,
+                )
+            except Exception:
+                pass
+            return False
         except Exception:
             self._reject_shell_approval(approval_id)
             raise
@@ -81,6 +95,7 @@ class ApprovalService:
         *,
         command: str,
         prompt_text: str,
+        timeout_sec: int = 300,
     ) -> str | None:
         if not self.harness.allow_interactive_shell_approval or getattr(self.harness, "event_handler", None) is None:
             return None
@@ -97,12 +112,27 @@ class ApprovalService:
                 "prompt_id": prompt_id,
                 "command": command,
                 "prompt_text": prompt_text,
+                "timeout_sec": timeout_sec,
                 "status_activity": "awaiting sudo password...",
             },
         )
         try:
             await self.harness._emit(self.harness.event_handler, event)
-            return await future
+            return await asyncio.wait_for(future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            self._reject_sudo_password_prompt(prompt_id)
+            logger.warning("Sudo password prompt timeout for command: %s", command)
+            try:
+                self.harness._runlog(
+                    "sudo_password_timeout",
+                    "Sudo password prompt timed out",
+                    command=command,
+                    prompt_id=prompt_id,
+                    timeout_sec=timeout_sec,
+                )
+            except Exception:
+                pass
+            return None
         except Exception:
             self._reject_sudo_password_prompt(prompt_id)
             raise

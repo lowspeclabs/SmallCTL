@@ -464,6 +464,8 @@ def artifact_invalidated(
         paths = [str(path).strip() for path in (event.get("paths") or []) if str(path).strip()]
         if reason in {"file_changed", "write_session_target_changed"} and paths:
             if any(path_matches_any(candidate, paths) for candidate in artifact_paths):
+                if reason == "file_changed" and is_read_only_artifact(artifact):
+                    return False
                 return True
         if reason in {"phase_advanced", "environment_changed"} and metadata_phase:
             if metadata_phase != current_phase:

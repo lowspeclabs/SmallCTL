@@ -132,6 +132,7 @@ def build_registry(
         register=_register,
         make_registration=_make_registration,
         inject_state=_inject_state,
+        inject_cwd=_inject_cwd,
         inject_harness=_inject_harness,
         core_profile=CORE_PROFILE,
         data_profile=DATA_PROFILE,

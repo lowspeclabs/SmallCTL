@@ -4,7 +4,10 @@ import os
 from typing import Any
 
 from .installer_preflight import run_installer_preflight_probes
-from .network_ssh_helpers import build_ssh_command as _build_ssh_command
+from .network_ssh_helpers import (
+    build_ssh_command as _build_ssh_command,
+    resolve_ssh_strict_host_key_mode as _resolve_ssh_strict_host_key_mode,
+)
 
 
 async def _run_remote_installer_preflight_probes(
@@ -20,6 +23,7 @@ async def _run_remote_installer_preflight_probes(
 ) -> dict[str, Any]:
     """Run automated SSH probes to discover installer environment state."""
     password_files: list[str] = []
+    strict_host_key_mode = _resolve_ssh_strict_host_key_mode(harness)
 
     def _build_probe_command(probe_script: str) -> str:
         full_cmd, _env_overrides, password_file_path = _build_ssh_command(
@@ -29,6 +33,7 @@ async def _run_remote_installer_preflight_probes(
             port=port,
             identity_file=identity_file,
             password=password,
+            strict_host_key_checking=strict_host_key_mode,
         )
         if password_file_path:
             password_files.append(password_file_path)

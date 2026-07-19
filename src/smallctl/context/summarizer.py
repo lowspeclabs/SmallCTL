@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from ..models.conversation import ConversationMessage
 from ..state import ContextBrief, EpisodicSummary, LoopState, TurnBundle
-from .policy import ContextPolicy, estimate_text_tokens
+from .policy import ContextPolicy
 from .observations import ObservationPacket, build_observation_packets
 from .summarizer_support import (
     _collect_messages,
@@ -18,6 +19,18 @@ from .summarizer_support import (
     extract_rewoo_lanes_from_messages,
 )
 from ..client import OpenAICompatClient
+
+
+_SEQUENTIAL_ID_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def _next_sequential_id(existing_ids: Iterable[str], *, prefix: str) -> str:
+    max_suffix = 0
+    for raw_id in existing_ids:
+        match = _SEQUENTIAL_ID_RE.match(str(raw_id or "").strip())
+        if match and match.group(1) == prefix:
+            max_suffix = max(max_suffix, int(match.group(2)))
+    return f"{prefix}{max_suffix + 1:04d}"
 
 
 @dataclass(slots=True)
@@ -67,7 +80,10 @@ class ContextSummarizer:
         old_messages = state.recent_messages[:-keep_recent]
         if not old_messages:
             return CompactionAttemptResult(noop_reason="no_compactable_messages")
-        summary_id = f"S{len(state.episodic_summaries) + 1:04d}"
+        summary_id = _next_sequential_id(
+            (summary.summary_id for summary in state.episodic_summaries),
+            prefix="S",
+        )
         artifact_ids = [
             message.metadata.get("artifact_id", "")
             for message in old_messages
@@ -159,7 +175,10 @@ class ContextSummarizer:
         summary_text = result.assistant_text.strip()
 
         # Create episodic summary
-        summary_id = f"S{len(state.episodic_summaries) + 1:04d}"
+        summary_id = _next_sequential_id(
+            (summary.summary_id for summary in state.episodic_summaries),
+            prefix="S",
+        )
         artifact_ids = [
             message.metadata.get("artifact_id", "")
             for message in old_messages
@@ -278,7 +297,10 @@ class ContextSummarizer:
                 "next_action_hint": "Proceed with task"
             }
 
-        brief_id = f"B{len(state.context_briefs) + 1:04d}"
+        brief_id = _next_sequential_id(
+            (existing_brief.brief_id for existing_brief in state.context_briefs),
+            prefix="B",
+        )
         
         # Collect artifact IDs from the messages
         artifact_ids = [
@@ -387,7 +409,10 @@ class ContextSummarizer:
     ) -> TurnBundle | None:
         if not messages:
             return None
-        bundle_id = f"TB{len(state.turn_bundles) + 1:04d}"
+        bundle_id = _next_sequential_id(
+            (existing_bundle.bundle_id for existing_bundle in state.turn_bundles),
+            prefix="TB",
+        )
         artifact_ids = [
             str(message.metadata.get("artifact_id") or "").strip()
             for message in messages
@@ -485,7 +510,10 @@ class ContextSummarizer:
     ) -> ContextBrief | None:
         if not bundles:
             return None
-        brief_id = f"B{len(state.context_briefs) + 1:04d}"
+        brief_id = _next_sequential_id(
+            (existing_brief.brief_id for existing_brief in state.context_briefs),
+            prefix="B",
+        )
         summary_lines: list[str] = []
         files_touched: list[str] = []
         artifact_ids: list[str] = []
@@ -566,15 +594,21 @@ class ContextSummarizer:
     ) -> str:
         if not thinking_text or len(thinking_text) < 200:
             return ""
-        
+
+        # Keep untrusted task text out of the system prompt: the task travels
+        # as a user message so injected instructions in it cannot masquerade as
+        # system directives.
         system_prompt = (
             "You are a meta-cognition summarizer. "
-            f"The assistant just thought through the following for the task: '{task}'. "
+            "The user message contains the assistant's current task and its raw thinking. "
             "Extract the most critical 'lesson learned' or 'operational insight' from this thinking. "
             "Output ONLY the insight in one concise sentence starting with 'Note:', 'Always:', or 'Never:'."
         )
-        
-        user_msg = {"role": "user", "content": f"Thinking block:\n{thinking_text[:4000]}"}
+
+        user_msg = {
+            "role": "user",
+            "content": f"Task:\n{task}\n\nThinking block:\n{thinking_text[:4000]}",
+        }
         
         chunks = []
         async for event in client.stream_chat(messages=[{"role": "system", "content": system_prompt}, user_msg], tools=[]):

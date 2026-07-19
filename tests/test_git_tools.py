@@ -115,3 +115,53 @@ def test_read_log_with_offset(tmp_path) -> None:
     assert "line 16\n" not in result["output"]
     assert result["metadata"]["start_line"] == 11
     assert result["metadata"]["end_line"] == 15
+
+
+def test_git_status_resolves_path_against_cwd(monkeypatch, tmp_path) -> None:
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    (tmp_path / "a.txt").write_text("hello")
+
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    monkeypatch.chdir(outside)
+
+    result = asyncio.run(git_status(path=".", cwd=str(tmp_path), short=True))
+    assert result["success"] is True
+    assert result["output"]["dirty"] is True
+    assert "a.txt" in result["output"]["output"]
+
+
+def test_git_diff_resolves_path_against_cwd(monkeypatch, tmp_path) -> None:
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True, check=True)
+    (tmp_path / "a.txt").write_text("hello")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True)
+    (tmp_path / "a.txt").write_text("hello modified")
+
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    monkeypatch.chdir(outside)
+
+    result = asyncio.run(git_diff(path=".", cwd=str(tmp_path)))
+    assert result["success"] is True
+    assert result["output"]["has_changes"] is True
+    assert "modified" in result["output"]["output"]
+
+
+def test_read_log_resolves_path_against_cwd(monkeypatch, tmp_path) -> None:
+    log = tmp_path / "subdir" / "app.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(f"line {i}" for i in range(1, 11)))
+
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    monkeypatch.chdir(outside)
+
+    result = asyncio.run(read_log(path="subdir/app.log", cwd=str(tmp_path), lines=5))
+    assert result["success"] is True
+    assert result["output"].startswith("line 6\n")
+    assert result["metadata"]["total_lines"] == 10

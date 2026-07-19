@@ -169,7 +169,7 @@ def _dir_list_repeat_has_intervening_progress(
     history: list[dict[str, str]],
     prior_dir_list_index: int,
 ) -> bool:
-    progress_tools = {"artifact_read", "file_read", "shell_exec", "ssh_exec", "bash_exec"}
+    progress_tools = {"artifact_read", "file_read", "shell_exec", "ssh_exec"}
     if prior_dir_list_index < 0 or prior_dir_list_index >= len(history):
         return False
     for item in history[prior_dir_list_index + 1 :]:

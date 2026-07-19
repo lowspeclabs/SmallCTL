@@ -219,7 +219,7 @@ def test_fama_done_gate_dispatch_blocks_hidden_task_complete() -> None:
 
 def test_fama_done_gate_allows_diagnostic_failure_completion() -> None:
     state = LoopState()
-    state.run_brief.original_task = "rca why fog install is not working"
+    state.run_brief.original_task = "rca why fog service is not responding"
     state.last_verifier_verdict = {
         "verdict": "fail",
         "command": "curl -Is https://192.168.1.89:8080/fog/",
@@ -358,6 +358,49 @@ def test_fama_done_gate_requires_matching_verifier_pass_to_clear(monkeypatch) ->
             operation_id="op-3",
         )
     )
+    assert "done_gate" not in active_mitigation_names(state)
+
+
+def test_fama_reverification_with_shell_suffix_clears_done_gate(monkeypatch) -> None:
+    state = LoopState()
+    service = SimpleNamespace(harness=_harness(state))
+    message = ConversationMessage(role="tool", name="shell_exec", content="ok")
+
+    async def _persist(*args, **kwargs):
+        return message
+
+    monkeypatch.setattr(tool_result_flow, "_persist_artifact_result", _persist)
+    failed_command = "grep -E '^(TOKEN_ID|TOKEN_SECRET)=' /tmp/proxmox/.env"
+    state.scratchpad["_fama"] = {
+        "version": 1,
+        "signals": [],
+        "active_mitigations": [
+            {
+                "name": "done_gate",
+                "reason": f"task_complete rejected with verifier verdict needs_human: {failed_command} [None]",
+                "source_signal": "early_stop:0",
+                "activated_step": 0,
+                "expires_after_step": 4,
+                "priority": 50,
+            }
+        ],
+        "last_observed_step": 0,
+    }
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "command": f"{failed_command} && echo VERIFIED_OK",
+    }
+
+    asyncio.run(
+        tool_result_flow.record_result(
+            service,
+            tool_name="shell_exec",
+            tool_call_id="call-1",
+            result=ToolEnvelope(success=True, output="ok"),
+            arguments={"command": f"{failed_command} && echo VERIFIED_OK"},
+        )
+    )
+
     assert "done_gate" not in active_mitigation_names(state)
 
 

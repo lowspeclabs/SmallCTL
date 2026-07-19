@@ -4,8 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 from smallctl.fama.fingerprints import install_verifier_passes_objective
-from smallctl.fama.runtime import observe_tool_result
-from smallctl.fama.signals import ActiveMitigation
+from smallctl.fama.runtime import _is_ssh_transport_impossibility, observe_tool_result
+from smallctl.fama.signals import ActiveMitigation, FamaFailureKind, FamaSignal, push_fama_signal
 from smallctl.fama.state import activate_mitigations, active_mitigation_names
 from smallctl.fama.tool_policy import apply_fama_tool_exposure, enforce_fama_tool_call
 from smallctl.harness.tool_visibility import schedule_retry_tool_exposure
@@ -359,7 +359,7 @@ def test_fama_disabled_config_allows_direct_tool_dispatcher() -> None:
     assert result.output == "done"
 
 
-def test_ssh_auth_failure_releases_done_gate() -> None:
+def test_ssh_auth_failure_preserves_remote_blocker() -> None:
     state = LoopState()
     activate_mitigations(
         state,
@@ -410,8 +410,9 @@ def test_ssh_auth_failure_releases_done_gate() -> None:
     )
 
     assert "done_gate" not in active_mitigation_names(state)
-    assert state.task_mode == "local_execute"
-    assert state.active_intent == "general_task"
+    assert state.task_mode == "remote_execute"
+    assert state.active_intent == "requested_ssh_exec"
+    assert state.scratchpad["_pinned_recovery"]["kind"] == "ssh_auth_blocker"
 
     schemas = apply_fama_tool_exposure(
         [_schema("task_complete"), _schema("task_fail"), _schema("shell_exec")],
@@ -660,3 +661,254 @@ def test_interactive_installer_stall_capsule_reasons() -> None:
     assert reasons.get("ssh_exec") == ["interactive_installer_stall_narrows_to_send"]
     assert reasons.get("interactive_run") == ["interactive_installer_stall_narrows_to_send"]
     assert "ssh_session_send" not in reasons
+
+
+def _set_repeated_verifier_rejection(state: LoopState, command: str, failure_mode: str) -> None:
+    state.last_verifier_verdict = {
+        "verdict": "fail",
+        "command": command,
+        "failure_mode": failure_mode,
+    }
+    state.scratchpad["_verifier_rejection_count"] = 5
+    state.scratchpad["_last_verifier_rejection"] = {"command": command}
+    state.scratchpad["_fama_same_target_streak"] = {"command": command, "streak": 4}
+
+
+def test_fama_done_gate_hides_task_fail_on_insufficient_verifier() -> None:
+    """task_fail must not be the only completion tool when the harness itself is
+    uncertain about verifier strength (insufficient_verifier). The model should
+    run a corrected/stronger verifier instead of escaping via task_fail."""
+    state = LoopState()
+    _activate_done_gate(state)
+    _set_repeated_verifier_rejection(
+        state,
+        command="cd /repo && python3 ./temp/text_chunker.py",
+        failure_mode="insufficient_verifier",
+    )
+
+    schemas = apply_fama_tool_exposure(
+        [
+            _schema("task_complete"),
+            _schema("task_fail"),
+            _schema("file_read"),
+            _schema("shell_exec"),
+        ],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = {entry["function"]["name"] for entry in schemas}
+    assert "task_complete" not in names
+    assert "task_fail" not in names
+    assert "file_read" in names
+    assert "shell_exec" in names
+
+
+def test_fama_done_gate_exposes_task_fail_after_repeated_genuine_failures() -> None:
+    """The dead-end escape hatch should still work for genuine (non-insufficient)
+    verifier failures so the model can report an unfixable blocker."""
+    state = LoopState()
+    _activate_done_gate(state)
+    _set_repeated_verifier_rejection(
+        state,
+        command="cd /repo && python3 ./temp/text_chunker.py",
+        failure_mode="test",
+    )
+
+    schemas = apply_fama_tool_exposure(
+        [
+            _schema("task_complete"),
+            _schema("task_fail"),
+            _schema("file_read"),
+            _schema("shell_exec"),
+        ],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = {entry["function"]["name"] for entry in schemas}
+    assert "task_complete" not in names
+    assert "task_fail" in names
+    assert "file_read" in names
+    assert "shell_exec" in names
+
+
+def test_remote_command_exit_255_is_not_ssh_transport_impossibility() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="remote command failed",
+        metadata={
+            "tool_name": "ssh_exec",
+            "failure_kind": "remote_command",
+            "ssh_transport_succeeded": True,
+            "exit_code": 255,
+            "stderr": "unknown command 'pct'",
+        },
+    )
+    assert _is_ssh_transport_impossibility(result) is False
+
+
+def test_transport_marker_exit_255_is_ssh_transport_impossibility() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="",
+        metadata={
+            "tool_name": "ssh_exec",
+            "exit_code": 255,
+            "stderr": "ssh: connect to host 192.168.1.161 port 22: Connection refused",
+        },
+    )
+    assert _is_ssh_transport_impossibility(result) is True
+
+
+def test_exit_255_empty_stderr_is_ssh_transport_impossibility() -> None:
+    result = ToolEnvelope(
+        success=False,
+        error="",
+        metadata={
+            "tool_name": "ssh_exec",
+            "exit_code": 255,
+            "stderr": "",
+        },
+    )
+    assert _is_ssh_transport_impossibility(result) is True
+
+
+def test_repeated_exposure_does_not_advance_same_target_rejection_streak() -> None:
+    """Only track_verifier_rejection should mutate the same-target streak."""
+    from smallctl.harness.verifier_monitor import track_verifier_rejection
+
+    state = LoopState()
+    _activate_done_gate(state)
+    command = "cd /repo && python3 ./temp/text_chunker.py"
+    state.scratchpad["_fama_same_target_streak"] = {"command": command, "streak": 2}
+    state.scratchpad["_verifier_rejection_count"] = 5
+    state.last_verifier_verdict = {"verdict": "fail", "command": command, "failure_mode": "test"}
+
+    for _ in range(5):
+        apply_fama_tool_exposure(
+            [_schema("task_complete"), _schema("task_fail"), _schema("file_read")],
+            state=state,
+            mode="loop",
+            config=_Config(),
+        )
+
+    streak = state.scratchpad.get("_fama_same_target_streak")
+    assert isinstance(streak, dict)
+    assert streak["streak"] == 2
+
+    track_verifier_rejection(state, {"verdict": "fail", "command": command})
+    streak = state.scratchpad.get("_fama_same_target_streak")
+    assert isinstance(streak, dict)
+    assert streak["streak"] == 3
+
+
+def _activate_tool_exposure_narrowing(state: LoopState) -> None:
+    activate_mitigations(
+        state,
+        [
+            ActiveMitigation(
+                name="tool_exposure_narrowing",
+                reason="loop_guard repeated_action",
+                source_signal="looping:0",
+                activated_step=0,
+                expires_after_step=2,
+            )
+        ],
+        max_active=3,
+    )
+
+
+def _push_looping_signal(state: LoopState, tool_name: str) -> None:
+    push_fama_signal(
+        state,
+        FamaSignal(
+            kind=FamaFailureKind.LOOPING,
+            severity=2,
+            source="loop_guard",
+            evidence=f"repeated_tool={tool_name}; no_actionable_progress=4",
+            step=1,
+            tool_name=tool_name,
+        ),
+    )
+
+
+def test_tool_exposure_narrowing_keeps_file_read_exposed_for_read_loop() -> None:
+    """A repeated file_read loop must not hide file_read entirely (run aba990a3).
+
+    The loop_guard already blocks the repeated call on the specific path; hiding
+    the whole tool pushes the model onto worse substitutes like artifact_read.
+    """
+    state = LoopState()
+    _activate_tool_exposure_narrowing(state)
+    _push_looping_signal(state, "file_read")
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("file_read"), _schema("artifact_read"), _schema("file_patch")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = {entry["function"]["name"] for entry in schemas}
+    assert names == {"file_read", "artifact_read", "file_patch"}
+
+
+def test_tool_exposure_narrowing_still_hides_other_looping_read_tools() -> None:
+    """Narrowing still applies to the other read-loop tools (e.g. artifact_read)."""
+    state = LoopState()
+    _activate_tool_exposure_narrowing(state)
+    _push_looping_signal(state, "artifact_read")
+
+    schemas = apply_fama_tool_exposure(
+        [_schema("file_read"), _schema("artifact_read"), _schema("file_patch")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+
+    names = {entry["function"]["name"] for entry in schemas}
+    assert "artifact_read" not in names
+    assert "file_read" in names
+
+
+def test_repeated_tool_loop_suppression_still_hides_other_looping_tools() -> None:
+    """Non-file_read looping tools are still suppressed for the TTL window."""
+    from smallctl.harness.tool_visibility import filter_tools_for_runtime_state
+
+    state = LoopState()
+    state.scratchpad["_repeated_tool_loop_suppressed_tool"] = "dir_list"
+    state.scratchpad["_repeated_tool_loop_suppressed_ttl"] = 2
+
+    filtered = filter_tools_for_runtime_state(
+        [_schema("file_read"), _schema("dir_list")],
+        state=state,
+        mode="loop",
+    )
+
+    names = {entry["function"]["name"] for entry in filtered}
+    assert "dir_list" not in names
+    assert "file_read" in names
+
+
+def test_swa_stable_tool_exposure_reads_scratchpad_model_and_provider() -> None:
+    """SWA detection must fall back to state scratchpad model/provider."""
+    from smallctl.fama.tool_policy import _swa_stable_tool_exposure
+
+    state = LoopState()
+    state.scratchpad["_model_name"] = "gemma-4-12b"
+    state.scratchpad["_provider_profile"] = "llamacpp"
+
+    assert _swa_stable_tool_exposure(state, config=None) is True
+
+    # All tools should remain exposed for SWA models.
+    schemas = apply_fama_tool_exposure(
+        [_schema("task_complete"), _schema("task_fail"), _schema("file_read")],
+        state=state,
+        mode="loop",
+        config=_Config(),
+    )
+    names = {entry["function"]["name"] for entry in schemas}
+    assert names == {"task_complete", "task_fail", "file_read"}

@@ -79,6 +79,21 @@ class SmallctlConfig:
     graph_recursion_limit: int = 1024
     graph_coding_recursion_limit: int = 2048
     needs_human_timeout_sec: int = 600
+    # Native LangGraph per-node timeouts are opt-in until rollout validation is complete.
+    langgraph_native_timeouts_enabled: bool = False
+    # Native LangGraph retry policy: opt-in, bounded, and restricted to safe nodes.
+    langgraph_native_retries_enabled: bool = False
+    langgraph_native_retry_max_attempts: int = 2
+    # Native LangGraph node error handlers: opt-in; route selected safe-node failures
+    # into the harness's existing recovery logic instead of ending the graph immediately.
+    langgraph_error_handlers_enabled: bool = False
+    # Native LangGraph task/checkpoint streaming: opt-in; expose graph lifecycle events
+    # to the TUI/logs without removing the custom runlog system.
+    langgraph_stream_events_enabled: bool = False
+    # Native LangGraph cache policy: disabled. No graph node has a provably correct
+    # cache key (prompt preparation depends on conversation/retrieval state, and the
+    # indexer pipeline uses LLM calls and mutating tool calls). Do not enable.
+    langgraph_cache_policy_enabled: bool = False
     restore_graph_state: bool = False
     graph_thread_id: str | None = None
     fresh_run: bool = False
@@ -120,7 +135,9 @@ class SmallctlConfig:
     rewoo_refiner_frame_enabled: bool = False
     rewoo_frame_token_budget: int = 1200
     test_time_scaling_enabled: bool = False
-    test_time_scaling_runtimes: list[str] = field(default_factory=lambda: ["staged_execution"])
+    test_time_scaling_runtimes: list[str] = field(
+        default_factory=lambda: ["staged_execution"]
+    )
     test_time_scaling_trigger: str = "retry_or_explicit"
     test_time_scaling_max_candidates: int = 3
     test_time_scaling_min_candidates: int = 2
@@ -196,7 +213,9 @@ class SmallctlConfig:
     artifact_summarization_threshold: int = 1200
     chunk_mode_min_bytes: int = 4096
     chunk_mode_new_file_only: bool = True
-    chunk_mode_supported_models: list[str] = field(default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"])
+    chunk_mode_supported_models: list[str] = field(
+        default_factory=lambda: ["qwen3.5", "llama3.1", "deepseek-v3", "deepseek-v4"]
+    )
     small_model_soft_write_chars: int = 2000
     small_model_hard_write_chars: int = 4000
     new_file_chunk_mode_line_estimate: int = 100
@@ -215,6 +234,7 @@ class SmallctlConfig:
     loop_guard_cumulative_write_gate: bool = True
     loop_guard_checkpoint_gate: bool = True
     loop_guard_diff_gate: bool = True
+    max_consecutive_errors: int = 8
     fama_enabled: bool = True
     fama_mode: str = "lite"
     fama_default_ttl_steps: int = 2
@@ -245,7 +265,10 @@ class SmallctlConfig:
 def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     # Source precedence (before provider defaults):
     # user config path -> local config -> env/.env -> CLI
-    env_cfg = _env_config()
+    # Screenshot diagnostics can opt into hermetic resolution without changing
+    # normal application precedence.
+    local_config_only = bool(cli.get("_local_config_only"))
+    env_cfg = {} if local_config_only else _env_config()
     user_cfg: dict[str, Any] = {}
     local_cfg: dict[str, Any] = {}
 
@@ -253,7 +276,8 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     if user_config_path:
         user_cfg = _read_yaml(Path(user_config_path))
         user_cfg["config_path"] = user_config_path
-    local_cfg = _read_yaml(Path.cwd() / LOCAL_CONFIG)
+    if not local_config_only:
+        local_cfg = _read_yaml(Path.cwd() / LOCAL_CONFIG)
 
     merged: dict[str, Any] = {}
     if "provider_profile" not in merged:
@@ -285,7 +309,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         merged["preset"] = preset_name
     _apply_typed_config_values(merged)
     _apply_config_aliases(merged)
-    if merged.get("staged_reasoning") and "staged_execution_enabled" not in explicit_merged:
+    if (
+        merged.get("staged_reasoning")
+        and "staged_execution_enabled" not in explicit_merged
+    ):
         merged["staged_execution_enabled"] = True
 
     explicit_prompt_budget = "max_prompt_tokens" in explicit_merged
@@ -312,7 +339,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
         )
     merged["phase"] = normalize_phase(str(merged.get("phase", "explore")))
     merged["run_mode"] = _normalize_run_mode(merged.get("run_mode", "auto"))
-    merged["graph_checkpointer"] = _normalize_graph_checkpointer(merged.get("graph_checkpointer", "memory"))
+    merged["graph_checkpointer"] = _normalize_graph_checkpointer(
+        merged.get("graph_checkpointer", "memory")
+    )
     if merged.get("graph_checkpoint_path") and merged["graph_checkpointer"] == "memory":
         merged["graph_checkpointer"] = "file"
     if merged.get("fresh_run"):
@@ -320,9 +349,10 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     _apply_provider_profile(merged, explicit_merged, compatibility_warnings)
     profile = str(merged.get("provider_profile", "auto")).strip().lower()
     if profile == "lmstudio":
-        if not str(merged.get("backend_unload_command") or "").strip() and not str(
-            merged.get("backend_restart_command") or ""
-        ).strip():
+        if (
+            not str(merged.get("backend_unload_command") or "").strip()
+            and not str(merged.get("backend_restart_command") or "").strip()
+        ):
             compatibility_warnings.append(
                 "LM Studio native API unload will be attempted automatically; configure SMALLCTL_BACKEND_RESTART_COMMAND if you want restart fallback when unload does not recover."
             )
@@ -341,7 +371,9 @@ def resolve_config(cli: dict[str, Any]) -> SmallctlConfig:
     allowed_keys = {f.name for f in fields(SmallctlConfig)}
     unknown_keys = sorted(k for k in merged if k not in allowed_keys)
     if unknown_keys:
-        compatibility_warnings.append(f"Ignoring unsupported config keys: {', '.join(unknown_keys)}.")
+        compatibility_warnings.append(
+            f"Ignoring unsupported config keys: {', '.join(unknown_keys)}."
+        )
     filtered = {k: v for k, v in merged.items() if k in allowed_keys}
     return SmallctlConfig(**filtered)
 

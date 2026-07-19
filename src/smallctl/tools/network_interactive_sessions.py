@@ -7,12 +7,16 @@ import uuid
 from typing import Any
 
 from .common import fail, ok
+from ..risk_policy import evaluate_risk_policy
+from ..state import LoopState
 from .process_lifecycle import cancel_tasks, stop_process, unregister_process
 from .process_streams import read_stream_chunks
 from .ssh_parsing import strip_redundant_root_sudo as _strip_redundant_root_sudo
 from .network_ssh_helpers import (
+    SSHStrictHostKeyConfigError,
     build_ssh_command as _build_ssh_command,
     detect_interactive_prompt as _detect_interactive_prompt,
+    resolve_ssh_strict_host_key_mode as _resolve_ssh_strict_host_key_mode,
     ssh_execution_debug_metadata as _ssh_execution_debug_metadata,
 )
 from .shell_support import _expose_interactive_session_tools
@@ -326,6 +330,66 @@ async def ssh_session_start(
 
     proc = None
     password_file_path: str | None = None
+
+    policy_state = state if state is not None else LoopState()
+    approval_fn = getattr(harness, "request_shell_approval", None)
+    approval_available = callable(approval_fn) and getattr(harness, "event_handler", None) is not None
+    risk_decision = evaluate_risk_policy(
+        policy_state,
+        tool_name="ssh_exec",
+        tool_risk="high",
+        phase=str(getattr(policy_state, "current_phase", "") or ""),
+        action=f"Start interactive SSH session on {host}: {command}",
+        expected_effect="Open an interactive SSH session and run the requested command on the remote host.",
+        rollback="Close the session and revert any in-progress remote changes if needed.",
+        verification="Inspect the interactive session output and any follow-up verifier result.",
+        approval_available=approval_available,
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "host": host,
+                "user": user,
+                "command": command,
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
+            },
+        )
+    if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+        approved = await approval_fn(
+            command=f"ssh {user + '@' if user else ''}{host} {command}".strip(),
+            cwd=str(getattr(policy_state, "cwd", ".") or "."),
+            timeout_sec=timeout_sec,
+            proof_bundle=risk_decision.proof_bundle,
+        )
+        if not approved:
+            denied = fail(
+                "Interactive SSH session denied by user.",
+                metadata={
+                    "approval_denied": True,
+                    "host": host,
+                    "user": user,
+                    "command": command,
+                },
+            )
+            denied["status"] = "denied"
+            return denied
+
+    try:
+        strict_host_key_mode = _resolve_ssh_strict_host_key_mode(harness)
+    except SSHStrictHostKeyConfigError as exc:
+        return fail(
+            str(exc),
+            metadata={
+                "host": host,
+                "user": user,
+                "command": command,
+                "reason": "invalid_ssh_config",
+                "config_key": "ssh_strict_host_key_checking",
+            },
+        )
+
     try:
         full_cmd, env_overrides, password_file_path = _build_ssh_command(
             host=host,
@@ -334,6 +398,7 @@ async def ssh_session_start(
             port=port,
             identity_file=identity_file,
             password=password,
+            strict_host_key_checking=strict_host_key_mode,
             force_tty=True,
         )
     except FileNotFoundError as exc:
@@ -419,7 +484,7 @@ async def ssh_session_start(
             **_ssh_execution_debug_metadata(
                 password=password,
                 identity_file=identity_file,
-                strict_host_key_checking="accept-new",
+                strict_host_key_checking=strict_host_key_mode,
             ),
         },
     )
@@ -519,6 +584,55 @@ async def ssh_session_send(
             "SSH interactive session stdin is unavailable.",
             metadata={"session_id": session_id},
         )
+    gate_harness = harness if harness is not None else session.get("harness")
+    policy_state = state if state is not None else LoopState()
+    approval_fn = getattr(gate_harness, "request_shell_approval", None)
+    approval_available = callable(approval_fn) and getattr(gate_harness, "event_handler", None) is not None
+    host = str(session.get("host") or "")
+    user = session.get("user")
+    risk_decision = evaluate_risk_policy(
+        policy_state,
+        tool_name="ssh_exec",
+        tool_risk="high",
+        phase=str(getattr(policy_state, "current_phase", "") or ""),
+        action=f"Send input to interactive SSH session on {host}: {input}",
+        expected_effect="Deliver the requested input to the remote interactive process.",
+        rollback="Close the session and revert any in-progress remote changes if needed.",
+        verification="Inspect the interactive session output and any follow-up verifier result.",
+        approval_available=approval_available,
+    )
+    if not risk_decision.allowed:
+        return fail(
+            risk_decision.reason,
+            metadata={
+                "session_id": session_id,
+                "host": host,
+                "user": user,
+                "input": str(input or ""),
+                "reason": "missing_supported_claim",
+                "proof_bundle": risk_decision.proof_bundle,
+            },
+        )
+    if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+        approved = await approval_fn(
+            command=f"ssh {user + '@' if user else ''}{host} send: {input}".strip(),
+            cwd=str(getattr(policy_state, "cwd", ".") or "."),
+            timeout_sec=int(session.get("timeout_sec") or 900),
+            proof_bundle=risk_decision.proof_bundle,
+        )
+        if not approved:
+            denied = fail(
+                "Interactive SSH session input denied by user.",
+                metadata={
+                    "approval_denied": True,
+                    "session_id": session_id,
+                    "host": host,
+                    "user": user,
+                    "input": str(input or ""),
+                },
+            )
+            denied["status"] = "denied"
+            return denied
     text = str(input or "")
     if send_newline and text and not text.endswith("\n"):
         text += "\n"

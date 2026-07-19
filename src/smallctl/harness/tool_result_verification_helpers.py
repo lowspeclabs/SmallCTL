@@ -38,6 +38,8 @@ def verifier_kind_for_command(command: str) -> str:
     if any(marker in padded for marker in (" ruff", " mypy", " eslint", "cargo clippy")):
         return "lint_typecheck"
     if re.search(r"\bpython(?:3(?:\.\d+)?)?\b.*\.py\b", normalized):
+        if re.search(r"\b(nodes list|help|(--?help))\b", normalized):
+            return "diagnostic"
         return "run_target"
     # Install-task verifiers: service status, package presence, listening ports, version commands
     if re.search(r"\bsystemctl\s+(?:status|is-active|is-enabled)\b", normalized):

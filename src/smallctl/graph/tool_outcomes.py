@@ -84,11 +84,30 @@ _REMOTE_TASK_USER_HOST_RE = re.compile(
 )
 
 
+def _reset_no_tool_nudges_after_successful_dispatch(
+    harness: Any,
+    records: list[ToolExecutionRecord],
+) -> None:
+    """Clear the counted no-tool nudge counter after a successful dispatch.
+
+    The ``_no_tool_nudges`` counter arms the no-tool auto-finalize threshold.
+    It is cleared only when at least one dispatched tool call in the batch
+    reports envelope success; merely routing calls to dispatch (or a batch in
+    which every call failed) leaves the counter armed.
+    """
+    scratchpad = getattr(getattr(harness, "state", None), "scratchpad", None)
+    if not isinstance(scratchpad, dict) or not scratchpad.get("_no_tool_nudges"):
+        return
+    if any(bool(getattr(record.result, "success", False)) for record in records):
+        scratchpad["_no_tool_nudges"] = 0
+
+
 async def apply_tool_outcomes(
     graph_state: GraphRunState,
     deps: GraphRuntimeDeps,
 ) -> LoopRoute:
     harness = deps.harness
+    _reset_no_tool_nudges_after_successful_dispatch(harness, graph_state.last_tool_results)
     for record in graph_state.last_tool_results:
         _observe_install_source_diagnosis(harness, record)
         _maybe_clear_missing_input_after_remote_readback(harness, record)
@@ -166,6 +185,7 @@ async def apply_chat_tool_outcomes(
     deps: GraphRuntimeDeps,
 ) -> LoopRoute:
     harness = deps.harness
+    _reset_no_tool_nudges_after_successful_dispatch(harness, graph_state.last_tool_results)
     for record in graph_state.last_tool_results:
         _maybe_clear_missing_input_after_remote_readback(harness, record)
         _maybe_emit_missing_requested_output_file_nudge(graph_state, harness, record)

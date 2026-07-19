@@ -25,6 +25,7 @@ from agent_tools_lib import (
     Colors,
     colorize,
     extract_trace_id,
+    is_background_state_changing_shell_dispatch,
     iter_records,
     resolve_run_dir,
 )
@@ -117,7 +118,7 @@ def _parse_dispatches(
             subindex_by_trace[tid] = subindex_by_trace.get(tid, 0) + 1
             subindex = subindex_by_trace[tid]
             sub_trace_id = f"{tid}:dispatch-{subindex}"
-            dispatches.append({
+            dispatch = {
                 "trace_id": tid,
                 "sub_trace_id": sub_trace_id,
                 "timestamp": rec.get("timestamp"),
@@ -131,7 +132,9 @@ def _parse_dispatches(
                 "mode": _mode_at_trace(harness_records, tid),
                 "profiles": _profiles_at_trace(harness_records, tid),
                 "ui_event_kinds": ui_event_kinds.get(tid, []),
-            })
+            }
+            dispatch["background_state_changing"] = is_background_state_changing_shell_dispatch(dispatch)
+            dispatches.append(dispatch)
 
     return dispatches
 
@@ -182,6 +185,13 @@ def _render_text(
         lines.append(line)
         if ui_kind_text:
             lines.append(f"         ui_events: {ui_kind_text}")
+        if d.get("background_state_changing"):
+            lines.append(
+                colorize(
+                    "         warning: background state-changing command; OK only means the process launched, not that the mutation completed",
+                    Colors.YELLOW,
+                )
+            )
         if success is False and error:
             lines.append(f"         error: {error[:200]}")
         if show_policy:

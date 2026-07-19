@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .tool_call_parser import _tool_call_fingerprint
+from .tool_loop_guards import _tool_call_fingerprint
 from .state import ToolExecutionRecord
 
 

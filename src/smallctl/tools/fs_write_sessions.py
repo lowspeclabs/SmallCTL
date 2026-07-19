@@ -380,6 +380,11 @@ def maybe_create_implicit_write_session(
     has_next = bool(raw_next) and not _is_finalization_marker(raw_next)
     content_len = len(str(content or ""))
 
+    if strategy == "overwrite" and not has_next:
+        # An explicit one-shot overwrite with no declared follow-up section is a
+        # direct write; do not trap it in a staged session that may never finalize.
+        return None
+
     # A present section label (other than a full-file marker) implies chunked authoring.
     implies_chunking = bool(normalized_section) and normalized_section.lower() not in {
         "full_file",

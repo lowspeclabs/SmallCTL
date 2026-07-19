@@ -684,6 +684,49 @@ def test_repeated_artifact_read_past_eof_stops_early(tmp_path: Path) -> None:
     assert "artifact_read EOF overread" in repeat_error
 
 
+def test_repeated_target_artifact_read_covered_by_prior_reads_is_loop() -> None:
+    harness = _FakeHarness()
+    harness.state.scratchpad["_task_target_paths"] = [
+        "/home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md"
+    ]
+    harness.state.artifacts = {
+        "A0001": ArtifactRecord(
+            artifact_id="A0001",
+            kind="file_read",
+            source="/home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md",
+            created_at="2026-04-30T00:00:00+00:00",
+            size_bytes=256,
+            summary="agents guide",
+            tool_name="file_read",
+            metadata={
+                "path": "/home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md",
+                "complete_file": True,
+            },
+        )
+    }
+
+    prior_file_read = PendingToolCall(
+        tool_name="file_read",
+        args={"path": "/home/stephen/Scripts/Harness-Redo/temp/proxmox-manager/AGENTS.md"},
+    )
+    _record_tool_attempt(harness, prior_file_read)
+    prior_artifact_read = PendingToolCall(
+        tool_name="artifact_read",
+        args={"artifact_id": "A0001"},
+    )
+    _record_tool_attempt(harness, prior_artifact_read)
+
+    pending = PendingToolCall(
+        tool_name="artifact_read",
+        args={"artifact_id": "A0001", "start_line": 1, "end_line": 150},
+    )
+    _record_tool_attempt(harness, pending)
+    repeat_error = _detect_repeated_tool_loop(harness, pending)
+
+    assert repeat_error is not None
+    assert "re-reading an instruction/target file" in repeat_error
+
+
 def test_repeated_loop_status_pauses_with_verifier_guidance() -> None:
     harness = _FakeHarness()
     harness.state.run_brief.original_task = "Fix temp/env_sanitizer.py"

@@ -7,6 +7,7 @@ import shlex
 from typing import Any
 
 from ..state import LoopState
+from ..risk_policy import evaluate_risk_policy
 from .common import fail, ok
 from . import network
 from .ssh_files_patch_utils import (
@@ -32,6 +33,7 @@ from .ssh_files_mutation_tracking import _clear_remote_mutation_requirement
 
 SSH_FILE_MUTATING_TOOLS = {"ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"}
 REMOTE_MUTATION_VERIFICATION_KEY = "_remote_mutation_requires_verification"
+_MUTATING_REMOTE_FILE_ACTIONS = {"write", "patch", "replace_between", "delete", "rename", "chmod", "mkdir"}
 
 # When the base64-encoded JSON payload exceeds this size, switch from passing it
 # as a command-line argument (which is bounded by ARG_MAX / MAX_ARG_STRLEN) to
@@ -115,6 +117,53 @@ async def _run_remote_file_action(
     )
     if error is not None or connection is None:
         return fail(error.get("message", "Invalid SSH target."), metadata=error or {})
+
+    mutating = action in _MUTATING_REMOTE_FILE_ACTIONS and not bool(payload.get("dry_run"))
+    if mutating:
+        policy_state = state if state is not None else LoopState()
+        approval_fn = getattr(harness, "request_shell_approval", None)
+        approval_available = callable(approval_fn) and getattr(harness, "event_handler", None) is not None
+        action_description = f"{action} remote file {path} on {connection.get('host')}"
+        risk_decision = evaluate_risk_policy(
+            policy_state,
+            tool_name="ssh_exec",
+            tool_risk="high",
+            phase=str(policy_state.current_phase or ""),
+            action=action_description,
+            expected_effect="Apply the requested remote file change.",
+            rollback="Restore the remote file from the pre-mutation backup if needed.",
+            verification="Read back the remote file and compare the resulting hash.",
+            approval_available=approval_available,
+        )
+        if not risk_decision.allowed:
+            return fail(
+                risk_decision.reason,
+                metadata={
+                    "path": path,
+                    "host": connection.get("host"),
+                    "reason": "missing_supported_claim",
+                    "proof_bundle": risk_decision.proof_bundle,
+                },
+            )
+        if risk_decision.requires_approval and callable(approval_fn) and approval_available:
+            approved = await approval_fn(
+                command=action_description,
+                cwd=str(getattr(policy_state, "cwd", ".") or "."),
+                timeout_sec=timeout_sec,
+                proof_bundle=risk_decision.proof_bundle,
+            )
+            if not approved:
+                denied = fail(
+                    "Remote file operation denied by user.",
+                    metadata={
+                        "approval_denied": True,
+                        "path": path,
+                        "host": connection.get("host"),
+                        "action": action,
+                    },
+                )
+                denied["status"] = "denied"
+                return denied
 
     helper_payload = {
         **payload,

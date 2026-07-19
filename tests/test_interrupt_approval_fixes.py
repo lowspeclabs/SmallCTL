@@ -1093,6 +1093,146 @@ class TestInterruptApprovalFixes:
         assert payload["incomplete_task_ids"] == ["task-0001"]
         assert payload["has_incomplete_prior_tasks"] is True
 
+class TestContinueModeInterruptModal:
+    """Regression tests for the repeated_tool_loop_resume modal reply mapping (run aba990a3)."""
+
+    def test_continue_mode_modal_affirmative_reply_is_accepted(self):
+        """The modal's affirmative reply must satisfy is_interrupt_response for continue-mode."""
+        from smallctl.ui.approval import InterruptPromptScreen
+
+        interrupt = {
+            "kind": "repeated_tool_loop_resume",
+            "response_mode": "continue",
+            "question": "PAUSED: You were looping on `artifact_read`. Reply `continue` to resume THAT SAME TASK.",
+        }
+        screen = InterruptPromptScreen(
+            title="Input required",
+            question=interrupt["question"],
+            kind=interrupt["kind"],
+            response_mode=interrupt["response_mode"],
+        )
+
+        assert screen.affirmative_reply == "continue"
+        assert screen.negative_reply is None
+        assert is_interrupt_response(interrupt, screen.affirmative_reply)
+        assert interrupt_response_action(interrupt, screen.affirmative_reply) == "continue"
+
+    def test_continue_mode_reply_inferred_from_kind_without_response_mode(self):
+        """Kind inference alone (no explicit response_mode) must still map to a continue reply."""
+        from smallctl.ui.approval import InterruptPromptScreen
+
+        interrupt = {
+            "kind": "repeated_tool_loop_resume",
+            "question": "PAUSED: You were looping on `artifact_read`.",
+        }
+        screen = InterruptPromptScreen(
+            title="Input required",
+            question=interrupt["question"],
+            kind=interrupt["kind"],
+        )
+
+        assert screen.affirmative_reply == "continue"
+        assert is_interrupt_response(interrupt, screen.affirmative_reply)
+        assert not is_interrupt_response(interrupt, "yes")
+        assert not is_interrupt_response(interrupt, "no")
+
+    def test_yes_no_mode_modal_replies_unchanged(self):
+        """apt validator yes/no interrupts keep their canonical yes/no replies."""
+        from smallctl.ui.approval import InterruptPromptScreen
+
+        interrupt = {
+            "kind": "apt_deb822_validator_approval",
+            "response_mode": "yes/no",
+            "question": "Approve the validator?",
+        }
+        screen = InterruptPromptScreen(
+            title="Input required",
+            question=interrupt["question"],
+            kind=interrupt["kind"],
+            response_mode=interrupt["response_mode"],
+        )
+
+        assert screen.affirmative_reply == "yes"
+        assert screen.negative_reply == "no"
+        assert interrupt_response_action(interrupt, screen.affirmative_reply) == "approve"
+        assert interrupt_response_action(interrupt, screen.negative_reply) == "reject"
+
+    def test_plan_approval_mode_modal_replies_unchanged(self):
+        """plan_execute_approval yes/no/revise semantics are not altered."""
+        from smallctl.ui.approval import InterruptPromptScreen
+
+        interrupt = {
+            "kind": "plan_execute_approval",
+            "response_mode": "yes/no/revise",
+            "question": "Plan ready. Execute it now?",
+        }
+        screen = InterruptPromptScreen(
+            title="Approve plan?",
+            question=interrupt["question"],
+            kind=interrupt["kind"],
+            response_mode=interrupt["response_mode"],
+        )
+
+        assert screen.affirmative_reply == "yes"
+        assert screen.negative_reply == "no"
+        assert interrupt_response_action(interrupt, screen.affirmative_reply) == "approve"
+        assert interrupt_response_action(interrupt, screen.negative_reply) == "reject"
+
+    def test_repeated_tool_loop_payload_declares_continue_response_mode(self):
+        """The guard payload carries an explicit response_mode so consumers need no inference."""
+        from smallctl.graph.chat_progress import build_repeated_tool_loop_interrupt_payload
+        from smallctl.graph.state import PendingToolCall
+
+        state = LoopState()
+        state.run_brief.original_task = "read .gitignore and summarize it"
+        harness = SimpleNamespace(state=state)
+        graph_state = SimpleNamespace(thread_id="thread-1")
+        pending = PendingToolCall(tool_name="artifact_read", args={"artifact_id": "A0001"})
+
+        payload = build_repeated_tool_loop_interrupt_payload(
+            harness=harness,
+            graph_state=graph_state,
+            pending=pending,
+            repeat_error="Guard tripped: repeated tool call loop",
+        )
+
+        assert payload["kind"] == "repeated_tool_loop_resume"
+        assert payload["response_mode"] == "continue"
+        assert is_interrupt_response(payload, "continue")
+        assert not is_interrupt_response(payload, "yes")
+        assert not is_interrupt_response(payload, "no")
+
+    @pytest.mark.asyncio
+    async def test_generic_interrupt_prompt_failure_surfaces_question_as_alert(self):
+        """If the modal cannot be shown, the question is still surfaced as an alert line."""
+        import logging
+
+        from smallctl.ui.app_approvals import prompt_for_generic_interrupt
+
+        lines: list[tuple[str, bool, str]] = []
+
+        async def _record(text: str, *, force: bool = False, kind: str = "system") -> None:
+            lines.append((text, force, kind))
+
+        app = SimpleNamespace(
+            _active_approval_prompt=None,
+            _app_logger=logging.getLogger("test.interrupt"),
+            _refresh_status=lambda: None,
+            push_screen=AsyncMock(side_effect=RuntimeError("no running app")),
+            _append_system_line=_record,
+        )
+        interrupt = {
+            "kind": "repeated_tool_loop_resume",
+            "response_mode": "continue",
+            "question": "PAUSED: You were looping on `artifact_read`.",
+        }
+
+        decision = await prompt_for_generic_interrupt(app, interrupt)
+
+        assert decision is None
+        assert lines == [("Input required: PAUSED: You were looping on `artifact_read`.", True, "alert")]
+        assert app._active_approval_prompt is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

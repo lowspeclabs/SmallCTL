@@ -18,7 +18,6 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
 from ..harness import Harness
-from ..logging_utils import RunLogger
 from ..logging_utils import log_kv
 from ..models.events import UIEvent, UIEventType, UIStatusSnapshot
 from ..chat_sessions import (
@@ -56,6 +55,29 @@ from .statusbar import StatusBar
 
 
 class SmallctlAppFlowMixin:
+    def _spawn_background_task(self, coro: Any, *, name: str) -> asyncio.Task[Any]:
+        """Run an auxiliary coroutine with retention so exceptions are observed."""
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+
+        def _on_done(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                self._app_logger.warning(f"UI background task {name} failed: {exc}")
+
+        task.add_done_callback(_on_done)
+        return task
+
+    async def _cancel_background_tasks(self) -> None:
+        tasks = [task for task in self._background_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def on_input_pane_submitted(self, event: InputPane.Submitted) -> None:
         await handle_input_pane_submitted(self, event)
 
@@ -185,6 +207,12 @@ class SmallctlAppFlowMixin:
             snapshot_payload = event.data.get("snapshot")
             if isinstance(snapshot_payload, dict):
                 self._queue_status_refresh(snapshot_payload)
+            return
+
+        if event.event_type == UIEventType.SYSTEM and event.data.get("graph_event"):
+            activity = str(event.data.get("node") or event.data.get("status") or "").strip()
+            if activity:
+                self._set_activity(f"graph: {activity}")
             return
 
         if event.event_type == UIEventType.USER and self._pending_user_echo is not None:
@@ -319,9 +347,17 @@ class SmallctlAppFlowMixin:
         if event in _CRITICAL_EVENTS:
             event_data["ui_kind"] = event
             event_data["event_payload"] = dict(row.get("data") or {})
-        emit = lambda: asyncio.create_task(
-            self.on_harness_event(UIEvent(event_type=UIEventType.SYSTEM, content=text, data=event_data))
-        )
+        def emit() -> bool:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return False
+            self._spawn_background_task(
+                self.on_harness_event(UIEvent(event_type=UIEventType.SYSTEM, content=text, data=event_data)),
+                name="run_log_row_emit",
+            )
+            return True
+
         app_thread_id = getattr(self, "_loop_thread_id", None) or getattr(self, "_thread_id", None)
         if app_thread_id == threading.get_ident():
             emit()
@@ -329,7 +365,14 @@ class SmallctlAppFlowMixin:
         try:
             self.call_from_thread(emit)
         except RuntimeError:
-            emit()
+            if not emit():
+                log_kv(
+                    self._app_logger,
+                    logging.WARNING,
+                    "ui_run_log_row_dropped",
+                    event=event,
+                    reason="no_running_event_loop",
+                )
 
     @staticmethod
     def _should_render_run_log_row(row: dict[str, Any]) -> bool:
@@ -939,8 +982,10 @@ class SmallctlAppFlowMixin:
         self._refresh_status()
         console = self._get_console()
         if console is not None:
-            import asyncio
-            asyncio.create_task(console.update_thinking_indicator())
+            self._spawn_background_task(
+                console.update_thinking_indicator(),
+                name="thinking_indicator",
+            )
 
     def _set_shell_approval_session_default(self, enabled: bool) -> None:
         self._shell_approval_session_default = bool(enabled)

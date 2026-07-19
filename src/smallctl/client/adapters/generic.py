@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import StreamPolicy
-from .common import sanitize_message_for_transport
+from .common import sanitize_messages_with_pending_tool_cleanup
 from .common import should_retry_without_stream_options as _retry_without_stream_options
 
 
@@ -18,7 +18,7 @@ class GenericAdapter:
     )
 
     def sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [sanitize_message_for_transport(message) for message in messages]
+        return sanitize_messages_with_pending_tool_cleanup(messages)
 
     def mutate_headers(self, headers: dict[str, str]) -> dict[str, str]:
         return dict(headers)

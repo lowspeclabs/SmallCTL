@@ -74,18 +74,72 @@ def test_resolve_tilde_in_file_read_missing() -> None:
     assert "~" in result["error"]
 
 
-def test_file_read_blocks_likely_secret_file(tmp_path) -> None:
+def test_file_read_redacts_envrc_file(tmp_path) -> None:
     import asyncio
     from smallctl.tools.fs_listing import file_read
 
-    env_file = tmp_path / ".env"
-    env_file.write_text("API_TOKEN=secret-value\n", encoding="utf-8")
+    env_file = tmp_path / ".envrc"
+    env_file.write_text("export API_TOKEN=secret-value\n", encoding="utf-8")
 
     result = asyncio.run(file_read(str(env_file)))
 
+    assert result["success"] is True
+    assert "secret-value" not in result["output"]
+    assert result["metadata"]["dotenv_read_redacted"] is True
+
+
+def test_file_read_allows_env_example_template(tmp_path) -> None:
+    import asyncio
+    from smallctl.tools.fs_listing import file_read
+
+    env_example = tmp_path / ".env.example"
+    env_example.write_text(
+        "# placeholder config\nPROXMOX_API_URL=https://example.local\n",
+        encoding="utf-8",
+    )
+
+    result = asyncio.run(file_read(str(env_example)))
+
+    assert result["success"] is True
+    assert "placeholder config" in result["output"]
+
+
+def test_file_read_redacts_real_env_files(tmp_path) -> None:
+    import asyncio
+    from smallctl.tools.fs_listing import file_read
+
+    for name in [".env", ".env.local", ".env.production"]:
+        target = tmp_path / name
+        target.write_text("API_KEY=super-secret-api-key\n", encoding="utf-8")
+        result = asyncio.run(file_read(str(target)))
+        assert result["success"] is True, name
+        assert "super-secret-api-key" not in result["output"], name
+        assert result["metadata"]["dotenv_read_redacted"] is True, name
+
+
+def test_file_read_still_blocks_netrc(tmp_path) -> None:
+    import asyncio
+    from smallctl.tools.fs_listing import file_read
+
+    target = tmp_path / ".netrc"
+    target.write_text("machine example login user password secret\n", encoding="utf-8")
+
+    result = asyncio.run(file_read(str(target)))
+
     assert result["success"] is False
     assert result["metadata"]["reason"] == "sensitive_file_read_blocked"
-    assert "secret-value" not in result["error"]
+    assert "machine example login user password secret" not in result["error"]
+
+
+def test_file_read_allows_env_sample_templates(tmp_path) -> None:
+    import asyncio
+    from smallctl.tools.fs_listing import file_read
+
+    for name in [".env.sample", ".env.template", ".env.dist"]:
+        target = tmp_path / name
+        target.write_text("# template\n", encoding="utf-8")
+        result = asyncio.run(file_read(str(target)))
+        assert result["success"] is True, name
 
 
 def test_resolve_enforces_workspace_containment_for_writes(tmp_path: Path) -> None:

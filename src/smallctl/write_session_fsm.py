@@ -262,6 +262,46 @@ def archive_interrupted_write_session(
     return None
 
 
+def archive_write_session(
+    state: Any,
+    session: Any,
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Archive a single active (non-terminal) session and refresh the alias.
+
+    Unlike ``archive_interrupted_write_session`` this only removes the given
+    session: other active sessions stay active and the ``state.write_session``
+    alias is refreshed to the most recently started remaining session.
+    """
+    if state is None or session is None:
+        return None
+    if is_terminal_write_session(session):
+        return None
+    payload = _append_archived_write_session(
+        state,
+        _write_session_archive_payload(session, reason=reason),
+    )
+    _record_dead_write_session_id(state, payload.get("write_session_id"))
+    active_map = getattr(state, "active_write_sessions_by_path", None)
+    if isinstance(active_map, dict):
+        state.active_write_sessions_by_path = {
+            key: item
+            for key, item in active_map.items()
+            if item is not session
+        }
+    if getattr(state, "write_session", None) is session:
+        state.write_session = None
+    _refresh_write_session_alias(state)
+    record_write_session_event(
+        state,
+        event="write_session_archived",
+        session=session,
+        details={"reason": payload["reason"], "count": 1},
+    )
+    return payload
+
+
 def _record_dead_write_session_id(state: Any, session_id: str | None) -> None:
     if state is None or not session_id:
         return

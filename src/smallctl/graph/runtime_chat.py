@@ -84,6 +84,7 @@ class ChatGraphRuntime(LoopGraphRuntime):
         },
         static_edges=[
             ("persist_tool_results", "apply_chat_tool_outcomes"),
+            ("interrupt_for_human", "prepare_step"),
         ],
     )
 

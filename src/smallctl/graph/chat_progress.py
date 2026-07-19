@@ -433,6 +433,7 @@ def build_repeated_tool_loop_interrupt_payload(
         guidance = build_artifact_summary_exit_message(harness, artifact_id=artifact_id)
     return {
         "kind": "repeated_tool_loop_resume",
+        "response_mode": "continue",
         "question": question,
         "current_phase": harness.state.current_phase,
         "active_profiles": list(harness.state.active_tool_profiles),

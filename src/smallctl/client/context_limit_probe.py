@@ -11,11 +11,35 @@ def _summarize_exception(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _normalize_model_list_id(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if "/" in text:
+        text = text.split("/")[-1]
+    return text
+
+
+def _is_same_model_family(configured: str, candidate: str) -> bool:
+    """Return True when two model-list ids plausibly name the same model.
+
+    Provider model lists often report ids that differ from the configured
+    model only by a vendor prefix or a quantization/instruction suffix, so a
+    normalized substring check in either direction counts as same-family.
+    """
+    normalized_configured = _normalize_model_list_id(configured)
+    normalized_candidate = _normalize_model_list_id(candidate)
+    if not normalized_configured or not normalized_candidate:
+        return False
+    return (
+        normalized_configured in normalized_candidate
+        or normalized_candidate in normalized_configured
+    )
+
+
 async def fetch_model_context_limit(client: Any) -> int | None:
     if not client.runtime_context_probe:
         return None
     try:
-        import httpx
+        import httpx  # noqa: F401
     except (ImportError, ModuleNotFoundError):  # pragma: no cover
         raise RuntimeError("Dependency missing: httpx")
 
@@ -99,9 +123,13 @@ async def fetch_model_context_limit(client: Any) -> int | None:
             break
     if selected is None:
         for item in data:
-            if isinstance(item, dict) and model_id in str(item.get("id", "")):
+            if isinstance(item, dict) and _is_same_model_family(model_id, str(item.get("id", ""))):
                 selected = item
                 break
     if selected is not None:
         return _remember_model_metadata(client, selected, source="model_list")
-    return _remember_model_metadata(client, payload, source="model_list")
+    # The configured model is absent from the provider's list. Do not fall back
+    # to the whole-list payload: its largest context window would come from an
+    # unrelated model and overestimate the budget, causing provider 400s.
+    log_kv(client.log, 20, "context_probe_model_not_listed", model=model_id, source="model_list")
+    return None

@@ -249,14 +249,13 @@ def _maybe_trigger_write_session_fallback(harness: Any, session: Any) -> bool:
 
 
 def _abort_write_session(harness: Any, session: Any) -> None:
-    from ..tools.fs_write_sessions import _remove_active_write_session
-    from ..write_session_fsm import archive_interrupted_write_session
+    from ..write_session_fsm import archive_write_session
 
-    archive_interrupted_write_session(
+    archive_write_session(
         harness.state,
+        session,
         reason=f"write_session_aborted_after_{session.write_failed_local_patches}_failed_patches",
     )
-    _remove_active_write_session(harness.state, session)
     _record_write_session_recovery_failure(
         harness,
         session,

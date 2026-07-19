@@ -4,8 +4,16 @@ import logging
 from typing import Any
 
 from ..logging_utils import log_kv
-from .openrouter_preflight import _client_context_limit, _tool_name
-from .request_budget import RequestBudget, RequestEstimator, build_request_budget
+from .client_transport_helpers import (
+    context_pressure_diagnostics as _context_pressure_diagnostics,
+)
+from .client_transport_helpers import tool_name as _tool_name
+from .request_budget import (
+    RequestBudget,
+    RequestEstimator,
+    build_request_budget,
+    client_context_limit as _client_context_limit,
+)
 from .tool_budgeting import ToolBudgetResult, fit_tools_to_context_budget
 from .transport_constants import _LOCAL_PATCH_INTENT_RE, _LOCAL_WRITE_INTENT_RE, _UNSET
 
@@ -58,6 +66,7 @@ def _log_llamacpp_budget_preflight(
     context_limit: int | None,
     context_limit_source: str = "observed",
     reduction_reason: str = "",
+    payload: dict[str, Any] | None = None,
 ) -> None:
     details: dict[str, Any] = {
         "stage": stage,
@@ -67,6 +76,8 @@ def _log_llamacpp_budget_preflight(
         "context_limit_source": context_limit_source,
         "budget_action": action,
     }
+    if payload is not None:
+        details.update(_context_pressure_diagnostics(payload, context_limit=context_limit))
     if reduction_reason:
         details["reduction_reason"] = reduction_reason
     if result is not None:
@@ -154,7 +165,6 @@ def _llamacpp_budget_preflight(
             model=client.model,
             context_limit=None,
             budget_action="skipped_unknown_limit",
-            estimated_payload_tokens=footprint.estimated_payload_tokens,
             estimated_message_tokens=footprint.estimated_message_tokens,
             estimated_tool_tokens=footprint.estimated_tool_tokens,
             tool_count_before=footprint.tool_count,
@@ -162,6 +172,7 @@ def _llamacpp_budget_preflight(
             dropped_tool_names=[],
             kept_tool_names=[_tool_name(tool) for tool in tools if _tool_name(tool)],
             over_budget_tokens=0,
+            **_context_pressure_diagnostics(payload, context_limit=None),
         )
         if client.run_logger:
             client.run_logger.log(
@@ -173,7 +184,6 @@ def _llamacpp_budget_preflight(
                 model=client.model,
                 context_limit=None,
                 budget_action="skipped_unknown_limit",
-                estimated_payload_tokens=footprint.estimated_payload_tokens,
                 estimated_message_tokens=footprint.estimated_message_tokens,
                 estimated_tool_tokens=footprint.estimated_tool_tokens,
                 tool_count_before=footprint.tool_count,
@@ -181,6 +191,7 @@ def _llamacpp_budget_preflight(
                 dropped_tool_names=[],
                 kept_tool_names=[_tool_name(tool) for tool in tools if _tool_name(tool)],
                 over_budget_tokens=0,
+                **_context_pressure_diagnostics(payload, context_limit=None),
             )
         return None
 
@@ -210,6 +221,7 @@ def _llamacpp_budget_preflight(
         context_limit=displayed_context_limit,
         context_limit_source=context_limit_source,
         reduction_reason=reduction_reason,
+        payload=payload,
     )
     return result
 

@@ -13,7 +13,7 @@ MEMORY_NAMESPACES = {
     "incidents",
 }
 
-_LOCAL_SHELL_TOOL_NAMES = {"shell_exec", "bash_exec"}
+_LOCAL_SHELL_TOOL_NAMES = {"shell_exec"}
 _REMOTE_TOOL_NAMES = {"ssh_exec"}
 _CODING_TOOL_NAMES = {
     "file_write",
@@ -80,7 +80,6 @@ _INTENT_NAMESPACE_OVERRIDES = {
     "requested_file_delete": "coding",
     "requested_write_file": "coding",
     "requested_shell_exec": "local_shell",
-    "requested_bash_exec": "local_shell",
     "requested_ssh_exec": "ssh_remote",
 }
 

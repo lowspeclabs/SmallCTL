@@ -38,6 +38,8 @@ from .task_classifier_support import (
     task_is_local_coding_target,
     task_is_local_ssh_file_target,
     task_is_local_system_target,
+    task_has_local_command_target,
+    task_has_local_scope_markers,
     task_uses_local_tool_for_remote_api,
 )
 
@@ -60,6 +62,17 @@ class RuntimeIntent:
 class RuntimePolicy:
     route_mode: str | None
     chat_requires_tools: bool
+
+
+@dataclass(frozen=True)
+class TaskClassificationDecision:
+    """Route decision plus the evidence needed by downstream safety guards."""
+
+    mode: str
+    matched_rule: str
+    local_anchors: tuple[str, ...]
+    remote_execution_anchors: tuple[str, ...]
+    decision_source: str = "task_classifier"
 
 
 
@@ -139,16 +152,26 @@ def has_code_target(task: str) -> bool:
 
 
 def classify_task_mode(task: str) -> str:
+    return classify_task_decision(task).mode
+
+
+def classify_task_decision(task: str) -> TaskClassificationDecision:
     text = task.strip()
     if not text:
-        return "chat"
+        return TaskClassificationDecision("chat", "empty_task", (), ())
+    lowered = text.lower()
+    local_anchors = tuple(anchor for anchor in ("local", "locally", "./", "../", "this host", "this machine") if anchor in lowered)
+    if task_has_local_command_target(text):
+        local_anchors += ("local_command_path",)
+    if task_has_local_scope_markers(text) and "local_scope" not in local_anchors:
+        local_anchors += ("local_scope",)
+    remote_anchors = tuple(anchor for anchor in ("ssh to", "over ssh", "via ssh", "connect to", "remote host", "remote server") if anchor in lowered)
     for rule in _TASK_CLASSIFICATION_RULES:
         if rule.check(text):
-            return rule.mode
-    lowered = text.lower()
+            return TaskClassificationDecision(rule.mode, rule.name, local_anchors, remote_anchors)
     if "error" in lowered or "failed" in lowered or "failure" in lowered:
-        return "analysis"
-    return "chat"
+        return TaskClassificationDecision("analysis", "failure_analysis", local_anchors, remote_anchors)
+    return TaskClassificationDecision("chat", "default_chat", local_anchors, remote_anchors)
 
 
 def looks_like_action_request(task: str) -> bool:

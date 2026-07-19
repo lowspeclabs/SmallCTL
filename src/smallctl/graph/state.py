@@ -68,6 +68,37 @@ _KNOWN_SWALLOWED_TOOL_ARGUMENTS = {
 }
 
 
+def _strip_json_trailing_commas(text: str) -> str:
+    """Remove trailing commas before ``]``/``}`` without touching string literals.
+
+    Walks the payload tracking JSON string state and backslash escapes; only
+    commas encountered outside any string whose next non-whitespace character
+    closes an object or array are dropped. Commas inside string values (regex
+    quantifiers such as ``{1,}``, shell fragments like ``a,]b``) are preserved.
+    """
+    chars = list(text)
+    in_string = False
+    escape = False
+    for index, char in enumerate(chars):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            lookahead = index + 1
+            while lookahead < len(chars) and chars[lookahead] in " \t\r\n":
+                lookahead += 1
+            if lookahead < len(chars) and chars[lookahead] in "]}":
+                chars[index] = " "
+    return "".join(chars)
+
+
 def _repair_gemma_swallowed_json_keys(args: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not isinstance(args, dict) or not args:
         return args, []
@@ -185,20 +216,32 @@ class PendingToolCall:
             return {}, metadata
         last_error: dict[str, str] | None = None
 
-        # Step 2: Fix trailing commas in objects and arrays
-        # This regex looks for commas followed by any whitespace and then a closing brace or bracket.
-        cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
+        # Step 2: Parse the payload exactly as emitted. Repairs only run after
+        # a parse failure so valid JSON passes through byte-identical and
+        # string literals are never rewritten by cleanup heuristics.
+        parsed, parse_error = _parse_mapping(cleaned)
+        if parse_error is None:
+            parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
+            if repairs:
+                metadata["gemma_swallowed_key_repairs"] = repairs
+            return parsed, metadata
+        last_error = parse_error
 
-        # Step 3: Attempt to fix missing closing braces
+        # Step 3: Fix trailing commas in objects and arrays using a
+        # string/escape-aware scan so commas inside string literals survive.
+        cleaned = _strip_json_trailing_commas(cleaned)
+
+        # Step 4: Attempt to fix missing closing braces
         # If the string starts with '{' but is missing the balancing '}', we try to append it.
         if cleaned.startswith('{') and not cleaned.endswith('}'):
             # Only try this if it's missing at most 5 closing braces (guard against crazy strings)
             for _ in range(5):
                 cleaned += '}'
                 # Clean AGAIN after adding brace to catch trailing commas that now have a bracket following them
-                repaired = re.sub(r',\s*([\]}])', r'\1', cleaned)
+                repaired = _strip_json_trailing_commas(cleaned)
                 parsed, parse_error = _parse_mapping(repaired)
                 if parse_error is None:
+                    metadata["arguments_repaired"] = True
                     parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
                     if repairs:
                         metadata["gemma_swallowed_key_repairs"] = repairs
@@ -207,6 +250,7 @@ class PendingToolCall:
 
         parsed, parse_error = _parse_mapping(cleaned)
         if parse_error is None:
+            metadata["arguments_repaired"] = True
             parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
             if repairs:
                 metadata["gemma_swallowed_key_repairs"] = repairs
@@ -214,10 +258,10 @@ class PendingToolCall:
         if parse_error is not None:
             last_error = parse_error
         if not parsed:
-            # Step 4: Final fallback for very common 'code-block' wrap halluciations
+            # Step 5: Final fallback for very common 'code-block' wrap halluciations
             if "```json" in cleaned.lower():
                 # Pre-clean the whole thing for trailing commas if we're desperate
-                desperate = re.sub(r',\s*([\]}])', r'\1', cleaned)
+                desperate = _strip_json_trailing_commas(cleaned)
                 match = re.search(r"```json\s*(\{.*?\})\s*```", desperate, re.DOTALL | re.IGNORECASE)
                 if match:
                     parsed, parse_error = _parse_mapping(match.group(1))
@@ -226,6 +270,7 @@ class PendingToolCall:
                 else:
                     parsed = {}
         if isinstance(parsed, dict) and parsed:
+            metadata["arguments_repaired"] = True
             parsed, repairs = _repair_gemma_swallowed_json_keys(parsed)
             if repairs:
                 metadata["gemma_swallowed_key_repairs"] = repairs

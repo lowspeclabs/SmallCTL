@@ -5,9 +5,12 @@ import logging
 from typing import Any
 
 from ..logging_utils import log_kv
+from .client_transport_helpers import (
+    context_pressure_diagnostics as _context_pressure_diagnostics,
+    tool_name as _tool_name,
+)
 from .provider_adapters import sanitize_messages_for_openrouter
 from .request_budget import (
-    approx_token_count as _budget_approx_token_count,
     client_context_limit as _budget_client_context_limit,
     json_size_bytes as _budget_json_size_bytes,
 )
@@ -17,36 +20,8 @@ def _json_size_bytes(value: Any) -> int:
     return _budget_json_size_bytes(value)
 
 
-def _approx_token_count(value: Any) -> int:
-    return _budget_approx_token_count(value)
-
-
 def _client_context_limit(client: Any) -> int | None:
     return _budget_client_context_limit(client)
-
-
-def _context_pressure_diagnostics(payload: dict[str, Any], *, context_limit: int | None) -> dict[str, Any]:
-    estimated_payload_tokens = _approx_token_count(payload)
-    estimated_tool_schema_tokens = _approx_token_count(payload.get("tools", []))
-    diagnostics: dict[str, Any] = {
-        "estimated_payload_tokens": estimated_payload_tokens,
-        "estimated_tool_schema_tokens": estimated_tool_schema_tokens,
-    }
-    if context_limit is not None:
-        diagnostics["known_context_limit"] = context_limit
-        diagnostics["estimated_context_tokens_remaining"] = context_limit - estimated_payload_tokens
-        if estimated_payload_tokens >= context_limit:
-            diagnostics["likely_provider_rejection"] = "context_overflow"
-    return diagnostics
-
-
-def _tool_name(tool: Any) -> str:
-    if not isinstance(tool, dict):
-        return ""
-    function = tool.get("function")
-    if not isinstance(function, dict):
-        return ""
-    return str(function.get("name") or "").strip()
 
 
 def _tool_schema_diagnostics(payload: dict[str, Any], *, context_limit: int | None = None) -> dict[str, Any]:

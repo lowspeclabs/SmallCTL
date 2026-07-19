@@ -226,7 +226,8 @@ def test_declined_write_recovery_empty_payload_is_blocked_before_dispatch(tmp_pa
 
     assert dispatched == []
     assert graph_state.pending_tool_calls == []
-    assert graph_state.last_tool_results == []
+    assert len(graph_state.last_tool_results) == 1
+    assert graph_state.last_tool_results[0].result.status == "blocked"
     assert state.recent_messages
     assert state.recent_messages[-1].metadata["recovery_kind"] == "schema_validation"
     assert state.recent_messages[-1].metadata["required_fields"] == ["content"]

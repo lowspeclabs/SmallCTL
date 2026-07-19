@@ -130,7 +130,35 @@ def _readonly_answer_looks_complete(text: str) -> bool:
     # Conclusive language.
     if any(marker in lowered for marker in ("to install", "steps:", "summary", "conclusion", "in summary", "recommended")):
         return True
+    # The model is explaining that the lookup is blocked by an environmental
+    # failure (e.g., DNS resolution, placeholder config, unreachable host).
+    # This is a *complete explanation* but should not be treated as a successful
+    # completion; callers must finalize as blocked/partial/failed instead.
+    if _readonly_answer_has_environmental_failure(text):
+        return True
     return False
+
+
+def _readonly_answer_has_environmental_failure(text: str) -> bool:
+    """Return True when the answer states the lookup is blocked by DNS/transport."""
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    return any(
+        marker in lowered
+        for marker in (
+            "can't connect because",
+            "cannot connect because",
+            "unable to connect",
+            "could not resolve",
+            "name resolution",
+            "temporary failure in",
+            "placeholder",
+            "blocked by",
+            "unreachable",
+            "network is unreachable",
+            "no route to host",
+            "unknown host",
+        )
+    )
 
 
 _NON_ACTIONABLE_FORWARD_MARKERS = (
@@ -144,6 +172,7 @@ _NON_ACTIONABLE_FORWARD_MARKERS = (
     "gonna ",
     "going to ",
 )
+_NON_ACTIONABLE_PROSE_COUNTS_CAP = 128
 
 
 def _looks_like_non_actionable_prose(text: str) -> bool:
@@ -158,6 +187,60 @@ def _non_actionable_turn_signature(text: str) -> str:
     """Stable signature for a non-actionable assistant turn."""
     normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
     return normalized[:120]
+
+
+def _answer_describes_hard_environmental_blocker(text: str) -> bool:
+    """Return True when the answer explains a hard environmental blocker.
+
+    Examples: missing credentials, placeholder config, unreachable service,
+    missing required input/environment. Such answers are terminal and should
+    not be treated as an action-stall nudge.
+    """
+    lowered = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if len(lowered) < 80:
+        return False
+    if any(marker in lowered for marker in _NON_ACTIONABLE_FORWARD_MARKERS):
+        # A negated "I will not ..." is a refusal, not a forward plan.
+        if "i will not" not in lowered and "i won't" not in lowered:
+            return False
+    blocker_markers = (
+        "no `.env`",
+        "no .env",
+        "missing credentials",
+        "missing api token",
+        "missing token",
+        "cannot authenticate",
+        "cannot connect because",
+        "unable to connect",
+        "could not resolve",
+        "name resolution",
+        "temporary failure in",
+        "placeholder",
+        "unreachable",
+        "no route to host",
+        "unknown host",
+        "blocked by",
+        "cannot proceed",
+        "to proceed, please provide",
+        "without a real",
+        "without valid",
+        "not configured",
+        "requires configuration",
+        "i will not",
+        "i won't",
+    )
+    return any(marker in lowered for marker in blocker_markers)
+
+
+# The ``_no_tool_nudges`` scratchpad counter arms the no-tool auto-finalize
+# threshold. Only nudges in this family (``recovery_kind`` on the injected
+# message) may increment it; phase-contract blocks and verifier-repair
+# nudges are separate families and must not count toward auto-finalize.
+# The counter is cleared in the tool-outcome application path once a
+# dispatched batch reports at least one envelope success (see
+# tool_outcomes._reset_no_tool_nudges_after_successful_dispatch); routing to
+# dispatch alone does not reset it.
+_NO_TOOL_NUDGE_COUNTED_FAMILY = "missing_task_complete"
 
 
 async def interpret_model_output(
@@ -270,7 +353,6 @@ async def interpret_model_output(
                                 "recovery_kind": "phase_contract_all_tools_blocked",
                             },
                         ))
-                        harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
                         return LoopRoute.NEXT_STEP
                 else:
                     phase_bits = phase_contract(current_phase)
@@ -287,25 +369,6 @@ async def interpret_model_output(
                             "recovery_kind": "phase_contract_partial_tools_blocked",
                         },
                     ))
-                    harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
-                    return LoopRoute.NEXT_STEP
-
-            if current_phase == "verify":
-                blocked = ["task_complete", "task_fail", "file_write", "file_patch", "ast_patch", "long_context_lookup", "summarize_report", "artifact_read", "grep"]
-                if any(c.tool_name in blocked for c in graph_state.pending_tool_calls):
-                    graph_state.pending_tool_calls = [c for c in graph_state.pending_tool_calls if c.tool_name not in blocked]
-                    harness.state.append_message(ConversationMessage(
-                        role="system",
-                        content=(
-                            "You are in VERIFICATION. Review the verifier evidence and acceptance criteria before "
-                            "moving to execution or repair."
-                        ),
-                        metadata={
-                            "is_recovery_nudge": True,
-                            "recovery_kind": "verify_phase_tools_blocked",
-                        },
-                    ))
-                    harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
                     return LoopRoute.NEXT_STEP
 
     # Anti-premature-fail guard: block task_fail/task_complete within 2 steps
@@ -333,7 +396,6 @@ async def interpret_model_output(
                                 "recovery_kind": "verifier_failure_repair_required",
                             },
                         ))
-                        harness.state.scratchpad["_no_tool_nudges"] = int(harness.state.scratchpad.get("_no_tool_nudges", 0)) + 1
                         return LoopRoute.NEXT_STEP
 
     if graph_state.pending_tool_calls:
@@ -732,6 +794,9 @@ async def interpret_model_output(
 
         return LoopRoute.DISPATCH_TOOLS
 
+    # Counted no-tool nudges (missing-task_complete family only; see
+    # _NO_TOOL_NUDGE_COUNTED_FAMILY). Other recovery nudge families do not
+    # arm the auto-finalize threshold below.
     nudges = int(harness.state.scratchpad.get("_no_tool_nudges", 0))
     assistant_text = graph_state.last_assistant_text or ""
 
@@ -803,11 +868,16 @@ async def interpret_model_output(
                 "next i",
             )
         )
+        # A negated "I will not ..." is a refusal, not a forward plan.
+        if looks_like_future_action and "i will not" in low_assistant_text:
+            looks_like_future_action = False
         # For read-only / research tasks (e.g. "do a websearch and respond"),
         # a substantive prose answer after tool evidence is the deliverable.
         # Auto-promote it to task_complete so the loop doesn't stall with
         # action_stall / completion_confabulation / consecutive_idle nudges.
         readonly_lookup = _is_readonly_lookup_intent(harness)
+        blocker_explanation = _answer_describes_hard_environmental_blocker(assistant_text)
+        readonly_env_failure = readonly_lookup and _readonly_answer_has_environmental_failure(assistant_text)
         if (
             nudges == 0
             and has_tool_evidence
@@ -820,9 +890,27 @@ async def interpret_model_output(
                     readonly_lookup
                     and _readonly_answer_looks_complete(assistant_text)
                 )
+                or blocker_explanation
             )
             and harness.state.current_phase != "repair"
         ):
+            if readonly_env_failure or blocker_explanation:
+                harness._runlog(
+                    "auto_finalize_blocked_environmental_failure" if readonly_env_failure else "auto_finalize_hard_blocker",
+                    "lookup/action answer reports hard environmental blocker; finalizing as blocked",
+                    text_len=len(assistant_text),
+                    readonly_lookup=readonly_lookup,
+                    blocker_explanation=blocker_explanation,
+                )
+                graph_state.final_result = {
+                    "status": "blocked",
+                    "message": {
+                        "status": "blocked",
+                        "message": assistant_text[:500],
+                    },
+                    "assistant": assistant_text,
+                }
+                return LoopRoute.FINALIZE
             harness._runlog(
                 "auto_finalize",
                 "prose answer with tool evidence; skipping nudge",
@@ -841,7 +929,7 @@ async def interpret_model_output(
 
     _ACTION_KEYWORDS = ["call", "run", "execute", "use", "using", "invok", "command", "tool"]
     _HTML_TOOL_TAGS = ["<tool_call>", "<function=", "<parameter="]
-    _FUNC_SYNTAX = [f"{t}(" for t in ["shell_exec", "artifact_read", "file_read", "dir_list", "task_complete", "bash_exec"]]
+    _FUNC_SYNTAX = [f"{t}(" for t in ["shell_exec", "artifact_read", "file_read", "dir_list", "task_complete"]]
 
     low_text = assistant_text.lower()
     thinking_looks_like_action = any(kw in graph_state.last_thinking_text.lower() for kw in _ACTION_KEYWORDS)
@@ -1024,7 +1112,13 @@ async def interpret_model_output(
             counts = {}
             harness.state.scratchpad["_non_actionable_prose_counts"] = counts
         count = int(counts.get(signature, 0)) + 1
+        # Bounded LRU accounting: the scratchpad is checkpointed, so cap the
+        # map to the newest signatures instead of letting it grow unbounded.
+        if signature in counts:
+            del counts[signature]
         counts[signature] = count
+        while len(counts) > _NON_ACTIONABLE_PROSE_COUNTS_CAP:
+            counts.pop(next(iter(counts)))
         harness.state.scratchpad["_non_actionable_prose_last_signature"] = signature
 
         registry = getattr(harness, "registry", None)
@@ -1137,6 +1231,7 @@ async def interpret_model_output(
             return LoopRoute.DISPATCH_TOOLS
 
     if nudges < 4 and assistant_text_for_guards and not stream_halted:
+        # Only the missing-task_complete family counts toward auto-finalize.
         harness.state.scratchpad["_no_tool_nudges"] = nudges + 1
         msg = (
             "You reached a conclusion but did not call `task_complete`. "
@@ -1185,7 +1280,7 @@ async def interpret_model_output(
                 content=msg,
                 metadata={
                     "is_recovery_nudge": True,
-                    "recovery_kind": "missing_task_complete",
+                    "recovery_kind": _NO_TOOL_NUDGE_COUNTED_FAMILY,
                 },
             )
         )
@@ -1448,7 +1543,7 @@ async def interpret_chat_output(
     low_text = assistant_text.lower()
     action_keywords = ["call", "run", "execute", "use", "using", "invok", "command", "tool"]
     html_tool_tags = ["<tool_call>", "<function=", "<parameter="]
-    func_syntax = [f"{tool_name}(" for tool_name in ["shell_exec", "ssh_exec", "artifact_read", "file_read", "dir_list", "task_complete", "bash_exec"]]
+    func_syntax = [f"{tool_name}(" for tool_name in ["shell_exec", "ssh_exec", "artifact_read", "file_read", "dir_list", "task_complete"]]
     thinking_looks_like_action = any(keyword in str(graph_state.last_thinking_text or "").lower() for keyword in action_keywords)
     text_looks_like_action = any(keyword in low_text for keyword in action_keywords)
     text_has_tool_tags = any(tag in low_text for tag in html_tool_tags)

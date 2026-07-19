@@ -8,7 +8,14 @@ def estimate_text_tokens(text: str) -> int:
         return 0
     # Conservative estimation for agentic prompts (special chars, code, JSON)
     # Using 0.4 tokens per character (approx // 2.5) to avoid overfilling tight limits.
-    return max(1, int(len(text) * 0.4) + 1)
+    if text.isascii():
+        return max(1, int(len(text) * 0.4) + 1)
+    # Non-ASCII codepoints (CJK, emoji, many accented scripts) tokenize at
+    # roughly one token per character, so charge them at 1.0 to keep every
+    # downstream budget honest for non-ASCII content.
+    non_ascii_chars = sum(1 for char in text if ord(char) > 127)
+    ascii_chars = len(text) - non_ascii_chars
+    return max(1, int(ascii_chars * 0.4 + non_ascii_chars * 1.0) + 1)
 
 
 @dataclass
@@ -21,7 +28,9 @@ class ContextPolicy:
     recent_message_limit: int = 20
     transcript_token_limit: int = 1400
     run_brief_token_limit: int = 240
-    working_memory_token_limit: int = 360
+    # Bounded but large enough for curated working-memory blocks (write-session
+    # contract, recovery guidance, session notepad) to survive lane enforcement.
+    working_memory_token_limit: int = 640
     episodic_summary_token_limit: int = 320
     artifact_snippet_section_token_limit: int = 520
     max_summary_items: int = 3

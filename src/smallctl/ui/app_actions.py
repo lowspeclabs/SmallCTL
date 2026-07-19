@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from textual.app import ComposeResult
@@ -17,7 +18,7 @@ from ..provider_profiles import supported_provider_profiles
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
 from .console import ConsolePane
 from .display import _build_backend_rca_strip, format_tool_call_for_display
-from .model_selector import ModelSelectScreen, ProviderSelectButton, ProviderSelectScreen
+from .model_selector import ModelSelectScreen, ProviderSelectScreen
 from .statusbar import StatusBar
 
 
@@ -87,6 +88,7 @@ class SmallctlAppActionsMixin:
         bridge = getattr(self, "_harness_bridge", None)
         if bridge is not None:
             bridge.cancel(source="ui_stop_button")
+            bridge.abort()
         elif self.harness is not None:
             self.harness.cancel(source="ui_stop_button")
         active_task = self.active_task
@@ -120,6 +122,14 @@ class SmallctlAppActionsMixin:
                             task_id=id(active_task),
                             task_name=getattr(active_task, "get_name", lambda: "?")(),
                         )
+            if bridge is not None:
+                terminated = await bridge.wait_for_idle(timeout=5.0)
+                if not terminated:
+                    log_kv(
+                        self._app_logger,
+                        logging.WARNING,
+                        "ui_cancel_run_still_in_flight",
+                    )
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Active task cancelled.")

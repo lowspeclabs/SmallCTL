@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shlex
 import time
+from pathlib import Path
 from typing import Any
-
-log = logging.getLogger("smallctl.tools.shell_foreground")
 
 from ..models.events import UIEvent, UIEventType
 from ..risk_policy import evaluate_risk_policy
@@ -22,6 +22,7 @@ from .shell_support import (
     _build_shell_status_update,
     _command_requires_shell,
     _detect_unsupported_shell_syntax,
+    _extract_dry_run_hint,
     _extract_missing_argparse_arguments,
     _extract_unrecognized_argparse_arguments,
     _interactive_installer_yes_pipe_guard,
@@ -32,26 +33,154 @@ from .shell_support import (
 )
 from .ui_streaming import BufferedUIEventEmitter
 
+log = logging.getLogger("smallctl.tools.shell_foreground")
 
-_SAFE_COMPILE_LINT_COMMANDS = {
-    "python3 -m py_compile",
-    "flake8",
-    "mypy",
-    "ruff check",
-    "shellcheck",
+_LINT_MUTATING_FLAG_DENYLIST: dict[str, frozenset[str]] = {
+    "mypy": frozenset(
+        {
+            "--install-types",
+            "--html-report",
+            "--xhtml-report",
+            "--txt-report",
+            "--linecount-report",
+            "--linecoverage-report",
+            "--any-exprs-report",
+            "--cobertura-xml-report",
+            "--junit-xml",
+        }
+    ),
+    "flake8": frozenset({"--output-file"}),
 }
 
 
-def _is_safe_compile_lint_command(command: str) -> bool:
-    """Return True if the command is a read-only compile/lint verifier that can be auto-approved."""
-    segments = [s.strip() for s in re.split(r"&&|\|\||[;&|]", str(command or ""))]
-    for segment in segments:
-        if segment.startswith("cd "):
+def _split_shell_segments(command: str) -> list[str] | None:
+    """Split a command into segments on shell control operators, quote-aware.
+
+    Returns None when the command contains constructs that must fail closed:
+    redirection, command substitution, backgrounding, or unbalanced quotes.
+    """
+    text = str(command or "")
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            current.append(ch)
+            if ch == quote:
+                quote = None
+            elif ch == "\\" and quote == '"' and i + 1 < len(text):
+                i += 1
+                current.append(text[i])
+            i += 1
             continue
-        for prefix in _SAFE_COMPILE_LINT_COMMANDS:
-            if segment.startswith(prefix):
-                return True
+        if ch == "\\":
+            current.append(ch)
+            if i + 1 < len(text):
+                i += 1
+                current.append(text[i])
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
+            i += 1
+            continue
+        if ch in "><`":
+            return None
+        if ch == "$" and text[i + 1 : i + 2] == "(":
+            return None
+        if ch == "&":
+            if text[i + 1 : i + 2] == "&":
+                segments.append("".join(current))
+                current = []
+                i += 2
+                continue
+            return None
+        if ch == "|":
+            if text[i + 1 : i + 2] == "|":
+                segments.append("".join(current))
+                current = []
+                i += 2
+                continue
+            segments.append("".join(current))
+            current = []
+            i += 1
+            continue
+        if ch == ";":
+            segments.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    if quote is not None:
+        return None
+    segments.append("".join(current))
+    return segments
+
+
+def _segment_has_mutating_lint_flags(tool: str, arguments: list[str]) -> bool:
+    denied = _LINT_MUTATING_FLAG_DENYLIST.get(tool)
+    if not denied:
+        return False
+    return any(argument.split("=", 1)[0] in denied for argument in arguments)
+
+
+def _segment_is_safe_compile_lint(segment: str, *, workspace: Path | None) -> bool:
+    """Return True when a single segment is exactly a known read-only lint/compile invocation."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    head = tokens[0]
+    if head == "cd":
+        if len(tokens) != 2 or workspace is None:
+            return False
+        target = Path(tokens[1]).expanduser()
+        if not target.is_absolute():
+            target = workspace / target
+        try:
+            resolved = target.resolve()
+            resolved.relative_to(workspace)
+        except (OSError, ValueError):
+            return False
+        return True
+    if head == "ruff":
+        return (
+            len(tokens) >= 2
+            and tokens[1] == "check"
+            and not any(t in {"--fix", "--fix-only"} for t in tokens[2:])
+        )
+    if head in {"mypy", "flake8", "shellcheck"}:
+        return not _segment_has_mutating_lint_flags(head, tokens[1:])
     return False
+
+
+def _is_safe_compile_lint_command(command: str, *, cwd: str | None = None) -> bool:
+    """Return True if the command is a read-only compile/lint verifier that can be auto-approved.
+
+    Every segment separated by shell control operators must be exactly a known
+    non-mutating lint/compile invocation (or a workspace-bounded `cd`); anything
+    else fails closed.
+    """
+    segments = _split_shell_segments(command)
+    if not segments:
+        return False
+    workspace: Path | None = None
+    cwd_text = str(cwd or "").strip()
+    if cwd_text:
+        try:
+            workspace = Path(cwd_text).expanduser().resolve()
+        except OSError:
+            workspace = None
+    return all(
+        _segment_is_safe_compile_lint(segment, workspace=workspace)
+        for segment in segments
+    )
 
 
 def _leading_command_tokens(command: str, *, max_depth: int = 3) -> list[str]:
@@ -302,7 +431,7 @@ async def shell_exec_foreground(
                 )
             if risk_decision.requires_approval and callable(approval_fn) and approval_available:
                 approval_start = time.monotonic()
-                if _is_safe_compile_lint_command(command):
+                if _is_safe_compile_lint_command(command, cwd=state.cwd):
                     approved = True
                 else:
                     approved = await approval_fn(
@@ -311,7 +440,7 @@ async def shell_exec_foreground(
                         timeout_sec=timeout_sec,
                         proof_bundle=risk_decision.proof_bundle,
                     )
-                if not _is_safe_compile_lint_command(command):
+                if not _is_safe_compile_lint_command(command, cwd=state.cwd):
                     approval_wait_sec = time.monotonic() - approval_start
                 if not approved:
                     denied = fail(
@@ -591,6 +720,9 @@ async def shell_exec_foreground(
                 failure_metadata = {"output": output, "command": command}
                 failure_metadata.update(_classify_shell_failure(command, error, output))
                 return fail(error, metadata=failure_metadata)
+            dry_run_hint = _extract_dry_run_hint(output)
+            if dry_run_hint:
+                return ok(output, metadata={"command": command, "dry_run_hint": dry_run_hint})
             outcome = classify_shell_outcome(
                 command,
                 int(proc.returncode or 0),

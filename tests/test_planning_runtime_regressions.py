@@ -107,7 +107,7 @@ def test_request_validation_execution_is_exposed_in_planning(tmp_path) -> None:
     }
 
     assert "request_validation_execution" in planning_tool_names
-    assert "shell_exec" not in planning_tool_names
+    assert "shell_exec" in planning_tool_names
 
 
 def test_auto_runtime_validation_execution_reply_resumes_loop(tmp_path, monkeypatch) -> None:
@@ -818,7 +818,6 @@ async def test_interpret_planning_output_synthesizes_fallback_plan_after_meta_co
 @pytest.mark.asyncio
 async def test_interpret_planning_output_injects_gemma_recovery_nudge_on_reasoning_only_stall() -> None:
     """A Gemma-4 reasoning-only stream stall in planning mode should get the loop-mode recovery nudge."""
-    from smallctl.graph.node_support import _harness_model_name
 
     state = LoopState(cwd="/tmp")
     state.run_brief.original_task = "Fix the remote backup job"

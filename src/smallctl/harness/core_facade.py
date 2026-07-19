@@ -39,7 +39,10 @@ from ..tools.profiles import (
     classify_tool_profiles,
 )
 from ..tools.control_phase_gates import task_involves_interactive_program
-from .task_classifier_support import task_is_local_ssh_file_target
+from .task_classifier_support import (
+    _SSH_COMMAND_TARGET_RE,
+    task_is_local_ssh_file_target,
+)
 
 
 def _write_json_file(
@@ -637,6 +640,11 @@ def _finalize(self: Any, result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _reset_cancel_requested(self: Any) -> None:
+    self._cancel_requested = False
+    self._cancel_source = ""
+
+
 def _rewrite_active_plan_export(self: Any) -> None:
     plan = self.state.active_plan or self.state.draft_plan
     if plan is None or not plan.requested_output_path:
@@ -1135,10 +1143,15 @@ def _activate_tool_profiles(self: Any, task: str) -> None:
         elif task_mode == "local_execute":
             # Coding/local tasks do not need SSH tools; removing them prevents
             # small models from hallucinating remote operations during local work.
-            profiles.discard(NETWORK_PROFILE)
-            profiles.discard(NETWORK_RAW_PROFILE)
-            if task_is_local_ssh_file_target(task):
-                profiles.discard(NETWORK_READ_PROFILE)
+            # However, if the user explicitly wrote an "ssh user@host" command,
+            # do not strip the network profile; the task is a remote shell request.
+            if _SSH_COMMAND_TARGET_RE.search(task):
+                profiles.add(NETWORK_PROFILE)
+            else:
+                profiles.discard(NETWORK_PROFILE)
+                profiles.discard(NETWORK_RAW_PROFILE)
+                if task_is_local_ssh_file_target(task):
+                    profiles.discard(NETWORK_READ_PROFILE)
         resolved_remote = self.state.scratchpad.get("_resolved_remote_followup")
         if isinstance(resolved_remote, dict) and resolved_remote:
             profiles.add(NETWORK_PROFILE)
@@ -1232,6 +1245,7 @@ def bind_core_facade(cls: type[Any]) -> None:
     cls._emit = _emit
     cls.build_status_snapshot = build_status_snapshot
     cls._finalize = _finalize
+    cls._reset_cancel_requested = _reset_cancel_requested
     cls._rewrite_active_plan_export = _rewrite_active_plan_export
     cls._create_child_harness = _create_child_harness
     cls._build_subtask_result = _build_subtask_result

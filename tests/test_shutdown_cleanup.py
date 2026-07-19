@@ -301,6 +301,9 @@ def test_tui_ctrl_c_exit_prints_shutdown_alert_with_session_id(monkeypatch) -> N
         debug_tokens=False,
         compatibility_warnings=[],
         show_system_messages=True,
+        tui=True,
+        cleanup=False,
+        fama_disabled=False,
     )
 
     monkeypatch.setattr(main_module, "resolve_config", lambda _args: config)

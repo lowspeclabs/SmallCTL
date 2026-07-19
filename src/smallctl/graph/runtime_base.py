@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from dataclasses import dataclass
 import time
 from typing import Any, Awaitable, Callable
 
+import httpx
+from langgraph.errors import NodeError, NodeTimeoutError
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.types import Command, RetryPolicy
 
-from .runtime_payloads import (
+from .runtime_payloads import (  # noqa: F401
     LoopGraphPayload,
     build_runtime_payload,
     checkpoint_config,
@@ -24,7 +27,8 @@ from .runtime_payloads import (
     route_if_interrupt_else_final_else_pending_else,
     serialize_runtime_state,
 )
-from .state import GraphRunState
+from .state import GraphRunState  # noqa: F401
+from ..redaction import redact_sensitive_text
 
 
 DEFAULT_GRAPH_NODE_TIMEOUT_SEC = 300.0
@@ -65,7 +69,13 @@ class RuntimeGraphBuilder:
 
         for node_name, method_name in self.spec.node_map.items():
             fn = getattr(self.runtime, method_name)
-            builder.add_node(node_name, self._wrap_node(self.runtime, node_name, fn))
+            builder.add_node(
+                node_name,
+                self._wrap_node(self.runtime, node_name, fn),
+                timeout=graph_node_timeout_policy(self.runtime.deps.harness, node_name),
+                retry_policy=graph_retry_policy(self.runtime.deps.harness, node_name),
+                error_handler=graph_error_handler_policy(self.runtime, node_name),
+            )
 
         entry_source, entry_target = self.spec.entry_point
         builder.add_edge(entry_source, entry_target)
@@ -78,6 +88,8 @@ class RuntimeGraphBuilder:
             builder.add_node(
                 route_node_name,
                 self._wrap_node(self.runtime, route_node_name, self._make_route_node(router, targets)),
+                timeout=graph_node_timeout_policy(self.runtime.deps.harness, route_node_name),
+                retry_policy=graph_retry_policy(self.runtime.deps.harness, route_node_name),
             )
             builder.add_edge(source, route_node_name)
 
@@ -106,22 +118,7 @@ class RuntimeGraphBuilder:
                 timeout_sec=timeout_sec,
             )
             try:
-                if timeout_sec is None:
-                    result = await fn(payload)
-                else:
-                    result = await asyncio.wait_for(fn(payload), timeout=timeout_sec)
-            except asyncio.TimeoutError as exc:
-                elapsed = time.monotonic() - started
-                touch_graph_activity(harness)
-                runlog(
-                    harness,
-                    f"{node_name}_timeout",
-                    "graph node timed out",
-                    node=node_name,
-                    timeout_sec=timeout_sec,
-                    elapsed_sec=round(elapsed, 3),
-                )
-                raise GraphNodeTimeoutError(node_name, timeout_sec or 0.0) from exc
+                result = await fn(payload)
             except asyncio.CancelledError:
                 elapsed = time.monotonic() - started
                 touch_graph_activity(harness)
@@ -154,7 +151,7 @@ class RuntimeGraphBuilder:
                     node=node_name,
                     elapsed_sec=round(elapsed, 3),
                     error_type=type(exc).__name__,
-                    error_message=str(exc),
+                    error_message=redact_sensitive_text(str(exc)),
                 )
                 raise
             elapsed = time.monotonic() - started
@@ -337,6 +334,327 @@ def graph_node_timeout_sec(harness: Any, node_name: str) -> float | None:
         default = DEFAULT_GRAPH_NODE_TIMEOUT_SEC
         value = config_value(harness, "graph_node_timeout_sec", default)
     return positive_float(value)
+
+
+def graph_node_timeout_policy(harness: Any, node_name: str) -> float | None:
+    if not config_value(harness, "langgraph_native_timeouts_enabled", False):
+        return None
+    if node_name.startswith("route__"):
+        return graph_node_timeout_sec(harness, node_name)
+    if node_name in {
+        "dispatch_tools",
+        "persist_tool_results",
+        "interrupt_for_human",
+    } or node_name.endswith("_tool_outcomes"):
+        return None
+    return graph_node_timeout_sec(harness, node_name)
+
+
+# Nodes that are known to be idempotent, read-only, and prompt/retrieval-style.
+# This set is intentionally explicit; no wildcard or mutation-capable node is allowed.
+_RETRY_ALLOWED_NODES = frozenset({
+    "prepare_prompt",
+    "prepare_chat_prompt",
+    "prepare_indexer_prompt",
+    "prepare_tool_plan_prompt",
+    "prepare_solver_prompt",
+})
+
+_RETRY_INITIAL_INTERVAL = 1.0
+_RETRY_BACKOFF_FACTOR = 2.0
+_RETRY_MAX_INTERVAL = 30.0
+_RETRY_MAX_ATTEMPTS_CAP = 2
+
+# Per-async-task retry failure counts so that concurrent graph runs do not share
+# a global counter. The dict maps node name -> failure count for the current run.
+_retry_failure_counts: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "retry_failure_counts", default=None
+)
+
+
+def begin_graph_retry_attempts() -> contextvars.Token[dict[str, int] | None]:
+    """Start isolated retry accounting for one graph invocation."""
+    return _retry_failure_counts.set({})
+
+
+def end_graph_retry_attempts(token: contextvars.Token[dict[str, int] | None]) -> None:
+    """Discard retry accounting after a graph invocation completes."""
+    _retry_failure_counts.reset(token)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """Return True only for clearly transient transport/compute errors."""
+    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+        return False
+    if type(exc).__name__ == "GraphInterrupt":
+        return False
+    if isinstance(exc, NodeTimeoutError):
+        return False
+    if isinstance(exc, ConnectionError):
+        return True
+    if isinstance(exc, httpx.ConnectError):
+        return True
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            if exc.response.status_code >= 500:
+                return True
+        except Exception:
+            pass
+    if hasattr(exc, "status_code"):
+        try:
+            if int(getattr(exc, "status_code", 0)) >= 500:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _intended_retry_delay(failure_count: int) -> float:
+    """Compute the intended backoff delay for a given failure count."""
+    return min(
+        _RETRY_INITIAL_INTERVAL * (_RETRY_BACKOFF_FACTOR ** max(0, failure_count - 1)),
+        _RETRY_MAX_INTERVAL,
+    )
+
+
+def graph_retry_policy(harness: Any, node_name: str) -> RetryPolicy | None:
+    """Return a LangGraph RetryPolicy for safe, idempotent nodes, or None."""
+    if not config_value(harness, "langgraph_native_retries_enabled", False):
+        return None
+    if not node_name or node_name.startswith("route__"):
+        return None
+    if node_name not in _RETRY_ALLOWED_NODES:
+        return None
+
+    user_max = positive_int(
+        config_value(harness, "langgraph_native_retry_max_attempts", _RETRY_MAX_ATTEMPTS_CAP),
+        _RETRY_MAX_ATTEMPTS_CAP,
+    )
+    max_attempts = min(user_max, _RETRY_MAX_ATTEMPTS_CAP)
+    if max_attempts < 1:
+        max_attempts = _RETRY_MAX_ATTEMPTS_CAP
+
+    def retry_on(exc: BaseException) -> bool:
+        if not _is_transient_error(exc):
+            return False
+        counts = _retry_failure_counts.get(None)
+        if counts is None:
+            counts = {}
+            _retry_failure_counts.set(counts)
+        counts[node_name] = counts.get(node_name, 0) + 1
+        failure_count = counts[node_name]
+        next_attempt = failure_count + 1
+        if next_attempt <= max_attempts:
+            runlog(
+                harness,
+                "graph_retry_attempt",
+                "graph node retry attempt",
+                node=node_name,
+                attempt=next_attempt,
+                exception_type=type(exc).__name__,
+                delay_sec=_intended_retry_delay(failure_count),
+            )
+        return True
+
+    return RetryPolicy(
+        max_attempts=max_attempts,
+        initial_interval=_RETRY_INITIAL_INTERVAL,
+        backoff_factor=_RETRY_BACKOFF_FACTOR,
+        max_interval=_RETRY_MAX_INTERVAL,
+        jitter=True,
+        retry_on=retry_on,
+    )
+
+
+# Nodes that may receive native error handlers. This set is intentionally explicit;
+# no mutation-capable, model-call, or approval node is included.
+_ERROR_RECOVERY_ALLOWED_NODES = frozenset({
+    "prepare_prompt",
+    "prepare_chat_prompt",
+    "prepare_indexer_prompt",
+    "prepare_tool_plan_prompt",
+    "prepare_solver_prompt",
+    "interpret_model_output",
+    "interpret_chat_output",
+    "interpret_indexer_output",
+    "interpret_planning_output",
+    "interpret_solver_output",
+})
+
+_ERROR_RECOVERY_PREPARE_NODES = frozenset({
+    "prepare_prompt",
+    "prepare_chat_prompt",
+    "prepare_indexer_prompt",
+    "prepare_tool_plan_prompt",
+    "prepare_solver_prompt",
+})
+
+_ERROR_RECOVERY_INTERPRET_NODES = frozenset({
+    "interpret_model_output",
+    "interpret_chat_output",
+    "interpret_indexer_output",
+    "interpret_planning_output",
+    "interpret_solver_output",
+})
+
+_ERROR_RECOVERY_MAX_ATTEMPTS = 1
+
+
+def _graph_error_handler_terminal_result(
+    graph_state: GraphRunState,
+    harness: Any,
+    node_name: str,
+    exc: BaseException,
+) -> None:
+    """Set a harness failure result on the graph state for terminal errors."""
+    failure_fn = getattr(harness, "_failure", None)
+    if callable(failure_fn):
+        graph_state.final_result = failure_fn(
+            f"Graph node `{node_name}` failed and recovery is unavailable.",
+            error_type="graph_node_error",
+            details={
+                "node": node_name,
+                "exception_type": type(exc).__name__,
+            },
+        )
+    else:
+        graph_state.final_result = {
+            "status": "failed",
+            "error": {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+        }
+
+
+def _sanitize_error_message_for_handler(exc: BaseException) -> str:
+    """Return a short, sanitized error summary with no state or secret-bearing text."""
+    message = str(exc).strip() or type(exc).__name__
+    # Redact credentials or request fragments before truncating for runlog storage.
+    redacted = redact_sensitive_text(message)
+    # Truncate to a small window; never pass raw model output, tool args, or prompts.
+    return redacted[:500]
+
+
+def _tool_call_repair_enabled(harness: Any) -> bool:
+    return bool(getattr(getattr(harness, "config", None), "tool_call_repair_enabled", True))
+
+
+def _is_interpret_error_recoverable(harness: Any, exc: BaseException) -> bool:
+    """Return True only when the existing repair infrastructure can handle it."""
+    # The harness's tool-call schema repair and related hardening are the existing
+    # parse-repair paths. Without them, an interpret failure is terminal.
+    if not _tool_call_repair_enabled(harness):
+        return False
+    # Do not recover timeouts, cancels, or interrupts via the error handler.
+    if isinstance(exc, (asyncio.CancelledError, NodeTimeoutError)):
+        return False
+    if type(exc).__name__ == "GraphInterrupt":
+        return False
+    return True
+
+
+def _prepare_node_for_runtime(runtime: Any, failed_node_name: str) -> str | None:
+    """Pick the next safe preparation node for a failed allowed node."""
+    # If the failed node itself is a preparation node, route back to it.
+    if failed_node_name in _ERROR_RECOVERY_PREPARE_NODES:
+        return failed_node_name
+    # For interpret nodes, prefer a context-specific prepare node when possible.
+    if failed_node_name == "interpret_solver_output":
+        return "prepare_solver_prompt"
+    # Otherwise find any available preparation node in the runtime spec.
+    spec = getattr(runtime, "GRAPH_SPEC", None)
+    node_map = getattr(spec, "node_map", {}) if spec is not None else {}
+    for candidate in (
+        "prepare_prompt",
+        "prepare_chat_prompt",
+        "prepare_indexer_prompt",
+        "prepare_tool_plan_prompt",
+        "prepare_solver_prompt",
+    ):
+        if candidate in node_map:
+            return candidate
+    return None
+
+
+def make_graph_error_handler(runtime: Any, node_name: str):
+    """Return a LangGraph node error handler closure for the given node name.
+
+    The handler is narrow: it only attempts recovery for explicitly allowed safe
+    nodes. All other failures are converted into terminal harness results.
+    """
+    if node_name not in _ERROR_RECOVERY_ALLOWED_NODES:
+        return None
+
+    async def handler(payload: LoopGraphPayload, error: NodeError) -> Command:
+        harness = runtime.deps.harness
+        original_exc = error.error
+        # GraphInterrupt must never be recovered or converted to a terminal failure.
+        # Re-raise it so LangGraph's interrupt machinery produces the existing
+        # needs_human / resume behavior.
+        if type(original_exc).__name__ == "GraphInterrupt":
+            raise original_exc
+        graph_state = load_runtime_state(runtime, payload)
+        sanitized_message = _sanitize_error_message_for_handler(original_exc)
+
+        # Decide whether to recover or fail.
+        action = "recover"
+        scratchpad = graph_state.loop_state.scratchpad
+        recovery_counts = scratchpad.setdefault("_graph_error_recovery_counts", {})
+        if not isinstance(recovery_counts, dict):
+            recovery_counts = {}
+            scratchpad["_graph_error_recovery_counts"] = recovery_counts
+        recovery_count = int(recovery_counts.get(node_name, 0) or 0)
+        if recovery_count >= _ERROR_RECOVERY_MAX_ATTEMPTS:
+            action = "terminal"
+        if node_name in _ERROR_RECOVERY_PREPARE_NODES:
+            if action == "recover":
+                recovery_counts[node_name] = recovery_count + 1
+                scratchpad["_graph_error_recovery_hint"] = f"{node_name} failed: {sanitized_message}"
+        elif node_name in _ERROR_RECOVERY_INTERPRET_NODES:
+            if not _is_interpret_error_recoverable(harness, original_exc):
+                action = "terminal"
+            elif action == "recover":
+                recovery_counts[node_name] = recovery_count + 1
+                scratchpad["_graph_error_recovery_hint"] = f"{node_name} failed: {sanitized_message}"
+        else:
+            action = "terminal"
+
+        runlog(
+            harness,
+            "graph_error_handler",
+            "graph node error handler invoked",
+            node=node_name,
+            error_type=type(original_exc).__name__,
+            error_message=sanitized_message,
+            recovery_action=action,
+        )
+
+        if action == "terminal":
+            _graph_error_handler_terminal_result(graph_state, harness, node_name, original_exc)
+            return Command(update=serialize_runtime_state(graph_state), goto=END)
+
+        target_node = _prepare_node_for_runtime(runtime, node_name)
+        if target_node is None:
+            # No safe preparation node found; treat as terminal.
+            _graph_error_handler_terminal_result(graph_state, harness, node_name, original_exc)
+            return Command(update=serialize_runtime_state(graph_state), goto=END)
+
+        return Command(update=serialize_runtime_state(graph_state), goto=target_node)
+
+    return handler
+
+
+def graph_error_handler_policy(runtime: Any, node_name: str):
+    """Return an error handler for allowed nodes when the feature is enabled."""
+    harness = runtime.deps.harness
+    if not config_value(harness, "langgraph_error_handlers_enabled", False):
+        return None
+    if not node_name or node_name.startswith("route__"):
+        return None
+    return make_graph_error_handler(runtime, node_name)
 
 
 def touch_graph_activity(harness: Any) -> None:

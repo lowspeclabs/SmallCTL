@@ -71,7 +71,33 @@ from .hidden_tool_helpers import _validation_handoff_hint_for_blocked_tool
 from .tool_execution_node_guards import (
     _block_long_running_remote_timeout_write,
     _block_outline_mode_violation,
+    _synthetic_blocked_records,
 )
+
+
+_TOOL_CATEGORY_MAP = {
+    "ssh_exec": "ssh",
+    "ssh_file_read": "ssh",
+    "ssh_file_write": "ssh",
+    "ssh_file_patch": "ssh",
+    "ssh_file_replace_between": "ssh",
+    "shell_exec": "shell",
+    "file_read": "fs",
+    "file_write": "fs",
+    "file_patch": "fs",
+    "ast_patch": "fs",
+    "file_delete": "fs",
+    "dir_list": "fs",
+    "artifact_read": "artifact",
+    "artifact_grep": "artifact",
+    "artifact_print": "artifact",
+    "task_complete": "control",
+    "task_fail": "control",
+}
+
+
+def _tool_category(tool_name: str) -> str:
+    return _TOOL_CATEGORY_MAP.get(tool_name, "other")
 
 
 _TOOL_NOT_EXPOSED_REASON_LABELS = {
@@ -163,8 +189,10 @@ async def _block_empty_file_write_before_dispatch(
             details=repair_decision.details,
         )
         graph_state.error = graph_state.final_result["error"]
+    graph_state.last_tool_results = _synthetic_blocked_records(
+        graph_state, reason=err_msg
+    )
     graph_state.pending_tool_calls = []
-    graph_state.last_tool_results = []
     return True
 
 
@@ -256,8 +284,10 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                     tool_name=pending.tool_name,
                     arguments=json_safe_value(pending.args),
                 )
+                graph_state.last_tool_results = _synthetic_blocked_records(
+                    graph_state, reason=message
+                )
                 graph_state.pending_tool_calls = []
-                graph_state.last_tool_results = []
                 return
         if intercepted_result is None:
             pending.tool_name = normalized_tool_name
@@ -321,12 +351,13 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                         },
                     ),
                 )
+                graph_state.last_tool_results = _synthetic_blocked_records(
+                    graph_state, reason=err_msg
+                )
                 graph_state.pending_tool_calls = []
-                graph_state.last_tool_results = []
                 return
 
         repeat_error = _detect_repeated_tool_loop(harness, pending)
-        _record_tool_attempt(harness, pending)
 
         if repeat_error is not None:
             _handle_signal(
@@ -353,6 +384,9 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 repeat_error=repeat_error,
             )
             if maybe_pending is None:
+                # Explicit loop recovery handled the call; record it so the
+                # loop guard keeps its escalation accounting.
+                _record_tool_attempt(harness, pending)
                 return
             pending = maybe_pending
 
@@ -598,6 +632,11 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 tool_name=pending.tool_name,
             )
 
+        # Record the attempt only once the call is admitted to dispatch, so
+        # calls blocked by exposure/eligibility checks do not inflate the
+        # repeat history used by the loop guard.
+        _record_tool_attempt(harness, pending)
+
         if promote_active_intent_for_tool_call(harness.state, pending.tool_name):
             harness._runlog(
                 "active_intent_promoted_by_tool",
@@ -644,6 +683,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
             logging.INFO,
             "harness_tool_dispatch",
             tool_name=pending.tool_name,
+            tool_category=_tool_category(pending.tool_name),
             replayed=replayed,
         )
         if replayed:
@@ -775,6 +815,8 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 )
                 continue
             except asyncio.CancelledError:
+                if not getattr(harness, "_cancel_requested", False):
+                    raise
                 elapsed_sec = max(0.0, time.perf_counter() - dispatch_start)
                 cancelled_result = ToolEnvelope.make_error(
                     pending.tool_name,

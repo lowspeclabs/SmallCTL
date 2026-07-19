@@ -20,55 +20,7 @@ def _memory_store_paths() -> tuple[Path, Path]:
 def build_memory_parser(subparsers: Any) -> None:
     parser = subparsers.add_parser("memory", help="Manage experience memory tiers")
     memory_sub = parser.add_subparsers(dest="memory_command", required=True)
-
-    # ADD
-    add_p = memory_sub.add_parser("add", help="Add a manual experience record")
-    add_p.add_argument("--tier", choices=["warm", "cold"], default="cold")
-    add_p.add_argument("--intent", required=True)
-    add_p.add_argument("--tool", help="Tool name")
-    add_p.add_argument("--outcome", choices=["success", "failure", "partial"], default="success")
-    add_p.add_argument("--failure-mode", help="Specific failure taxonomy mode")
-    add_p.add_argument("--note", help="The operational guidance note", required=False, default="")
-    add_p.add_argument("--tag", action="append", help="Intent tags")
-    add_p.add_argument("--env-tag", action="append", help="Environment tags")
-    add_p.add_argument("--entity-tag", action="append", help="Entity tags")
-    add_p.add_argument("--namespace", help="Primary memory namespace")
-    add_p.add_argument("--pinned", action="store_true", help="Pin the memory")
-    add_p.add_argument("--confidence", type=float, default=1.0)
-    add_p.add_argument("--from-json", help="Import memories from JSON file")
-
-    # LIST
-    list_p = memory_sub.add_parser("list", help="List stored memories")
-    list_p.add_argument("--tier", choices=["warm", "cold", "all"], default="all")
-    list_p.add_argument("--intent", help="Filter by intent")
-    list_p.add_argument("--tool", help="Filter by tool")
-    list_p.add_argument("--namespace", help="Filter by namespace")
-
-    # SEARCH
-    search_p = memory_sub.add_parser("search", help="Search memories by query")
-    search_p.add_argument("query", nargs="?", default="")
-    search_p.add_argument("--query", dest="query_text", help="Query string")
-    search_p.add_argument("--query-text", help="Query string")
-    search_p.add_argument("--tier", choices=["warm", "cold", "all"], default="all")
-    search_p.add_argument("--namespace", help="Filter by namespace")
-
-    # FORGET
-    forget_p = memory_sub.add_parser("forget", help="Delete a memory by ID")
-    forget_p.add_argument("id", help="Memory ID")
-    forget_p.add_argument("--tier", choices=["warm", "cold"], required=True)
-
-    # PROMOTE
-    promote_p = memory_sub.add_parser("promote", help="Promote warm memory to cold")
-    promote_p.add_argument("id", help="Memory ID")
-
-    # SCRUB
-    scrub_p = memory_sub.add_parser("scrub", help="Redact sensitive text from stored memory notes")
-    scrub_p.add_argument("--tier", choices=["warm", "cold", "all"], default="all")
-    scrub_p.add_argument(
-        "--write",
-        action="store_true",
-        help="Persist the redacted notes back to disk. Default is dry-run.",
-    )
+    _build_subcommands(memory_sub)
 
 def handle_memory_command(args: argparse.Namespace) -> int:
     cmd = args.memory_command
@@ -132,11 +84,23 @@ def _handle_add(args: argparse.Namespace, warm_store: ExperienceStore, cold_stor
         )
         all_memories.append(mem)
 
-    ids = [m.memory_id for m in all_memories]
+    ids = []
+    failed_ids = []
     for m in all_memories:
         target = cold_store if m.tier == "cold" else warm_store
-        target.upsert(m)
-    
+        if target.upsert(m) is None:
+            failed_ids.append(m.memory_id)
+        else:
+            ids.append(m.memory_id)
+
+    if failed_ids:
+        print(json.dumps({
+            "status": "failed",
+            "reason": "Failed to persist memory records",
+            "memory_ids": ids,
+            "failed_ids": failed_ids,
+        }))
+        return 1
     print(json.dumps({"status": "added", "memory_ids": ids}))
     return 0
 
@@ -178,19 +142,42 @@ def _handle_search(args: argparse.Namespace, warm_store: ExperienceStore, cold_s
 def _handle_forget(args: argparse.Namespace, warm_store: ExperienceStore, cold_store: ExperienceStore) -> int:
     target = cold_store if args.tier == "cold" else warm_store
     memory_id = getattr(args, "memory_id", None) or getattr(args, "id", None)
-    target.delete(memory_id)
-    print(json.dumps({"status": "deleted", "memory_id": memory_id, "tier": args.tier}))
-    return 0
+    if target.delete(memory_id):
+        print(json.dumps({"status": "deleted", "memory_id": memory_id, "tier": args.tier}))
+        return 0
+    reason = (
+        f"Failed to persist delete for memory: {memory_id}"
+        if target.get(memory_id) is not None
+        else f"Memory not found in {args.tier} tier: {memory_id}"
+    )
+    print(json.dumps({"status": "failed", "reason": reason, "memory_id": memory_id, "tier": args.tier}))
+    return 1
 
 def _handle_promote(args: argparse.Namespace, warm_store: ExperienceStore, cold_store: ExperienceStore) -> int:
     memory_id = getattr(args, "memory_id", None) or getattr(args, "id", None)
-    m = warm_store.get(memory_id)
-    if not m:
+    source = warm_store.get(memory_id)
+    if not source:
         print(json.dumps({"status": "failed", "reason": f"Memory not found in warm tier: {memory_id}"}))
         return 1
-    m.tier = "cold"
-    cold_store.upsert(m)
-    warm_store.delete(memory_id)
+    promoted = _coerce_experience_memory(json_safe_value(source))
+    promoted.tier = "cold"
+    if cold_store.upsert(promoted) is None:
+        print(json.dumps({
+            "status": "failed",
+            "reason": f"Failed to persist memory to cold tier: {memory_id}",
+            "memory_id": memory_id,
+            "recoverable_in_tier": "warm",
+        }))
+        return 1
+    if not warm_store.delete(memory_id):
+        print(json.dumps({
+            "status": "partial",
+            "reason": f"Promoted to cold tier but failed to remove the warm source record: {memory_id}",
+            "memory_id": memory_id,
+            "tier": "cold",
+            "recoverable_in_tier": "warm",
+        }))
+        return 1
     print(json.dumps({"status": "promoted", "memory_id": memory_id, "tier": "cold"}))
     return 0
 
@@ -206,13 +193,27 @@ def _handle_scrub(args: argparse.Namespace, warm_store: ExperienceStore, cold_st
     total_records = 0
     total_changed = 0
     total_written = 0
+    failed_tiers: list[str] = []
     for tier_name, store in stores:
         summary = store.scrub_sensitive_notes(write=bool(args.write))
         tiers[tier_name] = summary
         total_records += int(summary.get("records", 0))
         total_changed += int(summary.get("changed", 0))
         total_written += int(summary.get("written", 0))
+        if args.write and int(summary.get("changed", 0)) > 0 and not int(summary.get("written", 0)):
+            failed_tiers.append(tier_name)
 
+    if failed_tiers:
+        print(json.dumps({
+            "status": "failed",
+            "reason": "Failed to persist scrubbed notes for tiers: " + ", ".join(failed_tiers),
+            "tier": args.tier,
+            "tiers": tiers,
+            "records": total_records,
+            "changed": total_changed,
+            "written": total_written,
+        }))
+        return 1
     print(json.dumps({
         "status": "scrubbed" if args.write else "dry_run",
         "tier": args.tier,
@@ -226,11 +227,9 @@ def _handle_scrub(args: argparse.Namespace, warm_store: ExperienceStore, cold_st
 
 def memory_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    # We don't want the 'memory' prefix in the arguments passed to memory_cli in tests
+    # Entry point without the 'memory' prefix; shares the single subcommand
+    # builder with build_memory_parser so both CLIs stay in lockstep.
     memory_sub = parser.add_subparsers(dest="memory_command", required=True)
-    
-    # We can't reuse build_memory_parser directly because it adds 'memory' subparsers
-    # So we inline the subcommand definitions or refactor
     _build_subcommands(memory_sub)
     
     args = parser.parse_args(argv)
@@ -270,14 +269,20 @@ def _build_subcommands(memory_sub: Any) -> None:
 
     # FORGET
     forget_p = memory_sub.add_parser("forget", help="Delete a memory by ID")
+    forget_p.add_argument("id", nargs="?", help="Memory ID")
     forget_p.add_argument("--memory-id", help="Memory ID")
     forget_p.add_argument("--tier", choices=["warm", "cold"], required=True)
 
     # PROMOTE
     promote_p = memory_sub.add_parser("promote", help="Promote warm memory to cold")
+    promote_p.add_argument("id", nargs="?", help="Memory ID")
     promote_p.add_argument("--memory-id", help="Memory ID")
 
     # SCRUB
     scrub_p = memory_sub.add_parser("scrub", help="Redact sensitive text from stored memory notes")
     scrub_p.add_argument("--tier", choices=["warm", "cold", "all"], default="all")
-    scrub_p.add_argument("--write", action="store_true", help="Persist the redacted notes back to disk")
+    scrub_p.add_argument(
+        "--write",
+        action="store_true",
+        help="Persist the redacted notes back to disk. Default is dry-run.",
+    )

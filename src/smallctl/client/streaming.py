@@ -109,10 +109,7 @@ class SSEStreamer:
     def _next_stream_read_timeout(self, *, chunk_count: int = 1, tool_call_stream_active: bool) -> float:
         """Determine the appropriate read timeout for the next stream chunk."""
         if chunk_count == 0:
-            return min(
-                float(self.STREAM_READ_TIMEOUT_SEC),
-                float(self.first_token_timeout_sec),
-            )
+            return float(self.first_token_timeout_sec)
         if tool_call_stream_active and (self.provider_profile == "lmstudio" or self.aggressive_tool_call_timeout):
             return max(1.0, float(self.tool_call_continuation_timeout_sec))
         return float(self.STREAM_READ_TIMEOUT_SEC)

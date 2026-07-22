@@ -3,22 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
+from ..tools.dispatcher_ssh_auth import password_fingerprint, ssh_auth_recovery_entry_key
 from .tool_result_verification_constants import _RAW_SSH_COMMAND_RE, _SSH_AUTH_RECOVERY_KEY
 from .tool_result_verification_helpers import snip_text as _snip_text
-
-
-def _ssh_auth_recovery_entry_key(host: str, user: str) -> str:
-    h = str(host or "").strip().lower()
-    u = str(user or "").strip()
-    return f"{h}::{u}" if u else h
-
-
-def _ssh_password_fingerprint(password: str) -> str:
-    import hashlib
-    p = str(password or "").strip()
-    if not p:
-        return ""
-    return hashlib.sha256(p.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 def _update_ssh_auth_recovery_state(
@@ -55,7 +42,7 @@ def _update_ssh_auth_recovery_state(
     user = str(args.get("user") or "").strip()
     if not host:
         return
-    entry_key = _ssh_auth_recovery_entry_key(host, user)
+    entry_key = ssh_auth_recovery_entry_key(host, user)
     reached_remote_host = (
         result.success
         or bool(metadata.get("ssh_transport_succeeded"))
@@ -90,7 +77,7 @@ def _update_ssh_auth_recovery_state(
         "user": user,
         "failure_count": prior_failures + 1,
         "password_provided": bool(password),
-        "password_fingerprint": _ssh_password_fingerprint(password),
+        "password_fingerprint": password_fingerprint(password),
         "ssh_auth_mode": str(metadata.get("ssh_auth_mode") or "").strip(),
         "ssh_auth_transport": str(metadata.get("ssh_auth_transport") or "").strip(),
         "last_command": str(args.get("command") or "").strip(),

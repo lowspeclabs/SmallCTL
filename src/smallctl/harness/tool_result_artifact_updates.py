@@ -49,6 +49,8 @@ from .tool_result_remote_mutation import (
     _maybe_emit_small_file_rewrite_nudge,
     _recent_ssh_file_read_size,
     _handle_remote_mutation_verifier_result,
+    record_remote_mutation_provenance,
+    observe_runtime_projection_read,
 )
 from .tool_result_ssh_memory import _remember_session_ssh_target
 from .tool_result_web_memory import _remember_web_search_results
@@ -76,6 +78,7 @@ def _apply_shell_exec_updates(
         _remember_session_ssh_target(service, tool_name=tool_name, result=result, arguments=arguments)
         _observe_remote_installer_preflight_check(service, result=result, arguments=arguments)
         _handle_remote_mutation_verifier_result(service, result=result, arguments=arguments)
+        observe_runtime_projection_read(service, result=result, arguments=arguments)
         if not result.success:
             _record_failed_verification_attempt(service, tool_name=tool_name, result=result, arguments=arguments)
         _record_remote_mutation_requirement(service, result=result, arguments=arguments)
@@ -235,6 +238,9 @@ def _apply_ssh_file_mutation_updates(
         mutated_path = str(arguments.get("path") or "").strip()
         host = str(arguments.get("host") or "").strip().lower()
     if mutated_path and host:
+        record_remote_mutation_provenance(
+            service, host=host, path=mutated_path, arguments=arguments
+        )
         cache = service.harness.state.scratchpad.get("ssh_file_read_cache")
         if isinstance(cache, dict):
             prefix = f"ssh://{host}{mutated_path}"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -1016,6 +1017,22 @@ async def resume_planning_run(
     )
 
 
+def _dedupe_repeated_loop_recent_errors(state: Any) -> None:
+    """Keep one countable error per repeated-loop episode fingerprint."""
+    errors = list(getattr(state, "recent_errors", []) or [])
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for error in errors:
+        text = str(error or "")
+        if "repeated tool call loop" in text.lower():
+            fingerprint = re.sub(r"\d+", "#", re.sub(r"\s+", " ", text.lower())).strip()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+        deduped.append(text)
+    state.recent_errors = deduped
+
+
 async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) -> None:
     harness = deps.harness
     start_time = time.perf_counter()
@@ -1198,6 +1215,7 @@ async def prepare_loop_step(graph_state: GraphRunState, deps: GraphRuntimeDeps) 
                 )
 
     _check_completion_confabulation(harness, graph_state)
+    _dedupe_repeated_loop_recent_errors(harness.state)
     progress_guard = _check_progress_stagnation(harness, graph_state)
     if progress_guard:
         guard_error = progress_guard

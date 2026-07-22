@@ -17,7 +17,8 @@ from ..models.events import UIEvent, UIEventType
 from ..provider_profiles import supported_provider_profiles
 from .chat_selector import ChatMenuScreen, ChatSessionSelectScreen
 from .console import ConsolePane
-from .display import _build_backend_rca_strip, format_tool_call_for_display
+from .approval import ApprovePromptScreen, ShellApprovalDecision
+from .display import format_tool_call_for_display
 from .model_selector import ModelSelectScreen, ProviderSelectScreen
 from .statusbar import StatusBar
 
@@ -130,12 +131,6 @@ class SmallctlAppActionsMixin:
                         logging.WARNING,
                         "ui_cancel_run_still_in_flight",
                     )
-            console = self._get_console()
-            if console is not None:
-                await self._append_system_line("Active task cancelled.")
-                rca = _build_backend_rca_strip(self.harness)
-                if rca:
-                    await self._append_system_line(rca)
             self._refresh_status(step_override="cancelled")
             return
         console = self._get_console()
@@ -148,7 +143,10 @@ class SmallctlAppActionsMixin:
             return
         self._active_approval_prompt = None
         try:
-            prompt.dismiss(False)
+            if isinstance(prompt, ApprovePromptScreen):
+                prompt.dismiss(ShellApprovalDecision(False, False, cancelled=True))
+            else:
+                prompt.dismiss(False)
         except Exception:
             pass
 

@@ -47,26 +47,12 @@ def _remember_session_ssh_target(
     elif reached_remote_host:
         remembered["confirmed"] = True
 
-    credential_store = getattr(getattr(service, "harness", None), "credential_store", None)
     password = str(arguments.get("password") or "").strip()
     if password:
-        if credential_store is not None:
-            credential_store.set_ssh_password(host, user, password)
-            remembered["password_fingerprint"] = credential_store.fingerprint(password)
-        else:
-            remembered["password"] = password
+        remembered["password"] = password
     elif isinstance(existing, dict):
-        # Preserve a fingerprint or plaintext password from the existing record
-        # when the current call did not supply one.
-        if existing.get("password_fingerprint"):
-            remembered["password_fingerprint"] = existing["password_fingerprint"]
-        elif existing.get("password"):
-            if credential_store is not None:
-                plaintext = str(existing["password"])
-                credential_store.set_ssh_password(host, user, plaintext)
-                remembered["password_fingerprint"] = credential_store.fingerprint(plaintext)
-            else:
-                remembered["password"] = existing["password"]
+        if existing.get("password"):
+            remembered["password"] = existing["password"]
 
     identity_file = str(arguments.get("identity_file") or "").strip()
     if identity_file:

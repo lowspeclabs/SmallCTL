@@ -190,7 +190,7 @@ def test_emit_records_lightweight_ui_event_ledger() -> None:
         ledger = state.scratchpad.get("_ui_event_ledger")
         assert isinstance(ledger, list)
         assert ledger[0]["event_type"] == "system"
-        assert "abc" not in ledger[0]["content"]
+        assert "abc" in ledger[0]["content"]
         assert len(events) == 2
 
     asyncio.run(_run())

@@ -734,9 +734,14 @@ def _remote_service_readiness_evidence(state: LoopState) -> dict[str, Any]:
         weak_probe = bool(re.search(r"\bdocker\s+ps\b|\bdocker(?:\s+compose)?\s+ps\b|\bdocker-compose\s+ps\b", command))
         if weak_probe:
             saw_weak_container_probe = True
+        compose_ps_ready = bool(
+            re.search(r"\bdocker\s+compose\s+ps\b|\bdocker-compose\s+ps\b", command)
+            and re.search(r"\b(?:running|up)\b", output_text)
+        )
         strong_probe = bool(
             re.search(r"(?:^|[;&|]\s*)(?:curl|wget|nc|nmap)\b", command)
             or re.search(r"\bdocker\s+inspect\b.*\b(?:health|status)\b", command)
+            or compose_ps_ready
             or (reads_logs and not saw_unhealthy_logs and bool(output_text.strip()))
             or re.search(r"\b(?:systemctl|service)\s+(?:status|is-active)\b", command)
         )

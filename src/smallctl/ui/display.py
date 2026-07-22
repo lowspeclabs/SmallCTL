@@ -637,7 +637,7 @@ def _is_standalone_ip(token: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", token))
 
 
-def _build_backend_rca_strip(harness: Any) -> str:
+def _build_backend_rca_strip(harness: Any, *, include_fama: bool = True) -> str:
     """Build a compact backend RCA strip for cancelled/interrupted runs."""
     if harness is None:
         return ""
@@ -723,7 +723,7 @@ def _build_backend_rca_strip(harness: Any) -> str:
                         f"artifacts={artifact_count}, observations={observation_count}, summaries={summary_count}"
                     )
         fama = scratchpad.get("_fama")
-        if isinstance(fama, dict):
+        if include_fama and isinstance(fama, dict):
             signals = fama.get("signals")
             if isinstance(signals, list) and signals:
                 parts.append(f"FAMA signals: {len(signals)}")
@@ -763,6 +763,7 @@ class StatusState:
         token_usage: int = 0,
         token_total: int = 0,
         token_limit: int = 0,
+        requested_prompt_tokens: int = 0,
         context_window: int = 0,
         api_errors: int = 0,
         recovery_banner: str = "",
@@ -781,6 +782,7 @@ class StatusState:
         self.token_usage = token_usage
         self.token_total = token_total
         self.token_limit = token_limit
+        self.requested_prompt_tokens = requested_prompt_tokens
         self.context_window = context_window
         self.api_errors = api_errors
         self.recovery_banner = recovery_banner
@@ -827,6 +829,7 @@ class StatusState:
             token_usage=max(0, int(payload.get("token_usage", 0) or 0)),
             token_total=max(0, int(payload.get("token_total", 0) or 0)),
             token_limit=max(0, int(payload.get("token_limit", 0) or 0)),
+            requested_prompt_tokens=max(0, int(payload.get("requested_prompt_tokens", 0) or 0)),
             context_window=max(0, int(payload.get("context_window", 0) or 0)),
             api_errors=max(0, int(payload.get("api_errors", 0) or 0)),
             recovery_banner=str(payload.get("recovery_banner", "") or ""),

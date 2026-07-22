@@ -886,6 +886,19 @@ class TaskBoundaryClassificationMixin:
             self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
             return resolved
 
+        if _RETRY_FOLLOWUP_RE.search(raw_task):
+            candidate = self._current_or_handoff_continuity_task() or base_task_from_task_chain(
+                handoff.get("current_goal")
+                or handoff.get("effective_task")
+                or self.harness.state.run_brief.original_task
+                or self.harness.state.scratchpad.get("_last_task_text")
+                or ""
+            )
+            if candidate and (self.has_task_local_context() or handoff):
+                resolved = f"Continue current task: {candidate}. User requested retry: {raw_task}"
+                self._store_followup_transaction_for_resolution(raw_task=raw_task, effective_task=resolved)
+                return resolved
+
         if not self._is_contextual_followup(raw_task):
             return raw_task
 

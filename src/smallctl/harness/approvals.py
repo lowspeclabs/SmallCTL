@@ -38,6 +38,8 @@ class ApprovalService:
         if self.harness.shell_approval_session_default:
             return True
 
+        configured_timeout = getattr(getattr(self.harness, "config", None), "needs_human_timeout_sec", None)
+        approval_timeout_sec = int(configured_timeout) if configured_timeout is not None else timeout_sec
         approval_id = f"shell-{uuid.uuid4().hex[:10]}"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
@@ -50,14 +52,14 @@ class ApprovalService:
                 "approval_id": approval_id,
                 "command": command,
                 "cwd": cwd,
-                "timeout_sec": timeout_sec,
+                "timeout_sec": approval_timeout_sec,
                 "proof_bundle": proof_bundle or {},
                 "status_activity": "awaiting approval...",
             },
         )
         try:
             await self.harness._emit(self.harness.event_handler, event)
-            return await asyncio.wait_for(future, timeout=timeout_sec)
+            return await asyncio.wait_for(future, timeout=approval_timeout_sec)
         except asyncio.TimeoutError:
             self._reject_shell_approval(approval_id)
             logger.warning("Shell approval timeout for command: %s", command)
@@ -67,7 +69,7 @@ class ApprovalService:
                     "Shell approval request timed out",
                     command=command,
                     approval_id=approval_id,
-                    timeout_sec=timeout_sec,
+                    timeout_sec=approval_timeout_sec,
                 )
             except Exception:
                 pass

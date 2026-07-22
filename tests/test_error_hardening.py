@@ -423,6 +423,21 @@ class TestWebSearchOnRepeatedError:
         assert gs.pending_tool_calls == []
         harness.state.append_message.assert_not_called()
 
+    def test_skips_web_search_for_local_remote_route_contradiction(self):
+        gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
+        harness = _make_harness()
+        harness.registry.names.return_value = ["web_search"]
+        record = _make_record(
+            "ssh_exec",
+            success=False,
+            error="This local workspace command must use shell_exec, not ssh_exec.",
+        )
+
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert _maybe_schedule_web_search_for_repeated_error(gs, harness, record) is False
+        assert gs.pending_tool_calls == []
+        harness.state.append_message.assert_not_called()
+
     def test_nudges_when_web_search_unavailable(self):
         gs = GraphRunState(loop_state=MagicMock(), thread_id="t1", run_mode="loop")
         harness = _make_harness()

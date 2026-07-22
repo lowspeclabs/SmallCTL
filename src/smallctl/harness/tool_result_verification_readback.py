@@ -20,11 +20,15 @@ def _simple_remote_readback_path(command: str) -> str:
 
     command_name = tokens[0]
     if command_name in _REMOTE_READBACK_COMMANDS:
-        path_operands = [token for token in tokens[1:] if token.startswith("/")]
+        path_operands = [
+            token for token in tokens[1:] if token.startswith(("/", "~/"))
+        ]
         return path_operands[0] if len(path_operands) == 1 else ""
 
     if command_name == "sed" and "-n" in tokens:
-        path_operands = [token for token in tokens[1:] if token.startswith("/")]
+        path_operands = [
+            token for token in tokens[1:] if token.startswith(("/", "~/"))
+        ]
         return path_operands[0] if len(path_operands) == 1 else ""
 
     return ""

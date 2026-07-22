@@ -967,7 +967,7 @@ def test_stream_chat_backend_stream_failure_invokes_recovery_and_retries(monkeyp
     assert recovery_calls[0]["details"]["reason"] == "backend_stream_failure"
 
 
-def test_stream_chat_redacts_provider_payload_without_mutating_live_messages(monkeypatch) -> None:
+def test_stream_chat_preserves_password_in_provider_payload_without_mutating_live_messages(monkeypatch) -> None:
     client = OpenAICompatClient(
         base_url="http://127.0.0.1:8080/v1",
         model="demo-model",
@@ -1004,8 +1004,7 @@ def test_stream_chat_redacts_provider_payload_without_mutating_live_messages(mon
 
     assert messages == original_messages
     assert payloads
-    assert payloads[0]["messages"][0]["content"] != "ssh password is hunter2"
-    assert "REDACTED" in str(payloads[0]["messages"][0]["content"])
+    assert payloads[0]["messages"][0]["content"] == "ssh password is hunter2"
 
 
 def test_stream_chat_llamacpp_model_unloaded_yields_provider_chunk_error(monkeypatch) -> None:
@@ -1985,4 +1984,3 @@ def test_stream_chat_backend_stream_failure_is_retried(monkeypatch) -> None:
     assert attempts["count"] == 2
     assert len(recovery_calls) == 1
     assert recovery_calls[0]["details"]["reason"] == "backend_stream_failure"
-

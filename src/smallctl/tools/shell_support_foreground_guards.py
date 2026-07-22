@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,40 @@ def _foreground_command_guard(
         },
         extra_metadata={
             "foreground_detection": reason,
+        },
+    )
+
+
+def _masked_compose_lifecycle_guard(command: str, *, tool_name: str) -> dict[str, Any] | None:
+    """Block lifecycle mutations whose shell structure can hide an incomplete restart."""
+    normalized = " ".join(str(command or "").lower().split())
+    padded = f" {normalized} "
+    if not normalized or not any(token in padded for token in (" docker compose ", " docker-compose ")):
+        return None
+    if not any(
+        marker in padded
+        for marker in (" compose down ", " compose up ", " compose start ", " compose restart ")
+    ):
+        return None
+    masks_status = bool(
+        re.search(r"\|\s*(?:head|tail)\b", normalized)
+        or re.search(r"\|\|\s*(?:true|:)(?:\s|$)", normalized)
+        or (" compose down " in padded and ";" in normalized)
+    )
+    if not masks_status:
+        return None
+    return _guard_fail(
+        f"`{tool_name}` blocked a Docker Compose lifecycle command whose pipeline/chaining can hide failure: `{command}`. "
+        "Run one lifecycle mutation at a time without `head`, `tail`, `|| true`, or semicolon chaining, then verify the stack in a separate command.",
+        reason="masked_compose_lifecycle_command",
+        command=command,
+        next_required_action={
+            "strategy": "run_compose_lifecycle_then_verify",
+            "notes": [
+                "Run `docker compose down` separately only when teardown is required.",
+                "Run `docker compose up -d --build` without truncating or masking its exit status.",
+                "Verify with a separate `docker compose ps`, health check, or application request.",
+            ],
         },
     )
 

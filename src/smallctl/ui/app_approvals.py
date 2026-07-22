@@ -125,6 +125,7 @@ async def handle_approval_prompt(app, event: UIEvent) -> None:
 
     approved = False
     remember_session = False
+    cancelled = False
     runlog = getattr(harness, "_runlog", None)
     prompt_timeout_sec = max(1, timeout_sec)
     if callable(runlog):
@@ -154,6 +155,7 @@ async def handle_approval_prompt(app, event: UIEvent) -> None:
         approved = bool(decision)
         if isinstance(decision, ShellApprovalDecision):
             remember_session = decision.remember_session
+            cancelled = decision.cancelled
         else:
             remember_session = bool(getattr(decision, "remember_session", False))
     except Exception as exc:
@@ -167,7 +169,7 @@ async def handle_approval_prompt(app, event: UIEvent) -> None:
             )
     finally:
         app._active_approval_prompt = None
-        if approved and remember_session:
+        if approved and remember_session and not cancelled:
             app._set_shell_approval_session_default(True)
         if approval_id:
             try:
@@ -189,11 +191,12 @@ async def handle_approval_prompt(app, event: UIEvent) -> None:
                 approval_id=approval_id or "pending",
                 approved=approved,
                 remember_session=remember_session,
+                cancelled=cancelled,
                 command=command or "(empty command)",
                 cwd=cwd or harness.state.cwd,
                 timeout_sec=prompt_timeout_sec,
             )
-        if approved and remember_session:
+        if approved and remember_session and not cancelled:
             await app._append_system_line(
                 "Shell commands will auto-approve for this session.",
                 force=True,

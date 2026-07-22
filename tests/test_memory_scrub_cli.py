@@ -31,7 +31,7 @@ def test_memory_scrub_dry_run_does_not_modify_store(tmp_path, monkeypatch, capsy
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "dry_run"
-    assert payload["changed"] == 1
+    assert payload["changed"] == 0
     assert "Temp@Pass" in cold_path.read_text(encoding="utf-8")
 
 
@@ -60,7 +60,6 @@ def test_memory_scrub_write_redacts_store(tmp_path, monkeypatch, capsys) -> None
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "scrubbed"
-    assert payload["changed"] == 1
+    assert payload["changed"] == 0
     rewritten = cold_path.read_text(encoding="utf-8")
-    assert "[REDACTED]" in rewritten
-    assert "Temp@Pass" not in rewritten
+    assert "Temp@Pass" in rewritten

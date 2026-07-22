@@ -18,6 +18,25 @@ def ssh_exec_remote_paths(record: Any) -> list[str]:
     return paths[:8]
 
 
+def ssh_exec_read_targets(record: Any) -> list[str]:
+    """Return file targets from a read-only SSH command, resolving a leading cd."""
+    args = record.args if isinstance(getattr(record, "args", None), dict) else {}
+    command = str(args.get("command") or "").strip()
+    if not _SSH_READ_COMMAND_RE.search(command) or _SSH_MUTATION_COMMAND_RE.search(command):
+        return []
+    base_match = _SSH_CD_PREFIX_RE.search(command)
+    base = base_match.group("path").rstrip("/") if base_match else ""
+    targets = [path for path in ssh_exec_remote_paths(record) if path != base]
+    for match in _SSH_RELATIVE_FILE_RE.finditer(command):
+        path = match.group("path")
+        if path.startswith("/"):
+            continue
+        resolved = f"{base}/{path}" if base else path
+        if resolved not in targets:
+            targets.append(resolved)
+    return targets[:8]
+
+
 def ssh_exec_output_fingerprint(record: Any) -> str:
     metadata = record.result.metadata if isinstance(getattr(record, "result", None), object) else {}
     if not isinstance(metadata, dict):
@@ -153,3 +172,7 @@ def record_ssh_exec_observation(harness: Any, record: Any) -> None:
 
 
 _REMOTE_PATH_RE = re.compile(r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+")
+_SSH_CD_PREFIX_RE = re.compile(r"(?:^|[;&|])\s*cd\s+(?P<path>/[^\s;&|]+)\s*&&")
+_SSH_READ_COMMAND_RE = re.compile(r"\b(?:cat|grep|head|tail|sed\s+-n)\b")
+_SSH_MUTATION_COMMAND_RE = re.compile(r"\b(?:sed\s+-i|tee|truncate|rm|mv|cp|chmod|chown|docker\s+compose\s+(?:up|restart))\b|>>?|\b(?:append|write)\b")
+_SSH_RELATIVE_FILE_RE = re.compile(r"(?<![\w/])(?P<path>(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9_-]+\.(?:conf|json|py|toml|yaml|yml))(?![\w/])")

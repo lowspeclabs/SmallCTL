@@ -30,7 +30,6 @@ _LOCAL_WRITE_ARGUMENT_TOOLS = {
 }
 
 _EXACT_SENSITIVE_KEYS = {
-    "password",
     "passphrase",
     "secret",
     "token",
@@ -40,25 +39,20 @@ _EXACT_SENSITIVE_KEYS = {
     "refresh_token",
     "authorization",
     "auth_token",
-    "ssh_password",
-    "sshpass",
-    "conn_pass",
 }
 
 _SENSITIVE_SUFFIXES = (
-    "_password",
     "_passphrase",
     "_secret",
     "_token",
     "_api_key",
     "_access_key",
     "_key",
-    "_pass",
 )
 
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])"
-    r"(?P<name>(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|token|secret|passwd|password|authorization)"
+    r"(?P<name>(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|token|secret|authorization)"
     r"(?:[_-][A-Za-z0-9]+)*)(?P<key_quote>[\"']?)(?P<before>[ \t]*)"
     r"(?P<separator>[=:])(?P<after>[ \t]*)"
     r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,\"'\]}]+)"
@@ -99,14 +93,9 @@ _PYTHON_ANNOTATION_ROOTS = {
 _SENSITIVE_TEXT_PATTERNS = (
     # Bearer tokens first so a generic authorization handler never strands the JWT.
     re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]+)", re.IGNORECASE),
-    re.compile(r"(\bsshpass\s+-p\s*[\"']?)([^\s\"',;\]}]+)([\"']?)", re.IGNORECASE),
-    re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]+:)([^\s@]+)(@)", re.IGNORECASE),
     _AUTHORIZATION_SCHEME_RE,
-    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)\s+)([^\s,;]+)", re.IGNORECASE),
-    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password)=)([^\s,;]+)", re.IGNORECASE),
-    re.compile(r"(\bpassword\s+is\s+)([^\s,;]+)", re.IGNORECASE),
-    re.compile(r'(\bpassword\s*(?:is\s+|=|:)?\s*")([^"\r\n]+)(")', re.IGNORECASE),
-    re.compile(r"(\bpassword\s*(?:is\s+|=|:)?\s*')([^'\r\n]+)(')", re.IGNORECASE),
+    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret)\s+)([^\s,;]+)", re.IGNORECASE),
+    re.compile(r"(\B--(?:api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret)=)([^\s,;]+)", re.IGNORECASE),
 )
 
 
@@ -136,7 +125,7 @@ def _is_sensitive_assignment_name(name: str) -> bool:
     parts = [part for part in normalized.split("_") if part]
     if normalized in {"apikey", "authorization"}:
         return True
-    if any(part in {"token", "secret", "passwd", "password"} for part in parts):
+    if any(part in {"token", "secret"} for part in parts):
         return True
     return any(parts[index : index + 2] == ["api", "key"] for index in range(len(parts) - 1))
 

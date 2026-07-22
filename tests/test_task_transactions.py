@@ -110,6 +110,22 @@ def test_classifies_retry_after_guard_error() -> None:
     assert tx.reset_policy.preserve_guard_context is True
 
 
+def test_classifies_retry_after_approval_denial_as_retry() -> None:
+    tx = classify_followup_transaction(
+        raw_task="try again",
+        effective_task="Continue current task: list Proxmox nodes. User requested retry: try again",
+        previous_task="list Proxmox nodes",
+        signals=FollowupSignals(
+            has_prior_task=True,
+            denial_context=True,
+            retry_language=True,
+        ),
+    )
+
+    assert tx.turn_type == "RETRY"
+    assert tx.reset_policy.keep_prior_result is True
+
+
 def test_classifies_explicit_conflicting_target_as_new_task() -> None:
     tx = classify_followup_transaction(
         raw_task="Instead patch temp/new_parser.py",
@@ -230,6 +246,30 @@ def test_bare_continue_preserves_resolved_numbered_option_over_stale_plan_goal()
     Harness._initialize_run_brief(harness, continued, raw_task="continue")
     assert state.working_memory.current_goal == selected
     assert state.working_memory.current_goal != broad_goal
+
+
+def test_retry_followup_resolves_to_prior_objective() -> None:
+    state = LoopState(cwd="/tmp")
+    prior = "list Proxmox containers and the hosts they run on"
+    state.run_brief.original_task = prior
+    state.working_memory.current_goal = prior
+    state.scratchpad["_last_task_text"] = prior
+    state.scratchpad["_last_task_handoff"] = {
+        "effective_task": prior,
+        "current_goal": prior,
+        "last_failed_tool": {
+            "tool_name": "shell_exec",
+            "approval_denied": True,
+            "error": "Shell execution denied by user.",
+        },
+    }
+    harness = _make_harness(state)
+
+    resolved = Harness._resolve_followup_task(harness, "try again")
+
+    assert prior in resolved
+    assert "User requested retry: try again" in resolved
+    assert state.scratchpad["_task_transaction"]["turn_type"] == "RETRY"
 
 
 def test_resolve_remote_clarification_stores_transaction_and_mode_stays_chat() -> None:

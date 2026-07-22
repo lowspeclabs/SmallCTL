@@ -573,7 +573,6 @@ def cancel(self: Any, source: str = "manual") -> None:
     from ..logging_utils import log_kv
 
     log_kv(self.log, logging.INFO, "harness_cancel_requested", source=source_text)
-    asyncio.create_task(self.teardown())
 
 
 def note_task_shutdown(self: Any, reason: str) -> None:

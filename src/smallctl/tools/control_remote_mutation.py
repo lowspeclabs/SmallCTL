@@ -69,7 +69,9 @@ def remote_path_needs_presence_probe(path: str) -> bool:
 
 
 def remote_presence_probe_command(path: str) -> str:
-    quoted = shlex.quote(str(path or "").strip())
+    raw_path = str(path or "").strip()
+    # Quoting a home-relative path prevents the remote shell from expanding ~.
+    quoted = raw_path if raw_path.startswith("~/") else shlex.quote(raw_path)
     return f"test -s {quoted} && sha256sum {quoted}"
 
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from ..models.conversation import ConversationMessage
 from ..normalization import dedupe_keep_tail
 from ..shell_utils import strip_benign_shell_redirections
 from ..tools.shell_support import _REMOTE_INSTALLER_PREFLIGHT_KEY
-from .directory_empty_checks import guess_deletion_directory_empty_checks
 from .remote_mutation_helpers import (
     _REMOTE_MULTILINE_REPLACEMENT_RE,
     _REMOTE_MUTATING_COMMAND_RE,
@@ -28,6 +28,7 @@ from .remote_mutation_helpers import (
 )
 from .remote_mutation_parsing import (
     _REMOTE_DELETION_RE,
+    guess_remote_deletion_directory_empty_checks,
     guess_remote_mutation_paths,
 )
 from .tool_result_verification import assess_remote_mutation_verification
@@ -129,9 +130,22 @@ def _record_remote_mutation_requirement(
         return
 
     host = str(arguments.get("host") or arguments.get("target") or "").strip()
-    is_deletion = _REMOTE_DELETION_RE.search(mutation_command) is not None
+    generated_public_keys = _generated_public_key_paths(mutation_command)
+    # A cleanup followed by ssh-keygen replaces the old key rather than leaving
+    # a deletion outcome. Track the generated public key, which is the useful
+    # user-facing artifact and can be read back safely.
+    is_deletion = (
+        _REMOTE_DELETION_RE.search(mutation_command) is not None
+        and not generated_public_keys
+    )
     guessed_paths = guess_remote_mutation_paths(mutation_command, deletion=is_deletion)
-    directory_empty_checks = guess_deletion_directory_empty_checks(mutation_command) if is_deletion else []
+    if generated_public_keys:
+        guessed_paths = generated_public_keys
+    directory_empty_checks = (
+        guess_remote_deletion_directory_empty_checks(mutation_command)
+        if is_deletion
+        else []
+    )
     if is_deletion and not guessed_paths and not directory_empty_checks:
         return
     requirement: dict[str, Any] = {
@@ -202,6 +216,87 @@ def _record_remote_mutation_requirement(
             command=command,
             guessed_paths=guessed_paths,
         )
+
+
+def record_remote_mutation_provenance(
+    service: Any,
+    *,
+    host: str,
+    path: str,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Retain host-file patch details after ordinary readback verification."""
+    if not host or not path or not isinstance(arguments, dict):
+        return
+    old_text = str(arguments.get("target_text") or arguments.get("old_text") or arguments.get("start_text") or "")
+    new_text = str(arguments.get("replacement_text") or arguments.get("new_text") or arguments.get("content") or "")
+    if not old_text or not new_text or old_text == new_text:
+        return
+    provenance = service.harness.state.scratchpad.setdefault("_remote_mutation_provenance", [])
+    if not isinstance(provenance, list):
+        provenance = []
+        service.harness.state.scratchpad["_remote_mutation_provenance"] = provenance
+    provenance.append({"host": host.lower(), "path": path, "old_text": old_text, "new_text": new_text})
+    del provenance[:-12]
+
+
+def observe_runtime_projection_read(
+    service: Any,
+    *,
+    result: Any,
+    arguments: dict[str, Any] | None,
+) -> None:
+    """Detect a container still exposing the pre-mutation host-file content."""
+    if not result.success or not isinstance(arguments, dict):
+        return
+    command = str(arguments.get("command") or "")
+    match = re.search(r"\b(?:docker|podman)\s+exec\s+(?:-[^\s]+\s+)*(?P<service>[^\s]+).*?\bcat\s+(?P<path>[^\s;&|]+)", command, re.I)
+    if not match:
+        return
+    output = result.output if isinstance(result.output, dict) else {}
+    content = str(output.get("stdout") or "")
+    host = str(arguments.get("host") or arguments.get("target") or "").strip().lower()
+    provenance = service.harness.state.scratchpad.get("_remote_mutation_provenance", [])
+    if not isinstance(provenance, list):
+        return
+    for item in reversed(provenance):
+        if not isinstance(item, dict) or str(item.get("host") or "").lower() != host:
+            continue
+        old_text = str(item.get("old_text") or "")
+        new_text = str(item.get("new_text") or "")
+        if old_text and old_text in content and (not new_text or new_text not in content):
+            guidance = {
+                "recovery_kind": "runtime_projection_stale",
+                "host": host,
+                "host_path": str(item.get("path") or ""),
+                "runtime_path": match.group("path").strip("'\""),
+                "service": match.group("service"),
+                "guidance": "Recreate only the affected service/container, then rerun the direct acceptance check.",
+            }
+            service.harness.state.scratchpad["_runtime_projection_stale"] = guidance
+            service.harness.state.append_message(ConversationMessage(
+                role="system",
+                content=(
+                    "The container runtime projection is stale: it still shows the old host-file patch target. "
+                    f"Recreate only `{guidance['service']}`, then rerun the direct acceptance check; do not reload every service."
+                ),
+                metadata={"is_recovery_nudge": True, **guidance},
+            ))
+            return
+
+
+def _generated_public_key_paths(command: str) -> list[str]:
+    """Return public-key paths generated by ssh-keygen commands in a shell command."""
+    import re
+
+    paths: list[str] = []
+    for match in re.finditer(r"\bssh-keygen\b.*?(?:^|\s)-f\s+([^\s;&|]+)", command):
+        private_path = match.group(1).strip("'\"")
+        if private_path and private_path not in {"/dev/null", "-"}:
+            public_path = f"{private_path}.pub"
+            if public_path not in paths:
+                paths.append(public_path)
+    return paths
 
 
 def _emit_remote_redirection_mutation_nudge(

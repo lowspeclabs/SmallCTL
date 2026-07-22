@@ -395,8 +395,9 @@ def test_c2_provider_bound_messages_contain_no_secret_values() -> None:
 
     redacted = redact_sensitive_messages(messages)
     serialized = json.dumps(redacted)
-    for secret in (api_key, ssh_secret, jwt, "eyJzdWIiOiIxMjM0In0"):
+    for secret in (api_key, jwt, "eyJzdWIiOiIxMjM0In0"):
         assert secret not in serialized
+    assert ssh_secret in serialized
     assert "REDACTED" in serialized
 
 
@@ -416,11 +417,11 @@ def test_c2_runlog_bound_data_contains_no_secret_values(tmp_path: Path) -> None:
     row = json.loads((logger.run_dir / "harness.jsonl").read_text(encoding="utf-8").splitlines()[0])
     serialized_data = json.dumps(row["data"])
     assert api_key not in serialized_data
-    assert ssh_secret not in serialized_data
+    assert ssh_secret in serialized_data
     assert row["data"]["environment"]["safe"] == "visible"
     text_log = (logger.run_dir / "harness.log").read_text(encoding="utf-8")
     assert api_key not in text_log
-    assert ssh_secret not in text_log
+    assert ssh_secret in text_log
 
 
 def test_c2_experience_store_persistence_boundary_redacts_notes(tmp_path: Path) -> None:

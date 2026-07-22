@@ -251,7 +251,7 @@ def test_record_result_compacts_ssh_file_write_arguments_in_artifact_json(tmp_pa
     assert arguments["content_chars"] == len(content)
     assert "content" not in arguments
     assert content not in serialized_arguments
-    assert "secret-password" not in serialized_arguments
+    assert "secret-password" in serialized_arguments
 
 
 def test_record_result_keeps_file_reads_inline_without_artifacts(tmp_path: Path) -> None:
@@ -600,4 +600,3 @@ def test_large_file_read_artifact_survives_graph_state_serialization(tmp_path: P
     assert artifact.metadata["complete_file"] is True
     assert artifact.metadata["total_lines"] == 2300
     assert artifact.metadata["truncated"] is False
-

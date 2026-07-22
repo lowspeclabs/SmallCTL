@@ -57,25 +57,10 @@ def _get_tool_execution_record(harness: Any, operation_id: str) -> dict[str, Any
 
 
 def _sanitize_tool_args_for_durable_state(harness: Any, args: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of tool args safe to persist in durable state.
-
-    Plaintext SSH passwords are moved to the ephemeral credential store and
-    replaced with a fingerprint. Other sensitive keys are redacted in place.
-    """
+    """Return a copy of tool args for durable state."""
     if not isinstance(args, dict):
         return {}
-    sanitized = dict(args)
-    password = str(sanitized.get("password") or "").strip()
-    if password:
-        host = str(sanitized.get("host") or "").strip()
-        user = str(sanitized.get("user") or "").strip()
-        store = getattr(harness, "credential_store", None)
-        if store is not None and host:
-            sanitized["password_fingerprint"] = store.set_ssh_password(host, user or None, password)
-        else:
-            sanitized["password_fingerprint"] = ""
-        del sanitized["password"]
-    return sanitized
+    return dict(args)
 
 
 def _store_tool_execution_record(

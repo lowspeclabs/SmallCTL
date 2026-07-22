@@ -5,6 +5,8 @@ import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from smallctl.client.client import OpenAICompatClient
 from smallctl.graph.model_call_nodes import (
     _conversation_tool_calls_from_pending,
@@ -18,6 +20,7 @@ from smallctl.graph.model_stream_loop_rendering import (
 )
 from smallctl.graph.state import GraphRunState, PendingToolCall
 from smallctl.harness.memory import MemoryService
+from smallctl.harness.credential_store import CredentialStore
 from smallctl.graph.tool_call_parser import parse_tool_calls
 from smallctl.graph.tool_inline_parsing import _extract_inline_tool_calls
 from smallctl.models.events import UIEventType
@@ -142,6 +145,31 @@ def test_ssh_semantic_failure_ignores_plain_diagnostic_probe() -> None:
         ssh_semantic_failure("which apt apt-get yum dnf 2>&1; ls /bin/dnf", output)
         == ""
     )
+
+
+def test_ssh_semantic_failure_detects_masked_docker_error() -> None:
+    output = {
+        "exit_code": 0,
+        "stdout": "Error response from daemon: network app_default not found\n",
+        "stderr": "",
+    }
+
+    reason = ssh_semantic_failure(
+        "docker network inspect app_default 2>&1 | head -5; docker compose ps",
+        output,
+    )
+
+    assert reason == "Error response from daemon: network app_default not found"
+
+
+def test_ssh_semantic_failure_ignores_successful_docker_diagnostic_pipeline() -> None:
+    output = {
+        "exit_code": 0,
+        "stdout": "NAME IMAGE STATUS\napi app healthy\n",
+        "stderr": "",
+    }
+
+    assert ssh_semantic_failure("docker compose ps 2>&1 | head -30", output) == ""
 
 
 def test_qwen_distilled_wrappers_preserve_task_complete_and_plan_reasoning() -> None:
@@ -1367,6 +1395,53 @@ def test_ssh_exec_writes_stdin_data_to_remote_command() -> None:
     assert create_process.await_args.kwargs["stdin"] is asyncio.subprocess.PIPE
 
 
+def test_ssh_exec_cancellation_stops_and_reaps_process() -> None:
+    class _HangingProc:
+        def __init__(self) -> None:
+            self.stdout = _FakeStream([b""])
+            self.stderr = _FakeStream([b""])
+            self.stdin = None
+            self.returncode = None
+            self.terminated = False
+            self.waited = 0
+            self._stopped = asyncio.Event()
+
+        async def wait(self) -> int:
+            self.waited += 1
+            await self._stopped.wait()
+            return 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+            self._stopped.set()
+
+        def kill(self) -> None:
+            self.terminate()
+
+    async def _run() -> _HangingProc:
+        proc = _HangingProc()
+        with patch.object(network, "create_process", AsyncMock(return_value=proc)):
+            task = asyncio.create_task(
+                network.run_ssh_command(
+                    host="192.168.1.63",
+                    user="root",
+                    command="sleep 30",
+                    state=LoopState(cwd="/tmp"),
+                    harness=SimpleNamespace(_active_processes={proc}),
+                )
+            )
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        return proc
+
+    proc = asyncio.run(_run())
+    assert proc.terminated is True
+    assert proc.waited >= 1
+
+
 def test_ssh_exec_does_not_retry_when_accept_new_is_rejected() -> None:
     state = LoopState(cwd="/tmp")
     create_process = AsyncMock(
@@ -1542,7 +1617,36 @@ def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
     assert metadata["ssh_password_recovered"] is True
 
 
-def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
+def test_ssh_file_read_preserves_explicit_password_literal() -> None:
+    state = LoopState(cwd=".")
+    state.run_brief.original_task = (
+        'ssh into root@192.168.1.110 with password "[REDACTED] [sha256=640200a3]"'
+    )
+    store = CredentialStore()
+    store.set_ssh_password("192.168.1.110", "root", "task-secret")
+    harness = SimpleNamespace(credential_store=store)
+
+    tool_name, args, intercepted, metadata = normalize_tool_request(
+        SimpleNamespace(get=lambda _name: None),
+        "ssh_file_read",
+        {
+            "host": "192.168.1.110",
+            "user": "root",
+            "password": "[REDACTED] [sha256=640200a3]",
+            "path": "/root/docker-medium-challenge/compose.yaml",
+        },
+        phase="execute",
+        state=state,
+        harness=harness,
+    )
+
+    assert intercepted is None
+    assert tool_name == "ssh_file_read"
+    assert args["password"] == "[REDACTED] [sha256=640200a3]"
+    assert "recovered_ssh_password_source" not in metadata
+
+
+def test_ssh_exec_preserves_explicit_hash_like_password() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
         'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
@@ -1567,15 +1671,11 @@ def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
 
     assert intercepted is None
     assert tool_name == "ssh_exec"
-    assert args["password"] == "Temp@Pass"
-    assert metadata["recovered_ssh_password"] is True
-    assert metadata["recovered_ssh_password_source"] == "task_context"
-    assert metadata["ssh_password_hash_suffix_corrected"] is True
-    assert metadata["ssh_password_origin"] == "task_context"
-    assert metadata["ssh_password_recovered"] is True
+    assert args["password"] == hash_suffix
+    assert "ssh_password_hash_suffix_corrected" not in metadata
 
 
-def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None:
+def test_ssh_file_read_preserves_explicit_hash_like_password() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
         'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
@@ -1598,10 +1698,8 @@ def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None
 
     assert intercepted is None
     assert tool_name == "ssh_file_read"
-    assert args["password"] == "Temp@Pass"
-    assert metadata["recovered_ssh_password"] is True
-    assert metadata["recovered_ssh_password_source"] == "task_context"
-    assert metadata["ssh_password_hash_suffix_corrected"] is True
+    assert args["password"] == hash_suffix
+    assert "ssh_password_hash_suffix_corrected" not in metadata
 
 
 def test_ssh_exec_preserves_explicit_password_that_does_not_match_task_hash() -> None:

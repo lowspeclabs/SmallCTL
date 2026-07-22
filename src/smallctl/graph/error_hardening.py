@@ -44,7 +44,8 @@ _HARNESS_POLICY_BLOCK_RE = re.compile(
     r"patch_over_rewrite_guard|ssh_host_key_recovery_required|spec_not_approved)\b"
     r"|Raw `ssh`/`scp`/`sftp` shell commands are (?:not allowed|blocked)"
     r"|Shell execution is blocked until the spec contract is approved"
-    r"|SSH execution is blocked until the spec contract is approved",
+    r"|SSH execution is blocked until the spec contract is approved"
+    r"|This local workspace command must use shell_exec, not ssh_exec",
     re.IGNORECASE | re.DOTALL,
 )
 _TERMINAL_UNKNOWN_RE = re.compile(r"\berror\s+opening\s+terminal:\s*unknown\b", re.IGNORECASE)

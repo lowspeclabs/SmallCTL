@@ -43,6 +43,19 @@ _SSH_COMPOSITE_ERROR_MARKERS = (
     "cannot access",
     "no such file or directory",
 )
+_SSH_CONTAINER_ERROR_MARKERS = (
+    "error response from daemon:",
+    "cannot connect to the docker daemon",
+    "oci runtime exec failed",
+    "oci runtime create failed",
+    "failed to create task",
+    "failed to create shim task",
+    "failed to solve:",
+    "manifest unknown",
+    "pull access denied",
+    "no matching manifest",
+    "no such object:",
+)
 _SSH_COMPOSITE_SHELL_TOKENS = ("&&", "||", ";", "|", "tee ", "head ", "tail ")
 _SSH_PACKAGE_OR_INSTALL_TOKENS = (
     " apt ",
@@ -58,6 +71,7 @@ _SSH_PACKAGE_OR_INSTALL_TOKENS = (
     " systemctl ",
     " service ",
 )
+_SSH_CONTAINER_COMMAND_TOKENS = (" docker ", " docker-compose ", " podman ")
 
 
 def ssh_command_is_package_manager_install(command: str) -> bool:
@@ -390,7 +404,9 @@ def ssh_semantic_failure(command: str, output: dict[str, Any]) -> str:
     normalized_command = f" {command_text.lower()} "
     if not any(token in normalized_command for token in _SSH_COMPOSITE_SHELL_TOKENS):
         return ""
-    if not any(token in normalized_command for token in _SSH_PACKAGE_OR_INSTALL_TOKENS):
+    package_or_install = any(token in normalized_command for token in _SSH_PACKAGE_OR_INSTALL_TOKENS)
+    container_command = any(token in normalized_command for token in _SSH_CONTAINER_COMMAND_TOKENS)
+    if not package_or_install and not container_command:
         return ""
     stdout = str(output.get("stdout") or "")
     stderr = str(output.get("stderr") or "")
@@ -398,7 +414,10 @@ def ssh_semantic_failure(command: str, output: dict[str, Any]) -> str:
     lowered = combined.lower()
     if not lowered:
         return ""
-    for marker in _SSH_COMPOSITE_ERROR_MARKERS:
+    error_markers = _SSH_COMPOSITE_ERROR_MARKERS
+    if container_command:
+        error_markers += _SSH_CONTAINER_ERROR_MARKERS
+    for marker in error_markers:
         if marker not in lowered:
             continue
         if marker == "unit " and "could not be found" not in lowered:

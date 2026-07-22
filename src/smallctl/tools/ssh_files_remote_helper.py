@@ -235,6 +235,7 @@ def atomic_write(path, data, payload):
     mode = payload.get("mode") or "overwrite"
     create_parent_dirs = bool(payload.get("create_parent_dirs"))
     backup = bool(payload.get("backup"))
+    preserve_inode = bool(payload.get("preserve_inode"))
     expected_sha256 = str(payload.get("expected_sha256") or "").strip()
     path = pathlib.Path(path)
     parent = path.parent
@@ -242,7 +243,10 @@ def atomic_write(path, data, payload):
         parent.mkdir(parents=True, exist_ok=True)
     if not parent.exists():
         return {"ok": False, "error_kind": "parent_not_found", "path": str(path), "message": "Remote parent directory does not exist."}
+    is_symlink = path.is_symlink()
     existed = path.exists()
+    if preserve_inode and is_symlink:
+        return {"ok": False, "error_kind": "preserve_inode_symlink_unsupported", "path": str(path), "message": "preserve_inode cannot be used with a symlink; refusing to follow and mutate its target."}
     if mode == "create" and existed:
         return {"ok": False, "error_kind": "file_exists", "path": str(path), "message": "Remote file already exists."}
     if mode not in {"overwrite", "create", "append"}:
@@ -250,11 +254,15 @@ def atomic_write(path, data, payload):
     old_data = b""
     old_sha = None
     old_stat = None
+    pre_device = None
+    pre_inode = None
     if existed:
         try:
             old_data = path.read_bytes()
             old_sha = sha256_bytes(old_data)
             old_stat = path.stat()
+            pre_device = old_stat.st_dev
+            pre_inode = old_stat.st_ino
         except PermissionError:
             return {"ok": False, "error_kind": "permission_denied", "path": str(path), "message": "Permission denied reading current remote file."}
     if expected_sha256 and old_sha != expected_sha256:
@@ -265,32 +273,48 @@ def atomic_write(path, data, payload):
     if backup and existed:
         backup_path = str(path) + ".bak." + time.strftime("%Y%m%d%H%M%S")
         shutil.copy2(path, backup_path)
-    fd, tmp_name = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(parent))
+    tmp_name = None
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if old_stat is not None:
-            os.chmod(tmp_name, old_stat.st_mode & 0o7777)
-            try:
-                os.chown(tmp_name, old_stat.st_uid, old_stat.st_gid)
-            except PermissionError:
-                pass
-        os.replace(tmp_name, path)
+        if preserve_inode and existed:
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(data)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+        else:
+            fd, tmp_name = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(parent))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if old_stat is not None:
+                os.chmod(tmp_name, old_stat.st_mode & 0o7777)
+                try:
+                    os.chown(tmp_name, old_stat.st_uid, old_stat.st_gid)
+                except PermissionError:
+                    pass
+            os.replace(tmp_name, path)
+            tmp_name = None
     except PermissionError:
         try:
-            os.unlink(tmp_name)
+            if tmp_name is not None:
+                os.unlink(tmp_name)
         except OSError:
             pass
         return {"ok": False, "error_kind": "permission_denied", "path": str(path), "message": "Permission denied writing remote file."}
     except Exception as exc:
         try:
-            os.unlink(tmp_name)
+            if tmp_name is not None:
+                os.unlink(tmp_name)
         except OSError:
             pass
         return {"ok": False, "error_kind": "remote_write_failed", "path": str(path), "message": str(exc)}
     readback = path.read_bytes()
+    post_stat = path.stat()
+    post_device = post_stat.st_dev
+    post_inode = post_stat.st_ino
+    inode_replaced = bool(existed and (pre_device, pre_inode) != (post_device, post_inode))
     new_sha = sha256_bytes(data)
     readback_sha = sha256_bytes(readback)
     if readback_sha != new_sha:
@@ -304,6 +328,12 @@ def atomic_write(path, data, payload):
         "backup_path": backup_path,
         "changed": old_data != data,
         "readback_sha256": readback_sha,
+        "pre_st_dev": pre_device,
+        "pre_st_ino": pre_inode,
+        "post_st_dev": post_device,
+        "post_st_ino": post_inode,
+        "inode_replaced": inode_replaced,
+        "restart_consumers_may_be_required": inode_replaced,
     }
 
 def apply_patch_content(content, payload):

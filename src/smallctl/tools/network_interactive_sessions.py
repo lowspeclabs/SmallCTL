@@ -271,15 +271,6 @@ async def ssh_session_start(
     harness: Any = None,
 ) -> dict[str, Any]:
     """Start an interactive SSH command and keep stdin/stdout open."""
-    if password and str(password).startswith("[REDACTED"):
-        return fail(
-            "The SSH password provided was literally redacted. Ask the human user to provide the actual password.",
-            metadata={
-                "host": host,
-                "command": command,
-                "reason": "redacted_password_provided",
-            },
-        )
     try:
         from .ssh_parsing import normalize_ssh_arguments, normalize_ssh_target
 

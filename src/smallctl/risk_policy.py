@@ -82,6 +82,8 @@ def evaluate_risk_policy(
     approval_available: bool = False,
 ) -> RiskPolicyDecision:
     task_classification = classify_task(state)
+    if tool_name == "ssh_exec" and _is_read_only_evidence_action(action):
+        tool_risk = "network_read"
     proof_bundle = build_risk_proof_bundle(
         state,
         tool_name=tool_name,

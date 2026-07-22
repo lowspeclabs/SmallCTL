@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..docker_retry_normalization import classify_docker_failure
+from ..docker_retry_normalization import classify_docker_failure, docker_reload_target
 from .tool_result_verification_constants import (
     _BINARY_PROBE_RE,
     _FOG_RESOURCE_RE,
@@ -14,6 +14,7 @@ from .tool_result_verification_constants import (
 )
 
 _VERIFIER_KIND_STRENGTH = {
+    "state_change": 0,
     "syntax_only": 1,
     "lint_typecheck": 2,
     "diagnostic": 2,
@@ -30,6 +31,8 @@ def verifier_kind_for_command(command: str) -> str:
     normalized = re.sub(r"\s+", " ", str(command or "").strip().lower())
     if not normalized:
         return ""
+    if docker_reload_target(normalized):
+        return "state_change"
     padded = f" {normalized}"
     if "py_compile" in padded:
         return "syntax_only"

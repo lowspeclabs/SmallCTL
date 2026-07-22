@@ -1957,3 +1957,13 @@ def test_remote_service_readiness_gate_accepts_http_probe_after_detached_run() -
     }
 
     assert task_complete_gate_remote_service_readiness(state) is None
+
+
+def test_remote_service_readiness_gate_accepts_running_compose_ps_after_start() -> None:
+    state = _remote_service_state()
+    state.tool_execution_records = {
+        "run": _ssh_step(1, "docker compose up -d", stdout="Container netbox Started"),
+        "ps": _ssh_step(2, "docker compose ps", stdout="netbox  Up 10 seconds (healthy)"),
+    }
+
+    assert task_complete_gate_remote_service_readiness(state) is None

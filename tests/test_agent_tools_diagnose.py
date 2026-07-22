@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Agent-Tools"))
 
 from run_diagnose import _classify_failure, _file_patch_target_loop_count
 from runscan import _classify_run
-from agent_tools_lib import detect_background_state_changing_shell, detect_primary_blockers, detect_shell_execution_anomalies, warn_on_schema_mismatch
+from agent_tools_lib import detect_background_state_changing_shell, detect_primary_blockers, detect_remote_container_file_divergence, detect_shell_execution_anomalies, warn_on_schema_mismatch
 from trace_call import _filter_records, _trace_step, _trace_task
 
 
@@ -23,6 +23,49 @@ def _make_failed_dispatch(tool_name: str, error_kind: str, error: str = "") -> d
             "metadata": {"error_kind": error_kind},
         },
     }
+
+
+def _remote_call(step: int, command: str, output: str, *, host: str = "192.0.2.10") -> list[dict]:
+    trace_id = f"run:task-1:step-{step}:call-{step}"
+    return [
+        {"event": "dispatch_start", "trace_id": trace_id, "data": {"tool_name": "ssh_exec", "arguments": {"host": host, "command": command}}},
+        {"event": "dispatch_complete", "trace_id": trace_id, "data": {"tool_name": "ssh_exec", "success": True, "output": {"stdout": output, "exit_code": 0}}},
+    ]
+
+
+def _divergence_records() -> list[dict]:
+    patch_trace = "run:task-1:step-1:call-1"
+    records = [
+        {"event": "dispatch_start", "trace_id": patch_trace, "data": {"tool_name": "ssh_file_patch", "arguments": {"host": "192.0.2.10", "path": "/srv/web/default.conf", "target_text": "proxy_pass http://api:8080;", "replacement_text": "proxy_pass http://api:8000;"}}},
+        {"event": "dispatch_complete", "trace_id": patch_trace, "data": {"tool_name": "ssh_file_patch", "success": True, "output": {"changed": True}}},
+    ]
+    records += _remote_call(2, "docker exec web nginx -s reload", "signal process started")
+    records += _remote_call(3, "docker compose exec web nginx -s reload", "signal process started")
+    records += _remote_call(4, "docker exec web cat /etc/nginx/conf.d/default.conf", "proxy_pass http://api:8080;")
+    records += _remote_call(5, "curl -s -o /dev/null -w '%{http_code}' http://localhost/health", "502")
+    return records
+
+
+def test_detect_remote_container_file_divergence_requires_full_corroboration() -> None:
+    findings = detect_remote_container_file_divergence(_divergence_records())
+
+    assert len(findings) == 1
+    assert findings[0]["basename"] == "default.conf"
+    assert findings[0]["successful_reload_count"] == 2
+    assert findings[0]["http_5xx_sample"].find("502") >= 0
+
+    without_second_reload = _divergence_records()
+    del without_second_reload[4:6]
+    assert detect_remote_container_file_divergence(without_second_reload) == []
+
+
+def test_diagnose_classifies_container_divergence_before_success_and_recovery() -> None:
+    session = {"overall_objective_status": "completed", "deliverable_verified": True}
+    events = Counter({"recovery_failure_event_recorded": 1})
+
+    classification = _classify_failure(events, [], session, [], [], tools_records=_divergence_records())
+
+    assert classification == "remote_container_file_divergence"
 
 
 def test_file_patch_target_loop_count_detects_stale_patch_failures() -> None:
@@ -92,6 +135,23 @@ def test_diagnose_classifies_completed_recovered_run_as_success_with_errors() ->
     classification = _classify_failure(events, errors, session, dispatches, harness_records)
 
     assert classification == "success_with_errors"
+
+
+def test_diagnose_classifies_cancelled_remote_verification_loop_before_recovery_failure() -> None:
+    events = Counter({"recovery_failure_event_recorded": 1})
+    session = {
+        "overall_objective_status": "incomplete",
+        "final_task_status": "cancelled",
+        "deliverable_verified": False,
+    }
+    dispatches = [_make_failed_dispatch(
+        "task_complete",
+        "remote_mutation_requires_verification",
+        "Cannot complete while remote mutation verification is pending.",
+    )]
+
+    assert _classify_failure(events, [], session, dispatches, []) == "cancelled_remote_verification_loop"
+    assert _classify_run(events, [], session, {}, dispatches, []) == "cancelled_remote_verification_loop"
 
 
 def test_runscan_classifies_completed_recovered_run_as_success_with_errors() -> None:

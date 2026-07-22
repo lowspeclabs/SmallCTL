@@ -14,6 +14,7 @@ from ..shell_utils import looks_like_ssh_keygen_known_hosts_removal as _looks_li
 class ShellApprovalDecision:
     approved: bool
     remember_session: bool = False
+    cancelled: bool = False
 
     def __bool__(self) -> bool:
         return self.approved

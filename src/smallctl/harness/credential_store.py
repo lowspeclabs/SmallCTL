@@ -55,7 +55,12 @@ class CredentialStore:
     def get_ssh_password(self, host: str, user: str | None) -> str | None:
         """Return the SSH password for a host/user pair, if known."""
         key = self._ssh_key(host, user)
-        return self._ssh_passwords.get(key)
+        password = self._ssh_passwords.get(key)
+        if password is not None:
+            return password
+        if str(user or "").strip():
+            return self._ssh_passwords.get(self._ssh_key(host, None))
+        return None
 
     def get_ssh_password_by_fingerprint(self, fingerprint: str) -> str | None:
         """Return an SSH password by its fingerprint, if known."""

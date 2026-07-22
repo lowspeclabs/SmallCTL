@@ -22,7 +22,7 @@ def test_run_logger_trace_id_is_written_to_all_channels(tmp_path) -> None:
         assert row["trace_id"] == "thread-1:7"
 
 
-def test_run_logger_redacts_sensitive_fields_in_jsonl_output(tmp_path) -> None:
+def test_run_logger_preserves_passwords_but_redacts_tokens_in_jsonl_output(tmp_path) -> None:
     logger = RunLogger(tmp_path / "run")
 
     logger.log(
@@ -35,9 +35,9 @@ def test_run_logger_redacts_sensitive_fields_in_jsonl_output(tmp_path) -> None:
 
     row = json.loads((logger.run_dir / "harness.jsonl").read_text(encoding="utf-8").splitlines()[0])
     data = row["data"]
-    assert data["password"] != "hunter2"
+    assert data["password"] == "hunter2"
     assert data["payload"]["token"] != "abc123"
-    assert data["payload"]["nested"]["ssh_password"] != "secret"
+    assert data["payload"]["nested"]["ssh_password"] == "secret"
 
 
 def test_model_call_trace_id_changes_when_step_count_resets() -> None:

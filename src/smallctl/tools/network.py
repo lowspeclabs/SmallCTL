@@ -44,6 +44,7 @@ from .shell_support import (
     _apt_sources_list_d_guard,
     _expose_interactive_session_tools,
     _foreground_command_guard,
+    _masked_compose_lifecycle_guard,
     _interactive_installer_yes_pipe_guard,
     _installer_command_suggested_timeout,
     _looks_like_deb822_validator,
@@ -324,16 +325,6 @@ async def run_ssh_command(
     stdin_data: str | None = None,
 ) -> dict[str, Any]:
     """Run a generated SSH command and return the same result shape as ssh_exec."""
-    if password and str(password).startswith("[REDACTED"):
-        return fail(
-            "The SSH password provided was literally redacted. This means you have lost access to the real password due to security scrubbing. "
-            "You MUST ask the human user to provide the actual password in plain text. Do NOT retry this command blindly.",
-            metadata={
-                "host": host,
-                "command": command,
-                "reason": "redacted_password_provided",
-            },
-        )
     strict_host_key_mode = _resolve_ssh_strict_host_key_mode(harness)
     try:
         host, user = normalize_ssh_target(host=host, user=user)
@@ -367,6 +358,13 @@ async def run_ssh_command(
         )
         yes_pipe_guard["metadata"] = metadata
         return yes_pipe_guard
+
+    lifecycle_guard = _masked_compose_lifecycle_guard(command, tool_name="ssh_exec")
+    if lifecycle_guard is not None:
+        metadata = dict(lifecycle_guard.get("metadata") or {})
+        metadata.update({"host": host, "user": user})
+        lifecycle_guard["metadata"] = metadata
+        return lifecycle_guard
 
     foreground_guard = _foreground_command_guard(command, tool_name="ssh_exec")
     if foreground_guard is not None:
@@ -674,6 +672,8 @@ async def run_ssh_command(
                 timeout=timeout_sec,
             )
         finally:
+            if proc.returncode is None:
+                await stop_process(proc, harness=harness, timeout=1.0)
             elapsed = time.time() - start_time
             last_process_output = _build_process_output(
                 stdout="".join(stdout_data),

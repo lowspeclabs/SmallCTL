@@ -234,6 +234,7 @@ async def dispatch_tools(graph_state: GraphRunState, deps: Any) -> None:
                 pending.args,
                 phase=getattr(getattr(harness, "dispatcher", None), "phase", None),
                 state=harness.state,
+                harness=harness,
                 source=pending_source,
             )
         else:

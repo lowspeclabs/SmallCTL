@@ -689,6 +689,119 @@ def detect_shell_execution_anomalies(
     return findings
 
 
+_DOCKER_CAT_RE = re.compile(
+    r"\bdocker(?:\s+compose)?\s+exec\b[^\n;&|]*?\bcat\s+(?P<path>[^\s;&|]+)",
+    re.IGNORECASE,
+)
+_DOCKER_RELOAD_RE = re.compile(
+    r"\bdocker(?:\s+compose)?\s+exec\b[^\n;&|]*?\b(?:reload|nginx\s+-s\s+reload)\b",
+    re.IGNORECASE,
+)
+_HTTP_COMMAND_RE = re.compile(r"\b(?:curl|wget)\b", re.IGNORECASE)
+_HTTP_5XX_RE = re.compile(r"(?<!\d)5\d\d(?!\d)")
+
+
+def detect_remote_container_file_divergence(
+    tools_records: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Find strongly corroborated host/container file divergence after a patch.
+
+    This intentionally requires a successful host patch, a later successful
+    same-host container cat of the same basename showing the old target but not
+    its replacement, at least two successful reloads, and a later HTTP 5xx.
+    """
+    records = list(tools_records)
+    starts: dict[str, tuple[int, dict[str, Any]]] = {}
+    calls: list[dict[str, Any]] = []
+    for index, rec in enumerate(records):
+        data = rec.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        trace_id = extract_trace_id(rec) or ""
+        if rec.get("event") == "dispatch_start":
+            starts[trace_id] = (index, data)
+            continue
+        if rec.get("event") != "dispatch_complete" or trace_id not in starts:
+            continue
+        start_index, start_data = starts[trace_id]
+        arguments = start_data.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        output = data.get("output")
+        output_text = json.dumps(output, default=str, ensure_ascii=False) if not isinstance(output, str) else output
+        calls.append({
+            "index": start_index,
+            "trace_id": trace_id,
+            "tool_name": start_data.get("tool_name"),
+            "arguments": arguments,
+            "host": str(arguments.get("host") or ""),
+            "success": data.get("success") is True,
+            "output": output_text,
+        })
+
+    findings: list[dict[str, Any]] = []
+    for patch in calls:
+        if patch["tool_name"] != "ssh_file_patch" or not patch["success"] or not patch["host"]:
+            continue
+        args = patch["arguments"]
+        path = str(args.get("path") or "")
+        target = str(args.get("target_text") or "")
+        replacement = str(args.get("replacement_text") or "")
+        basename = Path(path).name
+        if not basename or not target or not replacement or target == replacement:
+            continue
+        later = [call for call in calls if call["index"] > patch["index"] and call["host"] == patch["host"]]
+        reloads = [
+            call for call in later
+            if call["tool_name"] == "ssh_exec"
+            and call["success"]
+            and _DOCKER_RELOAD_RE.search(str(call["arguments"].get("command") or ""))
+        ]
+        if len(reloads) < 2:
+            continue
+        stale_cats: list[dict[str, Any]] = []
+        for call in later:
+            command = str(call["arguments"].get("command") or "")
+            match = _DOCKER_CAT_RE.search(command)
+            if (
+                call["tool_name"] == "ssh_exec"
+                and call["success"]
+                and match
+                and Path(match.group("path").strip("'\"")).name == basename
+                and target in call["output"]
+                and replacement not in call["output"]
+            ):
+                stale_cats.append(call)
+        if not stale_cats:
+            continue
+        first_cat = stale_cats[0]
+        http_5xx = [
+            call for call in later
+            if call["index"] > first_cat["index"]
+            and call["tool_name"] == "ssh_exec"
+            and call["success"]
+            and _HTTP_COMMAND_RE.search(str(call["arguments"].get("command") or ""))
+            and _HTTP_5XX_RE.search(call["output"])
+        ]
+        if not http_5xx:
+            continue
+        findings.append({
+            "pattern": "remote_container_file_divergence",
+            "host": patch["host"],
+            "host_path": path,
+            "basename": basename,
+            "target_text": target,
+            "replacement_text": replacement,
+            "patch_trace_id": patch["trace_id"],
+            "container_read_trace_id": first_cat["trace_id"],
+            "successful_reload_count": len(reloads),
+            "reload_trace_ids": [call["trace_id"] for call in reloads],
+            "http_5xx_trace_id": http_5xx[0]["trace_id"],
+            "http_5xx_sample": http_5xx[0]["output"][:200],
+        })
+    return findings
+
+
 def detect_primary_blockers(
     harness_records: Iterable[dict[str, Any]],
     failed_dispatches: Iterable[dict[str, Any]],

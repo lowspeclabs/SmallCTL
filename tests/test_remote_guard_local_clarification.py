@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import asyncio
+from unittest.mock import AsyncMock
 
 from smallctl.state import LoopState
 from smallctl.harness.tool_dispatch import dispatch_tool_call
@@ -155,3 +156,39 @@ def test_direct_ssh_exec_rejects_local_workspace_command() -> None:
     assert result.success is False
     assert result.metadata["reason"] == "local_command_requires_shell_exec"
     assert result.metadata["required_tool"] == "shell_exec"
+
+
+def test_direct_ssh_exec_allows_relative_command_on_confirmed_remote_target() -> None:
+    state = _make_state(task_mode="local_execute", cwd="/workspace")
+    state.run_brief.original_task = (
+        "Troubleshoot the application on remote host 192.168.1.110. The lab contains a grader script."
+    )
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.110": {"host": "192.168.1.110", "user": "root", "confirmed": True}
+    }
+
+    class _Registry:
+        def names(self) -> set[str]:
+            return {"ssh_exec", "shell_exec"}
+
+        def get(self, _name: str):
+            return None
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        dispatcher=SimpleNamespace(dispatch=AsyncMock(return_value=SimpleNamespace(success=True, error=None))),
+        _runlog=lambda *_args, **_kwargs: None,
+    )
+    result = asyncio.run(
+        dispatch_tool_call(
+            harness,
+            "ssh_exec",
+            {
+                "host": "192.168.1.110",
+                "command": "cd /root/docker-medium-challenge && ./grader.sh",
+            },
+        )
+    )
+
+    assert result.error != "This local workspace command must use shell_exec, not ssh_exec."

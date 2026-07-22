@@ -42,6 +42,7 @@ class StatusBar(Static):
         self._latest_verdict = latest_verdict
         self._token_usage = 0  # Current prompt estimate
         self._token_limit = 0  # Effective prompt budget (free)
+        self._requested_prompt_tokens = 0
         self._token_total = 0  # Cumulative session tokens
         self._context_window = 0  # Total server context window
         self._api_errors = 0
@@ -75,6 +76,7 @@ class StatusBar(Static):
         token_usage: int, # prompt estimate
         token_total: int, # cumulative
         token_limit: int, # effective prompt budget (free)
+        requested_prompt_tokens: int = 0,
         context_window: int = 0, # total server context window
         api_errors: int = 0,
         fama_off: bool = False,
@@ -95,6 +97,7 @@ class StatusBar(Static):
         self._token_usage = max(0, token_usage)
         self._token_total = max(0, token_total)
         self._token_limit = max(0, token_limit)
+        self._requested_prompt_tokens = max(0, requested_prompt_tokens)
         self._context_window = max(0, context_window)
         self._api_errors = api_errors
         self._fama_off = fama_off
@@ -195,7 +198,7 @@ class StatusBar(Static):
         return "\n".join(lines)
 
     def _context_usage_text(self) -> str:
-        limit = self._context_window or self._token_limit
+        limit = self._token_limit or self._context_window
         if limit <= 0:
             used = max(0, self._token_usage)
             return f"context: [bold #86efac]○ 0%[/] ({used:,}/0)"
@@ -212,7 +215,11 @@ class StatusBar(Static):
             color = "#f87171"
         elif percent >= 70:
             color = "#fbbf24"
-        return f"context: [bold {color}]{circle} {percent}%[/] ({used:,}/{limit:,})"
+        budget = f"{used:,}/{limit:,}"
+        requested = max(0, int(getattr(self, "_requested_prompt_tokens", 0) or 0))
+        if requested and requested != limit:
+            budget += f" requested {requested:,}"
+        return f"context: [bold {color}]{circle} {percent}%[/] ({budget})"
 
     @staticmethod
     def _truncate_line(text: str, width: int = 28) -> str:

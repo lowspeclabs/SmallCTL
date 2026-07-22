@@ -222,6 +222,17 @@ def test_build_backend_rca_strip_shows_fama_health() -> None:
     assert "FAMA signals: 1" in rca
 
 
+def test_build_backend_rca_strip_hides_fama_when_not_requested() -> None:
+    harness = SimpleNamespace(state=LoopState())
+    harness.state.current_phase = "repair"
+    harness.state.scratchpad["_fama"] = {"signals": [{"kind": "preflight_contradiction"}]}
+
+    rca = _build_backend_rca_strip(harness, include_fama=False)
+
+    assert "Phase: repair" in rca
+    assert "FAMA" not in rca
+
+
 def test_build_backend_rca_strip_shows_hidden_artifacts() -> None:
     harness = SimpleNamespace(
         state=LoopState(),

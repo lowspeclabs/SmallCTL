@@ -127,7 +127,10 @@ class SmallctlAppFlowMixin:
             console = self._get_console()
             if console is not None:
                 await self._append_system_line("Task cancelled.", force=True, kind="cancel")
-                rca = _build_backend_rca_strip(self.harness)
+                rca = _build_backend_rca_strip(
+                    self.harness,
+                    include_fama=self._show_system_messages or self._verbose,
+                )
                 if rca:
                     await self._append_system_line(rca, force=True, kind="cancel")
             step_override = "cancelled"
@@ -490,6 +493,7 @@ class SmallctlAppFlowMixin:
                     token_usage=state.token_usage,
                     token_total=state.token_total,
                     token_limit=state.token_limit,
+                    requested_prompt_tokens=state.requested_prompt_tokens,
                     context_window=state.context_window,
                     api_errors=state.api_errors,
                     fama_off=getattr(state, "fama_off", False),

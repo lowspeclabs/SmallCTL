@@ -21,7 +21,7 @@ def test_remote_followup_prefers_ssh_exec_intent() -> None:
     assert tool_name == "ssh_exec"
 
 
-def test_terminal_experience_redacts_password_like_text() -> None:
+def test_terminal_experience_preserves_password_text() -> None:
     state = LoopState(cwd="/tmp")
     state.thread_id = "thread-1"
     state.run_brief.original_task = "ssh into the remote host"
@@ -41,8 +41,7 @@ def test_terminal_experience_redacts_password_like_text() -> None:
         notes='Task complete: SSH to root@192.168.1.63 with password "Temp@Pass" succeeded.',
     )
 
-    assert "[REDACTED]" in memory.notes
-    assert "Temp@Pass" not in memory.notes
+    assert "Temp@Pass" in memory.notes
 
 
 def test_retrieval_and_rendering_deemphasize_redacted_task_complete_memories() -> None:
@@ -85,8 +84,7 @@ def test_retrieval_and_rendering_deemphasize_redacted_task_complete_memories() -
     assert bundle.experiences[0].memory_id == "mem-ssh-exec"
 
     rendered = PromptAssembler()._render_warm_item(task_complete)
-    assert "[REDACTED]" in rendered
-    assert "Temp@Pass" not in rendered
+    assert "Temp@Pass" in rendered
 
 
 def test_chat_task_mode_filters_remote_execution_memories() -> None:

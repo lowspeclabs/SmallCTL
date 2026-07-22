@@ -103,7 +103,7 @@ def classify_followup_transaction(
         turn_type = "RETRY"
         relevance = "high"
     elif signals.denial_context and signals.retry_language:
-        turn_type = "CLARIFICATION"
+        turn_type = "RETRY"
         relevance = "high"
     elif signals.remote_clarification:
         turn_type = "CLARIFICATION"

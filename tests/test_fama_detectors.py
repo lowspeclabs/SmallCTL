@@ -3,8 +3,10 @@ from __future__ import annotations
 from smallctl.fama.detectors import (
     detect_early_stop_from_result,
     detect_generic_stuck_loop,
+    detect_objective_verifier_mismatch,
     detect_ssh_host_key_verification_failure_from_result,
     detect_verifier_failure_from_result,
+    detect_wrong_path,
 )
 from smallctl.fama.signals import FamaFailureKind
 from smallctl.models.tool_result import ToolEnvelope
@@ -210,3 +212,32 @@ def test_detect_generic_stuck_loop_ignores_insufficient_failure_evidence() -> No
     state.recent_errors = ["command not found"]
 
     assert detect_generic_stuck_loop(state, threshold=3) is None
+
+
+def test_detect_wrong_path_keeps_remote_path_error_out_of_remote_scope_mitigation() -> None:
+    state = LoopState(step_count=2)
+    result = ToolEnvelope(
+        success=False,
+        error="grep: app.py: No such file or directory",
+        metadata={"reason": "", "path": "/root/docker-medium-challenge/app.py"},
+    )
+
+    signal = detect_wrong_path(state, tool_name="ssh_exec", result=result)
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.WRONG_PATH
+    assert signal.failure_class == "wrong_path"
+
+
+def test_detect_objective_verifier_mismatch_for_compose_repair_config_grep() -> None:
+    state = LoopState(step_count=4)
+    state.run_brief.original_task = "Repair a broken Docker Compose application and run the grader."
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "command": "cd /root/docker-medium-challenge && grep -n 'DB_HOST' compose.yaml",
+    }
+
+    signal = detect_objective_verifier_mismatch(state)
+
+    assert signal is not None
+    assert signal.kind is FamaFailureKind.OBJECTIVE_MISMATCH

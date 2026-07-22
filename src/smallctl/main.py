@@ -650,6 +650,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--reserve-tool-tokens", type=int, help="Reserved tool-call tokens"
     )
     parser.add_argument(
+        "--first-token-timeout-sec",
+        type=int,
+        help="Seconds to wait for the backend's first streamed token",
+    )
+    parser.add_argument(
         "--backend-unload-command",
         help="Shell command to unload a wedged backend model before retrying generation",
     )

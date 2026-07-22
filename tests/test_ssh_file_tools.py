@@ -3,12 +3,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from smallctl.state import LoopState
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.harness import tool_result_artifact_updates
-from smallctl.harness.remote_mutation_parsing import guess_remote_mutation_paths
+from smallctl.harness.remote_mutation_parsing import (
+    guess_remote_deletion_directory_empty_checks,
+    guess_remote_mutation_paths,
+)
 from smallctl.state_schema import ArtifactRecord
 from smallctl.tools.control import task_complete
 from smallctl.tools import ssh_files
@@ -16,6 +22,7 @@ from smallctl.tools.dispatcher import normalize_tool_request
 from smallctl.harness.task_intent import infer_requested_tool_name
 from smallctl.tools.profiles import NETWORK_PROFILE
 from smallctl.tools.register import build_registry
+from smallctl.tools.ssh_files_remote_helper import _REMOTE_HELPER_SOURCE
 
 
 def test_apply_exact_patch_content_fails_on_zero_match() -> None:
@@ -141,6 +148,84 @@ def test_ssh_dir_list_registered_in_network_profile(tmp_path) -> None:
     assert spec is not None
     assert "path" in spec.schema.get("properties", {})
     assert "path" in spec.schema.get("required", [])
+
+
+def test_ssh_mutation_schemas_expose_preserve_inode(tmp_path) -> None:
+    harness = SimpleNamespace(state=LoopState(cwd=str(tmp_path)), log=SimpleNamespace(info=lambda *args, **kwargs: None))
+    registry = build_registry(harness, registry_profiles={NETWORK_PROFILE})
+
+    for tool_name in ("ssh_file_write", "ssh_file_patch", "ssh_file_replace_between"):
+        prop = registry.get(tool_name).schema["properties"]["preserve_inode"]
+        assert prop["type"] == "boolean"
+        assert prop["default"] is False
+
+
+def _run_remote_helper(payload: dict) -> dict:
+    encoded = base64.b64encode(json.dumps(payload).encode()).decode()
+    completed = subprocess.run(
+        [sys.executable, "-c", _REMOTE_HELPER_SOURCE, encoded],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_remote_helper_preserve_inode_rewrites_existing_file_in_place(tmp_path) -> None:
+    path = tmp_path / "config.txt"
+    path.write_text("old", encoding="utf-8")
+    before = path.stat()
+
+    result = _run_remote_helper({
+        "action": "write", "path": str(path), "content": "new content",
+        "encoding": "utf-8", "backup": True, "preserve_inode": True,
+    })
+
+    after = path.stat()
+    assert result["ok"] is True
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert result["inode_replaced"] is False
+    assert result["restart_consumers_may_be_required"] is False
+    assert result["pre_st_ino"] == result["post_st_ino"] == before.st_ino
+    assert result["backup_path"] and os.path.exists(result["backup_path"])
+
+
+def test_remote_helper_atomic_write_reports_inode_replacement(tmp_path) -> None:
+    path = tmp_path / "config.txt"
+    path.write_text("old", encoding="utf-8")
+
+    result = _run_remote_helper({"action": "write", "path": str(path), "content": "new", "encoding": "utf-8"})
+
+    assert result["ok"] is True
+    assert result["inode_replaced"] is True
+    assert result["restart_consumers_may_be_required"] is True
+    assert result["pre_st_ino"] != result["post_st_ino"]
+
+
+def test_remote_helper_new_file_reports_inode_not_replaced(tmp_path) -> None:
+    path = tmp_path / "new.txt"
+
+    result = _run_remote_helper({"action": "write", "path": str(path), "content": "new", "encoding": "utf-8", "preserve_inode": True})
+
+    assert result["ok"] is True
+    assert result["pre_st_dev"] is None
+    assert result["pre_st_ino"] is None
+    assert result["inode_replaced"] is False
+    assert result["restart_consumers_may_be_required"] is False
+
+
+def test_remote_helper_rejects_preserve_inode_for_symlink(tmp_path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("unchanged", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    result = _run_remote_helper({"action": "write", "path": str(link), "content": "changed", "encoding": "utf-8", "preserve_inode": True})
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "preserve_inode_symlink_unsupported"
+    assert "symlink" in result["message"]
+    assert target.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_remote_file_guard_suggests_typed_read_tool() -> None:
@@ -940,6 +1025,46 @@ def test_remote_glob_directory_empty_verifier_clears_requirement() -> None:
     )
 
     assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_compound_key_regeneration_tracks_public_key_not_deletion() -> None:
+    state = LoopState(cwd=".")
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    service = SimpleNamespace(harness=harness)
+    command = (
+        "rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub && "
+        "ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''"
+    )
+
+    tool_result_artifact_updates._record_remote_mutation_requirement(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "ok", "exit_code": 0}),
+        arguments={"host": "192.168.1.89", "user": "root", "command": command},
+    )
+
+    requirement = state.scratchpad[ssh_files.REMOTE_MUTATION_VERIFICATION_KEY]
+    assert requirement.get("mutation_type") != "deletion"
+    assert requirement["guessed_paths"] == ["~/.ssh/id_ed25519.pub"]
+    assert requirement["directory_empty_checks"] == []
+
+    tool_result_artifact_updates._handle_remote_mutation_verifier_result(
+        service,
+        result=ToolEnvelope(success=True, output={"stdout": "ssh-ed25519 AAAA", "exit_code": 0}),
+        arguments={
+            "host": "192.168.1.89",
+            "user": "root",
+            "command": "cat ~/.ssh/id_ed25519.pub",
+        },
+    )
+
+    assert ssh_files.REMOTE_MUTATION_VERIFICATION_KEY not in state.scratchpad
+
+
+def test_deletion_directory_checks_only_track_globs() -> None:
+    assert guess_remote_deletion_directory_empty_checks("rm -f /etc/app/config") == []
+    assert guess_remote_deletion_directory_empty_checks("rm -rf /var/www/*") == [
+        {"path": "/var/www", "glob": "/var/www/*"}
+    ]
 
 
 def test_remote_deletion_requires_all_path_and_glob_verifiers() -> None:

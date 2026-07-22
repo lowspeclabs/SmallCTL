@@ -180,3 +180,31 @@ def test_repeated_tool_loop_blocks_exhausted_docker_registry_family() -> None:
     assert guard_error is not None
     assert "Docker registry/image resolution loop" in guard_error
     assert "openproject/openproject:latest" in guard_error
+
+
+def test_third_equivalent_reload_is_blocked_while_acceptance_failure_remains() -> None:
+    state = _make_state()
+    harness = SimpleNamespace(state=state, _runlog=lambda *args, **kwargs: None)
+    state.scratchpad["_last_failed_verifier"] = {
+        "command": "curl -fsS http://localhost/health",
+        "failure_mode": "test",
+        "key_stderr": "HTTP 500",
+        "key_stdout": "",
+    }
+    for _ in range(2):
+        _store_verifier_verdict(
+            state,
+            tool_name="ssh_exec",
+            result=ToolEnvelope(success=True, output={"exit_code": 0}),
+            arguments={"host": "server", "command": "docker restart api"},
+        )
+    pending = PendingToolCall(
+        tool_name="ssh_exec",
+        args={"host": "server", "command": "docker restart api"},
+        tool_call_id="third-reload",
+    )
+
+    guard_error = _detect_repeated_tool_loop(harness, pending)
+
+    assert guard_error is not None
+    assert "Recreate only the affected service/container" in guard_error

@@ -9,6 +9,7 @@ from smallctl.graph.progress_guard import (
     _record_ssh_exec_observation,
     _record_progress_read,
     _turn_has_actionable_progress,
+    ssh_exec_read_targets,
 )
 from smallctl.state import LoopState
 
@@ -36,6 +37,17 @@ def test_ssh_exec_read_is_new_detects_repeats() -> None:
 
     new_record2 = SimpleNamespace(args={"command": "cat /var/www/html/page.html"})
     assert _ssh_exec_read_is_new(harness, new_record2) is True
+
+
+def test_ssh_exec_read_targets_resolves_relative_files_from_cd() -> None:
+    record = SimpleNamespace(
+        args={"command": "cd /root/docker-medium-challenge && grep -n 'DB_HOST' compose.yaml api/app.py"}
+    )
+
+    assert ssh_exec_read_targets(record) == [
+        "/root/docker-medium-challenge/compose.yaml",
+        "/root/docker-medium-challenge/api/app.py",
+    ]
 
 
 def test_turn_has_actionable_progress_counts_new_ssh_exec_read() -> None:

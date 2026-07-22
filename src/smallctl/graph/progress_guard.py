@@ -55,6 +55,7 @@ from .progress_guard_ssh import (
     ssh_exec_has_novel_remote_observation as _ssh_exec_has_novel_remote_observation,
     ssh_exec_observation_entries as _ssh_exec_observation_entries,
     ssh_exec_output_fingerprint as _ssh_exec_output_fingerprint,
+    ssh_exec_read_targets,
     ssh_exec_remote_paths as _ssh_exec_remote_paths,
 )
 from .verifier_utils import (
@@ -729,6 +730,32 @@ def _update_progress_tracking(harness: Any, graph_state: Any) -> None:
                     "read_only_loop_gate_cleared",
                     "cleared read-only loop hard gate after successful mutation",
                 )
+        if (
+            record.tool_name == "ssh_file_write"
+            and record.result.success
+            and (record.result.metadata or {}).get("changed") is False
+            and (record.result.metadata or {}).get("restart_consumers_may_be_required") is True
+            and isinstance(scratchpad, dict)
+            and not scratchpad.get("_remote_noop_write_restart_nudged")
+        ):
+            scratchpad["_remote_noop_write_restart_nudged"] = True
+            state.append_message(
+                ConversationMessage(
+                    role="system",
+                    content=(
+                        "The remote file already contains the requested content (`changed=false`). "
+                        "Do not write it again. Restart or reload the affected consumer, then verify its live configuration and acceptance endpoint."
+                    ),
+                    metadata={
+                        "is_recovery_nudge": True,
+                        "recovery_kind": "remote_noop_write_requires_restart",
+                    },
+                )
+            )
+            harness._runlog(
+                "remote_noop_write_restart_nudge",
+                "redirected unchanged remote write to consumer restart and verification",
+            )
         _record_failed_verifier(state, record)
         _maybe_suppress_file_patch_after_target_not_found(state, record)
     _maybe_inject_verifier_success_nudge(state, graph_state)

@@ -66,6 +66,11 @@ def infer_ssh_password(
     if inferred_from_records:
         return inferred_from_records, "prior_ssh_exec"
 
+    if credential_store is not None:
+        inferred_from_store = credential_store.get_ssh_password(host, user)
+        if inferred_from_store:
+            return inferred_from_store, "credential_store"
+
     inferred_from_task = infer_ssh_password_from_state_context(host, user=user, state=state)
     if inferred_from_task:
         return inferred_from_task, "task_context"

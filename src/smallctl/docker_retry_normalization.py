@@ -186,6 +186,26 @@ def docker_retry_key(command: str, failure_class: str) -> str:
     return f"docker_registry_error::{str(failure_class or '').strip()}::{image_ref}"
 
 
+def docker_reload_target(command: str) -> str:
+    """Return the affected service/container for a reload-like state change."""
+    tokens = _split_command(command)
+    lowered = [token.lower() for token in tokens]
+    for executable in ("docker", "podman"):
+        if executable in lowered:
+            index = lowered.index(executable)
+            if index + 2 < len(tokens) and lowered[index + 1] in {"restart", "reload"}:
+                return f"{executable}:{tokens[index + 2]}"
+    for executable in ("systemctl", "service"):
+        if executable not in lowered:
+            continue
+        index = lowered.index(executable)
+        if executable == "systemctl" and index + 2 < len(tokens) and lowered[index + 1] in {"reload", "restart", "reload-or-restart"}:
+            return f"service:{tokens[index + 2]}"
+        if executable == "service" and index + 2 < len(tokens) and lowered[index + 2] in {"reload", "restart"}:
+            return f"service:{tokens[index + 1]}"
+    return ""
+
+
 def _extract_first_non_option_argument(tokens: list[str], *, value_flags: frozenset[str]) -> str:
     index = 0
     while index < len(tokens):

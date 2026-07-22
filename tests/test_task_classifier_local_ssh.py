@@ -136,6 +136,17 @@ def test_explicit_remote_execution_stays_remote_execute(task: str) -> None:
     assert task_uses_local_tool_for_remote_api(task) is False
 
 
+def test_remote_lab_with_grader_script_is_not_misclassified_as_local_tool_api() -> None:
+    task = (
+        "Troubleshoot the application on remote host 192.168.1.110. Diagnose each failure "
+        "using status, logs, health output, and the Compose configuration. The lab contains "
+        "a grader script and ./grader.sh must report CHALLENGE PASSED."
+    )
+
+    assert task_uses_local_tool_for_remote_api(task) is False
+    assert classify_task_mode(task) == "hybrid_execute"
+
+
 def test_run_brief_includes_local_scope_line() -> None:
     state = LoopState()
     state.run_brief.original_task = (

@@ -1155,6 +1155,17 @@ def test_remote_only_continue_under_pressure_reduces_tool_exposure(tmp_path) -> 
     assert "web_fetch" not in names
 
 
+def test_ask_human_is_available_in_chat_repair_mode(tmp_path) -> None:
+    harness = _real_registry_harness(tmp_path, task="repair remote access")
+    harness.state.current_phase = "repair"
+
+    spec = harness.registry.get("ask_human")
+
+    assert spec is not None
+    assert spec.mode_allowed("chat")
+    assert spec.phase_allowed("repair")
+
+
 def test_remote_only_continue_keeps_full_tools_without_pressure(tmp_path) -> None:
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"

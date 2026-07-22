@@ -37,6 +37,7 @@ from .tool_result_verification_semantic import (
 )
 from .tool_result_verification_ssh_recovery import _update_ssh_auth_recovery_state
 from .tool_result_verification_timeout import _is_long_running_remote_command_timeout
+from ..docker_retry_normalization import docker_reload_target
 
 
 def _store_verifier_verdict(
@@ -91,6 +92,7 @@ def _store_verifier_verdict(
     status = str(result.status or metadata.get("status") or "").strip()
     approval_denied = bool(metadata.get("approval_denied"))
     current_verifier_kind = verifier_kind_for_command(command)
+    is_state_change = current_verifier_kind == "state_change"
     if status == "needs_human" or approval_denied:
         verdict = "needs_human"
     elif semantic_failure:
@@ -161,7 +163,7 @@ def _store_verifier_verdict(
             false_negative_path = True
 
     insufficient_verifier = False
-    if verdict == "pass":
+    if verdict == "pass" and not is_state_change:
         insufficient_verifier = _passing_verifier_is_weaker_than_prior_failure(
             state,
             current_command=command,
@@ -173,7 +175,7 @@ def _store_verifier_verdict(
 
     # Reject weak verifiers for install tasks
     install_verifier_weak = False
-    if verdict == "pass" and not insufficient_verifier:
+    if verdict == "pass" and not insufficient_verifier and not is_state_change:
         install_verifier_weak, install_weak_reason = _install_task_requires_strong_verifier(
             state, command=command
         )
@@ -216,7 +218,12 @@ def _store_verifier_verdict(
         failure_class=failure_class,
         verdict=verdict,
     )
-    if verdict == "pass":
+    if verdict == "pass" and is_state_change:
+        acceptance_delta = {
+            "status": "pending",
+            "notes": ["state changed; direct acceptance verification is still required"],
+        }
+    elif verdict == "pass":
         acceptance_delta = {
             "status": "satisfied",
             "notes": ["execution succeeded"],
@@ -242,6 +249,8 @@ def _store_verifier_verdict(
         "failure_mode": failure_class,
         "acceptance_delta": acceptance_delta,
     }
+    if verdict == "pass":
+        normalized["verifier_kind"] = current_verifier_kind
     if insufficient_verifier or install_verifier_weak:
         normalized["insufficient_verifier"] = True
         normalized["verifier_kind"] = current_verifier_kind
@@ -289,7 +298,7 @@ def _store_verifier_verdict(
             normalized["latest_blocker"] = blocker
     state.last_verifier_verdict = normalized
     state.scratchpad["_last_verifier_verdict"] = normalized
-    if verdict == "pass":
+    if verdict == "pass" and not is_state_change:
         # An accepted (non-insufficient) pass supersedes the failed-verifier
         # baseline; the gate above has already rejected passes that do not
         # address it, and rejections never reach this point.
@@ -306,9 +315,10 @@ def _store_verifier_verdict(
     )
     if blocker:
         _store_latest_execution_blocker(state, blocker)
-    elif verdict == "pass":
+    elif verdict == "pass" and not is_state_change:
         state.scratchpad.pop("_latest_execution_blocker", None)
-    state.scratchpad.pop("_last_verifier_stale_after_mutation", None)
+    if not is_state_change:
+        state.scratchpad.pop("_last_verifier_stale_after_mutation", None)
     state.last_failure_class = failure_class
     state.scratchpad["_last_failure_class"] = failure_class
     if failure_class == "long_running_remote_command":
@@ -321,7 +331,20 @@ def _store_verifier_verdict(
             "stderr": stderr,
             "error": str(result.error or ""),
         }
-    _update_acceptance_ledger(state, verdict=verdict)
+    if not is_state_change:
+        _update_acceptance_ledger(state, verdict=verdict)
+    elif verdict == "pass":
+        target_name = docker_reload_target(command)
+        failed = state.scratchpad.get("_last_failed_verifier")
+        if target_name and isinstance(failed, dict):
+            failure_fingerprint = "|".join(
+                str(failed.get(key) or "").strip().lower()
+                for key in ("command", "failure_mode", "key_stderr", "key_stdout")
+            )
+            reloads = state.scratchpad.setdefault("_successful_reload_attempts", {})
+            if isinstance(reloads, dict):
+                key = f"{target_name}|{failure_fingerprint}"
+                reloads[key] = int(reloads.get(key, 0) or 0) + 1
     _update_ssh_auth_recovery_state(
         state,
         tool_name=tool_name,

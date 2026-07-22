@@ -73,6 +73,7 @@ FAILURE_CLASS_LABELS = {
     "ask_human_resume_terminal_tool_stall": "ask_human_resume_terminal_tool_stall",
     "continue_prompt_budget_loop": "continue_prompt_budget_loop",
     "tool_call_protocol_mismatch": "tool_call_protocol_mismatch",
+    "cancelled_remote_verification_loop": "cancelled_remote_verification_loop",
     "recovery_failure": "recovery_failure",
     "incomplete_unverified": "incomplete_unverified",
 }
@@ -109,6 +110,19 @@ def _has_patch_first_policy_loop(failed_dispatches: list[dict[str, Any]]) -> boo
     return has_patch_first_policy_loop(failed_dispatches)
 
 
+def _has_cancelled_remote_verification_loop(
+    session: dict[str, Any], failed_dispatches: list[dict[str, Any]]
+) -> bool:
+    if str(session.get("final_task_status") or "").strip().lower() not in {"cancelled", "interrupted"}:
+        return False
+    return any(
+        str((record.get("data") or {}).get("tool_name") or "") == "task_complete"
+        and "remote" in str((record.get("data") or {}).get("error") or "").lower()
+        and "verification" in str((record.get("data") or {}).get("error") or "").lower()
+        for record in failed_dispatches
+    )
+
+
 def _classify_run(
     events: Counter[str],
     errors: list[dict[str, Any]],
@@ -138,6 +152,8 @@ def _classify_run(
         return "success"
     if completed and not has_incomplete_tasks:
         return "success_with_errors" if errors else "success"
+    if _has_cancelled_remote_verification_loop(session, failed_dispatches):
+        return "cancelled_remote_verification_loop"
     if final in {"chat_failed", "chat_action_blocked"}:
         return "chat_failure"
     if _has_chat_terminal_repetition_stall(harness_records, session):

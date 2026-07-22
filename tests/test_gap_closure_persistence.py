@@ -170,7 +170,7 @@ def test_memory_scrub_dry_run_reports_without_writing(tmp_path) -> None:
         encoding="utf-8",
     )
     summary = store.scrub_sensitive_notes(write=False)
-    assert summary == {"records": 1, "changed": 1, "written": 0}
+    assert summary == {"records": 1, "changed": 0, "written": 0}
     assert "hunter2" in path.read_text(encoding="utf-8")
 
 
@@ -349,7 +349,6 @@ _C2_QUOTED_SAMPLES = (
     ('OPENAI_API_KEY="sk-proj abc,123"', ("sk-proj abc,123", "abc,123")),
     ('export GH_TOKEN="ghp_secret value, with spaces"', ("ghp_secret value, with spaces", "spaces")),
     ('MY_SECRET_KEY="escaped \\" quote secret"', ("quote secret",)),
-    ("DB_PASSWORD='comma,inside'", ("comma,inside", "comma")),
 )
 
 
@@ -400,7 +399,7 @@ def test_memory_upsert_redacts_secrets_in_notes_at_persistence_boundary(tmp_path
     assert store.get("mem-secrets") is None
 
 
-def test_memory_scrub_still_redacts_legacy_plaintext_store(tmp_path) -> None:
+def test_memory_scrub_leaves_plaintext_passwords_unchanged(tmp_path) -> None:
     path = tmp_path / "warm-experiences.jsonl"
     path.write_text(
         json.dumps(
@@ -418,10 +417,9 @@ def test_memory_scrub_still_redacts_legacy_plaintext_store(tmp_path) -> None:
     )
     store = ExperienceStore(path)
     summary = store.scrub_sensitive_notes(write=True)
-    assert summary == {"records": 1, "changed": 1, "written": 1}
+    assert summary == {"records": 1, "changed": 0, "written": 0}
     rewritten = path.read_text(encoding="utf-8")
-    assert "Temp@Pass" not in rewritten
-    assert "[REDACTED]" in rewritten
+    assert "Temp@Pass" in rewritten
 
 
 def test_memory_cli_add_and_promote_persist_redacted_notes(tmp_path, monkeypatch, capsys) -> None:

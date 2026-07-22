@@ -148,6 +148,11 @@ def record_verifier_result(
         progress.last_verifier_exit_code = None if exit_code is None else int(exit_code)
     except (TypeError, ValueError):
         progress.last_verifier_exit_code = None
+    if str(verifier_kind or "").strip().lower() == "state_change":
+        # Reload/restart success changes runtime state but proves no acceptance
+        # criterion and must not supersede the last objective verifier result.
+        progress.verified_after_last_change = False
+        return
     if progress.last_verifier_verdict == "pass":
         if _verifier_matches_user_objective(state, command, stdout=stdout, stderr=stderr):
             if progress.task_category == "coding":

@@ -165,6 +165,22 @@ def _current_user_task(harness: Any) -> str:
     return task
 
 
+def _matches_confirmed_ssh_target(harness: Any, host: str) -> bool:
+    normalized_host = str(host or "").strip().lower()
+    if not normalized_host:
+        return False
+    scratchpad = _scratchpad(harness)
+    targets = scratchpad.get("_session_ssh_targets")
+    if not isinstance(targets, dict):
+        return False
+    return any(
+        isinstance(target, dict)
+        and bool(target.get("confirmed"))
+        and str(target.get("host") or key or "").strip().lower() == normalized_host
+        for key, target in targets.items()
+    )
+
+
 def _refresh_runtime_intent(harness: Any, task: str) -> tuple[str, str]:
     runtime_intent = classify_runtime_intent(
         task,
@@ -538,12 +554,14 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
     decision = classify_task_decision(task)
     command = str(args.get("command") or "").strip()
     cwd = str(getattr(harness.state, "cwd", "") or "").strip()
-    command_is_local = bool(command and ("./" in command or "../" in command or (cwd and cwd in command)))
+    command_is_local = bool(command and ("../" in command or (cwd and cwd in command)))
+    confirmed_remote_host = _matches_confirmed_ssh_target(harness, str(args.get("host") or ""))
     if (
         tool_name == "ssh_exec"
         and task_mode == "local_execute"
         and decision.matched_rule.startswith("local_")
         and command_is_local
+        and not confirmed_remote_host
         and not any(anchor in task.lower() for anchor in ("ssh to", "over ssh", "via ssh", "run on the remote", "execute on the remote"))
     ):
         harness._runlog(
@@ -565,6 +583,7 @@ async def dispatch_tool_call(harness: Any, tool_name: str, args: dict[str, Any])
                 "classified_task_scope": "local_execute",
                 "matched_route_rule": decision.matched_rule,
                 "required_tool": "shell_exec",
+                "attempted_host": str(args.get("host") or ""),
             },
         )
 

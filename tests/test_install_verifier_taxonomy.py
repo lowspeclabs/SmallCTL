@@ -388,14 +388,59 @@ def test_deliverable_verified_true_on_cancel_with_passing_verifier() -> None:
     state.last_verifier_verdict = {"verdict": "pass", "command": "pihole status"}
     challenge_progress = {"verified_after_last_change": True}
     flags = _run_metric_flags(state, challenge_progress, status="cancelled")
-    assert flags["deliverable_verified"] is True
+    assert flags["deliverable_verified"] is False
+
+
+def test_deliverable_verified_false_on_cancel_with_removal_absence_probe() -> None:
+    state = LoopState()
+    state.last_verifier_verdict = {
+        "verdict": "pass",
+        "verifier_kind": "removal_absence_probe",
+    }
+    flags = _run_metric_flags(state, {"verified_after_last_change": True}, status="cancelled")
+    assert flags["deliverable_verified"] is False
 
 
 def test_deliverable_verified_preserved_on_non_cancelled() -> None:
     state = LoopState()
+    state.last_verifier_verdict = {"verdict": "pass", "verifier_kind": "test_suite"}
     challenge_progress = {"verified_after_last_change": True}
     flags = _run_metric_flags(state, challenge_progress, status="completed")
     assert flags["deliverable_verified"] is True
+
+
+def test_deliverable_verified_rejects_diagnostic_or_state_change_pass() -> None:
+    state = LoopState()
+    for kind in ("diagnostic", "state_change"):
+        state.last_verifier_verdict = {"verdict": "pass", "verifier_kind": kind}
+        flags = _run_metric_flags(
+            state, {"verified_after_last_change": True}, status="completed"
+        )
+        assert flags["deliverable_verified"] is False
+
+
+def test_service_restart_is_state_change_and_preserves_failed_acceptance() -> None:
+    state = LoopState()
+    state.run_brief.original_task = "Deploy the API and verify its HTTP endpoint"
+    state.scratchpad["_last_failed_verifier"] = {
+        "command": "curl -fsS http://localhost/health",
+        "failure_mode": "test",
+        "key_stderr": "HTTP 500",
+    }
+    state.challenge_progress.verified_after_last_change = True
+
+    verdict = _store_verifier_verdict(
+        state,
+        tool_name="ssh_exec",
+        result=ToolEnvelope(success=True, output={"exit_code": 0, "stdout": "api"}),
+        arguments={"host": "server", "command": "docker restart api"},
+    )
+
+    assert verdict is not None
+    assert verdict["verifier_kind"] == "state_change"
+    assert verdict["acceptance_delta"]["status"] == "pending"
+    assert state.challenge_progress.verified_after_last_change is False
+    assert state.scratchpad["_last_failed_verifier"]["key_stderr"] == "HTTP 500"
 
 
 def test_deliverable_verified_false_when_not_verified() -> None:

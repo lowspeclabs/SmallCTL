@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from smallctl.context import ContextPolicy, PromptAssembler
 from smallctl.context.retrieval import LexicalRetriever, build_retrieval_query
 from smallctl.harness import Harness
+from smallctl.harness.credential_store import CredentialStore
 from smallctl.harness.task_boundary import TaskBoundaryService
 from smallctl.models.conversation import ConversationMessage
 from smallctl.state import ArtifactRecord, ExecutionPlan, LoopState
@@ -18,6 +19,7 @@ def _make_harness(state: LoopState) -> SimpleNamespace:
         _configured_planning_mode=False,
         _configured_tool_profiles=None,
         _runlog=lambda *args, **kwargs: None,
+        credential_store=CredentialStore(),
     )
     harness._task_boundary_service = TaskBoundaryService(harness)
     return harness
@@ -44,6 +46,48 @@ def test_task_boundary_reset_preserves_pending_deliverable_paths() -> None:
         "Verify or create pending deliverables: /tmp/qwen-docker-easy-report.txt"
     )
     assert "Pending deliverables" in state.context_briefs[-1].key_discoveries[-1]
+
+
+def test_initialize_run_brief_retains_ssh_password_in_task_state() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    harness = _make_harness(state)
+    task = 'inspect root@192.168.1.110 with password: "task-secret"'
+
+    Harness._initialize_run_brief(harness, task, raw_task=task)
+
+    assert "task-secret" in state.run_brief.original_task
+
+
+def test_password_only_followup_rotates_sole_active_ssh_target_credential() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    state.scratchpad["_session_ssh_targets"] = {
+        "192.168.1.110": {
+            "host": "192.168.1.110",
+            "user": "root",
+            "confirmed": True,
+        }
+    }
+    harness = _make_harness(state)
+    harness.credential_store.set_ssh_password("192.168.1.110", "root", "old-secret")
+
+    Harness._initialize_run_brief(
+        harness,
+        'password is "replacement-secret"',
+        raw_task='password is "replacement-secret"',
+    )
+
+    assert "replacement-secret" in state.run_brief.original_task
+
+
+def test_continue_keeps_password_in_inherited_task() -> None:
+    state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
+    harness = _make_harness(state)
+    task = 'inspect root@192.168.1.110 with password: "task-secret"'
+    Harness._initialize_run_brief(harness, task, raw_task=task)
+
+    Harness._initialize_run_brief(harness, task, raw_task="continue")
+
+    assert "task-secret" in state.run_brief.original_task
 
 
 def test_remote_operational_followup_resolves_to_active_ssh_target() -> None:

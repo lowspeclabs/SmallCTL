@@ -3459,6 +3459,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     harness = SimpleNamespace(
         state=state,
         context_policy=SimpleNamespace(max_prompt_tokens=4096),
+        configured_max_prompt_tokens=8192,
         server_context_limit=2048,
         guards=SimpleNamespace(max_tokens=1024),
     )
@@ -3472,6 +3473,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     assert status.contract_phase == "verify"
     assert status.acceptance_progress == "1/2"
     assert status.latest_verdict == "pass | pytest | exit 0"
+    assert status.requested_prompt_tokens == 8192
 
     bar = object.__new__(StatusBar)
     bar.__dict__.update(
@@ -3490,6 +3492,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
             "_token_usage": status.token_usage,
             "_token_total": status.token_total,
             "_token_limit": status.token_limit,
+            "_requested_prompt_tokens": status.requested_prompt_tokens,
             "_context_window": status.context_window,
             "_api_errors": status.api_errors,
             "_phase_transition": "",
@@ -3507,6 +3510,7 @@ def test_contract_flow_status_text_includes_verdict_and_acceptance() -> None:
     assert "Recovery: verifier loop (2 rejects)" in text
     assert "cumulative:" in text
     assert "context:" in text
+    assert "requested 8,192" in text
     assert "█" not in text
 
     bar.__dict__["_vertical"] = True
@@ -5833,6 +5837,14 @@ def test_first_token_timeout_parses_from_env(monkeypatch: pytest.MonkeyPatch) ->
     config = resolve_config({})
 
     assert config.first_token_timeout_sec == 17
+
+
+def test_first_token_timeout_parses_from_cli() -> None:
+    from smallctl.main import build_parser
+
+    args = build_parser().parse_args(["--first-token-timeout-sec", "300"])
+
+    assert args.first_token_timeout_sec == 300
 
 
 def test_backend_supervisor_fields_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

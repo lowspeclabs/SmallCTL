@@ -425,6 +425,31 @@ async def test_shell_approval_timeout_emits_event():
 
 
 @pytest.mark.asyncio
+async def test_shell_approval_uses_human_timeout_not_command_timeout():
+    from smallctl.harness.approvals import ApprovalService
+
+    events = []
+    harness = SimpleNamespace(
+        allow_interactive_shell_approval=True,
+        shell_approval_session_default=False,
+        config=SimpleNamespace(needs_human_timeout_sec=45),
+        event_handler=lambda _event: None,
+        _emit=AsyncMock(side_effect=lambda _handler, event: events.append(event)),
+        _runlog=Mock(),
+    )
+    service = ApprovalService(harness)
+
+    pending = asyncio.create_task(
+        service.request_shell_approval(command="sleep 1", cwd="/tmp", timeout_sec=1)
+    )
+    await asyncio.sleep(0)
+    event = events[0]
+    assert event.data["timeout_sec"] == 45
+    service.resolve_shell_approval(event.data["approval_id"], True)
+    assert await pending is True
+
+
+@pytest.mark.asyncio
 async def test_sudo_password_timeout_emits_event():
     from smallctl.harness.approvals import ApprovalService
 
@@ -547,4 +572,3 @@ def test_verifier_decision_logs_verdict():
     assert data["tool_name"] == "shell_exec"
     assert data["verdict"] == "pass"
     assert data["command"] == "python3 -m py_compile app.py"
-

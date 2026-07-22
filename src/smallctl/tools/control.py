@@ -464,6 +464,37 @@ async def finalize_write_session(state: LoopState, harness: Any) -> dict:
 
 
 async def task_fail(message: str, state: LoopState, harness: Any | None = None) -> dict:
+    normalized_message = " ".join(str(message or "").lower().split())
+    success_claim = any(
+        phrase in normalized_message
+        for phrase in (
+            "completed successfully",
+            "successfully completed",
+            "task is complete",
+            "task complete",
+            "task is completed",
+            "deliverables are confirmed",
+        )
+    )
+    blocker_language = any(
+        phrase in normalized_message
+        for phrase in (
+            "could not",
+            "cannot",
+            "can't",
+            "failed",
+            "failure",
+            "blocked",
+            "not complete",
+            "did not complete",
+            "unsuccessful",
+        )
+    )
+    if success_claim and not blocker_language:
+        return fail(
+            "Cannot fail the task with a message that claims successful completion. Use task_complete, or describe the concrete blocker.",
+            metadata={"reason": "task_fail_success_claim"},
+        )
     verifier_verdict = _normalized_verifier_verdict(state)
     runtime_error_block = runtime_error_task_fail_block(
         state,

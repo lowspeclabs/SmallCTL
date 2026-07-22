@@ -10,6 +10,7 @@ import pytest
 from smallctl.harness import Harness
 from smallctl.harness.runtime_facade import (
     HarnessRunAlreadyActiveError,
+    cancel,
     resume_task_with_events,
     run_auto_with_events,
     run_task_with_events,
@@ -56,6 +57,26 @@ class _BlockingHarness:
 
     async def teardown(self) -> None:
         await asyncio.sleep(0)
+
+
+def test_harness_cancel_does_not_start_teardown_during_active_run() -> None:
+    dispatch_task = SimpleNamespace(done=lambda: False, cancel=lambda: None)
+    harness = SimpleNamespace(
+        _cancel_requested=False,
+        _cancel_source="",
+        _active_dispatch_task=dispatch_task,
+        approvals=SimpleNamespace(
+            reject_pending_shell_approvals=lambda: None,
+            reject_pending_sudo_password_prompts=lambda: None,
+        ),
+        note_task_shutdown=lambda reason: None,
+        log=logging.getLogger(__name__),
+    )
+
+    cancel(harness, source="ui_stop_button")
+
+    assert harness._cancel_requested is True
+    assert harness._cancel_source == "ui_stop_button"
 
 
 def _make_bridge(harness: _BlockingHarness) -> HarnessBridge:

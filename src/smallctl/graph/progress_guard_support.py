@@ -34,7 +34,7 @@ def _current_task_requires_file_mutation(state: Any | None) -> bool:
     mutation_verb = any(verb in task_text for verb in mutation_verbs)
     file_target = any(
         marker in task_text
-        for marker in ("file", "file_patch", ".html", ".py", ".js", ".ts", "/var/www", "do not do a direct overwrite")
+        for marker in ("file", "file_patch", ".html", ".py", ".js", ".ts", ".yaml", ".yml", ".conf", "docker compose", "compose application", "/var/www", "do not do a direct overwrite")
     )
     if mutation_verb and file_target:
         return True

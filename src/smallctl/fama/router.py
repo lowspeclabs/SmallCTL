@@ -38,6 +38,7 @@ MITIGATION_RULES: dict[FamaFailureKind, list[str]] = {
     FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID: ["source_invalid_install_capsule", "evidence_reuse_capsule", "tool_exposure_narrowing", "micro_plan_capsule"],
     FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: ["preexisting_state_as_success_capsule", "acceptance_checklist_capsule", "evidence_reuse_capsule"],
     FamaFailureKind.SSH_HOST_KEY_VERIFICATION: ["ssh_host_key_recovery_capsule"],
+    FamaFailureKind.WRONG_PATH: ["micro_plan_capsule", "evidence_reuse_capsule"],
 }
 
 

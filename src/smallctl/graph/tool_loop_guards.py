@@ -5,7 +5,7 @@ import math
 import re
 from typing import Any
 
-from ..docker_retry_normalization import docker_retry_family
+from ..docker_retry_normalization import docker_reload_target, docker_retry_family
 from ..repeat_loop_policy import strict_identical_limit, strict_window_limit
 from ..state import json_safe_value
 from .state import PendingToolCall
@@ -50,6 +50,7 @@ from .tool_loop_guard_read_predicates import (
     _artifact_read_targets_mutation_result_loop,
     _ssh_file_read_after_remote_mutation_is_progress,
 )
+from .progress_guard_ssh import ssh_exec_read_targets
 from .tool_loop_guards_support import (
     _directive_hint_for_repeated_tool,
     _normalize_token,
@@ -490,6 +491,9 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
     exhausted_docker_error = _detect_exhausted_docker_registry_family(harness, pending)
     if exhausted_docker_error:
         return exhausted_docker_error
+    exhausted_reload_error = _detect_exhausted_docker_reload(harness, pending)
+    if exhausted_reload_error:
+        return exhausted_reload_error
     if _consume_repeat_guard_one_shot_allowance(harness, pending):
         return None
     state = getattr(harness, "state", None)
@@ -525,6 +529,18 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
                 "Guard tripped: repeated deterministic missing remote file read "
                 "(ssh_file_read path was already reported not found)"
             ),
+        )
+    if _ssh_exec_repeats_remote_read_target(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            "Guard tripped: repeated remote file read loop (the same remote file was already inspected; use visible evidence to patch, verify, or inspect a different target)",
+        )
+    if _ssh_exec_immediate_identical_probe_is_loop(harness, pending):
+        return _format_repeated_tool_loop_message(
+            harness,
+            pending,
+            "Guard tripped: immediate duplicate SSH diagnostic probe (use the existing result and inspect a different layer or make a justified change)",
         )
     if _dir_list_same_path_repeat_is_loop(harness, pending):
         return _format_repeated_tool_loop_message(
@@ -656,6 +672,50 @@ def _detect_repeated_tool_loop(harness: Any, pending: PendingToolCall) -> str | 
     return None
 
 
+def _ssh_exec_repeats_remote_read_target(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "ssh_exec":
+        return False
+    candidate = PendingToolCall(tool_name="ssh_exec", args=pending.args)
+    targets = set(ssh_exec_read_targets(candidate))
+    if not targets:
+        return False
+    history = _tool_attempt_history(harness)
+    occurrences = {target: 1 for target in targets}
+    for item in history[-11:]:
+        if str(item.get("tool_name") or "") != "ssh_exec":
+            continue
+        args = _extract_args_from_fingerprint(_history_fingerprint(item))
+        if not args:
+            continue
+        prior = PendingToolCall(tool_name="ssh_exec", args=args)
+        for target in targets.intersection(ssh_exec_read_targets(prior)):
+            occurrences[target] += 1
+    return any(count >= 3 for count in occurrences.values())
+
+
+def _ssh_exec_immediate_identical_probe_is_loop(harness: Any, pending: PendingToolCall) -> bool:
+    if pending.tool_name != "ssh_exec":
+        return False
+    command = str(pending.args.get("command") or "").strip()
+    if not command or re.search(
+        r"\b(?:rm|mv|cp|chmod|chown|mkdir|touch|tee|truncate|sed\s+-i|"
+        r"docker\s+compose\s+(?:up|down|restart|stop|start|pull|build)|"
+        r"systemctl\s+(?:start|stop|restart|reload|enable|disable))\b|>>?",
+        command,
+        re.IGNORECASE,
+    ):
+        return False
+    history = _tool_attempt_history(harness)
+    if not history or str(history[-1].get("tool_name") or "") != "ssh_exec":
+        return False
+    candidate = _semantic_tool_call_fingerprint(
+        pending.tool_name,
+        pending.args,
+        cwd=_cwd_for_fingerprint(harness),
+    )
+    return _history_fingerprint(history[-1]) == candidate
+
+
 def _detect_exhausted_docker_registry_family(harness: Any, pending: PendingToolCall) -> str | None:
     if pending.tool_name not in {"shell_exec", "ssh_exec"}:
         return None
@@ -676,6 +736,31 @@ def _detect_exhausted_docker_registry_family(harness: Any, pending: PendingToolC
         f"for `{image_ref}`. This image reference already failed multiple times. "
         "Do not retry the same image ref. Verify the exact repo/tag from trusted docs or web search, "
         "check `docker image ls`, or switch to a different image/package."
+    )
+
+
+def _detect_exhausted_docker_reload(harness: Any, pending: PendingToolCall) -> str | None:
+    if pending.tool_name not in {"shell_exec", "ssh_exec"}:
+        return None
+    target = docker_reload_target(str(pending.args.get("command") or ""))
+    if not target:
+        return None
+    state = getattr(harness, "state", None)
+    scratchpad = getattr(state, "scratchpad", {}) if state is not None else {}
+    failed = scratchpad.get("_last_failed_verifier") if isinstance(scratchpad, dict) else None
+    attempts = scratchpad.get("_successful_reload_attempts", {}) if isinstance(scratchpad, dict) else {}
+    if not isinstance(failed, dict) or not isinstance(attempts, dict):
+        return None
+    failure_fingerprint = "|".join(
+        str(failed.get(key) or "").strip().lower()
+        for key in ("command", "failure_mode", "key_stderr", "key_stdout")
+    )
+    if int(attempts.get(f"{target}|{failure_fingerprint}", 0) or 0) < 2:
+        return None
+    service = target.split(":", 1)[-1]
+    return (
+        "Guard tripped: two equivalent successful Docker reload/restart attempts left acceptance unchanged. "
+        f"Do not reload `{service}` again. Recreate only the affected service/container, then rerun the direct acceptance check."
     )
 
 

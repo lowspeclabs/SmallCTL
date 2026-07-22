@@ -27,6 +27,7 @@ from agent_tools_lib import (
     detect_phantom_code_changes,
     detect_shell_execution_anomalies,
     detect_primary_blockers,
+    detect_remote_container_file_divergence,
     error_records,
     event_counter,
     extract_trace_id,
@@ -83,6 +84,19 @@ def _has_patch_first_policy_loop(failed_dispatches: list[dict[str, Any]]) -> boo
     return has_patch_first_policy_loop(failed_dispatches)
 
 
+def _has_cancelled_remote_verification_loop(
+    session: dict[str, Any], failed_dispatches: list[dict[str, Any]]
+) -> bool:
+    if str(session.get("final_task_status") or "").strip().lower() not in {"cancelled", "interrupted"}:
+        return False
+    return any(
+        str((record.get("data") or {}).get("tool_name") or "") == "task_complete"
+        and "remote" in str((record.get("data") or {}).get("error") or "").lower()
+        and "verification" in str((record.get("data") or {}).get("error") or "").lower()
+        for record in failed_dispatches
+    )
+
+
 def _classify_failure(
     events: Counter[str],
     errors: list[dict[str, Any]],
@@ -104,13 +118,18 @@ def _classify_failure(
     primary_blockers = detect_primary_blockers(harness_records, failed_dispatches)
     background_blockers = detect_background_state_changing_shell(tools_records or [])
     shell_anomalies = detect_shell_execution_anomalies(tools_records or [])
+    container_divergence = detect_remote_container_file_divergence(tools_records or [])
 
+    if container_divergence:
+        return "remote_container_file_divergence"
     if overall in {"complete", "completed"} and deliverable_verified is True and not errors:
         return "success"
     if overall in {"complete", "completed"} and deliverable_verified is True and errors:
         return "success_with_errors"
     if completed and not has_incomplete_tasks:
         return "success_with_errors" if errors else "success"
+    if _has_cancelled_remote_verification_loop(session, failed_dispatches):
+        return "cancelled_remote_verification_loop"
     if _has_chat_terminal_repetition_stall(harness_records, session):
         return "chat_terminal_repetition_stall"
     if _has_write_overwrite_guard_failures(failed_dispatches):
@@ -188,6 +207,13 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
     apt_deb822_misfires = detect_apt_deb822_guard_misfire(harness_records)
     reported_blocker = harness_reported_blocker(summaries, task_summaries)
     phantom_changes = detect_phantom_code_changes(summaries, tools_records, run_dir)
+    container_divergence = detect_remote_container_file_divergence(tools_records)
+    reported_verification = session.get("deliverable_verified")
+    deliverable_verification = {
+        "reported": reported_verification,
+        "effective": False if container_divergence else reported_verification,
+        "invalidated_by": ["remote_container_file_divergence"] if container_divergence else [],
+    }
 
     recommended = _recommend_next_steps(events, errors, session, failed_dispatches, harness_records, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records)
     if reported_blocker and not primary_blockers:
@@ -204,6 +230,8 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
             + ", ".join(p["path"] for p in phantom_changes[:3])
             + ". Check .smallctl/write_sessions/ for unpromoted staging copies."
         )
+    if container_divergence:
+        recommended.insert(0, "The patched host file diverges from the running container copy. Recreate the container or use an inode-preserving update, then verify container content and HTTP health again.")
 
     diagnosis = {
         "run_dir": str(run_dir),
@@ -213,6 +241,8 @@ def _diagnose(run_dir: Path) -> dict[str, Any]:
         "session_summary": session,
         "task_summary": task_summary,
         "failure_classification": _classify_failure(events, errors, session, failed_dispatches, harness_records, task_summary=task_summary, model_output_records=model_output_records, tools_records=tools_records, chat_records=chat_records),
+        "remote_container_file_divergence": container_divergence,
+        "deliverable_verification": deliverable_verification,
         "primary_blockers": primary_blockers,
         "harness_reported_blocker": reported_blocker,
         "phantom_code_changes": phantom_changes,
@@ -298,6 +328,8 @@ def _recommend_next_steps(
         steps.append("FAMA blocked a tool call; review fama signals and required verifier fingerprints.")
     if failed_dispatches:
         steps.append(f"{len(failed_dispatches)} tool dispatches failed; check tools.jsonl for error details.")
+    if _has_cancelled_remote_verification_loop(session, failed_dispatches):
+        steps.append("Cancellation followed repeated remote-mutation completion blocks; inspect the generated verifier command and requirement state before retrying.")
     if session.get("deliverable_verified") is False and session.get("overall_objective_status") == "incomplete":
         progress = session.get("challenge_progress") if isinstance(session, dict) else None
         if isinstance(progress, dict) and progress.get("code_change_count") and not progress.get("verified_after_last_change"):
@@ -330,6 +362,15 @@ def _render_text(diagnosis: dict[str, Any]) -> str:
     lines.append(f"  overall_objective_status: {session.get('overall_objective_status', 'n/a')}")
     lines.append(f"  final_task_status: {task_summary.get('final_task_status', 'n/a')}")
     lines.append(f"  deliverable_verified: {session.get('deliverable_verified', 'n/a')}")
+    verification = diagnosis.get("deliverable_verification") or {}
+    if verification.get("effective") is not verification.get("reported"):
+        lines.append(colorize(f"  effective_deliverable_verified: {verification.get('effective')} (invalidated by remote container divergence)", Colors.RED))
+
+    divergence = diagnosis.get("remote_container_file_divergence") or []
+    if divergence:
+        lines.append("  remote container file divergence:")
+        for item in divergence:
+            lines.append(colorize(f"    {item['host']}:{item['host_path']} -> container {item['basename']} stayed stale; reloads={item['successful_reload_count']}, HTTP={item['http_5xx_sample'][:40]}", Colors.RED))
 
     anomalies = diagnosis.get("shell_execution_anomalies") or []
     if anomalies:

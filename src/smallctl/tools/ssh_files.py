@@ -187,7 +187,25 @@ async def _run_remote_file_action(
         metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
         output = metadata.get("output") if isinstance(metadata.get("output"), dict) else {}
         stderr = str(output.get("stderr") or result.get("error") or "")
-        reason = "remote_python_missing" if "python3" in stderr.lower() and "not found" in stderr.lower() else "remote_helper_failed"
+        if "python3" in stderr.lower() and "not found" in stderr.lower():
+            reason = "remote_python_missing"
+        elif str(metadata.get("ssh_error_class") or "") == "auth_permission_denied":
+            reason = "ssh_auth_rejected"
+        else:
+            reason = "remote_helper_failed"
+        auth_metadata = {
+            key: metadata[key]
+            for key in (
+                "failure_kind",
+                "failure_mode",
+                "ssh_error_class",
+                "ssh_transport_succeeded",
+                "ssh_password_provided",
+                "ssh_auth_mode",
+                "ssh_auth_transport",
+            )
+            if key in metadata
+        }
         return fail(
             result.get("error") or "Remote SSH file helper failed.",
             metadata={
@@ -195,6 +213,7 @@ async def _run_remote_file_action(
                 "host": connection.get("host"),
                 "reason": reason,
                 "recovery_hint": "Install python3 on the remote host or use explicit ssh_exec." if reason == "remote_python_missing" else "Inspect remote SSH helper output.",
+                **auth_metadata,
                 "ssh_result": result,
             },
         )
@@ -311,6 +330,7 @@ async def ssh_file_write(
     mode: str = "overwrite",
     create_parent_dirs: bool = False,
     backup: bool = True,
+    preserve_inode: bool = False,
     expected_sha256: str | None = None,
     source_artifact_id: str | None = None,
     timeout_sec: int = 120,
@@ -347,6 +367,7 @@ async def ssh_file_write(
             "mode": mode,
             "create_parent_dirs": create_parent_dirs,
             "backup": backup,
+            "preserve_inode": preserve_inode,
             "expected_sha256": resolved_expected_sha256,
         },
         target=target,
@@ -398,6 +419,7 @@ async def ssh_file_patch(
     encoding: str = "utf-8",
     expected_occurrences: int = 1,
     backup: bool = True,
+    preserve_inode: bool = False,
     expected_sha256: str | None = None,
     source_artifact_id: str | None = None,
     whitespace_normalized: bool = False,
@@ -442,6 +464,7 @@ async def ssh_file_patch(
             "encoding": encoding,
             "expected_occurrences": expected_occurrences,
             "backup": backup,
+            "preserve_inode": preserve_inode,
             "expected_sha256": resolved_expected_sha256,
             "whitespace_normalized": whitespace_normalized,
             "dry_run": dry_run,
@@ -482,6 +505,7 @@ async def ssh_file_replace_between(
     include_bounds: bool = True,
     expected_occurrences: int = 1,
     backup: bool = True,
+    preserve_inode: bool = False,
     expected_sha256: str | None = None,
     source_artifact_id: str | None = None,
     whitespace_normalized: bool = False,
@@ -528,6 +552,7 @@ async def ssh_file_replace_between(
             "include_bounds": include_bounds,
             "expected_occurrences": expected_occurrences,
             "backup": backup,
+            "preserve_inode": preserve_inode,
             "expected_sha256": resolved_expected_sha256,
             "whitespace_normalized": whitespace_normalized,
             "dry_run": dry_run,

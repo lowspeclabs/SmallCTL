@@ -97,6 +97,4 @@ def _deletion_glob_empty_check(token: str) -> dict[str, str] | None:
         parent = token.rsplit("/", 1)[0]
         if parent and "/" in parent:
             return {"path": parent, "glob": token}
-    elif "/" in token:
-        return {"path": token, "glob": f"{token}/*"}
     return None

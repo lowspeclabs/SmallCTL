@@ -290,6 +290,73 @@ def test_dispatch_emits_tool_call_event_before_result() -> None:
     )
 
 
+def test_graph_dispatch_preserves_explicit_ssh_password_literal() -> None:
+    state = LoopState(cwd="/tmp")
+    state.step_count = 1
+
+    class _Registry:
+        @staticmethod
+        def get(_name: str) -> None:
+            return None
+
+        @staticmethod
+        def names() -> set[str]:
+            return {"ssh_exec"}
+
+    from smallctl.harness.credential_store import CredentialStore
+
+    store = CredentialStore()
+    store.set_ssh_password("192.168.1.110", "root", "task-secret")
+    dispatched: list[dict[str, object]] = []
+
+    async def _emit(_handler: object, _event: UIEvent) -> None:
+        return None
+
+    async def _dispatch(_tool_name: str, args: dict[str, object]) -> ToolEnvelope:
+        dispatched.append(args)
+        return ToolEnvelope(success=True, output={"stdout": "ok", "stderr": "", "exit_code": 0})
+
+    harness = SimpleNamespace(
+        state=state,
+        registry=_Registry(),
+        credential_store=store,
+        _dispatch_tool_call=_dispatch,
+        _active_dispatch_task=None,
+        _runlog=lambda *args, **kwargs: None,
+        _emit=_emit,
+        log=SimpleNamespace(log=lambda *args, **kwargs: None),
+    )
+    graph_state = GraphRunState(
+        loop_state=state,
+        thread_id="thread-1",
+        run_mode="loop",
+        pending_tool_calls=[
+            PendingToolCall(
+                tool_name="ssh_exec",
+                args={
+                    "host": "192.168.1.110",
+                    "user": "root",
+                    "password": "[REDACTED] [sha256=640200a3]",
+                    "command": "whoami",
+                },
+                tool_call_id="call-1",
+            )
+        ],
+    )
+
+    asyncio.run(dispatch_tools(graph_state, SimpleNamespace(harness=harness, event_handler=object())))
+
+    assert dispatched == [
+        {
+            "host": "192.168.1.110",
+            "user": "root",
+            "password": "[REDACTED] [sha256=640200a3]",
+            "command": "whoami",
+        }
+    ]
+    assert graph_state.last_tool_results[0].result.success is True
+
+
 def test_shell_exec_feeds_configured_sudo_password_inline() -> None:
     class _CapturingStdin:
         def __init__(self) -> None:

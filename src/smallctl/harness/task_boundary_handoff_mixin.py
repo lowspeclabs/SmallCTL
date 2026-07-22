@@ -20,6 +20,7 @@ from ..state import (
     json_safe_value,
 )
 from ..recovery_schema import FailureEvent
+from ..redaction import redact_sensitive_text
 from ..task_targets import extract_task_target_paths
 from ..normalization import dedupe_keep_tail
 from ..state_memory import trim_recent_messages
@@ -390,6 +391,7 @@ class TaskBoundaryHandoffMixin:
         else:
             canonical_task = effective_task or remote_mission_task or existing_task or previous_task
 
+        canonical_task = redact_sensitive_text(canonical_task)
         self.harness.state.run_brief.original_task = canonical_task
         self.harness.state.run_brief.task_contract = derive_task_contract(canonical_task)
         resolved_remote_followup = isinstance(

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from smallctl.graph.lifecycle_nodes_support import _apply_continue_task_state_reset
 from smallctl.graph.tool_loop_guard_progress import _dir_list_same_path_repeat_is_loop
 from smallctl.graph.tool_loop_guards import _detect_repeated_tool_loop
+from smallctl.graph.lifecycle_nodes import _dedupe_repeated_loop_recent_errors
 from smallctl.state import LoopState
 
 
@@ -55,6 +56,18 @@ def test_repeated_tool_loop_detects_file_read_repeat() -> None:
     result = _detect_repeated_tool_loop(harness, pending)
     assert result is not None
     assert "repeated" in result
+
+
+def test_one_repeated_loop_episode_counts_once_toward_error_guard() -> None:
+    state = LoopState(cwd="/tmp")
+    state.recent_errors = [
+        "Guard tripped: repeated tool call loop (file_read repeated 3 times)",
+        "Guard tripped: repeated tool call loop (file_read repeated 4 times)",
+    ]
+
+    _dedupe_repeated_loop_recent_errors(state)
+
+    assert len(state.recent_errors) == 1
 
 
 def test_tool_attempt_history_reset_on_task_boundary() -> None:

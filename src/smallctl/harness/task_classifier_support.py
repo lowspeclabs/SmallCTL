@@ -247,9 +247,21 @@ def task_uses_local_tool_for_remote_api(task: str) -> bool:
     if not has_remote_target:
         return False
 
-    has_local_tool_marker = any(marker in text for marker in _LOCAL_TOOL_FOR_REMOTE_API_MARKERS)
-    has_tool_keyword = any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
-    if not (has_local_tool_marker and has_tool_keyword):
+    explicit_local_tool = any(
+        marker in text for marker in ("local cli", "local client", "local script", "local tool")
+    ) or ("local" in text and any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS))
+    # Generic verbs such as "using the" only indicate local execution when the
+    # referenced CLI/script is nearby. Otherwise unrelated prose such as a
+    # remote lab description containing "grader script" becomes a false local
+    # route signal.
+    marker_pattern = "|".join(
+        re.escape(marker) for marker in _LOCAL_TOOL_FOR_REMOTE_API_MARKERS
+    )
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in _LOCAL_TOOL_KEYWORDS)
+    nearby_tool_reference = bool(
+        re.search(rf"(?:{marker_pattern})[^.;\n]{{0,48}}\b(?:{keyword_pattern})\b", text)
+    )
+    if not (explicit_local_tool or nearby_tool_reference):
         # No strong local-tool context; let the remote-execution rules handle it.
         return False
 
@@ -261,9 +273,7 @@ def task_uses_local_tool_for_remote_api(task: str) -> bool:
     # "run the local CLI ... against an API on <host>" describes an endpoint,
     # not a request to execute on that host. Preserve the explicit local anchor
     # before applying the broader imperative "run ... on <host>" fallback.
-    if any(marker in text for marker in ("local cli", "local client", "local script", "local tool")) or (
-        "local" in text and any(keyword in text for keyword in _LOCAL_TOOL_KEYWORDS)
-    ):
+    if explicit_local_tool:
         return True
     if re.search(r"\b(?:run|execute|exec)\b[^.;\n]*\bon\s+" + IP_ADDRESS_PATTERN.pattern + r"\b", text):
         return False

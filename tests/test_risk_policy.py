@@ -69,6 +69,25 @@ def test_implementation_task_allows_high_risk_shell_with_approval() -> None:
     assert decision.approval_kind == "shell"
 
 
+def test_read_only_ssh_probe_does_not_require_shell_approval() -> None:
+    state = LoopState(cwd="/tmp")
+    state.scratchpad["_task_classification"] = "implementation"
+
+    decision = evaluate_risk_policy(
+        state,
+        tool_name="ssh_exec",
+        tool_risk="high",
+        phase="execute",
+        action="whoami && uname -n",
+        approval_available=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_approval is False
+    assert decision.tool_risk == "network_read"
+    assert decision.proof_bundle["tool_risk"] == "network_read"
+
+
 def test_local_clarification_allows_local_tools() -> None:
     """If the user explicitly asks for local operations, local tools should be allowed."""
     from smallctl.tools.dispatcher_remote_detection import task_clearly_targets_remote_ssh_host

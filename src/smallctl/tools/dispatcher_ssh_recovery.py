@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from ..models.tool_result import ToolEnvelope
@@ -33,25 +32,6 @@ from .dispatcher_ssh_memory import (
     infer_ssh_user_from_session_memory as _infer_ssh_user_from_session_memory,
     session_ssh_target_record as _session_ssh_target_record,
 )
-
-
-def _looks_like_redaction_hash(value: str) -> bool:
-    """Detect passwords that are a redaction hash suffix rather than plaintext."""
-    stripped = str(value or "").strip()
-    if len(stripped) != 8:
-        return False
-    return all(ch in "0123456789abcdefABCDEF" for ch in stripped)
-
-
-def _password_matches_inferred_hash(provided: str, inferred: str) -> bool:
-    """Return True when the provided value is the sha256 prefix of the inferred password."""
-    provided = str(provided or "").strip()
-    inferred = str(inferred or "").strip()
-    if not provided or not inferred:
-        return False
-    if not _looks_like_redaction_hash(provided):
-        return False
-    return _password_fingerprint(inferred)[:8] == provided.lower()
 
 
 def _infer_ssh_host_from_context(state: Any | None) -> str:
@@ -116,12 +96,6 @@ def _recover_ssh_arguments_from_task_context(
     password = str(repaired.get("password") or "").strip()
     command = str(repaired.get("command") or "").strip()
 
-    # If the model echoed a redacted placeholder back as the password value,
-    # treat it as missing so we can recover the real credential from context.
-    if password.startswith("[REDACTED]"):
-        repaired.pop("password", None)
-        password = ""
-
     password_source = "explicit" if password else "none"
 
     target = str(repaired.get("target") or "").strip()
@@ -170,30 +144,6 @@ def _recover_ssh_arguments_from_task_context(
                 }
             )
             metadata["routing_reason"] = metadata.get("routing_reason") or f"ssh_password_recovery_{password_source}"
-    elif host and password:
-        # The model supplied a password, but small-model prompt redaction can leak
-        # only the hash suffix (e.g. "640200a3"). If the supplied value matches the
-        # sha256 prefix of the credential known from task context, substitute the
-        # real password instead of letting the model authenticate with a hash.
-        inferred_password, inferred_password_source = _infer_ssh_password(
-            host,
-            user=user,
-            state=state,
-            credential_store=credential_store,
-        )
-        if inferred_password and _password_matches_inferred_hash(password, inferred_password):
-            repaired["password"] = inferred_password
-            password = inferred_password
-            password_source = inferred_password_source
-            metadata.update(
-                {
-                    "recovered_ssh_password": True,
-                    "recovered_ssh_password_source": inferred_password_source,
-                    "ssh_password_hash_suffix_corrected": True,
-                }
-            )
-            metadata["routing_reason"] = metadata.get("routing_reason") or f"ssh_password_recovery_{inferred_password_source}"
-
     if not command and _task_requests_ssh_connection_probe(state):
         repaired["command"] = "whoami"
         metadata["recovered_ssh_command"] = "whoami"

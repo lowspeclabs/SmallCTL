@@ -114,8 +114,8 @@ def register_control_planning_tools(
                 handler=inject_state(control.ask_human),
                 category="control",
                 risk="medium",
-                allowed_phases={"explore", "plan", "execute", "verify"},
-                allowed_modes={"loop", "planning"},
+                allowed_phases={"explore", "plan", "execute", "verify", "repair"},
+                allowed_modes={"chat", "loop", "planning"},
                 profiles={core_profile},
             ),
             make_registration(

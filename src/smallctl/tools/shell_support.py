@@ -68,6 +68,7 @@ from .shell_support_installer_guards import (
 )
 from .shell_support_foreground_guards import (
     _foreground_command_guard,
+    _masked_compose_lifecycle_guard,
     _likely_long_running_foreground_reason,
     _has_detached_or_bounded_marker,
     _likely_long_running_simple_command_reason,

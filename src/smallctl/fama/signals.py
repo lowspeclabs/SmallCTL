@@ -28,6 +28,7 @@ class FamaFailureKind(str, Enum):
     UPSTREAM_INSTALL_SOURCE_INVALID = "upstream_install_source_invalid"
     PREEXISTING_STATE_AS_SUCCESS = "preexisting_state_as_success"
     SSH_HOST_KEY_VERIFICATION = "ssh_host_key_verification"
+    WRONG_PATH = "wrong_path"
 
 
 FAILURE_CLASSES = {
@@ -77,6 +78,7 @@ DEFAULT_FAILURE_CLASS_BY_KIND: dict[FamaFailureKind, str] = {
     FamaFailureKind.UPSTREAM_INSTALL_SOURCE_INVALID: "upstream_install_source_invalid",
     FamaFailureKind.PREEXISTING_STATE_AS_SUCCESS: "preexisting_state_as_success",
     FamaFailureKind.SSH_HOST_KEY_VERIFICATION: "ssh_host_key_verification",
+    FamaFailureKind.WRONG_PATH: "wrong_path",
 }
 
 

@@ -137,6 +137,7 @@ class UIStatusSnapshot:
     token_usage: int = 0
     token_total: int = 0
     token_limit: int = 0
+    requested_prompt_tokens: int = 0
     context_window: int = 0
     api_errors: int = 0
     fama_off: bool = False
@@ -160,6 +161,7 @@ class UIStatusSnapshot:
             "token_usage": self.token_usage,
             "token_total": self.token_total,
             "token_limit": self.token_limit,
+            "requested_prompt_tokens": self.requested_prompt_tokens,
             "context_window": self.context_window,
             "api_errors": self.api_errors,
             "fama_off": self.fama_off,
@@ -190,6 +192,7 @@ class UIStatusSnapshot:
         token_usage = 0
         token_total = 0
         token_limit = 0
+        requested_prompt_tokens = 0
         context_window = 0
         recovery_banner = ""
 
@@ -229,6 +232,7 @@ class UIStatusSnapshot:
                 or getattr(guards, "max_tokens", 0)
                 or 0
             )
+            requested_prompt_tokens = int(getattr(harness, "configured_max_prompt_tokens", 0) or 0)
             context_window = int(server_context_limit or 0)
             recovery_banner = str(getattr(harness.state, "scratchpad", {}).get("_ui_recovery_banner", "") or "")
             # Build FAMA mitigation summary for TUI
@@ -256,6 +260,7 @@ class UIStatusSnapshot:
             token_usage=max(0, token_usage),
             token_total=max(0, token_total),
             token_limit=max(0, token_limit),
+            requested_prompt_tokens=max(0, requested_prompt_tokens),
             context_window=max(0, context_window),
             api_errors=max(0, int(api_errors)),
             fama_off=fama_off,

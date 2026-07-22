@@ -617,6 +617,40 @@ def test_ssh_file_read_not_found_blocks_same_missing_path_retry() -> None:
     assert "ssh_file_read" in repeat_error
 
 
+def test_immediate_identical_ssh_diagnostic_probe_is_blocked() -> None:
+    harness = _FakeHarness()
+    pending = PendingToolCall(
+        tool_name="ssh_exec",
+        args={
+            "host": "192.168.1.110",
+            "user": "root",
+            "command": "docker compose exec api curl -fsS http://127.0.0.1:8000/health",
+        },
+    )
+
+    _record_tool_attempt(harness, pending)
+
+    repeat_error = _detect_repeated_tool_loop(harness, pending)
+    assert repeat_error is not None
+    assert "immediate duplicate SSH diagnostic probe" in repeat_error
+
+
+def test_immediate_identical_ssh_mutation_is_not_blocked_by_probe_guard() -> None:
+    harness = _FakeHarness()
+    pending = PendingToolCall(
+        tool_name="ssh_exec",
+        args={
+            "host": "192.168.1.110",
+            "user": "root",
+            "command": "docker compose restart api",
+        },
+    )
+
+    _record_tool_attempt(harness, pending)
+
+    assert _detect_repeated_tool_loop(harness, pending) is None
+
+
 def test_repeated_artifact_grep_trips_after_three_identical_calls_with_intervening_tools() -> None:
     harness = _FakeHarness()
     harness.client.model = "qwen3.5:4b"
@@ -1381,6 +1415,27 @@ def test_mutation_without_changed_does_not_count_as_progress() -> None:
     _update_progress_tracking(harness, graph_state)
 
     assert harness.state.stagnation_counters.get("no_actionable_progress", 0) == 1
+
+
+def test_unchanged_remote_write_nudges_restart_instead_of_rewrite() -> None:
+    harness = _FakeHarness()
+    record = _make_record(
+        "ssh_file_write",
+        {"path": "/root/docker-medium-challenge/web/default.conf", "content": "proxy_pass http://api:8000;"},
+        changed=False,
+        metadata={"changed": False, "restart_consumers_may_be_required": True},
+    )
+
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+    _update_progress_tracking(harness, _make_graph_state(tool_results=[record]))
+
+    nudges = [
+        message
+        for message in harness.state.recent_messages
+        if message.metadata.get("recovery_kind") == "remote_noop_write_requires_restart"
+    ]
+    assert len(nudges) == 1
+    assert "Do not write it again" in nudges[0].content
 
 
 def test_novel_failed_patch_target_mismatch_counts_as_bounded_repair_progress() -> None:

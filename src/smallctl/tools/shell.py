@@ -22,6 +22,7 @@ from .shell_support import (
     _apt_sources_list_d_guard,
     _expose_interactive_session_tools,
     _foreground_command_guard,
+    _masked_compose_lifecycle_guard,
     _interactive_installer_yes_pipe_guard,
     _looks_like_deb822_validator,
     _mark_deb822_preflight_clean,
@@ -111,6 +112,9 @@ async def shell_exec(
         return write_session_guard
     if background:
         return await shell_job_launch(command=command, state=state, create_process=_create_process, harness=harness)
+    lifecycle_guard = _masked_compose_lifecycle_guard(command, tool_name="shell_exec")
+    if lifecycle_guard is not None:
+        return lifecycle_guard
     foreground_guard = _foreground_command_guard(
         command,
         tool_name="shell_exec",

@@ -23,7 +23,8 @@ def register_operational_tools(
             make_registration(
                 name="ssh_exec",
                 description=(
-                    "Execute a REMOTE command on a remote host via SSH with live streaming support. "
+                    "Execute a REMOTE command on a remote host via SSH with live streaming support. For file reads, use "
+                    "`ssh_file_read`; for precise file edits, use `ssh_file_patch` or `ssh_file_write`. "
                     "Prefer `target='user@host'` when a username is known, for example "
                     "`target='root@192.168.1.63'`, rather than splitting identity across separate fields. "
                     "For interactive installers or scripts that prompt for input, use `ssh_session_start` instead. "
@@ -269,6 +270,7 @@ def register_operational_tools(
                         "mode": {"type": "string", "description": "overwrite, create, or append."},
                         "create_parent_dirs": {"type": "boolean", "default": False},
                         "backup": {"type": "boolean", "default": True},
+                        "preserve_inode": {"type": "boolean", "default": False, "description": "Rewrite an existing regular file in place instead of atomically replacing it."},
                         "expected_sha256": {"type": "string", "description": "Optional hash of the current remote file."},
                         "source_artifact_id": {"type": "string", "description": "Artifact id whose sha256 should match the current remote file before writing."},
                         "timeout_sec": {"type": "integer", "default": 120},
@@ -305,6 +307,7 @@ def register_operational_tools(
                         "encoding": {"type": "string", "default": "utf-8"},
                         "expected_occurrences": {"type": "integer", "default": 1},
                         "backup": {"type": "boolean", "default": True},
+                        "preserve_inode": {"type": "boolean", "default": False, "description": "Rewrite the existing regular file in place instead of atomically replacing it."},
                         "expected_sha256": {"type": "string", "description": "Optional hash of the current remote file."},
                         "source_artifact_id": {"type": "string", "description": "Artifact id whose sha256 should match the current remote file before patching."},
                         "whitespace_normalized": {"type": "boolean", "default": False, "description": "Opt-in relaxed matching that ignores whitespace differences. Prefer dry_run first."},
@@ -345,6 +348,7 @@ def register_operational_tools(
                         "include_bounds": {"type": "boolean", "default": True},
                         "expected_occurrences": {"type": "integer", "default": 1},
                         "backup": {"type": "boolean", "default": True},
+                        "preserve_inode": {"type": "boolean", "default": False, "description": "Rewrite the existing regular file in place instead of atomically replacing it."},
                         "expected_sha256": {"type": "string", "description": "Optional hash of the current remote file."},
                         "source_artifact_id": {"type": "string", "description": "Artifact id whose sha256 should match the current remote file before replacement."},
                         "whitespace_normalized": {"type": "boolean", "default": False, "description": "Opt-in relaxed matching that ignores whitespace differences. Prefer dry_run first."},

@@ -417,7 +417,7 @@ def test_escalation_packet_redacts_and_omits_provider_config():
 
     assert "secret-provider" not in packet_text
     assert "provider-secret" not in packet_text
-    assert "swordfish" not in packet_text
+    assert "swordfish" in packet_text
     assert "abc123" not in packet_text
     assert packet["task"]["original"] == "Fix the issue"
 

@@ -395,7 +395,11 @@ def detect_wrong_path(
     if path:
         evidence += f"; path={path}"
     return FamaSignal(
-        kind=FamaFailureKind.REMOTE_LOCAL_CONFUSION,
+        kind=(
+            FamaFailureKind.WRONG_PATH
+            if str(tool_name or "").strip() == "ssh_exec"
+            else FamaFailureKind.REMOTE_LOCAL_CONFUSION
+        ),
         severity=2,
         source="tool_result",
         evidence=evidence,
@@ -1374,11 +1378,11 @@ def detect_objective_verifier_mismatch(
     task = str(getattr(getattr(state, "run_brief", None), "original_task", "") or "").strip().lower()
     if not task or not command:
         return None
-    # Heuristic: install task but verifier only checks file existence
-    install_indicators = ("install", "setup", "deploy", "configure")
-    if not any(ind in task for ind in install_indicators):
+    # Service repair needs acceptance checks, not a configuration-only probe.
+    objective_indicators = ("install", "setup", "deploy", "configure", "troubleshoot", "repair", "docker compose", "compose application")
+    if not any(ind in task for ind in objective_indicators):
         return None
-    file_only_checks = ("ls -la ", "test -f ", "test -e ", "cat ")
+    file_only_checks = ("ls -la ", "test -f ", "test -e ", "cat ", "grep ")
     if not any(cmd in command for cmd in file_only_checks):
         return None
     # Check if the verifier passed
@@ -1386,7 +1390,7 @@ def detect_objective_verifier_mismatch(
     if verdict_label != "pass":
         return None
     evidence = (
-        f"verifier only checked file existence ({command}) for an install task; "
+        f"verifier only checked configuration/file state ({command}) for a service objective; "
         f"objective={task[:80]}"
     )
     return FamaSignal(
@@ -1398,7 +1402,7 @@ def detect_objective_verifier_mismatch(
         tool_name="task_complete",
         operation_id=operation_id,
         failure_class="objective_mismatch",
-        next_safe_action="The verifier must match the user objective. For install tasks, verify service status, version, or listening port—not just file existence.",
+        next_safe_action="The verifier must match the user objective. Verify service status, logs, network reachability, and the requested acceptance command—not just configuration text.",
         suggested_mitigations=["acceptance_checklist_capsule"],
     )
 

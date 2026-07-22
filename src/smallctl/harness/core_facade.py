@@ -290,6 +290,15 @@ def _run_metric_flags(
         else False
     )
     task_category = str(challenge_progress.get("task_category") or "").strip().lower()
+    failed_status = status in {"failed", "error", "aborted", "interrupted", "cancelled", "stopped"}
+    last_verifier = getattr(state, "last_verifier_verdict", None)
+    acceptance_capable_pass = isinstance(last_verifier, dict) and (
+        str(last_verifier.get("verdict") or "").strip().lower() == "pass"
+        and str(last_verifier.get("verifier_kind") or "").strip().lower()
+        not in {"", "diagnostic", "state_change", "partial_docker_diagnostic", "removal_absence_probe"}
+    )
+    if deliverable_verified and not acceptance_capable_pass:
+        deliverable_verified = False
     result_success = status in {
         "completed",
         "complete",
@@ -316,17 +325,8 @@ def _run_metric_flags(
             and last_verifier_kind == "test_suite"
         ):
             deliverable_verified = True
-    # If the run was cancelled, do not claim deliverable_verified=true unless the objective verifier
-    # passed after the last failure.
-    if status == "cancelled" and deliverable_verified:
-        last_verifier = getattr(state, "last_verifier_verdict", None)
-        last_verifier_pass = False
-        if isinstance(last_verifier, dict):
-            last_verifier_pass = (
-                str(last_verifier.get("verdict") or "").strip().lower() == "pass"
-            )
-        if not last_verifier_pass:
-            deliverable_verified = False
+    if failed_status:
+        deliverable_verified = False
     diagnostic_only = code_changes <= 0 and not deliverable_verified and not no_op
     if (
         task_category in {"sysadmin", "install", "setup", "deploy", "configure"}

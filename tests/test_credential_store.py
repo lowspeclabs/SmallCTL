@@ -10,6 +10,7 @@ from smallctl.harness.core_facade import _write_checkpoint_file
 from smallctl.harness.tool_result_ssh_memory import _remember_session_ssh_target
 from smallctl.models.tool_result import ToolEnvelope
 from smallctl.state import LoopState
+from smallctl.tools.dispatcher_ssh_memory import infer_ssh_password
 from smallctl.tools.network_ssh_helpers import build_ssh_command
 from smallctl.tools.shell_foreground import _feed_sudo_password_to_process
 
@@ -30,6 +31,21 @@ def test_credential_store_round_trip_ssh_password() -> None:
     assert store.get_ssh_password("example.test", "root") == "secret"
     assert store.get_ssh_password_by_fingerprint(fp) == "secret"
     assert store.get_ssh_password("other.test", "root") is None
+
+
+def test_credential_store_user_lookup_falls_back_to_host_only_password() -> None:
+    store = CredentialStore()
+    store.set_ssh_password("Example.Test", None, "host-secret")
+
+    assert store.get_ssh_password("example.test", "root") == "host-secret"
+
+
+def test_credential_store_exact_user_password_precedes_host_only_fallback() -> None:
+    store = CredentialStore()
+    store.set_ssh_password("example.test", None, "host-secret")
+    store.set_ssh_password("example.test", "root", "root-secret")
+
+    assert store.get_ssh_password("example.test", "root") == "root-secret"
 
 
 def test_credential_store_sudo_password_not_serialized() -> None:
@@ -76,7 +92,7 @@ def test_build_ssh_command_no_password_creates_no_file() -> None:
     assert cmd.startswith("ssh")
 
 
-def test_to_dict_redacts_plaintext_passwords() -> None:
+def test_to_dict_preserves_plaintext_passwords() -> None:
     state = LoopState(cwd="/tmp")
     state.scratchpad["_session_ssh_targets"] = {
         "example.test": {
@@ -91,14 +107,12 @@ def test_to_dict_redacts_plaintext_passwords() -> None:
     }
     payload = state.to_dict()
     target = payload["scratchpad"]["_session_ssh_targets"]["example.test"]
-    assert target["password"] != "secret"
-    assert target["password"].startswith("[REDACTED]")
+    assert target["password"] == "secret"
     args = payload["tool_execution_records"]["op-1"]["args"]
-    assert args["password"] != "secret"
-    assert args["password"].startswith("[REDACTED]")
+    assert args["password"] == "secret"
 
 
-def test_checkpoint_write_does_not_persist_plaintext_passwords(tmp_path) -> None:
+def test_checkpoint_write_persists_plaintext_passwords(tmp_path) -> None:
     state = LoopState(cwd="/tmp")
     state.scratchpad["_session_ssh_targets"] = {
         "example.test": {"host": "example.test", "user": "root", "password": "secret"}
@@ -110,10 +124,10 @@ def test_checkpoint_write_does_not_persist_plaintext_passwords(tmp_path) -> None
     path = tmp_path / "checkpoint.json"
     _write_checkpoint_file(path, {}, state.to_dict())
     text = path.read_text(encoding="utf-8")
-    assert "secret" not in text
+    assert '"password": "secret"' in text
 
 
-def test_remember_session_ssh_target_stores_fingerprint_not_password() -> None:
+def test_remember_session_ssh_target_stores_password() -> None:
     state = LoopState(cwd="/tmp")
     store = CredentialStore()
     harness = SimpleNamespace(state=state, credential_store=store)
@@ -129,9 +143,32 @@ def test_remember_session_ssh_target_stores_fingerprint_not_password() -> None:
         arguments={"host": "example.test", "user": "root", "password": "secret"},
     )
     target = state.scratchpad["_session_ssh_targets"]["example.test"]
-    assert "password" not in target
-    assert "password_fingerprint" in target
-    assert store.get_ssh_password("example.test", "root") == "secret"
+    assert target["password"] == "secret"
+
+
+def test_remember_session_ssh_target_keeps_supplied_password_literal() -> None:
+    state = LoopState(cwd="/tmp")
+    store = CredentialStore()
+    harness = SimpleNamespace(state=state, credential_store=store)
+    service = SimpleNamespace(harness=harness)
+
+    _remember_session_ssh_target(
+        service,
+        tool_name="ssh_exec",
+        result=ToolEnvelope(
+            success=True,
+            output={"stdout": "ok\n", "stderr": "", "exit_code": 0},
+            metadata={},
+        ),
+        arguments={
+            "host": "example.test",
+            "user": "root",
+            "password": "[REDACTED] [sha256=deadbeef]",
+        },
+    )
+
+    target = state.scratchpad["_session_ssh_targets"]["example.test"]
+    assert target["password"] == "[REDACTED] [sha256=deadbeef]"
 
 
 def test_feed_sudo_password_refuses_when_not_under_pty_or_sudo_child() -> None:

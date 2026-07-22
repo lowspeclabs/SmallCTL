@@ -19,7 +19,7 @@ def test_memory_scrub_dry_run_does_not_modify_store(tmp_path, monkeypatch, capsy
                 "intent": "requested_ssh_exec",
                 "tool_name": "task_complete",
                 "outcome": "success",
-                "notes": 'SSH to root@192.168.1.63 with password "@S02v1735" succeeded.',
+                "notes": 'SSH to root@192.168.1.63 with password "Temp@Pass" succeeded.',
             }
         )
         + "\n",
@@ -32,7 +32,7 @@ def test_memory_scrub_dry_run_does_not_modify_store(tmp_path, monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "dry_run"
     assert payload["changed"] == 1
-    assert "@S02v1735" in cold_path.read_text(encoding="utf-8")
+    assert "Temp@Pass" in cold_path.read_text(encoding="utf-8")
 
 
 def test_memory_scrub_write_redacts_store(tmp_path, monkeypatch, capsys) -> None:
@@ -48,7 +48,7 @@ def test_memory_scrub_write_redacts_store(tmp_path, monkeypatch, capsys) -> None
                 "intent": "requested_ssh_exec",
                 "tool_name": "task_complete",
                 "outcome": "success",
-                "notes": 'SSH to root@192.168.1.63 with password "@S02v1735" succeeded.',
+                "notes": 'SSH to root@192.168.1.63 with password "Temp@Pass" succeeded.',
             }
         )
         + "\n",
@@ -63,4 +63,4 @@ def test_memory_scrub_write_redacts_store(tmp_path, monkeypatch, capsys) -> None
     assert payload["changed"] == 1
     rewritten = cold_path.read_text(encoding="utf-8")
     assert "[REDACTED]" in rewritten
-    assert "@S02v1735" not in rewritten
+    assert "Temp@Pass" not in rewritten

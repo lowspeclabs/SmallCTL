@@ -2603,7 +2603,7 @@ def test_docker_report_chain_does_not_trip_guard_on_probe_failures() -> None:
 def test_dispatch_tools_blocks_local_shell_exec_for_remote_task_and_nudges() -> None:
     state = _make_state()
     state.run_brief.original_task = (
-        'ssh root@192.168.1.63 with username root password "@S02v1735" '
+        'ssh root@192.168.1.63 with username root password "Temp@Pass" '
         "check whether docker is installed"
     )
 

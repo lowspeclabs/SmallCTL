@@ -38,11 +38,11 @@ def test_terminal_experience_redacts_password_like_text() -> None:
     memory = service.record_experience(
         tool_name="task_complete",
         result=ToolEnvelope(success=True, output={"status": "completed"}, metadata={"status": "completed"}),
-        notes='Task complete: SSH to root@192.168.1.63 with password "@S02v1735" succeeded.',
+        notes='Task complete: SSH to root@192.168.1.63 with password "Temp@Pass" succeeded.',
     )
 
     assert "[REDACTED]" in memory.notes
-    assert "@S02v1735" not in memory.notes
+    assert "Temp@Pass" not in memory.notes
 
 
 def test_retrieval_and_rendering_deemphasize_redacted_task_complete_memories() -> None:
@@ -61,7 +61,7 @@ def test_retrieval_and_rendering_deemphasize_redacted_task_complete_memories() -
         environment_tags=["lmstudio"],
         outcome="success",
         confidence=0.95,
-        notes='Task complete: SSH to root@192.168.1.63 with password "@S02v1735" succeeded.',
+        notes='Task complete: SSH to root@192.168.1.63 with password "Temp@Pass" succeeded.',
     )
     ssh_exec = ExperienceMemory(
         memory_id="mem-ssh-exec",
@@ -86,7 +86,7 @@ def test_retrieval_and_rendering_deemphasize_redacted_task_complete_memories() -
 
     rendered = PromptAssembler()._render_warm_item(task_complete)
     assert "[REDACTED]" in rendered
-    assert "@S02v1735" not in rendered
+    assert "Temp@Pass" not in rendered
 
 
 def test_chat_task_mode_filters_remote_execution_memories() -> None:
@@ -153,7 +153,7 @@ def test_memory_service_canonicalizes_successful_ssh_exec_pattern_notes() -> Non
                 "arguments": {
                     "host": "192.168.1.63",
                     "user": "root",
-                    "password": "@S02v1735",
+                    "password": "Temp@Pass",
                     "command": "whoami",
                 }
             },

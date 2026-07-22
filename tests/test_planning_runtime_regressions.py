@@ -266,7 +266,7 @@ def test_auto_runtime_plan_approval_reply_replays_as_resume_not_new_task(tmp_pat
     state.pending_interrupt = _plan_approval_interrupt()
     state.active_tool_profiles = ["core", "network"]
     state.run_brief.original_task = (
-        'ssh root@192.168.1.89 with password "@S02v1735" and go to '
+        'ssh root@192.168.1.89 with password "Temp@Pass" and go to '
         "/var/www/demo-site/index.html, read the file and remove the google branding"
     )
     decisions: list[str] = []

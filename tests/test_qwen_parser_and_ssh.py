@@ -617,7 +617,7 @@ def test_parse_tool_calls_recovers_inline_tool_call_from_thinking_text() -> None
             "192.168.1.63\n"
             "</parameter>\n"
             "<parameter=password>\n"
-            "@S02v1735\n"
+            "Temp@Pass\n"
             "</parameter>\n"
             "<parameter=user>\n"
             "root\n"
@@ -665,7 +665,7 @@ def test_parse_tool_calls_recovers_orphan_parameter_block_from_thinking_text() -
             "192.168.1.63\n"
             "</parameter>\n"
             "<parameter=password>\n"
-            "@S02v1735\n"
+            "Temp@Pass\n"
             "</parameter>\n"
             "<parameter=user>\n"
             "root\n"
@@ -695,7 +695,7 @@ def test_parse_tool_calls_recovers_orphan_parameter_block_from_thinking_text() -
     assert recovered.tool_name == "ssh_exec"
     assert recovered.args["command"] == "docker ps -a"
     assert recovered.args["host"] == "192.168.1.63"
-    assert recovered.args["password"] == "@S02v1735"
+    assert recovered.args["password"] == "Temp@Pass"
     assert recovered.args["user"] == "root"
     assert parse_result.final_thinking_text == ""
 
@@ -716,7 +716,7 @@ def test_parse_tool_calls_strips_qwen_tool_payload_noise_from_visible_thinking()
             "192.168.1.63\n"
             "</parameter>\n"
             "<parameter=password>\n"
-            "@S02v1735\n"
+            "Temp@Pass\n"
             "</parameter>\n"
             "<parameter=user>\n"
             "root\n"
@@ -748,7 +748,7 @@ def test_parse_tool_calls_strips_qwen_tool_payload_noise_from_visible_thinking()
         "I'll install Docker using the standard Docker installation script."
     )
     assert "get-docker.sh" not in parse_result.final_thinking_text
-    assert "@S02v1735" not in parse_result.final_thinking_text
+    assert "Temp@Pass" not in parse_result.final_thinking_text
 
 
 def test_parse_tool_calls_skips_reasoning_fallback_when_tool_protocol_is_present() -> (
@@ -1074,7 +1074,7 @@ def test_model_call_emits_thinking_replace_after_qwen_tool_recovery() -> None:
                 "192.168.1.63\n"
                 "</parameter>\n"
                 "<parameter=password>\n"
-                "@S02v1735\n"
+                "Temp@Pass\n"
                 "</parameter>\n"
                 "<parameter=user>\n"
                 "root\n"
@@ -1426,7 +1426,7 @@ def test_ssh_exec_blocks_likely_foreground_service_command_before_launch() -> No
 def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh root@192.168.1.63 with username root password "@S02v1735" '
+        'ssh root@192.168.1.63 with username root password "Temp@Pass" '
         "is apache guacamole installed?"
     )
 
@@ -1436,7 +1436,7 @@ def test_ssh_exec_recovers_missing_user_from_task_context() -> None:
         {
             "host": "192.168.1.63",
             "command": "which guac && guac --version || echo 'Guacamole not installed'",
-            "password": "@S02v1735",
+            "password": "Temp@Pass",
         },
         phase="execute",
         state=state,
@@ -1515,7 +1515,7 @@ def test_ssh_exec_blocks_nested_raw_ssh_command() -> None:
 def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
         "then install nginx"
     )
 
@@ -1533,7 +1533,7 @@ def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
 
     assert intercepted is None
     assert tool_name == "ssh_exec"
-    assert args["password"] == "@S02v1735"
+    assert args["password"] == "Temp@Pass"
     assert metadata["recovered_ssh_password"] is True
     assert metadata["recovered_ssh_password_source"] == "task_context"
     assert metadata["ssh_auth_mode"] == "password"
@@ -1545,13 +1545,13 @@ def test_ssh_exec_recovers_missing_password_from_task_context() -> None:
 def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
         "then install nginx"
     )
 
     # Small models sometimes echo the redaction hash suffix they see in the prompt
-    # instead of the real password. The sha256 prefix of "@S02v1735" is "d0efcff6".
-    hash_suffix = "d0efcff6"
+    # instead of the real password. The sha256 prefix of "Temp@Pass" is "640200a3".
+    hash_suffix = "640200a3"
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
         "ssh_exec",
@@ -1567,7 +1567,7 @@ def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
 
     assert intercepted is None
     assert tool_name == "ssh_exec"
-    assert args["password"] == "@S02v1735"
+    assert args["password"] == "Temp@Pass"
     assert metadata["recovered_ssh_password"] is True
     assert metadata["recovered_ssh_password_source"] == "task_context"
     assert metadata["ssh_password_hash_suffix_corrected"] is True
@@ -1578,11 +1578,11 @@ def test_ssh_exec_corrects_hash_suffix_password_from_task_context() -> None:
 def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
         "then install nginx"
     )
 
-    hash_suffix = "d0efcff6"
+    hash_suffix = "640200a3"
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
         "ssh_file_read",
@@ -1598,7 +1598,7 @@ def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None
 
     assert intercepted is None
     assert tool_name == "ssh_file_read"
-    assert args["password"] == "@S02v1735"
+    assert args["password"] == "Temp@Pass"
     assert metadata["recovered_ssh_password"] is True
     assert metadata["recovered_ssh_password_source"] == "task_context"
     assert metadata["ssh_password_hash_suffix_corrected"] is True
@@ -1607,7 +1607,7 @@ def test_ssh_file_read_corrects_hash_suffix_password_from_task_context() -> None
 def test_ssh_exec_preserves_explicit_password_that_does_not_match_task_hash() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh into 192.168.1.63 with username "root" and password "@S02v1735", '
+        'ssh into 192.168.1.63 with username "root" and password "Temp@Pass", '
         "then install nginx"
     )
 
@@ -1639,7 +1639,7 @@ def test_ssh_exec_recovers_missing_password_from_prior_authenticated_ssh_exec() 
         "args": {
             "host": "192.168.1.63",
             "user": "root",
-            "password": "@S02v1735",
+            "password": "Temp@Pass",
             "command": "apt-get update && apt-get install -y nginx",
         },
         "result": {
@@ -1663,7 +1663,7 @@ def test_ssh_exec_recovers_missing_password_from_prior_authenticated_ssh_exec() 
 
     assert intercepted is None
     assert tool_name == "ssh_exec"
-    assert args["password"] == "@S02v1735"
+    assert args["password"] == "Temp@Pass"
     assert metadata["recovered_ssh_password"] is True
     assert metadata["recovered_ssh_password_source"] == "prior_ssh_exec"
     assert metadata["ssh_password_origin"] == "prior_ssh_exec"
@@ -1676,7 +1676,7 @@ def test_ssh_exec_recovers_missing_user_and_password_from_session_memory() -> No
         "192.168.1.63": {
             "host": "192.168.1.63",
             "user": "root",
-            "password": "@S02v1735",
+            "password": "Temp@Pass",
         }
     }
 
@@ -1694,7 +1694,7 @@ def test_ssh_exec_recovers_missing_user_and_password_from_session_memory() -> No
     assert intercepted is None
     assert tool_name == "ssh_exec"
     assert args["user"] == "root"
-    assert args["password"] == "@S02v1735"
+    assert args["password"] == "Temp@Pass"
     assert metadata["recovered_ssh_user"] == "root"
     assert metadata["recovered_ssh_user_source"] == "session_memory"
     assert metadata["recovered_ssh_password"] is True
@@ -1812,14 +1812,14 @@ def test_ssh_dir_list_preserves_explicit_user_that_differs_from_confirmed_sessio
 
 def test_ssh_exec_recovers_connection_probe_command_from_task_context() -> None:
     state = LoopState(cwd=".")
-    state.run_brief.original_task = 'ssh into root@192.168.1.63 password "@S02v1735"'
+    state.run_brief.original_task = 'ssh into root@192.168.1.63 password "Temp@Pass"'
 
     tool_name, args, intercepted, metadata = normalize_tool_request(
         SimpleNamespace(get=lambda _name: None),
         "ssh_exec",
         {
             "host": "192.168.1.63",
-            "password": "@S02v1735",
+            "password": "Temp@Pass",
         },
         phase="execute",
         state=state,
@@ -2243,7 +2243,7 @@ def test_normalize_artifact_read_resolves_existing_non_a_artifact_key() -> None:
 def test_remote_task_guard_blocks_local_shell_exec_for_remote_context() -> None:
     state = LoopState(cwd=".")
     state.run_brief.original_task = (
-        'ssh root@192.168.1.63 with username root password "@S02v1735" '
+        'ssh root@192.168.1.63 with username root password "Temp@Pass" '
         "is apache guacamole installed?"
     )
 
@@ -2436,7 +2436,7 @@ def test_normalize_ssh_arguments_prefers_target_user_at_host() -> None:
         {
             "target": "root@192.168.1.63",
             "command": "whoami",
-            "password": "@S02v1735",
+            "password": "Temp@Pass",
         }
     )
 

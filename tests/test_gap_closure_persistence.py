@@ -410,7 +410,7 @@ def test_memory_scrub_still_redacts_legacy_plaintext_store(tmp_path) -> None:
                 "intent": "general_task",
                 "tool_name": "shell_exec",
                 "outcome": "success",
-                "notes": 'SSH to root@192.0.2.10 with password "@S02v1735" succeeded.',
+                "notes": 'SSH to root@192.0.2.10 with password "Temp@Pass" succeeded.',
             }
         )
         + "\n",
@@ -420,7 +420,7 @@ def test_memory_scrub_still_redacts_legacy_plaintext_store(tmp_path) -> None:
     summary = store.scrub_sensitive_notes(write=True)
     assert summary == {"records": 1, "changed": 1, "written": 1}
     rewritten = path.read_text(encoding="utf-8")
-    assert "@S02v1735" not in rewritten
+    assert "Temp@Pass" not in rewritten
     assert "[REDACTED]" in rewritten
 
 

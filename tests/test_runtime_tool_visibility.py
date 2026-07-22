@@ -833,7 +833,7 @@ def test_mode_decision_recovers_remote_plan_approval_when_interrupt_context_is_m
     state = LoopState(cwd=str(tmp_path))
     state.current_phase = "execute"
     prior = (
-        'ssh root@192.168.1.89 with password "@S02v1735" and edit '
+        'ssh root@192.168.1.89 with password "Temp@Pass" and edit '
         "/var/www/demo-site/index.html with dynamic animation and cards"
     )
     state.run_brief.original_task = prior
@@ -879,7 +879,7 @@ def test_mode_decision_routes_remote_site_mutation_followup_to_loop(tmp_path) ->
     state.current_phase = "execute"
     prior = (
         'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
-        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+        'to have a minimal design google theme, make all cards animated password is "Temp@Pass"'
     )
     state.run_brief.original_task = prior
     state.working_memory.current_goal = prior
@@ -969,7 +969,7 @@ def test_chat_mode_tools_keep_ssh_for_remote_site_mutation_followup(tmp_path) ->
     state.active_tool_profiles = ["core", "network"]
     prior = (
         'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
-        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+        'to have a minimal design google theme, make all cards animated password is "Temp@Pass"'
     )
     raw = "remove the google branding"
     state.run_brief.original_task = prior

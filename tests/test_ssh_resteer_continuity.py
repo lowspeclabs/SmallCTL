@@ -154,7 +154,7 @@ def test_remote_research_install_task_activates_network_and_web_profiles() -> No
     task = (
         'do reserach on self hosted docker containers you can use for project management, '
         'choose one of them and spin up that docker container on 192.168.1.63 '
-        'username "root" password "@S02v1735"'
+        'username "root" password "Temp@Pass"'
     )
 
     Harness._initialize_run_brief(harness, task, raw_task=task)
@@ -407,7 +407,7 @@ def test_remote_nginx_followup_after_validated_ssh_file_read_session_stays_remot
 def test_remote_theme_followup_with_matching_remote_page_names_stays_on_active_ssh_target() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = (
-        'ssh into 192.168.1.63, username "root" password "@S02v1735" update the site at /var/www/, '
+        'ssh into 192.168.1.63, username "root" password "Temp@Pass" update the site at /var/www/, '
         "its supposed to be a presentation about small llms, do derearch on small language models "
         "and updated the pages as needed"
     )
@@ -472,7 +472,7 @@ def test_remote_branding_removal_followup_stays_on_active_site_target() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = (
         'ssh root@192.168.1.89 go to /var/www/demo-site and update index.html '
-        'to have a minimal design google theme, make all cards animated password is "@S02v1735"'
+        'to have a minimal design google theme, make all cards animated password is "Temp@Pass"'
     )
     raw = "remove the google branding"
     state.run_brief.original_task = prior
@@ -932,7 +932,7 @@ def test_unrelated_local_absolute_path_task_does_not_inherit_remote_session() ->
 def test_upstream_theme_followup_survives_intervening_chat_handoff() -> None:
     state = LoopState(cwd="/home/stephen/Scripts/Harness-Redo")
     prior = (
-        'ssh root@192.168.1.63 password "@S02v1735" and look for '
+        'ssh root@192.168.1.63 password "Temp@Pass" and look for '
         "/var/www/html/llm-explainer.html and other explainer files, "
         "make sure all files have the same google minimal theme and color scheme"
     )
